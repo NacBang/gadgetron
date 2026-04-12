@@ -1,0 +1,88 @@
+[server]
+bind = "0.0.0.0:8080"
+api_key = "gadgetron-dev-key"
+request_timeout_ms = 30000
+
+[router]
+default_strategy = "cost_optimal"
+
+[router.costs]
+"gpt-4o" = { input = 2.50, output = 10.00 }
+"gpt-4o-mini" = { input = 0.15, output = 0.60 }
+"claude-sonnet-4-20250514" = { input = 3.00, output = 15.00 }
+"claude-haiku-4-20250414" = { input = 0.80, output = 4.00 }
+"gemini-2.5-pro" = { input = 1.25, output = 10.00 }
+"gemini-2.5-flash" = { input = 0.15, output = 0.60 }
+
+[router.fallbacks]
+"gpt-4o" = ["ollama:llama3:70b", "ollama:mistral:7b"]
+"claude-sonnet-4-20250514" = ["ollama:llama3:70b"]
+
+# ── Cloud Providers ──────────────────────────────────────────
+
+[providers.openai]
+type = "openai"
+api_key = "${OPENAI_API_KEY}"
+models = ["gpt-4o", "gpt-4o-mini", "o3-mini"]
+
+[providers.anthropic]
+type = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"
+models = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"]
+
+[providers.gemini]
+type = "gemini"
+api_key = "${GEMINI_API_KEY}"
+models = ["gemini-2.5-pro", "gemini-2.5-flash"]
+
+# ── Local Serving Engines ────────────────────────────────────
+
+[providers.ollama]
+type = "ollama"
+endpoint = "http://localhost:11434"
+
+[providers.vllm]
+type = "vllm"
+endpoint = "http://localhost:8000"
+
+[providers.sglang]
+type = "sglang"
+endpoint = "http://localhost:30000"
+
+# ── Cluster Nodes ────────────────────────────────────────────
+
+[[nodes]]
+id = "node-01"
+endpoint = "http://localhost:11434"
+
+# ── Local Models ─────────────────────────────────────────────
+
+[[models.local]]
+id = "llama3:70b"
+engine = "ollama"
+vram_requirement_mb = 42000
+priority = 10
+
+[[models.local]]
+id = "mistral:7b"
+engine = "vllm"
+vram_requirement_mb = 4500
+args = ["--tensor-parallel-size", "1"]
+
+[[models.local]]
+id = "gemma2:9b"
+engine = "ollama"
+vram_requirement_mb = 6000
+priority = 3
+
+[[models.local]]
+id = "Qwen/Qwen2.5-72B-Instruct"
+engine = "sglang"
+vram_requirement_mb = 42000
+args = ["--tp", "2", "--mem-fraction-static", "0.85"]
+
+[[models.local]]
+id = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+engine = "vllm"
+vram_requirement_mb = 40000
+args = ["--tensor-parallel-size", "2", "--gpu-memory-utilization", "0.90"]

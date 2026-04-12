@@ -1,0 +1,146 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    pub tenant_id: Uuid,
+    pub api_key_id: Uuid,
+    pub request_id: Uuid,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub status: AuditStatus,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub cost_cents: i64,
+    pub latency_ms: i32,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditStatus {
+    Ok,
+    Error,
+    StreamInterrupted,
+    // Phase 2 may add `Throttled`, `RateLimited` variants.
+}
+
+impl AuditStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::StreamInterrupted => "stream_interrupted",
+        }
+    }
+}
+
+pub struct AuditWriter {
+    tx: tokio::sync::mpsc::Sender<AuditEntry>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl AuditWriter {
+    pub fn new(channel_capacity: usize) -> (Self, tokio::sync::mpsc::Receiver<AuditEntry>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(channel_capacity);
+        let dropped = Arc::new(AtomicU64::new(0));
+        (Self { tx, dropped }, rx)
+    }
+
+    pub fn send(&self, entry: AuditEntry) {
+        if self.tx.try_send(entry).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("audit entry dropped — channel full");
+        }
+    }
+
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry() -> AuditEntry {
+        AuditEntry {
+            tenant_id: Uuid::new_v4(),
+            api_key_id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            model: Some("gpt-4o-mini".to_string()),
+            provider: Some("openai".to_string()),
+            status: AuditStatus::Ok,
+            input_tokens: 100,
+            output_tokens: 50,
+            cost_cents: 0,
+            latency_ms: 250,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_delivers_to_receiver() {
+        let (writer, mut rx) = AuditWriter::new(16);
+        writer.send(make_entry());
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.status, AuditStatus::Ok);
+        assert_eq!(received.input_tokens, 100);
+    }
+
+    #[tokio::test]
+    async fn send_multiple_entries() {
+        let (writer, mut rx) = AuditWriter::new(16);
+        for _ in 0..5 {
+            writer.send(make_entry());
+        }
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[tokio::test]
+    async fn drops_when_channel_full() {
+        let (writer, _rx) = AuditWriter::new(2);
+        writer.send(make_entry());
+        writer.send(make_entry());
+        writer.send(make_entry());
+        assert!(writer.dropped_count() >= 1);
+    }
+
+    #[tokio::test]
+    async fn dropped_count_starts_at_zero() {
+        let (writer, _rx) = AuditWriter::new(16);
+        assert_eq!(writer.dropped_count(), 0);
+    }
+
+    #[test]
+    fn audit_status_as_str() {
+        assert_eq!(AuditStatus::Ok.as_str(), "ok");
+        assert_eq!(AuditStatus::Error.as_str(), "error");
+        assert_eq!(AuditStatus::StreamInterrupted.as_str(), "stream_interrupted");
+    }
+
+    #[tokio::test]
+    async fn entry_fields_preserved() {
+        let (writer, mut rx) = AuditWriter::new(16);
+        let entry = AuditEntry {
+            tenant_id: Uuid::nil(),
+            api_key_id: Uuid::nil(),
+            request_id: Uuid::nil(),
+            model: None,
+            provider: None,
+            status: AuditStatus::StreamInterrupted,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_cents: 0,
+            latency_ms: 0,
+        };
+        writer.send(entry);
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.status, AuditStatus::StreamInterrupted);
+        assert!(received.model.is_none());
+    }
+}

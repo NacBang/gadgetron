@@ -1,0 +1,17 @@
+[package]
+name = "gadgetron-router"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gadgetron-core = { workspace = true }
+gadgetron-provider = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+rand = "0.10.0"

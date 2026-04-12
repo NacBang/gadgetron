@@ -1,0 +1,23 @@
+[package]
+name = "gadgetron-node"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gadgetron-core = { workspace = true }
+sysinfo = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+
+[features]
+nvml = ["nvml-wrapper"]
+
+[dependencies.nvml-wrapper]
+version = "0.10"
+optional = true

@@ -1,0 +1,15 @@
+[package]
+name = "gadgetron-scheduler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gadgetron-core = { workspace = true }
+gadgetron-node = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }

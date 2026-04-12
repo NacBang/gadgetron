@@ -1,0 +1,18 @@
+[package]
+name = "gadgetron-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gadgetron-core = { workspace = true }
+gadgetron-router = { workspace = true }
+gadgetron-scheduler = { workspace = true }
+gadgetron-node = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+anyhow.workspace = true

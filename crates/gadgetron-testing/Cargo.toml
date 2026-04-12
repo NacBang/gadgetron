@@ -1,0 +1,19 @@
+[package]
+name = "gadgetron-testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Test utilities: mock providers, fake GPU nodes, PG harness, fixtures"
+
+[dependencies]
+gadgetron-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+wiremock = "0.6"
