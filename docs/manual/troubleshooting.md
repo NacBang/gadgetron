@@ -4,6 +4,42 @@ Each entry describes what you will observe, why it happens, and the exact steps 
 
 ---
 
+## `gadgetron doctor` — automated pre-flight check
+
+Before digging into individual errors, run `gadgetron doctor`. It checks the most common failure points and prints a pass/fail result for each:
+
+```sh
+export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadgetron"
+./target/release/gadgetron doctor
+```
+
+Example output (all checks passing):
+
+```
+[ok] GADGETRON_DATABASE_URL is set
+[ok] database reachable (latency 2ms)
+[ok] schema migrations are current
+[ok] provider openai reachable (GET /v1/models → 200)
+[ok] bind address 0.0.0.0:8080 is available
+```
+
+Example output (with failures):
+
+```
+[ok]   GADGETRON_DATABASE_URL is set
+[FAIL] database reachable — connection refused (postgres://gadgetron:***@localhost:5432/gadgetron)
+       fix: verify PostgreSQL is running: pg_isready -h localhost -p 5432
+[skip] schema migrations — skipped (database unreachable)
+[skip] provider checks — skipped (database unreachable)
+[ok]   bind address 0.0.0.0:8080 is available
+```
+
+`gadgetron doctor` exits with status 0 if all checks pass, or status 1 if any check fails. Use it in CI pre-flight scripts to catch environment problems before the server starts.
+
+The API key secret is masked as `***` in all `doctor` output. The `GADGETRON_DATABASE_URL` password is never printed.
+
+---
+
 ## Server startup errors
 
 ### "GADGETRON_DATABASE_URL environment variable is required"

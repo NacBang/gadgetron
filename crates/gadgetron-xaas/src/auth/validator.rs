@@ -19,6 +19,35 @@ pub trait KeyValidator: Send + Sync {
     async fn invalidate(&self, key_hash: &str);
 }
 
+/// Key validator for `--no-db` / dev mode.
+///
+/// Accepts any key hash and returns a synthetic `ValidatedKey` with all scopes.
+/// Never consults PostgreSQL. Do not use in production.
+pub struct InMemoryKeyValidator;
+
+#[async_trait]
+impl KeyValidator for InMemoryKeyValidator {
+    async fn validate(&self, _key_hash: &str) -> Result<Arc<ValidatedKey>, GadgetronError> {
+        Ok(Arc::new(ValidatedKey {
+            api_key_id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            scopes: vec![Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin],
+        }))
+    }
+
+    async fn invalidate(&self, _key_hash: &str) {
+        // no-op: no cache to invalidate in memory-only mode
+    }
+}
+
+/// Returns true if `raw_key` has a valid `gad_live_` or `gad_test_` prefix.
+///
+/// Used by auth middleware to reject obviously malformed keys before hashing.
+#[allow(dead_code)]
+pub(crate) fn validate_raw_key_format(raw_key: &str) -> bool {
+    raw_key.starts_with("gad_live_") || raw_key.starts_with("gad_test_")
+}
+
 pub struct PgKeyValidator {
     pool: sqlx::PgPool,
     cache: moka::future::Cache<String, Arc<ValidatedKey>>,

@@ -1,7 +1,5 @@
 # Authentication and Authorization
 
-> **Note:** `gadgetron key` CLI is not yet implemented. Create keys via SQL — see [quickstart.md](quickstart.md) Step 4.
-
 ---
 
 ## API key format
@@ -88,39 +86,56 @@ A key with `OpenAiCompat` scope that requests `GET /api/v1/nodes` (which require
 
 ## Creating API keys
 
-The CLI command for creating API keys is not yet implemented (Sprint 4). Use direct SQL inserts.
+### Using the CLI (Sprint 7+)
 
-To create a key manually:
+The recommended way to create tenants and keys is the CLI. The CLI handles key generation, hashing, and database insertion for you.
 
-1. Generate a cryptographically secure key string. The key must match the format `gad_live_<secret>` where the secret is at least 16 characters:
+**Step 1 — create a tenant:**
 
-   ```sh
-   echo "gad_live_$(openssl rand -hex 16)"
-   # Example output: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
-   ```
+```sh
+./target/release/gadgetron tenant create --name "my-team"
+# Output: tenant created id=<uuid>
+```
 
-2. Compute the SHA-256 hash of the complete key string (including the `gad_live_` prefix):
+**Step 2 — create a key for that tenant:**
 
-   ```sh
-   echo -n 'gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5' | sha256sum | cut -d' ' -f1
-   # Example output: 7a3f... (64 hex characters)
-   ```
+```sh
+./target/release/gadgetron key create --tenant-id <uuid>
+# Output:
+#   key created name=default id=<key-uuid>
+#   key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+```
 
-3. Insert into PostgreSQL (substitute your actual tenant UUID and hash):
+The raw key (the `key:` line) is printed exactly once. Copy it now — it cannot be recovered from the database, because Gadgetron stores only the SHA-256 hash.
 
-   ```sql
-   INSERT INTO api_keys (tenant_id, prefix, key_hash, kind, scopes, name)
-   VALUES (
-     'your-tenant-uuid-here',
-     'gad_live',
-     'your-64-char-sha256-hash-here',
-     'live',
-     ARRAY['OpenAiCompat'],
-     'my-api-key'
-   );
-   ```
+Optional flags for `key create`:
 
-4. Store the original key string (e.g. `gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5`) securely. Gadgetron never stores the plain key — only the hash. There is no way to recover the key from the database.
+| Flag | Description |
+|------|-------------|
+| `--name <name>` | Human-readable label for the key (default: `default`) |
+| `--scope <scope>` | Scope to assign (repeatable; default: `OpenAiCompat`) |
+| `--kind live\|test` | Key kind (default: `live`) |
+
+Example — create a management key with two scopes:
+
+```sh
+./target/release/gadgetron key create \
+  --tenant-id <uuid> \
+  --name "ops-key" \
+  --scope OpenAiCompat \
+  --scope Management
+```
+
+### No-database mode
+
+For local development without PostgreSQL, skip tenant creation and use `--no-db`:
+
+```sh
+./target/release/gadgetron key create --no-db
+# Output: key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+```
+
+The key is held in memory only. It is valid for the lifetime of the running server process and is lost on restart. Do not use `--no-db` in production.
 
 ---
 

@@ -966,10 +966,13 @@ dependencies = [
  "gadgetron-router",
  "gadgetron-tui",
  "gadgetron-xaas",
+ "reqwest",
  "sqlx",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1127,6 +1130,7 @@ dependencies = [
  "gadgetron-core",
  "hex",
  "moka",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2",

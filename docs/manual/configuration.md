@@ -50,6 +50,42 @@ No equivalent environment variable or `gadgetron.toml` field. This flag is only 
 
 ---
 
+## `gadgetron init` — generate an annotated config file
+
+`gadgetron init` writes a fully-annotated `gadgetron.toml` to the current directory. Every field is present with its default value and a comment explaining what it does and which environment variable overrides it. This is the recommended starting point for any new deployment.
+
+```sh
+./target/release/gadgetron init
+# Writes gadgetron.toml to ./gadgetron.toml
+# Exits with an error if the file already exists (use --force to overwrite)
+```
+
+If the file already exists, the command exits with a non-zero status and prints:
+
+```
+error: gadgetron.toml already exists — use --force to overwrite
+```
+
+### Quick-start mode with `--provider`
+
+The `--provider` flag pre-fills a specific provider block and removes all other provider examples, so the generated file is ready to use with minimal editing:
+
+```sh
+# Generate a config pre-filled for OpenAI
+./target/release/gadgetron init --provider openai
+
+# Generate a config pre-filled for a self-hosted vLLM instance
+./target/release/gadgetron init --provider vllm
+
+# Supported values: openai, anthropic, ollama, vllm, sglang
+```
+
+With `--provider openai` the generated file contains a `[providers.openai]` block with placeholder values and a comment pointing to where you set `OPENAI_API_KEY`. With `--provider vllm` the block contains an `endpoint` field pre-filled with `http://localhost:8100` and a comment to replace it with your vLLM host.
+
+After running `gadgetron init`, open the generated file and follow the inline comments. The file is valid TOML before any edits; the server will start using it immediately with the built-in defaults.
+
+---
+
 ## Environment variables
 
 ### Required

@@ -139,7 +139,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
-            pg_pool: lazy_pool(),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
             tui_tx: Some(tui_tx),
         }
     }
@@ -203,7 +204,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
-            pg_pool: lazy_pool(),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
             tui_tx: None,
         };
         let app = build_router(state);

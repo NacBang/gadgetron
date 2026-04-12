@@ -20,3 +20,4 @@ sqlx = { workspace = true }
 moka = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
+rand = { workspace = true }

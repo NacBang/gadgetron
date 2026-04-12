@@ -47,9 +47,12 @@ pub struct AppState {
     /// Routing layer: wraps `providers` with strategy + fallback + metrics.
     /// `None` only in legacy unit-test fixtures that do not exercise handlers.
     pub router: Option<Arc<LlmRouter>>,
-    /// PostgreSQL connection pool. Used by `/ready` health check and future audit flush.
+    /// PostgreSQL connection pool. `None` in no-db mode, `Some(_)` in full mode.
+    /// Used by `/ready` health check and future audit flush.
     /// `PgPool` is internally `Arc<PoolInner>` — clone is a pointer increment.
-    pub pg_pool: sqlx::PgPool,
+    pub pg_pool: Option<sqlx::PgPool>,
+    /// `true` when running in no-db mode (no PostgreSQL). `/ready` returns 200 unconditionally.
+    pub no_db: bool,
     /// Broadcast sender for TUI live updates. `None` when `--tui` flag is absent.
     /// Capacity: 1_024 (1_000 QPS ceiling × ~1s TUI drain period + 24 headroom).
     /// `broadcast::Sender<T>` is `Clone` — clone is an Arc pointer increment.
@@ -98,20 +101,30 @@ pub async fn health_handler() -> impl IntoResponse {
 
 /// `GET /ready`
 ///
-/// Executes `SELECT 1` against the PG pool in AppState.
+/// In no-db mode (`state.no_db == true`): always returns HTTP 200 `{"status":"ready"}`.
+/// In full mode: executes `SELECT 1` against the PG pool.
 /// Returns HTTP 200 `{"status":"ready"}` on success.
-/// Returns HTTP 503 `{"status":"unavailable"}` when the pool cannot reach PG.
+/// Returns HTTP 503 `{"status":"unavailable"}` when the pool is absent or cannot reach PG.
 /// Used as a K8s readiness probe target.
 pub async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(&state.pg_pool).await {
-        Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))),
-        Err(e) => {
-            tracing::warn!(error = %e, "readiness check failed");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"status": "unavailable"})),
-            )
-        }
+    if state.no_db {
+        return (StatusCode::OK, Json(json!({"status": "ready"})));
+    }
+    match &state.pg_pool {
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "unavailable"})),
+        ),
+        Some(pool) => match sqlx::query("SELECT 1").execute(pool).await {
+            Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))),
+            Err(e) => {
+                tracing::warn!(error = %e, "readiness check failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"status": "unavailable"})),
+                )
+            }
+        },
     }
 }
 
@@ -284,7 +297,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
-            pg_pool: lazy_pool(),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
             tui_tx: None,
         }
     }
@@ -297,7 +311,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
-            pg_pool: lazy_pool(),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
             tui_tx: None,
         }
     }
@@ -590,7 +605,7 @@ mod tests {
         // pg_pool: field access must compile and pool must be in a usable (lazy) state.
         // PgPool exposes .size() which returns 0 for a pool with no live connections.
         assert_eq!(
-            state.pg_pool.size(),
+            state.pg_pool.as_ref().unwrap().size(),
             0,
             "lazy pool starts with 0 connections"
         );
@@ -610,7 +625,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
-            pg_pool: lazy_pool(),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
             tui_tx: Some(tx),
         };
         assert!(
@@ -628,7 +644,9 @@ mod tests {
     async fn ready_returns_503_when_pool_closed() {
         let state = make_state();
         // Close the pool before the request — all subsequent queries fail immediately.
-        state.pg_pool.close().await;
+        if let Some(ref pool) = state.pg_pool {
+            pool.close().await;
+        }
 
         let app = build_router(state);
 
@@ -678,7 +696,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
-            pg_pool: pool,
+            pg_pool: Some(pool),
+            no_db: false,
             tui_tx: None,
         };
 
