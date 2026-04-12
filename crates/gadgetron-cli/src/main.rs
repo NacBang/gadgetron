@@ -667,6 +667,11 @@ async fn serve(
     eprint!("  Checking provider(s)...");
     let providers_ss = build_providers(&config).context("failed to initialise LLM providers")?;
     eprintln!(" done ({} configured)", providers_ss.len());
+    if providers_ss.is_empty() {
+        eprintln!("  WARNING: No providers configured.");
+        eprintln!("           All /v1/chat/completions requests will return 503.");
+        eprintln!("           Fix: add [providers.*] to gadgetron.toml or use --provider <url>");
+    }
 
     // Coerce Arc<dyn LlmProvider + Send + Sync> → Arc<dyn LlmProvider> for Router::new.
     let providers_for_router: HashMap<String, Arc<dyn LlmProvider>> = providers_ss
