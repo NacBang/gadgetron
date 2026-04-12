@@ -23,3 +23,20 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 sqlx = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+moka = { workspace = true }
+
+[[bench]]
+name = "middleware_chain"
+harness = false
+
+[[bench]]
+name = "auth_cache"
+harness = false
+
+[[bench]]
+name = "router"
+harness = false

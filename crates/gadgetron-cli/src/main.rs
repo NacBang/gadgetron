@@ -192,10 +192,8 @@ async fn main() -> Result<()> {
         Some(Commands::Tenant {
             command: TenantCmd::List,
         }) => {
-            anyhow::bail!(
-                "gadgetron tenant list is not yet implemented.\n\n  \
-                 Next step: Run 'gadgetron tenant create --name <name>' to create your first tenant."
-            )
+            let pool = connect_pg().await?;
+            tenant_list(&pool).await
         }
         Some(Commands::Key {
             command: KeyCmd::Create { tenant_id, scope },
@@ -216,20 +214,14 @@ async fn main() -> Result<()> {
         Some(Commands::Key {
             command: KeyCmd::List { tenant_id },
         }) => {
-            anyhow::bail!(
-                "gadgetron key list is not yet implemented.\n\n  \
-                 Tenant: {tenant_id}\n  \
-                 Next step: Use psql or the API to query keys for this tenant."
-            )
+            let pool = connect_pg().await?;
+            key_list(&pool, tenant_id).await
         }
         Some(Commands::Key {
             command: KeyCmd::Revoke { key_id },
         }) => {
-            anyhow::bail!(
-                "gadgetron key revoke is not yet implemented.\n\n  \
-                 Key ID: {key_id}\n  \
-                 Next step: Use psql to set revoked_at on the api_keys row."
-            )
+            let pool = connect_pg().await?;
+            key_revoke(&pool, key_id).await
         }
         Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
@@ -372,6 +364,153 @@ fn key_create_no_db(scope: &str) -> Result<()> {
     println!("      -H \"Authorization: Bearer {raw_key}\" \\");
     println!("      -H \"Content-Type: application/json\" \\");
     println!("      -d '{{\"model\":\"<model>\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hello!\"}}]}}'");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `gadgetron tenant list`
+// ---------------------------------------------------------------------------
+
+/// List all tenants ordered by creation time (newest first).
+///
+/// Output: aligned table with ID, Name, Status, Created columns.
+/// Empty state: user-friendly message with next-step hint.
+async fn tenant_list(pool: &sqlx::PgPool) -> Result<()> {
+    let rows =
+        sqlx::query("SELECT id, name, status, created_at FROM tenants ORDER BY created_at DESC")
+            .fetch_all(pool)
+            .await
+            .with_context(|| {
+                "Failed to query tenants.\n\n  \
+         Cause: database SELECT failed.\n  \
+         Next step: Verify migrations are applied — run 'gadgetron serve' to apply them."
+                    .to_string()
+            })?;
+
+    if rows.is_empty() {
+        println!("No tenants found.");
+        println!();
+        println!("  Next: gadgetron tenant create --name <name>");
+        return Ok(());
+    }
+
+    println!("{:<38} {:<20} {:<12} Created", "ID", "Name", "Status");
+    println!("{}", "-".repeat(90));
+    for row in &rows {
+        let id: Uuid = row.get("id");
+        let name: String = row.get("name");
+        let status: String = row.get("status");
+        let created: chrono::DateTime<chrono::Utc> = row.get("created_at");
+        println!(
+            "{:<38} {:<20} {:<12} {}",
+            id,
+            name,
+            status,
+            created.format("%Y-%m-%d %H:%M")
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `gadgetron key list`
+// ---------------------------------------------------------------------------
+
+/// List active (non-revoked) API keys for a tenant, ordered newest first.
+///
+/// Key hashes are never shown. Only prefix, kind, and scopes are displayed.
+/// Output: aligned table with ID, Prefix, Kind, Scopes, Created columns.
+async fn key_list(pool: &sqlx::PgPool, tenant_id: Uuid) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT id, prefix, kind, scopes, created_at \
+         FROM api_keys \
+         WHERE tenant_id = $1 AND revoked_at IS NULL \
+         ORDER BY created_at DESC",
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to query API keys for tenant {tenant_id}.\n\n  \
+             Cause: database SELECT failed.\n  \
+             Next step: Verify the tenant exists: gadgetron tenant list"
+        )
+    })?;
+
+    if rows.is_empty() {
+        println!("No active keys found for tenant {tenant_id}.");
+        println!();
+        println!("  Next: gadgetron key create --tenant-id {tenant_id}");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38} {:<12} {:<8} {:<20} Created",
+        "ID", "Prefix", "Kind", "Scopes"
+    );
+    println!("{}", "-".repeat(100));
+    for row in &rows {
+        let id: Uuid = row.get("id");
+        let prefix: String = row.get("prefix");
+        let kind: String = row.get("kind");
+        let scopes: Vec<String> = row.get("scopes");
+        let created: chrono::DateTime<chrono::Utc> = row.get("created_at");
+        println!(
+            "{:<38} {:<12} {:<8} {:<20} {}",
+            id,
+            prefix,
+            kind,
+            scopes.join(","),
+            created.format("%Y-%m-%d %H:%M")
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `gadgetron key revoke`
+// ---------------------------------------------------------------------------
+
+/// Revoke an API key by its UUID.
+///
+/// Sets `revoked_at = NOW()` only if the key is not already revoked.
+/// Idempotency: a key that was already revoked (or does not exist) returns an
+/// actionable error — the operator knows they need to verify the key ID.
+async fn key_revoke(pool: &sqlx::PgPool, key_id: Uuid) -> Result<()> {
+    let result = sqlx::query(
+        "UPDATE api_keys SET revoked_at = NOW() \
+         WHERE id = $1 AND revoked_at IS NULL \
+         RETURNING id",
+    )
+    .bind(key_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to revoke key {key_id}.\n\n  \
+             Cause: database UPDATE failed.\n  \
+             Next step: Verify the database is reachable and the api_keys table exists."
+        )
+    })?;
+
+    match result {
+        Some(_) => {
+            println!("Key revoked: {key_id}");
+            println!();
+            println!("  The key can no longer be used to authenticate requests.");
+        }
+        None => {
+            anyhow::bail!(
+                "Key not found or already revoked: {key_id}\n\n  \
+                 Cause: No active key with this UUID exists in the database.\n  \
+                 Next step: Verify the key ID with 'gadgetron key list --tenant-id <uuid>'."
+            )
+        }
+    }
 
     Ok(())
 }
@@ -1195,8 +1334,7 @@ fn redact_db_url(url: &str) -> String {
 
 /// Iterate `AppConfig.providers` and instantiate `LlmProvider` adapters.
 ///
-/// Phase 1 supports: OpenAI, Anthropic, Ollama, vLLM, SGLang.
-/// Gemini returns an error until Phase 1 Week 6-7.
+/// Phase 1 supports: OpenAI, Anthropic, Gemini, Ollama, vLLM, SGLang.
 /// An empty providers map is valid — the server boots but cannot route to
 /// any provider until at least one is configured.
 fn build_providers(
@@ -1227,10 +1365,15 @@ fn build_providers(
             ProviderConfig::Sglang { endpoint, api_key } => Arc::new(
                 gadgetron_provider::SglangProvider::new(endpoint.clone(), api_key.clone()),
             ),
-            // Gemini requires SseToChunkNormalizer extraction (Phase 1 Week 6-7).
-            // SEC-M2: do not format!("{:?}", provider_cfg) — would emit api_key.
-            ProviderConfig::Gemini { .. } => {
-                anyhow::bail!("Gemini provider not yet implemented (Phase 1 Week 6-7)")
+            ProviderConfig::Gemini { api_key, models } => {
+                let mut provider = gadgetron_provider::GeminiProvider::new(
+                    "https://generativelanguage.googleapis.com/v1".to_string(),
+                    Some(api_key.clone()),
+                );
+                if !models.is_empty() {
+                    provider = provider.with_models(models.clone());
+                }
+                Arc::new(provider) as Arc<dyn LlmProvider + Send + Sync>
             }
         };
 
@@ -1362,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn build_providers_gemini_still_bails() {
+    fn build_providers_gemini_activates() {
         use gadgetron_core::config::{AppConfig, ProviderConfig, ServerConfig};
         use gadgetron_core::routing::RoutingConfig;
         use std::collections::HashMap;
@@ -1386,13 +1529,12 @@ mod tests {
             nodes: vec![],
             models: vec![],
         };
-        let result = build_providers(&cfg);
-        assert!(result.is_err(), "Gemini must still return an error");
-        let msg = result.err().unwrap().to_string();
+        let map = build_providers(&cfg).expect("Gemini provider must now be implemented");
         assert!(
-            msg.contains("Gemini"),
-            "error message must mention Gemini, got: {msg}"
+            map.contains_key("my-gemini"),
+            "Gemini provider must be registered"
         );
+        assert_eq!(map["my-gemini"].name(), "gemini");
     }
 
     // ------------------------------------------------------------------
@@ -1900,6 +2042,22 @@ mod tests {
                 assert!(no_db, "--no-db flag must be true when provided");
             }
             _ => panic!("expected Commands::Serve with --no-db"),
+        }
+    }
+
+    /// S8-1-T1: `gadgetron tenant list` is parseable by clap.
+    ///
+    /// Verifies that `TenantCmd::List` is wired into the enum and that the bare
+    /// subcommand (no flags) parses without error.
+    #[test]
+    fn clap_tenant_list() {
+        let cli = Cli::try_parse_from(["gadgetron", "tenant", "list"])
+            .expect("parse must succeed for 'tenant list'");
+        match cli.command {
+            Some(Commands::Tenant {
+                command: TenantCmd::List,
+            }) => {}
+            _ => panic!("expected Commands::Tenant {{ command: TenantCmd::List }}"),
         }
     }
 }

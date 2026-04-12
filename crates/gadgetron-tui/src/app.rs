@@ -14,6 +14,33 @@ use gadgetron_core::ui::{
 
 use crate::ui;
 
+/// Which of the three body panels currently has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusedPanel {
+    Nodes,    // index 0
+    Models,   // index 1
+    Requests, // index 2
+}
+
+impl FocusedPanel {
+    /// Rotate focus to the next panel (wraps from Requests -> Nodes).
+    pub fn next(self) -> Self {
+        match self {
+            Self::Nodes => Self::Models,
+            Self::Models => Self::Requests,
+            Self::Requests => Self::Nodes,
+        }
+    }
+}
+
+/// Scroll offsets for each panel. `usize` rows from the top of the list.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScrollState {
+    pub nodes: usize,
+    pub models: usize,
+    pub requests: usize,
+}
+
 /// TUI application state.
 ///
 /// Concurrency model: `Arc<RwLock<T>>`.
@@ -34,6 +61,10 @@ pub struct App {
     pub request_log: Arc<RwLock<VecDeque<RequestEntry>>>,
     /// Update channel receiver. `None` = no data source connected (demo mode).
     update_rx: Option<broadcast::Receiver<WsMessage>>,
+    /// Currently focused panel.
+    pub focused: FocusedPanel,
+    /// Scroll offsets for each panel.
+    pub scroll: ScrollState,
 }
 
 impl Default for App {
@@ -177,6 +208,8 @@ impl App {
             model_statuses: Arc::new(RwLock::new(model_statuses)),
             request_log: Arc::new(RwLock::new(request_log)),
             update_rx: None,
+            focused: FocusedPanel::Nodes,
+            scroll: ScrollState::default(),
         }
     }
 
@@ -185,6 +218,47 @@ impl App {
         let mut app = Self::new();
         app.update_rx = Some(rx);
         app
+    }
+
+    /// Process a single crossterm `KeyEvent` and update state.
+    ///
+    /// Bindings:
+    ///   Tab           -> focused = focused.next()
+    ///   KeyCode::Up   -> scroll[focused] = scroll[focused].saturating_sub(1)
+    ///   KeyCode::Down -> scroll[focused] = scroll[focused].saturating_add(1)
+    ///   'q' / Esc     -> running = false
+    pub fn handle_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Tab => {
+                self.focused = self.focused.next();
+            }
+            KeyCode::Up => match self.focused {
+                FocusedPanel::Nodes => {
+                    self.scroll.nodes = self.scroll.nodes.saturating_sub(1);
+                }
+                FocusedPanel::Models => {
+                    self.scroll.models = self.scroll.models.saturating_sub(1);
+                }
+                FocusedPanel::Requests => {
+                    self.scroll.requests = self.scroll.requests.saturating_sub(1);
+                }
+            },
+            KeyCode::Down => match self.focused {
+                FocusedPanel::Nodes => {
+                    self.scroll.nodes = self.scroll.nodes.saturating_add(1);
+                }
+                FocusedPanel::Models => {
+                    self.scroll.models = self.scroll.models.saturating_add(1);
+                }
+                FocusedPanel::Requests => {
+                    self.scroll.requests = self.scroll.requests.saturating_add(1);
+                }
+            },
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.running = false;
+            }
+            _ => {}
+        }
     }
 
     /// Consume messages from the broadcast channel and update internal Arc<RwLock<T>>.
@@ -257,10 +331,7 @@ impl App {
 
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => self.running = false,
-                        _ => {}
-                    }
+                    self.handle_key(key.code);
                 }
             }
         }
@@ -425,5 +496,70 @@ mod tests {
         drop(tx); // close the channel
         app.drain_updates();
         assert!(!app.running, "closed channel must set running = false");
+    }
+
+    // ── FocusedPanel ─────────────────────────────────────────────────────
+
+    #[test]
+    fn focused_panel_next_cycles() {
+        assert_eq!(FocusedPanel::Nodes.next(), FocusedPanel::Models);
+        assert_eq!(FocusedPanel::Models.next(), FocusedPanel::Requests);
+        assert_eq!(FocusedPanel::Requests.next(), FocusedPanel::Nodes);
+    }
+
+    // ── handle_key ───────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_key_tab_changes_focus() {
+        let mut app = App::new();
+        assert_eq!(app.focused, FocusedPanel::Nodes);
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focused, FocusedPanel::Models);
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focused, FocusedPanel::Requests);
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focused, FocusedPanel::Nodes);
+    }
+
+    #[test]
+    fn handle_key_up_decrements_scroll() {
+        let mut app = App::new();
+        // Increment nodes scroll first so there is room to decrement.
+        app.handle_key(KeyCode::Down);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.scroll.nodes, 2);
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.scroll.nodes, 1);
+        // Saturating: decrement from 0 stays at 0.
+        app.scroll.nodes = 0;
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.scroll.nodes, 0);
+    }
+
+    #[test]
+    fn handle_key_down_increments_scroll() {
+        let mut app = App::new();
+        // Focus Nodes (default).
+        assert_eq!(app.focused, FocusedPanel::Nodes);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.scroll.nodes, 1);
+        // Switch to Models, confirm independent offset.
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Down);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.scroll.models, 2);
+        assert_eq!(app.scroll.nodes, 1, "nodes offset must be unaffected");
+        // Switch to Requests.
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.scroll.requests, 1);
+    }
+
+    #[test]
+    fn handle_key_q_stops() {
+        let mut app = App::new();
+        assert!(app.running);
+        app.handle_key(KeyCode::Char('q'));
+        assert!(!app.running);
     }
 }
