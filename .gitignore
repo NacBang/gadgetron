@@ -3,5 +3,6 @@
 *.swo
 .DS_Store
 .env
+*.log
 *.pem
 *.key

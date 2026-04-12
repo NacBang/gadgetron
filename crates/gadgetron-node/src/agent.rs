@@ -53,6 +53,13 @@ impl NodeAgent {
             InferenceEngine::Sglang => self.start_sglang_model(deployment).await?,
             InferenceEngine::LlamaCpp => self.start_llamacpp_model(deployment).await?,
             InferenceEngine::Tgi => self.start_tgi_model(deployment).await?,
+            // `InferenceEngine` is #[non_exhaustive] — future variants are not yet supported.
+            _ => {
+                return Err(GadgetronError::Node {
+                    kind: NodeErrorKind::InvalidMigProfile,
+                    message: format!("unsupported inference engine: {:?}", deployment.engine),
+                })
+            }
         };
         self.running_models.push(deployment.id.clone());
         Ok(port)

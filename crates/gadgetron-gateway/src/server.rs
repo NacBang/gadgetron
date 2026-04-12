@@ -224,6 +224,7 @@ mod tests {
     // Helpers
     // ------------------------------------------------------------------
 
+    use crate::test_helpers::{lazy_pool, TEST_AUDIT_CAPACITY, VALID_TOKEN};
     use async_trait::async_trait;
 
     /// Minimal `KeyValidator` that always rejects — used only for tests
@@ -275,20 +276,8 @@ mod tests {
         async fn invalidate(&self, _key_hash: &str) {}
     }
 
-    /// Build a lazy (disconnected) PgPool for unit tests.
-    ///
-    /// `connect_lazy` returns immediately without establishing a TCP connection.
-    /// Queries will fail at execution time, which is intentional for tests that
-    /// exercise the 503 path of `ready_handler`.
-    fn lazy_pool() -> sqlx::PgPool {
-        sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgresql://localhost/test")
-            .expect("lazy pool construction must not fail")
-    }
-
     fn make_state() -> AppState {
-        let (audit_writer, _rx) = AuditWriter::new(16);
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         AppState {
             key_validator: Arc::new(NoopKeyValidator),
             quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
@@ -301,7 +290,7 @@ mod tests {
     }
 
     fn make_state_with_validator(validator: impl KeyValidator + 'static) -> AppState {
-        let (audit_writer, _rx) = AuditWriter::new(16);
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         AppState {
             key_validator: Arc::new(validator),
             quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
@@ -312,9 +301,6 @@ mod tests {
             tui_tx: None,
         }
     }
-
-    // A valid-format token for test purposes (gad_ prefix + 16+ char suffix).
-    const VALID_TOKEN: &str = "gad_live_abcdefghijklmnop1234567890";
 
     // ------------------------------------------------------------------
     // S3-2 required tests (preserved)
@@ -615,8 +601,9 @@ mod tests {
         );
 
         // Verify that tui_tx: Some(sender) is also constructible.
+        // 1_024 = production broadcast channel capacity (see server.rs AppState doc).
         let (tx, _rx) = broadcast::channel::<WsMessage>(1_024);
-        let (audit_writer, _arx) = AuditWriter::new(16);
+        let (audit_writer, _arx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         let state_with_tui = AppState {
             key_validator: Arc::new(NoopKeyValidator),
             quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
@@ -684,7 +671,7 @@ mod tests {
             .await
             .expect("test PG connection must succeed");
 
-        let (audit_writer, _rx) = AuditWriter::new(16);
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         let state = AppState {
             key_validator: Arc::new(NoopKeyValidator),
             quota_enforcer: Arc::new(InMemoryQuotaEnforcer),

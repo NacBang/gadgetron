@@ -84,6 +84,7 @@ pub async fn metrics_middleware(
 mod tests {
     use super::*;
     use crate::server::{build_router, AppState};
+    use crate::test_helpers::{lazy_pool, TEST_AUDIT_CAPACITY, VALID_TOKEN};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -99,15 +100,8 @@ mod tests {
     use uuid::Uuid;
 
     // ---------------------------------------------------------------------------
-    // Test helpers (mirrors server.rs helpers)
+    // Test helpers
     // ---------------------------------------------------------------------------
-
-    fn lazy_pool() -> sqlx::PgPool {
-        sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgresql://localhost/test")
-            .expect("lazy pool construction must not fail")
-    }
 
     struct MockKeyValidator {
         result: Arc<ValidatedKey>,
@@ -138,7 +132,7 @@ mod tests {
     }
 
     fn make_state_with_tui(tui_tx: broadcast::Sender<WsMessage>) -> AppState {
-        let (audit_writer, _rx) = AuditWriter::new(16);
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         AppState {
             key_validator: Arc::new(MockKeyValidator::new(vec![Scope::OpenAiCompat])),
             quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
@@ -149,8 +143,6 @@ mod tests {
             tui_tx: Some(tui_tx),
         }
     }
-
-    const VALID_TOKEN: &str = "gad_live_abcdefghijklmnop1234567890";
 
     // ---------------------------------------------------------------------------
     // S6-2 TDD: metrics_middleware_emits_request_log
@@ -165,7 +157,7 @@ mod tests {
     /// correct HTTP status code.
     #[tokio::test]
     async fn metrics_middleware_emits_request_log() {
-        let (tx, mut rx) = broadcast::channel::<WsMessage>(16);
+        let (tx, mut rx) = broadcast::channel::<WsMessage>(TEST_AUDIT_CAPACITY);
         let state = make_state_with_tui(tx);
         let app = build_router(state);
 
@@ -204,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_middleware_noop_when_tui_disabled() {
         // Use state with tui_tx = None
-        let (audit_writer, _rx) = AuditWriter::new(16);
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         let state = AppState {
             key_validator: Arc::new(MockKeyValidator::new(vec![Scope::OpenAiCompat])),
             quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
@@ -234,7 +226,7 @@ mod tests {
     /// but JSON extraction fails → 422. The logged entry must have status 422.
     #[tokio::test]
     async fn metrics_middleware_records_error_status() {
-        let (tx, mut rx) = broadcast::channel::<WsMessage>(16);
+        let (tx, mut rx) = broadcast::channel::<WsMessage>(TEST_AUDIT_CAPACITY);
         let state = make_state_with_tui(tx);
         let app = build_router(state);
 

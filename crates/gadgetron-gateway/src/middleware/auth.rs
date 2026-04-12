@@ -38,7 +38,7 @@ pub async fn auth_middleware(
         Some(t) => t,
         None => {
             // SEC-M4: audit 401 — missing Authorization header. SOC2 CC6.7.
-            emit_auth_failure_audit(&state, Uuid::nil(), Uuid::nil());
+            emit_auth_failure_audit(&state);
             return ApiError(GadgetronError::TenantNotFound).into_response();
         }
     };
@@ -47,7 +47,7 @@ pub async fn auth_middleware(
     let api_key = match ApiKey::parse(&token) {
         Ok(k) => k,
         Err(_) => {
-            emit_auth_failure_audit(&state, Uuid::nil(), Uuid::nil());
+            emit_auth_failure_audit(&state);
             return ApiError(GadgetronError::TenantNotFound).into_response();
         }
     };
@@ -59,7 +59,7 @@ pub async fn auth_middleware(
         }
         Err(_) => {
             // SEC-M4: audit 401 — key not found or revoked. SOC2 CC6.7.
-            emit_auth_failure_audit(&state, Uuid::nil(), Uuid::nil());
+            emit_auth_failure_audit(&state);
             ApiError(GadgetronError::TenantNotFound).into_response()
         }
     }
@@ -69,10 +69,10 @@ pub async fn auth_middleware(
 ///
 /// Tenant and key IDs are `Uuid::nil()` because the caller is unauthenticated —
 /// no ValidatedKey is available to supply real UUIDs.
-fn emit_auth_failure_audit(state: &AppState, tenant_id: Uuid, api_key_id: Uuid) {
+fn emit_auth_failure_audit(state: &AppState) {
     state.audit_writer.send(AuditEntry {
-        tenant_id,
-        api_key_id,
+        tenant_id: Uuid::nil(),
+        api_key_id: Uuid::nil(),
         request_id: Uuid::new_v4(),
         model: None,
         provider: None,

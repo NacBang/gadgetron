@@ -5,7 +5,7 @@ Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway over
 ## Features
 
 - **OpenAI-compatible API** — drop-in `/v1/chat/completions` with SSE streaming
-- **6 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, vLLM, SGLang
+- **6 LLM providers** — OpenAI, Anthropic, Ollama, vLLM, SGLang (Gemini: Sprint 7+)
 - **6 routing strategies** — RoundRobin, CostOptimal, LatencyOptimal, QualityOptimal, Fallback, Weighted
 - **GPU-aware scheduling** — VRAM bin-packing, NUMA topology, MIG support
 - **Multi-tenant platform** — API key auth, per-tenant quota (i64 cents), audit logging
@@ -74,9 +74,9 @@ cargo deny check licenses bans advisories
 |----------|--------|
 | [Platform Architecture](docs/architecture/platform-architecture.md) | Approved (v1, 7300+ lines, 4 rounds) |
 | [XaaS Phase 1](docs/design/xaas/phase1.md) | Approved (4 rounds, 23 fixes) |
-| [Gateway Wire-up](docs/design/gateway/wire-up.md) | Approved (4 rounds, 28 fixes) |
+| [Gateway Wire-up](docs/design/gateway/wire-up.md) | Draft (Round 0 self-check; Round 1+ pending) |
 | [Core Types](docs/design/core/types-consolidation.md) | Round 3 Approved |
-| [Testing Harness](docs/design/testing/harness.md) | Round 3 |
+| [Testing Harness](docs/design/testing/harness.md) | Round 2 retry |
 
 ## Sprint Progress
 
@@ -84,8 +84,11 @@ cargo deny check licenses bans advisories
 |--------|-------|-------|
 | 1 | Core types (GadgetronError, Secret, TenantContext, ProcessState FSM) | 35 |
 | 2 | XaaS (PostgreSQL schema, PgKeyValidator, QuotaEnforcer, AuditWriter) | 17 |
-| 3 | Gateway wire-up (IntoResponse, middleware, SSE) | 14 (in progress) |
-| **Total** | | **66 passed** |
+| 3 | Gateway wire-up (IntoResponse, middleware, SSE) | 14 |
+| 4 | vLLM + SGLang provider activation | included above |
+| 5 | E2E harness, criterion benchmarks, TUI wiring | included above |
+| 6 | TUI live hardening (broadcast channel, /ready PG check, graceful shutdown) | included above |
+| **Total** | | **~100 passed** |
 
 ## Team
 

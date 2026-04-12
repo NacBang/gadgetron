@@ -68,6 +68,7 @@ pub enum ProcessState {
     },
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessEvent {
     LoadRequest,
@@ -140,6 +141,7 @@ impl ProcessState {
 
 /// High-level deployment lifecycle state, distinct from the low-level `ProcessState`
 /// finite state machine. Used by the scheduler to track cluster-level deployment status.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelState {
     Loading,
@@ -187,6 +189,7 @@ impl std::fmt::Display for InvalidTransition {
 
 impl std::error::Error for InvalidTransition {}
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum InferenceEngine {
     Ollama,

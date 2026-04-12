@@ -962,16 +962,12 @@ dependencies = [
  "clap",
  "gadgetron-core",
  "gadgetron-gateway",
- "gadgetron-node",
  "gadgetron-provider",
  "gadgetron-router",
- "gadgetron-scheduler",
  "gadgetron-tui",
  "gadgetron-xaas",
- "serde",
  "sqlx",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -996,16 +992,13 @@ dependencies = [
 name = "gadgetron-gateway"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "axum",
  "chrono",
  "futures",
  "gadgetron-core",
- "gadgetron-node",
  "gadgetron-provider",
  "gadgetron-router",
- "gadgetron-scheduler",
  "gadgetron-xaas",
  "serde",
  "serde_json",
@@ -1016,7 +1009,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -1122,14 +1114,8 @@ dependencies = [
  "chrono",
  "crossterm",
  "gadgetron-core",
- "gadgetron-node",
- "gadgetron-router",
- "gadgetron-scheduler",
  "ratatui",
- "serde",
  "tokio",
- "tokio-stream",
- "tracing",
 ]
 
 [[package]]

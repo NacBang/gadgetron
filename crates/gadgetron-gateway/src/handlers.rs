@@ -241,11 +241,29 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    use crate::test_helpers::{lazy_pool, TEST_AUDIT_CAPACITY, VALID_TOKEN};
+
+    // -----------------------------------------------------------------------
+    // Constants for FakeLlmProvider fixed responses
+    // -----------------------------------------------------------------------
+
+    /// Stable chat-completion ID used across the two fake SSE chunks.
+    const FAKE_CHAT_ID: &str = "chatcmpl-test-001";
+    /// Unix timestamp embedded in fake responses (2023-11-14 22:13:20 UTC).
+    const FAKE_CREATED_TS: u64 = 1_700_000_000;
+    /// Model name used by the deterministic `FakeLlmProvider`.
+    const FAKE_MODEL_NAME: &str = "fake-model";
+    /// `owned_by` field for `ModelInfo` entries returned by `FakeLlmProvider`.
+    const FAKE_PROVIDER_ORG: &str = "fake-org";
+
     // -----------------------------------------------------------------------
     // FakeLlmProvider — deterministic test double for LlmProvider
     // -----------------------------------------------------------------------
 
     /// Fake provider that returns a fixed `ChatResponse` and a 2-chunk stream.
+    ///
+    /// Cannot be replaced by `gadgetron_testing::FakeLlmProvider` because
+    /// `gadgetron-testing` depends on `gadgetron-gateway` (circular dependency).
     struct FakeLlmProvider {
         model_name: String,
     }
@@ -259,10 +277,10 @@ mod tests {
 
         fn fixed_response() -> ChatResponse {
             ChatResponse {
-                id: "chatcmpl-test-001".to_string(),
+                id: FAKE_CHAT_ID.to_string(),
                 object: "chat.completion".to_string(),
-                created: 1_700_000_000,
-                model: "fake-model".to_string(),
+                created: FAKE_CREATED_TS,
+                model: FAKE_MODEL_NAME.to_string(),
                 choices: vec![Choice {
                     index: 0,
                     message: Message {
@@ -283,10 +301,10 @@ mod tests {
         fn fixed_chunks() -> Vec<ChatChunk> {
             vec![
                 ChatChunk {
-                    id: "chatcmpl-test-001".to_string(),
+                    id: FAKE_CHAT_ID.to_string(),
                     object: "chat.completion.chunk".to_string(),
-                    created: 1_700_000_000,
-                    model: "fake-model".to_string(),
+                    created: FAKE_CREATED_TS,
+                    model: FAKE_MODEL_NAME.to_string(),
                     choices: vec![ChunkChoice {
                         index: 0,
                         delta: ChunkDelta {
@@ -299,10 +317,10 @@ mod tests {
                     }],
                 },
                 ChatChunk {
-                    id: "chatcmpl-test-001".to_string(),
+                    id: FAKE_CHAT_ID.to_string(),
                     object: "chat.completion.chunk".to_string(),
-                    created: 1_700_000_000,
-                    model: "fake-model".to_string(),
+                    created: FAKE_CREATED_TS,
+                    model: FAKE_MODEL_NAME.to_string(),
                     choices: vec![ChunkChoice {
                         index: 0,
                         delta: ChunkDelta {
@@ -338,7 +356,7 @@ mod tests {
             Ok(vec![ModelInfo {
                 id: self.model_name.clone(),
                 object: "model".to_string(),
-                owned_by: "fake-org".to_string(),
+                owned_by: FAKE_PROVIDER_ORG.to_string(),
             }])
         }
 
@@ -422,14 +440,12 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
-    const VALID_TOKEN: &str = "gad_live_abcdefghijklmnop1234567890";
-
     /// Build an `AppState` with the given `LlmProvider` wired into a `Router`.
     fn make_state_with_provider(
         provider: impl LlmProvider + 'static,
         provider_name: &str,
     ) -> AppState {
-        let (audit_writer, _rx) = AuditWriter::new(16);
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
         let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
         providers.insert(provider_name.to_string(), Arc::new(provider));
 
@@ -452,10 +468,7 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(providers_for_state),
             router: Some(Arc::new(lrouter)),
-            pg_pool: sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .connect_lazy("postgresql://localhost/test")
-                .expect("lazy pool construction must not fail"),
+            pg_pool: lazy_pool(),
             tui_tx: None,
         }
     }
