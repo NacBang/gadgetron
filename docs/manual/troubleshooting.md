@@ -1,0 +1,394 @@
+# Troubleshooting
+
+Each entry describes what you will observe, why it happens, and the exact steps to fix it.
+
+---
+
+## Server startup errors
+
+### "GADGETRON_DATABASE_URL environment variable is required"
+
+**What happened:** The server process started but exited immediately with this message.
+
+**Why:** `GADGETRON_DATABASE_URL` is a required environment variable. The server does not start without a valid PostgreSQL connection string.
+
+**Fix:**
+
+```sh
+export GADGETRON_DATABASE_URL="postgres://user:password@localhost:5432/gadgetron"
+./target/release/gadgetron
+```
+
+If you are using a `.env` file or systemd unit, verify the variable is actually present in the process environment:
+
+```sh
+# Check the running environment before starting
+printenv GADGETRON_DATABASE_URL
+```
+
+---
+
+### "failed to connect to PostgreSQL"
+
+**What happened:** `GADGETRON_DATABASE_URL` is set but the server could not open a connection to PostgreSQL within 5 seconds.
+
+**Why:** PostgreSQL is not running, the host/port is wrong, the credentials are wrong, or the database does not exist.
+
+**Fix — verify PostgreSQL is running:**
+
+```sh
+pg_isready -h localhost -p 5432
+```
+
+Expected: `localhost:5432 - accepting connections`
+
+**Fix — test the connection string directly:**
+
+```sh
+psql "$GADGETRON_DATABASE_URL" -c "SELECT 1;"
+```
+
+If `psql` fails, the connection string is wrong. Common mistakes:
+- Wrong port (default PostgreSQL port is 5432)
+- Wrong database name (must exist; `CREATE DATABASE gadgetron;` if needed)
+- Wrong password (check `pg_hba.conf` authentication method)
+
+---
+
+### "failed to run database migrations"
+
+**What happened:** The server connected to PostgreSQL but failed to apply the schema migrations.
+
+**Why:** The database user lacks `CREATE TABLE` privileges, or a previous partial migration left the schema in an inconsistent state.
+
+**Fix — verify privileges:**
+
+```sh
+psql "$GADGETRON_DATABASE_URL" -c "\du"
+```
+
+The Gadgetron database user needs at minimum: `CREATE`, `USAGE` on the schema, and `CONNECT` on the database.
+
+**Fix — grant privileges:**
+
+```sql
+GRANT ALL PRIVILEGES ON DATABASE gadgetron TO gadgetron_user;
+```
+
+If the schema is partially broken, drop and recreate the database (development only):
+
+```sh
+psql -U postgres -c "DROP DATABASE IF EXISTS gadgetron;"
+psql -U postgres -c "CREATE DATABASE gadgetron OWNER gadgetron_user;"
+```
+
+---
+
+### "unsupported provider type in Phase 1: gemini" (or vllm, sglang)
+
+**What happened:** The server exited during startup.
+
+**Why:** `gadgetron.toml` contains a provider with `type = "gemini"`, `type = "vllm"`, or `type = "sglang"`. These are not implemented in Sprint 1-3.
+
+**Fix:** Remove or comment out the unsupported provider block from `gadgetron.toml`. Only `openai`, `anthropic`, and `ollama` are supported in Sprint 1-3.
+
+---
+
+### "failed to load config from gadgetron.toml"
+
+**What happened:** The server found `gadgetron.toml` but could not parse it.
+
+**Why:** The TOML file has a syntax error or an invalid field value.
+
+**Fix:** Validate the TOML syntax:
+
+```sh
+# Using Python's tomllib (Python 3.11+):
+python3 -c "import tomllib; tomllib.loads(open('gadgetron.toml').read())"
+
+# Or use taplo:
+taplo check gadgetron.toml
+```
+
+The error message from the server includes the specific field that failed to parse. Look for:
+- Mismatched quotes
+- Wrong `type` value for a provider
+- Missing required fields within a section that is present
+
+---
+
+### "failed to bind to 0.0.0.0:8080"
+
+**What happened:** The server started but could not open the TCP listener.
+
+**Why:** Another process is already using port 8080, or you do not have permission to bind to that address.
+
+**Fix — find what is using the port:**
+
+```sh
+lsof -i :8080
+```
+
+**Fix — use a different port:**
+
+```sh
+GADGETRON_BIND=0.0.0.0:9000 ./target/release/gadgetron
+```
+
+Or change `[server].bind` in `gadgetron.toml`.
+
+---
+
+## Request errors
+
+### HTTP 401 Unauthorized — invalid or missing API key
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "Invalid API key. Verify your API key is correct and has not been revoked.",
+    "type": "authentication_error",
+    "code": "tenant_not_found"
+  }
+}
+```
+
+**Why:** One of the following:
+1. The `Authorization` header is absent from the request
+2. The header does not use the `Bearer ` prefix (note the space after Bearer)
+3. The key does not start with `gad_`
+4. The key is shorter than the minimum length (`gad_` + `live`/`test` + `_` + at least 16 characters)
+5. The key hash does not match any active row in `api_keys`
+6. The key has been revoked (`revoked_at IS NOT NULL`)
+
+**Fix — check the request header:**
+
+```sh
+# Correct format:
+curl ... -H "Authorization: Bearer gad_live_your32chartoken00000000000"
+
+# Common mistakes:
+# Missing space:    -H "Authorization: Beargad_live_..."
+# Wrong prefix:     -H "Authorization: Bearer sk-openai-key"
+# Bare token:       -H "Authorization: gad_live_..."
+```
+
+**Fix — verify the key exists and is not revoked:**
+
+```sql
+SELECT id, tenant_id, prefix, kind, scopes, revoked_at
+FROM api_keys
+WHERE key_hash = 'your-64-char-sha256-of-key-here';
+```
+
+If `revoked_at` is not null, the key is revoked. If no row is found, the key was never inserted or the hash is wrong. Recompute the hash:
+
+```sh
+echo -n 'gad_live_your_exact_key_string' | sha256sum | cut -d' ' -f1
+```
+
+**Fix — check the tenant is Active:**
+
+```sql
+SELECT t.status
+FROM tenants t
+JOIN api_keys k ON k.tenant_id = t.id
+WHERE k.key_hash = 'your-64-char-hash';
+```
+
+If `status` is `Suspended` or `Deleted`, the tenant cannot authenticate. Restore the tenant status or create a new tenant.
+
+---
+
+### HTTP 403 Forbidden — wrong scope
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "Your API key does not have permission for this operation. Check your key's assigned scopes.",
+    "type": "permission_error",
+    "code": "forbidden"
+  }
+}
+```
+
+**Why:** The API key is valid but lacks the scope required by the route.
+
+| If you requested... | You need scope... |
+|--------------------|-------------------|
+| `POST /v1/chat/completions` | `OpenAiCompat` |
+| `GET /v1/models` | `OpenAiCompat` |
+| `GET /api/v1/nodes` | `Management` |
+| `POST /api/v1/models/deploy` | `Management` |
+
+**Fix — check the key's current scopes:**
+
+```sql
+SELECT scopes FROM api_keys WHERE key_hash = 'your-64-char-hash';
+```
+
+**Fix — add the required scope to the key:**
+
+```sql
+UPDATE api_keys
+SET scopes = array_append(scopes, 'Management')
+WHERE key_hash = 'your-64-char-hash';
+```
+
+After updating, the next request will use the new scopes (cache TTL is 10 minutes; to take effect immediately, the server must be restarted or the cache entry must expire naturally).
+
+---
+
+### HTTP 429 Quota Exceeded
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "Your API usage quota has been exceeded. Contact your administrator to increase limits.",
+    "type": "quota_error",
+    "code": "quota_exceeded"
+  }
+}
+```
+
+**Why:** The tenant's `daily_limit_cents` has been reached. The quota enforcer in Sprint 1-3 is in-memory (`InMemoryQuotaEnforcer`). It checks the `daily_used_cents` value from the `quota_configs` table against the `daily_limit_cents`. If `daily_limit_cents - daily_used_cents <= 0`, requests are rejected.
+
+**Fix — increase the daily limit:**
+
+```sql
+UPDATE quota_configs
+SET daily_limit_cents = 500000   -- $5,000 USD (values are in cents)
+WHERE tenant_id = 'your-tenant-uuid-here';
+```
+
+**Fix — reset daily usage (for testing):**
+
+```sql
+UPDATE quota_configs
+SET daily_used_cents = 0
+WHERE tenant_id = 'your-tenant-uuid-here';
+```
+
+**Note:** In Sprint 1-3, `InMemoryQuotaEnforcer` does not actually write back to the database when usage is recorded — `record_post` only marks the in-memory token as used. The `daily_used_cents` column in the database is not incremented by the Sprint 1-3 implementation. PostgreSQL-backed quota enforcement is Sprint 2. Until then, 429 is triggered only when `daily_limit_cents - daily_used_cents <= 0` at request time (based on whatever value is in the database when the tenant context is loaded).
+
+---
+
+### HTTP 503 Service Unavailable — no providers configured
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "No suitable provider found for this request. Verify model availability and routing configuration.",
+    "type": "invalid_request_error",
+    "code": "routing_failure"
+  }
+}
+```
+
+**Why:** The server started with no providers configured (either `gadgetron.toml` has no `[providers]` section, or the file is absent), or all configured providers failed.
+
+**Fix — add a provider to gadgetron.toml:**
+
+```toml
+[providers.openai]
+type = "openai"
+api_key = "${OPENAI_API_KEY}"
+models = ["gpt-4o-mini"]
+```
+
+Then restart the server. The log line `INFO provider registered name=openai` confirms the provider was loaded.
+
+**Fix — verify the server logs for provider registration:**
+
+```
+INFO provider registered name=openai
+```
+
+If this log line is absent, the provider config is either missing or failed to load. Check `gadgetron.toml` syntax.
+
+---
+
+### HTTP 502 Bad Gateway — provider error
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "The upstream LLM provider returned an error. Check provider status and API key validity.",
+    "type": "api_error",
+    "code": "provider_error"
+  }
+}
+```
+
+**Why:** The configured provider (OpenAI, Anthropic, Ollama) returned an error or is unreachable.
+
+**Fix — test the provider API key directly:**
+
+```sh
+# OpenAI
+curl -s https://api.openai.com/v1/models \
+  -H "Authorization: Bearer $OPENAI_API_KEY" | jq .error
+
+# Anthropic
+curl -s https://api.anthropic.com/v1/models \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" | jq .error
+```
+
+**Fix — check the model name is correct:**
+
+The `model` field in the request must match a model ID in the provider's `models` list in `gadgetron.toml`. Use `GET /v1/models` to see what Gadgetron knows about:
+
+```sh
+curl -s http://localhost:8080/v1/models \
+  -H "Authorization: Bearer gad_live_your_key_here" | jq .
+```
+
+---
+
+### HTTP 422 or 400 — malformed request body
+
+**What you observe:** HTTP 422 or HTTP 400 with no Gadgetron error body (axum returns this before the handler runs).
+
+**Why:** The request body is not valid JSON, or required fields (`model`, `messages`) are missing.
+
+**Fix:** Ensure the request has `Content-Type: application/json` and a complete body:
+
+```sh
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gad_live_your_key_here" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+---
+
+## Log interpretation
+
+Enable debug logging to see the full middleware trace:
+
+```sh
+RUST_LOG=gadgetron=debug ./target/release/gadgetron
+```
+
+Key log fields to look for:
+
+| Log field | What it tells you |
+|-----------|-------------------|
+| `error.code` | Machine-readable error code (matches the `code` field in error responses) |
+| `error.type_` | Error type category |
+| `tenant_id` | Which tenant's request failed (scope failures) |
+| `required_scope` | What scope was needed (scope failures) |
+| `path` | The route that triggered the scope check |
+| `bind` | The address the server is actually listening on |
+| `name` | Provider name when a provider is registered |
