@@ -279,6 +279,47 @@ WHERE tenant_id = 'your-tenant-uuid-here';
 
 ---
 
+### GET /ready returns HTTP 503
+
+**What you observe:** `curl http://localhost:8080/ready` returns HTTP 503.
+
+**Why:** The PostgreSQL connection pool health check failed. This means the server either cannot reach PostgreSQL at all, or the pool is fully exhausted (all 20 connections in use and the acquire timeout of 5 seconds was exceeded).
+
+**Fix — verify PostgreSQL is reachable from the server host:**
+
+```sh
+pg_isready -h localhost -p 5432
+```
+
+Expected: `localhost:5432 - accepting connections`
+
+**Fix — test the connection string directly:**
+
+```sh
+psql "$GADGETRON_DATABASE_URL" -c "SELECT 1;"
+```
+
+**Fix — check active connections against the pool limit:**
+
+```sql
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = 'gadgetron';
+```
+
+The pool maximum is 20 connections. If your PostgreSQL `max_connections` is lower than 20 (or other applications are consuming connections), the pool cannot fill and the readiness check fails.
+
+**Fix — increase PostgreSQL `max_connections`** (in `postgresql.conf`):
+
+```
+max_connections = 100
+```
+
+Restart PostgreSQL after changing this value.
+
+**Note:** `GET /health` always returns HTTP 200 regardless of PostgreSQL state. If `/health` is 200 but `/ready` is 503, the gateway process is running but the database is unavailable. Authenticated requests will fail with HTTP 503 (`db_pool_timeout`) until the database is restored.
+
+---
+
 ### HTTP 503 Service Unavailable — no providers configured
 
 **What you observe:**

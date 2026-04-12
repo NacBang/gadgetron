@@ -1,6 +1,52 @@
 # Configuration
 
-Gadgetron is configured through two mechanisms: environment variables (for secrets and deployment-specific values) and `gadgetron.toml` (for everything else). Environment variables always take precedence over `gadgetron.toml` for the fields they overlap with.
+Gadgetron is configured through three mechanisms: CLI flags, environment variables, and `gadgetron.toml`. When the same setting is supplied by more than one mechanism, the order of precedence from highest to lowest is:
+
+1. **CLI flags** — always win
+2. **Environment variables** — override the config file
+3. **`gadgetron.toml`** — baseline configuration
+4. **Built-in defaults** — used when none of the above supply a value
+
+---
+
+## CLI flags
+
+These flags are accepted by `gadgetron serve`. They take precedence over environment variables and `gadgetron.toml`.
+
+### `--config <PATH>`
+
+Path to the TOML configuration file.
+
+- Default: `./gadgetron.toml` (relative to the working directory at process start)
+- Example: `gadgetron serve --config /etc/gadgetron/gadgetron.toml`
+
+Equivalent environment variable: `GADGETRON_CONFIG`
+
+If the file does not exist, the server starts with built-in defaults. If the file exists but cannot be parsed, the server exits with an error identifying the malformed field.
+
+---
+
+### `--bind <ADDR>`
+
+The TCP address and port the HTTP server listens on.
+
+- Default: `0.0.0.0:8080`
+- Example: `gadgetron serve --bind 127.0.0.1:9000`
+
+Equivalent environment variable: `GADGETRON_BIND`
+
+Overrides `[server].bind` in `gadgetron.toml`.
+
+---
+
+### `--tui`
+
+Launch the real-time TUI dashboard alongside the gateway server. When set, the terminal is taken over by the dashboard and all gateway request events are displayed in the Requests panel as they occur.
+
+- Default: off (server runs in headless mode with log output to stdout)
+- Example: `gadgetron serve --tui`
+
+No equivalent environment variable or `gadgetron.toml` field. This flag is only meaningful in interactive terminal sessions.
 
 ---
 

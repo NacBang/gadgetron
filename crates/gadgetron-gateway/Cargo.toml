@@ -24,4 +24,5 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+sqlx = { workspace = true }
 anyhow.workspace = true

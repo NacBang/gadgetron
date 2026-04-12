@@ -243,9 +243,21 @@ curl -s http://localhost:8080/health
 
 ### GET /ready
 
-Returns HTTP 200 with `{"status":"ready"}` (unconditional). A PostgreSQL connectivity check is not yet wired to this endpoint; it will be added in a future sprint.
+Performs a PostgreSQL connection pool health check and returns the result.
+
+- **HTTP 200** — PostgreSQL is reachable. Body: `{"status":"ready"}`
+- **HTTP 503** — PostgreSQL connection pool is unhealthy (pool exhausted or host unreachable). Body: `{"status":"not ready"}`
+
+Use this endpoint as a Kubernetes readiness probe or load-balancer health check. Routing traffic to an instance returning 503 will result in database-backed operations (auth, quota, audit) failing.
 
 ```sh
+curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ready
+# 200  (PostgreSQL up)
+# 503  (PostgreSQL down or pool exhausted)
+```
+
+```sh
+# Full response body
 curl -s http://localhost:8080/ready
 # {"status":"ready"}
 ```

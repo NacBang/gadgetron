@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
+    extract::State,
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -9,17 +10,19 @@ use axum::{
     Json, Router,
 };
 use gadgetron_core::provider::LlmProvider;
+use gadgetron_core::ui::WsMessage;
 use gadgetron_router::Router as LlmRouter;
 use gadgetron_xaas::audit::writer::AuditWriter;
 use gadgetron_xaas::auth::validator::KeyValidator;
 use gadgetron_xaas::quota::enforcer::QuotaEnforcer;
 use serde_json::json;
+use tokio::sync::broadcast;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use crate::handlers::{chat_completions_handler, list_models_handler};
 use crate::middleware::{
-    auth::auth_middleware, request_id::request_id_middleware, scope::scope_guard_middleware,
-    tenant_context::tenant_context_middleware,
+    auth::auth_middleware, metrics::metrics_middleware, request_id::request_id_middleware,
+    scope::scope_guard_middleware, tenant_context::tenant_context_middleware,
 };
 
 /// 4 MB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
@@ -28,9 +31,8 @@ const MAX_BODY_BYTES: usize = 4_194_304;
 
 /// Shared application state injected into every handler via `axum::State`.
 ///
-/// All fields are `Arc`-wrapped so `Clone` is a pointer copy (~1 ns).
-/// `Send + Sync` is satisfied because every inner type is already
-/// `Send + Sync` (trait-object bounds are explicit).
+/// All fields are `Arc`-wrapped or `Clone`-cheap so `Clone` is a pointer copy (~1 ns).
+/// `Send + Sync` is satisfied because every inner type is `Send + Sync`.
 #[derive(Clone)]
 pub struct AppState {
     /// Bearer-token validator (moka-cached, 10-min TTL, max 10 000 entries).
@@ -45,6 +47,13 @@ pub struct AppState {
     /// Routing layer: wraps `providers` with strategy + fallback + metrics.
     /// `None` only in legacy unit-test fixtures that do not exercise handlers.
     pub router: Option<Arc<LlmRouter>>,
+    /// PostgreSQL connection pool. Used by `/ready` health check and future audit flush.
+    /// `PgPool` is internally `Arc<PoolInner>` — clone is a pointer increment.
+    pub pg_pool: sqlx::PgPool,
+    /// Broadcast sender for TUI live updates. `None` when `--tui` flag is absent.
+    /// Capacity: 1_024 (1_000 QPS ceiling × ~1s TUI drain period + 24 headroom).
+    /// `broadcast::Sender<T>` is `Clone` — clone is an Arc pointer increment.
+    pub tui_tx: Option<broadcast::Sender<WsMessage>>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -89,10 +98,21 @@ pub async fn health_handler() -> impl IntoResponse {
 
 /// `GET /ready`
 ///
-/// Phase 1 placeholder: returns HTTP 200 unconditionally.
-/// Phase 2 will add a `SELECT 1` ping against the PG pool stored in AppState.
-pub async fn ready_handler() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status": "ready"})))
+/// Executes `SELECT 1` against the PG pool in AppState.
+/// Returns HTTP 200 `{"status":"ready"}` on success.
+/// Returns HTTP 503 `{"status":"unavailable"}` when the pool cannot reach PG.
+/// Used as a K8s readiness probe target.
+pub async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").execute(&state.pg_pool).await {
+        Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status": "unavailable"})),
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,19 +153,24 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/models/status", get(model_status_handler))
         .route("/api/v1/usage", get(usage_handler))
         .route("/api/v1/costs", get(costs_handler))
-        // Auth middleware stack (layers 3–6). These all operate on `Body` (not
+        // Auth middleware stack (layers 3–7). These all operate on `Body` (not
         // `Limited<Body>`), so they must be separate from RequestBodyLimitLayer
         // which wraps the body type and would require downstream middleware to
         // accept `Request<Limited<Body>>`.
         //
         // Layer ordering in axum: each `.layer()` call on `Router` is the NEW
         // outermost layer — it wraps all previously applied layers. Therefore we
-        // call `.layer()` from innermost-to-outermost (scope first, then auth, etc.).
+        // call `.layer()` from innermost-to-outermost (metrics first, then scope, auth, etc.).
         //
         // Final inbound request flow:
-        //   [body-limit] → [trace] → [request-id] → [auth] → [tenant-ctx] → [scope] → handler
+        //   [body-limit] → [trace] → [request-id] → [auth] → [tenant-ctx] → [scope] → [metrics] → handler
         //
-        // Layer 6 (innermost of auth stack): scope enforcement → 403 on mismatch.
+        // Layer 7 (innermost — closest to handler): emit RequestLog after handler completes.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
+        ))
+        // Layer 6: scope enforcement → 403 on mismatch.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             scope_guard_middleware,
@@ -164,11 +189,12 @@ pub fn build_router(state: AppState) -> Router {
         // Layer 1 (outermost): body size guard (4 MB). SEC-M2. Applied last so it
         // wraps all other layers and is first to intercept the incoming request.
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .with_state(state);
+        .with_state(state.clone()); // clone BEFORE consuming state in public_routes
 
     let public_routes = Router::new()
         .route("/health", get(health_handler))
-        .route("/ready", get(ready_handler));
+        .route("/ready", get(ready_handler))
+        .with_state(state); // state moved here (last consumer)
 
     Router::new()
         .merge(authenticated_routes)
@@ -249,6 +275,18 @@ mod tests {
         async fn invalidate(&self, _key_hash: &str) {}
     }
 
+    /// Build a lazy (disconnected) PgPool for unit tests.
+    ///
+    /// `connect_lazy` returns immediately without establishing a TCP connection.
+    /// Queries will fail at execution time, which is intentional for tests that
+    /// exercise the 503 path of `ready_handler`.
+    fn lazy_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgresql://localhost/test")
+            .expect("lazy pool construction must not fail")
+    }
+
     fn make_state() -> AppState {
         let (audit_writer, _rx) = AuditWriter::new(16);
         AppState {
@@ -257,6 +295,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
+            pg_pool: lazy_pool(),
+            tui_tx: None,
         }
     }
 
@@ -268,6 +308,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(HashMap::new()),
             router: None,
+            pg_pool: lazy_pool(),
+            tui_tx: None,
         }
     }
 
@@ -279,8 +321,8 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// AppState must derive Clone (all fields are Arc — clone is O(1)).
-    #[test]
-    fn app_state_is_clone() {
+    #[tokio::test]
+    async fn app_state_is_clone() {
         let state = make_state();
         let cloned = state.clone();
         // Arc pointer equality: both point to the same allocations.
@@ -290,8 +332,8 @@ mod tests {
 
     /// `build_router` must compile and produce a valid `Router`.
     /// Smoke test: confirms the function signature and return type are correct.
-    #[test]
-    fn build_router_compiles() {
+    #[tokio::test]
+    async fn build_router_compiles() {
         let state = make_state();
         let _router: Router = build_router(state);
         // If this compiles and runs, the smoke test passes.
@@ -319,9 +361,13 @@ mod tests {
         assert_eq!(value["status"], "ok");
     }
 
-    /// `GET /ready` must return HTTP 200 in Phase 1.
+    /// `GET /ready` returns HTTP 503 when the pool cannot reach PG.
+    ///
+    /// The lazy pool (no real PG server) will fail `SELECT 1` at query time,
+    /// causing `ready_handler` to return 503 SERVICE_UNAVAILABLE.
+    /// This is the expected unit-test behaviour — integration tests use a real pool.
     #[tokio::test]
-    async fn ready_returns_200() {
+    async fn ready_returns_503_with_lazy_pool() {
         let state = make_state();
         let app = build_router(state);
 
@@ -332,7 +378,13 @@ mod tests {
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["status"], "unavailable");
     }
 
     /// POST /v1/chat/completions with an invalid body returns a 4xx error.
@@ -535,5 +587,129 @@ mod tests {
         // Must parse as a valid UUID.
         let id_str = header_val.to_str().expect("header is valid UTF-8");
         Uuid::parse_str(id_str).expect("x-request-id must be a valid UUID");
+    }
+
+    // ------------------------------------------------------------------
+    // S6-1 TDD tests — AppState expansion + /ready PG check
+    // ------------------------------------------------------------------
+
+    /// S6-1-T1: AppState must contain `pg_pool` (sqlx::PgPool) and `tui_tx`
+    /// (Option<broadcast::Sender<WsMessage>>).
+    ///
+    /// Verifies both fields are present and correctly typed by construction.
+    /// `tui_tx: None` covers the headless (no-TUI) code path.
+    #[tokio::test]
+    async fn app_state_has_pg_pool_and_tui_tx() {
+        let state = make_state();
+        // pg_pool: field access must compile and pool must be in a usable (lazy) state.
+        // PgPool exposes .size() which returns 0 for a pool with no live connections.
+        assert_eq!(
+            state.pg_pool.size(),
+            0,
+            "lazy pool starts with 0 connections"
+        );
+        // tui_tx: None for the default headless state.
+        assert!(
+            state.tui_tx.is_none(),
+            "tui_tx must be None when TUI is disabled"
+        );
+
+        // Verify that tui_tx: Some(sender) is also constructible.
+        let (tx, _rx) = broadcast::channel::<WsMessage>(1_024);
+        let (audit_writer, _arx) = AuditWriter::new(16);
+        let state_with_tui = AppState {
+            key_validator: Arc::new(NoopKeyValidator),
+            quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
+            audit_writer: Arc::new(audit_writer),
+            providers: Arc::new(HashMap::new()),
+            router: None,
+            pg_pool: lazy_pool(),
+            tui_tx: Some(tx),
+        };
+        assert!(
+            state_with_tui.tui_tx.is_some(),
+            "tui_tx must be Some when TUI sender is set"
+        );
+    }
+
+    /// S6-1-T2: `GET /ready` returns HTTP 503 when the pool is closed.
+    ///
+    /// A pool that has been explicitly closed rejects all queries immediately.
+    /// `ready_handler` must catch the error and return 503 SERVICE_UNAVAILABLE
+    /// with body `{"status":"unavailable"}`.
+    #[tokio::test]
+    async fn ready_returns_503_when_pool_closed() {
+        let state = make_state();
+        // Close the pool before the request — all subsequent queries fail immediately.
+        state.pg_pool.close().await;
+
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["status"], "unavailable");
+    }
+
+    /// S6-1-T3: `GET /ready` returns HTTP 200 with a valid connected pool.
+    ///
+    /// Requires a local PostgreSQL instance at `postgresql://localhost:5432/gadgetron`.
+    /// Skipped automatically when `GADGETRON_TEST_DB_URL` is not set.
+    /// When running in CI with PG, set `GADGETRON_TEST_DB_URL=postgresql://localhost:5432/gadgetron`.
+    #[tokio::test]
+    async fn ready_returns_200_with_valid_pool() {
+        let db_url = match std::env::var("GADGETRON_TEST_DB_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                // Skip: no real PG available in this environment.
+                eprintln!("SKIP ready_returns_200_with_valid_pool: GADGETRON_TEST_DB_URL not set");
+                return;
+            }
+        };
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(3))
+            .connect(&db_url)
+            .await
+            .expect("test PG connection must succeed");
+
+        let (audit_writer, _rx) = AuditWriter::new(16);
+        let state = AppState {
+            key_validator: Arc::new(NoopKeyValidator),
+            quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
+            audit_writer: Arc::new(audit_writer),
+            providers: Arc::new(HashMap::new()),
+            router: None,
+            pg_pool: pool,
+            tui_tx: None,
+        };
+
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["status"], "ready");
     }
 }

@@ -2,19 +2,27 @@
 
 The `gadgetron-tui` crate provides a terminal-based dashboard for monitoring your Gadgetron cluster. It renders GPU node metrics, model states, and a live request log in a 3-column layout.
 
-As of Sprint 5, the TUI runs with static demo data. Live gateway data integration is planned for Sprint 6.
+As of Sprint 6, the TUI is connected to the live gateway via a `tokio::sync::broadcast` channel. Real-time GPU metrics, model states, and request log entries stream into the dashboard at 1 Hz.
 
 ---
 
 ## Running the TUI
 
+The TUI is embedded in the main `gadgetron` binary. Start it together with the gateway server using the `--tui` flag:
+
 ```sh
-cargo run -p gadgetron-tui
+gadgetron serve --tui
 ```
 
-No flags or config file are required. The dashboard starts immediately and renders demo data so you can verify the layout and color theme without a running cluster.
+With a custom config file and bind address:
 
-To exit, press `q` or `Esc`.
+```sh
+gadgetron serve --tui --config /etc/gadgetron/gadgetron.toml --bind 0.0.0.0:8080
+```
+
+When `--tui` is set, the gateway starts normally and the TUI dashboard opens in the same terminal. Incoming requests are reflected in the Requests panel in real time as they pass through the gateway. The dashboard updates at 1 Hz.
+
+To exit, press `q` or `Esc`. The server shuts down gracefully (5-second audit drain) before the process exits.
 
 ---
 
@@ -56,7 +64,7 @@ Fields:
 | `RPS` | Requests per second (cluster-wide) |
 | `Err` | Error rate as a percentage of requests |
 
-In Sprint 5 these values come from the static demo `ClusterHealth`. In Sprint 6 they will be updated from the gateway via a broadcast channel at 1 Hz.
+These values are updated from the live gateway via a broadcast channel at 1 Hz.
 
 ### Nodes column
 
@@ -112,12 +120,12 @@ The request ID is truncated to 8 characters for display.
 
 | Key | Action | Status |
 |-----|--------|--------|
-| `q` | Quit the TUI | Implemented |
-| `Esc` | Quit the TUI | Implemented |
-| `r` | Manual refresh trigger | Sprint 6 |
-| Arrow keys | Navigate between panels / scroll | Sprint 6 |
+| `q` | Quit the TUI (triggers graceful shutdown) | Implemented |
+| `Esc` | Quit the TUI (triggers graceful shutdown) | Implemented |
+| `r` | Manual refresh trigger | Sprint 7 |
+| Arrow keys | Navigate between panels / scroll | Sprint 7 |
 
-Arrow navigation and manual refresh are shown in the footer as a preview of Sprint 6 functionality. Pressing them in Sprint 5 has no effect.
+Arrow navigation and manual refresh are shown in the footer as a preview of future functionality. Pressing them in Sprint 6 has no effect.
 
 ---
 
@@ -154,16 +162,19 @@ When VRAM utilization is 90% or higher, the row color overrides to Red regardles
 
 ---
 
-## Sprint 5 limitations and Sprint 6 roadmap
+## Sprint 6 status and Sprint 7 roadmap
 
-Sprint 5 delivers the layout, color logic, and data plumbing. What is not yet wired:
+Sprint 6 delivered live gateway integration. What is now working:
 
-- **Demo data only.** All displayed values come from static structs in `App::new()`. No gateway connection exists yet. The data does not change while the TUI is running.
+- **Live data.** `App::with_channel(rx)` receives `GpuMetrics`, `ModelStatus`, `ClusterHealth`, and `RequestEntry` updates from the gateway via `tokio::sync::broadcast` at 1 Hz.
+- **Real-time request log.** Every request processed by the gateway is forwarded through `metrics_middleware` and appears in the Requests panel as it completes.
+- **Graceful shutdown.** Pressing `q` or `Esc` initiates a 5-second audit drain before the process exits.
+
+What is not yet wired (Sprint 7):
+
 - **No keyboard navigation.** Arrow keys and `r` are listed in the footer but not handled.
 - **No scrolling.** The Nodes and Models columns render all entries; there is no scroll position tracking.
 - **No time display.** The header does not show a clock or last-updated timestamp.
-
-Sprint 6 will connect the gateway via a `tokio::sync::broadcast` channel and deliver live `GpuMetrics`, `ModelStatus`, `ClusterHealth`, and `RequestEntry` updates at 1 Hz. The `App::with_channel(rx)` constructor and `drain_updates()` method are already implemented and ready to receive live data.
 
 ---
 

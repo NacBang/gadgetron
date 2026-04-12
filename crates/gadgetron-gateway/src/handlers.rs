@@ -452,6 +452,11 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(providers_for_state),
             router: Some(Arc::new(lrouter)),
+            pg_pool: sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgresql://localhost/test")
+                .expect("lazy pool construction must not fail"),
+            tui_tx: None,
         }
     }
 

@@ -95,6 +95,8 @@ impl GatewayHarness {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(state_providers),
             router: Some(llm_router),
+            pg_pool: pg.pool().clone(),
+            tui_tx: None,
         };
 
         let router = build_router(state);
