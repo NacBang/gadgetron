@@ -3,7 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, FocusedPanel};
 
 /// Top-level layout:
 ///
@@ -69,12 +69,21 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_nodes_panel(f: &mut Frame, area: Rect, app: &App) {
+    let focused = app.focused == FocusedPanel::Nodes;
+    let scroll_offset = app.scroll.nodes;
     let metrics = app.gpu_metrics.read().unwrap();
 
+    let border_style = if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let block = Block::default()
         .title(" Nodes ")
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Green));
+        .border_style(border_style);
 
     if metrics.is_empty() {
         let msg = Paragraph::new("No nodes connected")
@@ -85,8 +94,11 @@ fn draw_nodes_panel(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    let visible_rows = area.height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = metrics
         .iter()
+        .skip(scroll_offset)
+        .take(visible_rows)
         .map(|m| {
             let text = format!(
                 "[{}] GPU{} {:.0}% VRAM:{:.1}G/{:.1}G {}C",
@@ -117,12 +129,21 @@ fn draw_nodes_panel(f: &mut Frame, area: Rect, app: &App) {
 fn draw_models_panel(f: &mut Frame, area: Rect, app: &App) {
     use gadgetron_core::ui::ModelState;
 
+    let focused = app.focused == FocusedPanel::Models;
+    let scroll_offset = app.scroll.models;
     let statuses = app.model_statuses.read().unwrap();
 
+    let border_style = if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let block = Block::default()
         .title(" Models ")
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Yellow));
+        .border_style(border_style);
 
     if statuses.is_empty() {
         let msg = Paragraph::new("No models loaded")
@@ -133,8 +154,11 @@ fn draw_models_panel(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    let visible_rows = area.height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = statuses
         .iter()
+        .skip(scroll_offset)
+        .take(visible_rows)
         .map(|m| {
             let text = format!("[{}] {} {}", m.state, m.model_id, m.provider);
             let color = match m.state {
@@ -153,12 +177,21 @@ fn draw_models_panel(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_requests_panel(f: &mut Frame, area: Rect, app: &App) {
+    let focused = app.focused == FocusedPanel::Requests;
+    let scroll_offset = app.scroll.requests;
     let log = app.request_log.read().unwrap();
 
+    let border_style = if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let block = Block::default()
         .title(" Requests ")
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Blue));
+        .border_style(border_style);
 
     if log.is_empty() {
         let msg = Paragraph::new("Waiting for requests...")
@@ -169,10 +202,12 @@ fn draw_requests_panel(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    let visible_rows = area.height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = log
         .iter()
         .rev() // newest request at top
-        .take(50)
+        .skip(scroll_offset)
+        .take(visible_rows)
         .map(|r| {
             let text = format!(
                 "{} {} {}ms HTTP{}",
@@ -196,7 +231,8 @@ fn draw_requests_panel(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(" q/Esc: quit ").style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(" Tab: next panel  \u{2191}\u{2193}: scroll  q/Esc: quit ")
+        .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, area);
 }
 
