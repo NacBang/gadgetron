@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn stop_reason_has_five_variants() {
-        let reasons = vec![
+        let reasons = [
             StopReason::UserRequested,
             StopReason::NodeShutdown,
             StopReason::Evicted,
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn failure_reason_has_eight_variants() {
-        let reasons: Vec<FailureReason> = vec![
+        let reasons = [
             FailureReason::CrashExit(1),
             FailureReason::LoadTimeout,
             FailureReason::HealthCheckStale,

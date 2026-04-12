@@ -120,7 +120,10 @@ mod tests {
     fn audit_status_as_str() {
         assert_eq!(AuditStatus::Ok.as_str(), "ok");
         assert_eq!(AuditStatus::Error.as_str(), "error");
-        assert_eq!(AuditStatus::StreamInterrupted.as_str(), "stream_interrupted");
+        assert_eq!(
+            AuditStatus::StreamInterrupted.as_str(),
+            "stream_interrupted"
+        );
     }
 
     #[tokio::test]

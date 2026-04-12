@@ -12,7 +12,8 @@ gadgetron-node = { workspace = true }
 gadgetron-xaas = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["limit", "trace"] }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

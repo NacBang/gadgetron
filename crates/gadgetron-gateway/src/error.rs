@@ -13,8 +13,8 @@ impl From<GadgetronError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let err = &self.0;
-        let status =
-            StatusCode::from_u16(err.http_status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(err.http_status_code())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
         let body = serde_json::json!({
             "error": {
@@ -142,9 +142,7 @@ mod tests {
             GadgetronError::Config("".into()),
             GadgetronError::Provider("".into()),
             GadgetronError::Routing("".into()),
-            GadgetronError::StreamInterrupted {
-                reason: "".into(),
-            },
+            GadgetronError::StreamInterrupted { reason: "".into() },
             GadgetronError::QuotaExceeded {
                 tenant_id: Uuid::nil(),
             },

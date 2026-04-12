@@ -779,6 +779,7 @@ name = "gadgetron-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "gadgetron-core",
  "gadgetron-gateway",
  "gadgetron-node",
@@ -786,7 +787,9 @@ dependencies = [
  "gadgetron-router",
  "gadgetron-scheduler",
  "gadgetron-tui",
+ "gadgetron-xaas",
  "serde",
+ "sqlx",
  "tokio",
  "toml",
  "tracing",
@@ -814,6 +817,7 @@ name = "gadgetron-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "futures",
@@ -2948,6 +2952,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tower",

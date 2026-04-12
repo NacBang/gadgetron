@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use gadgetron_core::context::QuotaSnapshot;
 use gadgetron_core::error::GadgetronError;
@@ -22,8 +20,7 @@ impl QuotaToken {
     }
 
     pub fn mark_used(&self) {
-        self.used
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.used.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn was_used(&self) -> bool {

@@ -1,21 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoutingStrategy {
+    #[default]
     RoundRobin,
     CostOptimal,
     LatencyOptimal,
     QualityOptimal,
-    Fallback { chain: Vec<String> },
-    Weighted { weights: HashMap<String, f32> },
-}
-
-impl Default for RoutingStrategy {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
+    Fallback {
+        chain: Vec<String>,
+    },
+    Weighted {
+        weights: HashMap<String, f32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
