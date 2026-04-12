@@ -38,7 +38,12 @@
    └→ 문서: 코드-문서 불일치 0건
    └→ "더 이상 할 것 없음" 판단까지 반복
 
-⑦ PR + Merge
+⑦ 매뉴얼 업데이트 (push 전 필수)
+   └→ docs/manual/ 에 구현된 내용 반영
+   └→ 새 endpoint, CLI, config, 에러 코드 모두 매뉴얼에 포함
+   └→ 매뉴얼에 없는 기능 = push 금지
+
+⑧ PR + Merge
    └→ git commit → gh pr create → merge
    └→ clean state에서 다음 Sprint 시작
 ```
