@@ -1,0 +1,9 @@
+[server]
+bind = "0.0.0.0:8080"
+
+[providers.gemma4]
+type = "vllm"
+endpoint = "http://10.100.1.5:8100"
+
+[router.default_strategy]
+type = "round_robin"

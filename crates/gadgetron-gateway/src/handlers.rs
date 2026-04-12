@@ -268,6 +268,7 @@ mod tests {
                     message: Message {
                         role: Role::Assistant,
                         content: Content::Text("Hello from FakeLlmProvider!".to_string()),
+                        reasoning_content: None,
                     },
                     finish_reason: Some("stop".to_string()),
                 }],
@@ -292,6 +293,7 @@ mod tests {
                             role: Some("assistant".to_string()),
                             content: Some("Hello".to_string()),
                             tool_calls: None,
+                            reasoning_content: None,
                         },
                         finish_reason: None,
                     }],
@@ -307,6 +309,7 @@ mod tests {
                             role: None,
                             content: Some(" World!".to_string()),
                             tool_calls: None,
+                            reasoning_content: None,
                         },
                         finish_reason: Some("stop".to_string()),
                     }],

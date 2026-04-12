@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 pub struct Message {
     pub role: Role,
     pub content: Content,
+    /// Reasoning trace from SGLang GLM-5.1 style models (non-streaming path).
+    /// Absent in standard OpenAI/Anthropic responses; `serde(default)` makes it None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -66,6 +70,7 @@ impl Message {
         Self {
             role: Role::User,
             content: Content::Text(text.into()),
+            reasoning_content: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl Message {
         Self {
             role: Role::System,
             content: Content::Text(text.into()),
+            reasoning_content: None,
         }
     }
 
@@ -80,6 +86,33 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: Content::Text(text.into()),
+            reasoning_content: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_reasoning_content_deserializes() {
+        let json = r#"{"role":"assistant","content":"done","reasoning_content":"step1"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.reasoning_content, Some("step1".to_string()));
+    }
+
+    #[test]
+    fn message_missing_reasoning_content_is_none() {
+        let json = r#"{"role":"user","content":"hi"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.reasoning_content, None);
+    }
+
+    #[test]
+    fn message_constructors_set_reasoning_content_none() {
+        assert_eq!(Message::user("hi").reasoning_content, None);
+        assert_eq!(Message::system("sys").reasoning_content, None);
+        assert_eq!(Message::assistant("ok").reasoning_content, None);
     }
 }

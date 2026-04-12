@@ -96,6 +96,8 @@ request_timeout_ms = 30000
 default_strategy = {type = "round_robin"}
 ```
 
+`default_strategy` is a TOML inline table (tagged enum). The `type` key selects the variant; some variants take additional keys in the same inline table. The value `{type = "round_robin"}` is the minimal form with no extra keys. All provider names in `chain` and `weights` must match the `[providers.*]` keys defined in the same config file.
+
 `router.fallbacks` and `router.costs` are also accepted but are for advanced routing configuration not covered in this manual. Leave them absent to use defaults.
 
 ---
@@ -104,9 +106,9 @@ default_strategy = {type = "round_robin"}
 
 Each key under `[providers]` is a provider name you choose (used in routing and model listing). The `type` field selects the provider adapter.
 
-**Supported provider types in Sprint 1-3:** `openai`, `anthropic`, `ollama`
+**Supported provider types as of Sprint 4:** `openai`, `anthropic`, `ollama`, `vllm`, `sglang`
 
-**Not yet supported (will fail at startup):** `gemini`, `vllm`, `sglang`
+**Not yet supported (will fail at startup):** `gemini`
 
 #### OpenAI
 
@@ -154,6 +156,42 @@ endpoint = "http://localhost:11434"
 ```
 
 Ollama does not require an API key. The `models` field is not used for Ollama; available models are discovered from the Ollama API at runtime.
+
+#### vLLM
+
+Available as of Sprint 4.
+
+```toml
+[providers.gemma4]
+type = "vllm"
+
+# (required) Full URL to your vLLM instance, including port.
+# Override with an environment variable if needed: endpoint = "${VLLM_ENDPOINT}"
+endpoint = "http://10.100.1.5:8100"
+
+# (required) List of model IDs this provider can serve.
+# Must match the model name as vLLM knows it (--served-model-name or default).
+models = ["gemma-4-27b-it"]
+```
+
+vLLM does not require an API key when running in its default open mode. If your vLLM instance has `--api-key` configured, add `api_key = "${VLLM_API_KEY}"`.
+
+#### SGLang
+
+Available as of Sprint 4.
+
+```toml
+[providers.glm]
+type = "sglang"
+
+# (required) Full URL to your SGLang instance, including port.
+endpoint = "http://10.100.1.110:30000"
+
+# (required) List of model IDs this provider can serve.
+models = ["glm-4-9b-chat"]
+```
+
+SGLang does not require an API key by default. For reasoning models such as GLM-5.1, Gadgetron forwards the `reasoning_content` field in the response if the model returns it. See [api-reference.md](api-reference.md) for the field description.
 
 ---
 

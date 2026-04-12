@@ -6,7 +6,6 @@ use axum::{
 use gadgetron_core::context::{Scope, TenantContext};
 use gadgetron_core::error::GadgetronError;
 use gadgetron_xaas::audit::writer::{AuditEntry, AuditStatus};
-use uuid::Uuid;
 
 use crate::{error::ApiError, server::AppState};
 
@@ -77,21 +76,4 @@ pub async fn scope_guard_middleware(
     }
 
     next.run(req).await
-}
-
-/// Sends an audit entry for an anonymous auth failure (no TenantContext available).
-#[allow(dead_code)]
-fn emit_scope_failure_audit_anonymous(state: &AppState) {
-    state.audit_writer.send(AuditEntry {
-        tenant_id: Uuid::nil(),
-        api_key_id: Uuid::nil(),
-        request_id: Uuid::new_v4(),
-        model: None,
-        provider: None,
-        status: AuditStatus::Error,
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_cents: 0,
-        latency_ms: 0,
-    });
 }

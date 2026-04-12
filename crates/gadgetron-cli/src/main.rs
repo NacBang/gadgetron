@@ -227,15 +227,16 @@ fn build_providers(
             ProviderConfig::Ollama { endpoint } => {
                 Arc::new(gadgetron_provider::OllamaProvider::new(endpoint.clone()))
             }
+            ProviderConfig::Vllm { endpoint, api_key } => Arc::new(
+                gadgetron_provider::VllmProvider::new(endpoint.clone(), api_key.clone()),
+            ),
+            ProviderConfig::Sglang { endpoint, api_key } => Arc::new(
+                gadgetron_provider::SglangProvider::new(endpoint.clone(), api_key.clone()),
+            ),
+            // Gemini requires SseToChunkNormalizer extraction (Phase 1 Week 6-7).
             // SEC-M2: do not format!("{:?}", provider_cfg) — would emit api_key.
-            other => {
-                let kind = match other {
-                    ProviderConfig::Gemini { .. } => "gemini",
-                    ProviderConfig::Vllm { .. } => "vllm",
-                    ProviderConfig::Sglang { .. } => "sglang",
-                    _ => "unknown",
-                };
-                anyhow::bail!("unsupported provider type in Phase 1: {kind}");
+            ProviderConfig::Gemini { .. } => {
+                anyhow::bail!("Gemini provider not yet implemented (Phase 1 Week 6-7)")
             }
         };
 
@@ -307,5 +308,105 @@ mod tests {
         let cfg = super::default_config();
         let providers = super::build_providers(&cfg).unwrap();
         assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn build_providers_vllm_activates() {
+        use gadgetron_core::config::{AppConfig, ProviderConfig, ServerConfig};
+        use gadgetron_core::routing::RoutingConfig;
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "my-vllm".to_string(),
+            ProviderConfig::Vllm {
+                endpoint: "http://localhost:8001".to_string(),
+                api_key: None,
+            },
+        );
+        let cfg = AppConfig {
+            server: ServerConfig {
+                bind: "0.0.0.0:8080".to_string(),
+                api_key: None,
+                request_timeout_ms: 30_000,
+            },
+            router: RoutingConfig::default(),
+            providers,
+            nodes: vec![],
+            models: vec![],
+        };
+        let map = super::build_providers(&cfg).unwrap();
+        assert!(
+            map.contains_key("my-vllm"),
+            "vLLM provider must be registered"
+        );
+        assert_eq!(map["my-vllm"].name(), "vllm");
+    }
+
+    #[test]
+    fn build_providers_sglang_activates() {
+        use gadgetron_core::config::{AppConfig, ProviderConfig, ServerConfig};
+        use gadgetron_core::routing::RoutingConfig;
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "my-sglang".to_string(),
+            ProviderConfig::Sglang {
+                endpoint: "http://localhost:30000".to_string(),
+                api_key: Some("sk-test".to_string()),
+            },
+        );
+        let cfg = AppConfig {
+            server: ServerConfig {
+                bind: "0.0.0.0:8080".to_string(),
+                api_key: None,
+                request_timeout_ms: 30_000,
+            },
+            router: RoutingConfig::default(),
+            providers,
+            nodes: vec![],
+            models: vec![],
+        };
+        let map = super::build_providers(&cfg).unwrap();
+        assert!(
+            map.contains_key("my-sglang"),
+            "SGLang provider must be registered"
+        );
+        assert_eq!(map["my-sglang"].name(), "sglang");
+    }
+
+    #[test]
+    fn build_providers_gemini_still_bails() {
+        use gadgetron_core::config::{AppConfig, ProviderConfig, ServerConfig};
+        use gadgetron_core::routing::RoutingConfig;
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "my-gemini".to_string(),
+            ProviderConfig::Gemini {
+                api_key: "key".to_string(),
+                models: vec!["gemini-pro".to_string()],
+            },
+        );
+        let cfg = AppConfig {
+            server: ServerConfig {
+                bind: "0.0.0.0:8080".to_string(),
+                api_key: None,
+                request_timeout_ms: 30_000,
+            },
+            router: RoutingConfig::default(),
+            providers,
+            nodes: vec![],
+            models: vec![],
+        };
+        let result = super::build_providers(&cfg);
+        assert!(result.is_err(), "Gemini must still return an error");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("Gemini"),
+            "error message must mention Gemini, got: {msg}"
+        );
     }
 }

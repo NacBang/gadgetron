@@ -86,6 +86,31 @@ pub struct ChunkDelta {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallChunk>>,
+    /// SGLang (GLM-5.1 etc reasoning models) returns the reasoning trace in this field.
+    /// OpenAI-compatible engines do not send this field. `serde(default)` makes it None
+    /// when absent; `skip_serializing_if` suppresses it from Gadgetron → client responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_delta_reasoning_content_deserializes() {
+        let json = r#"{"content":"hi","reasoning_content":"step1"}"#;
+        let delta: ChunkDelta = serde_json::from_str(json).unwrap();
+        assert_eq!(delta.reasoning_content, Some("step1".to_string()));
+        assert_eq!(delta.content, Some("hi".to_string()));
+    }
+
+    #[test]
+    fn chunk_delta_missing_reasoning_content_is_none() {
+        let json = r#"{"content":"hi"}"#;
+        let delta: ChunkDelta = serde_json::from_str(json).unwrap();
+        assert_eq!(delta.reasoning_content, None);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

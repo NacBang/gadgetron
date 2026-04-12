@@ -77,6 +77,8 @@ Submit a chat completion request. Compatible with OpenAI's `/v1/chat/completions
 | `messages` | array | yes | Array of `{"role": "user"|"assistant"|"system", "content": "..."}` objects |
 | `stream` | boolean | no | `false` (default) for a single JSON response; `true` for SSE streaming |
 
+Additional OpenAI request fields (`temperature`, `max_tokens`, `top_p`, etc.) are forwarded to the upstream provider as-is. Gadgetron does not validate them beyond JSON parsing.
+
 Maximum request body size: **4 MB** (enforced by the gateway before authentication).
 
 **Non-streaming response (stream: false):**
@@ -106,6 +108,37 @@ HTTP 200
   }
 }
 ```
+
+**`reasoning_content` field (reasoning models — SGLang GLM-5.1 and similar):**
+
+Some models (e.g. GLM-5.1 served via SGLang) include a `reasoning_content` field inside `message`. When the upstream provider returns this field, Gadgetron forwards it unchanged. It contains the model's chain-of-thought text that preceded the final answer.
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "glm-4-9b-chat",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "Let me think about this step by step...",
+        "content": "The answer is 42."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 30,
+    "total_tokens": 42
+  }
+}
+```
+
+`reasoning_content` is absent when the upstream provider does not return it. Clients should treat it as an optional field.
 
 **Streaming response (stream: true):**
 
@@ -210,7 +243,7 @@ curl -s http://localhost:8080/health
 
 ### GET /ready
 
-Returns HTTP 200 with `{"status":"ready"}` in Sprint 1-3 (unconditional). Sprint 2 will add a PostgreSQL connectivity check.
+Returns HTTP 200 with `{"status":"ready"}` (unconditional). A PostgreSQL connectivity check is not yet wired to this endpoint; it will be added in a future sprint.
 
 ```sh
 curl -s http://localhost:8080/ready
@@ -221,7 +254,7 @@ curl -s http://localhost:8080/ready
 
 ## Admin endpoints (not yet implemented)
 
-The following routes are defined in the router but return HTTP 501 in Sprint 1-3. They require scope `Management`.
+The following routes are defined in the router but return HTTP 501 (not yet implemented). They require scope `Management`.
 
 | Method | Path | What it will do (future) |
 |--------|------|--------------------------|

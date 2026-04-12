@@ -211,6 +211,7 @@ fn from_anthropic_response(body: &serde_json::Value) -> Result<ChatResponse> {
             message: Message {
                 role: Role::Assistant,
                 content: assistant_content,
+                reasoning_content: None,
             },
             finish_reason: Some(stop_reason.to_string()),
         }],
@@ -338,6 +339,7 @@ impl LlmProvider for AnthropicProvider {
                                                     role: None,
                                                     content: Some(text.to_string()),
                                                     tool_calls: None,
+                                                    reasoning_content: None,
                                                 },
                                                 finish_reason: None,
                                             }],
