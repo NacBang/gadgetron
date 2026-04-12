@@ -1,11 +1,11 @@
 -- SEC-3: INSERT-only role for audit log integrity.
--- Uses EXCEPTION handler instead of IF NOT EXISTS to avoid race conditions
--- when multiple test databases run migrations in parallel.
+-- Uses EXCEPTION handler to handle concurrent CREATE ROLE from parallel tests.
+-- PostgreSQL raises unique_violation (23505) on pg_authid, not duplicate_object (42710).
 DO $$
 BEGIN
     CREATE ROLE gadgetron_app LOGIN;
 EXCEPTION
-    WHEN duplicate_object THEN NULL;
+    WHEN duplicate_object OR unique_violation THEN NULL;
 END
 $$;
 
