@@ -1,6 +1,12 @@
 [advisories]
 vulnerability = "deny"
 unmaintained = "warn"
+ignore = [
+    # RUSTSEC-2023-0071: rsa crate Marvin Attack — transitive dep via sqlx-mysql.
+    # We only use sqlx with postgres feature; mysql code path is never executed.
+    # No fix available upstream. Tracked: https://rustsec.org/advisories/RUSTSEC-2023-0071
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 unlicensed = "deny"

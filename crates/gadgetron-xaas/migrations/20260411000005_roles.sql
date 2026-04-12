@@ -1,11 +1,11 @@
 -- SEC-3: INSERT-only role for audit log integrity.
--- Requires the application to connect as 'gadgetron_app' role.
--- Run with a superuser or rds_superuser connection.
+-- Uses EXCEPTION handler instead of IF NOT EXISTS to avoid race conditions
+-- when multiple test databases run migrations in parallel.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gadgetron_app') THEN
-        CREATE ROLE gadgetron_app LOGIN;
-    END IF;
+    CREATE ROLE gadgetron_app LOGIN;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
 END
 $$;
 

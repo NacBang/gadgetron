@@ -30,7 +30,9 @@ impl PgHarness {
 
     fn base_url() -> String {
         let url = Self::admin_url();
-        url.rsplit_once('/').map(|(base, _)| base.to_string()).unwrap_or(url)
+        url.rsplit_once('/')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or(url)
     }
 
     pub async fn new() -> Self {
