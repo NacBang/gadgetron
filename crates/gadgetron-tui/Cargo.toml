@@ -2,6 +2,7 @@
 name = "gadgetron-tui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 gadgetron-core = { workspace = true }

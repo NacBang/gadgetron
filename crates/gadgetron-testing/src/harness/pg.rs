@@ -23,17 +23,26 @@ pub struct PgHarness {
 }
 
 impl PgHarness {
-    const ADMIN_URL: &'static str = "postgresql://localhost:5432/postgres";
+    fn admin_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://localhost:5432/postgres".to_string())
+    }
+
+    fn base_url() -> String {
+        let url = Self::admin_url();
+        url.rsplit_once('/')
+            .map(|(base, _)| base.to_string())
+            .unwrap_or(url)
+    }
 
     pub async fn new() -> Self {
         let db_name = format!("gadgetron_test_{}", Uuid::new_v4().simple());
 
-        // Create the temporary database using the default OS user (no password on dev).
         let admin = PgPoolOptions::new()
             .max_connections(2)
-            .connect(Self::ADMIN_URL)
+            .connect(&Self::admin_url())
             .await
-            .expect("admin connect to postgres failed — is PostgreSQL running on localhost:5432?");
+            .expect("admin connect to postgres failed — is PostgreSQL running? Set DATABASE_URL if needed.");
 
         sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
             .execute(&admin)
@@ -42,7 +51,7 @@ impl PgHarness {
         admin.close().await;
 
         // Connect to the new database and run migrations.
-        let url = format!("postgresql://localhost:5432/{db_name}");
+        let url = format!("{}/{db_name}", Self::base_url());
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(&url)
@@ -140,7 +149,7 @@ impl PgHarness {
 
         let admin = PgPoolOptions::new()
             .max_connections(2)
-            .connect(Self::ADMIN_URL)
+            .connect(&Self::admin_url())
             .await
             .expect("admin connect for cleanup failed");
 

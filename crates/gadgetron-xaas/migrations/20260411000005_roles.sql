@@ -1,11 +1,11 @@
 -- SEC-3: INSERT-only role for audit log integrity.
--- Requires the application to connect as 'gadgetron_app' role.
--- Run with a superuser or rds_superuser connection.
+-- Uses EXCEPTION handler to handle concurrent CREATE ROLE from parallel tests.
+-- PostgreSQL raises unique_violation (23505) on pg_authid, not duplicate_object (42710).
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'gadgetron_app') THEN
-        CREATE ROLE gadgetron_app LOGIN;
-    END IF;
+    CREATE ROLE gadgetron_app LOGIN;
+EXCEPTION
+    WHEN duplicate_object OR unique_violation THEN NULL;
 END
 $$;
 
