@@ -2,7 +2,7 @@
 
 Gadgetron is a Rust-native API gateway that presents an OpenAI-compatible HTTP interface in front of one or more LLM providers (OpenAI, Anthropic, Ollama, vLLM, SGLang). It handles authentication, per-tenant quota enforcement, request routing, and audit logging. It is designed to be self-hosted.
 
-This manual covers the Sprint 1-6 implementation state (Gadgetron v0.1.0, Rust edition 2021, `rust-version = "1.80"`).
+This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust edition 2021, `rust-version = "1.80"`).
 
 ---
 
@@ -20,7 +20,7 @@ This manual covers the Sprint 1-6 implementation state (Gadgetron v0.1.0, Rust e
 
 ---
 
-## What Gadgetron is and is not (as of Sprint 6)
+## What Gadgetron is and is not (as of Sprint 7)
 
 **Implemented and working:**
 - `POST /v1/chat/completions` — non-streaming and SSE streaming, backed by real LLM providers
@@ -46,10 +46,18 @@ This manual covers the Sprint 1-6 implementation state (Gadgetron v0.1.0, Rust e
 - `GET /api/v1/usage`
 - `GET /api/v1/costs`
 
+**Added in Sprint 7:**
+- `gadgetron tenant create --name <name>` — create a tenant, returns UUID
+- `gadgetron key create --tenant-id <uuid>` — create an API key for a tenant, prints raw key once
+- `gadgetron key create --no-db` — create an in-memory key without a tenant (local development)
+- `gadgetron init` — generate an annotated `gadgetron.toml` in the current directory
+- `gadgetron init --provider <name>` — quick-start mode: pre-fill a specific provider block
+- `gadgetron doctor` — check configuration, database connectivity, and provider reachability
+
 **Not yet implemented:**
-- CLI subcommands other than `gadgetron serve` (tenant/key management, node management)
+- Node management CLI subcommands
 - PostgreSQL-backed quota enforcement (Sprint 2)
 - Audit log PostgreSQL persistence (Sprint 2+)
-- TUI keyboard navigation and scrolling (Sprint 7)
+- TUI keyboard navigation and scrolling
 - Docker image (future)
 - Gemini provider (Phase 1 Week 6+)

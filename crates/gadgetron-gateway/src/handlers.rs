@@ -468,7 +468,8 @@ mod tests {
             audit_writer: Arc::new(audit_writer),
             providers: Arc::new(providers_for_state),
             router: Some(Arc::new(lrouter)),
-            pg_pool: lazy_pool(),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
             tui_tx: None,
         }
     }

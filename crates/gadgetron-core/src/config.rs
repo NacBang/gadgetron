@@ -77,6 +77,34 @@ pub struct LocalModelConfig {
     pub node: Option<String>,
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            // Bind on all interfaces, port 8080.
+            // Env override: GADGETRON_BIND
+            bind: "0.0.0.0:8080".to_string(),
+            api_key: None,
+            request_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl Default for AppConfig {
+    /// Built-in defaults used when no gadgetron.toml is present.
+    ///
+    /// Produces a no-db, no-provider configuration that starts on 0.0.0.0:8080.
+    /// Users should run `gadgetron init` to create a proper config file.
+    fn default() -> Self {
+        Self {
+            server: ServerConfig::default(),
+            router: Default::default(),
+            providers: Default::default(),
+            nodes: vec![],
+            models: vec![],
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &str) -> crate::error::Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {

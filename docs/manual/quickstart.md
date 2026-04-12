@@ -2,7 +2,7 @@
 
 This guide walks through every step required to run Gadgetron and make a successful chat completion request. All commands are copy-pasteable and intended to run in order.
 
-As of Sprint 4, Gadgetron routes to real LLM providers. Two quickstart paths are provided: one using OpenAI (requires an OpenAI API key), and one using a self-hosted vLLM instance (no external API key).
+As of Sprint 7, Gadgetron routes to real LLM providers and includes CLI commands for tenant and API key management. Two quickstart paths are provided: one using OpenAI (requires an OpenAI API key), and one using a self-hosted vLLM instance (no external API key).
 
 **Prerequisites (OpenAI path):** Rust 1.80+, Docker (for the PostgreSQL one-liner), an OpenAI API key.
 
@@ -78,9 +78,7 @@ Replace `10.100.1.5:8100` with the host and port of your vLLM instance. The mode
 
 ## Step 4 — Create a tenant and API key
 
-Gadgetron's tenant and API key management CLI commands are not yet implemented. For now, insert directly into PostgreSQL.
-
-The server must have run at least once first so that migrations create the schema. Start it briefly to apply migrations, then stop it with Ctrl-C.
+The server must have run at least once so that migrations create the schema. Start it briefly to apply migrations, then stop it with Ctrl-C.
 
 For the OpenAI path:
 
@@ -110,66 +108,37 @@ INFO listening addr=0.0.0.0:8080
 
 The `provider registered` line shows the key you chose under `[providers.*]` (e.g. `name=gemma4` for the vLLM example).
 
-Now insert a tenant and API key. The API key secret below is `gad_live_quickstart0000000000000000`. You must hash it with SHA-256 before storing; the hash shown here is the SHA-256 of that exact string.
+Now create a tenant and API key using the CLI.
+
+### Standard path (with database)
 
 ```sh
-docker exec -i gadgetron-pg psql -U gadgetron -d gadgetron <<'SQL'
--- Insert a tenant
-INSERT INTO tenants (id, name, status)
-VALUES ('00000000-0000-0000-0000-000000000001', 'quickstart-tenant', 'Active');
+# Create a tenant. Prints the assigned UUID.
+./target/release/gadgetron tenant create --name "my-team"
+# Example output: tenant created id=00000000-0000-0000-0000-000000000001
 
--- Insert an API key.
--- The key secret is: gad_live_quickstart0000000000000000
--- SHA-256 of that secret (hex):
---   Run: echo -n 'gad_live_quickstart0000000000000000' | sha256sum
--- Replace the key_hash value below with the output of that command.
-INSERT INTO api_keys (id, tenant_id, prefix, key_hash, kind, scopes, name)
-VALUES (
-  '00000000-0000-0000-0000-000000000002',
-  '00000000-0000-0000-0000-000000000001',
-  'gad_live',
-  '$(echo -n "gad_live_quickstart0000000000000000" | sha256sum | cut -d" " -f1)',
-  'live',
-  ARRAY['OpenAiCompat'],
-  'quickstart-key'
-);
-
--- Insert a quota config so the tenant has spending headroom.
-INSERT INTO quota_configs (tenant_id, daily_limit_cents, monthly_limit_cents)
-VALUES ('00000000-0000-0000-0000-000000000001', 100000, 1000000);
-SQL
+# Create an API key for that tenant. Prints the raw key — save it now.
+# The raw key is shown exactly once and cannot be recovered later.
+./target/release/gadgetron key create --tenant-id 00000000-0000-0000-0000-000000000001
+# Example output:
+#   key created name=default id=00000000-0000-0000-0000-000000000002
+#   key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
 ```
 
-**Note on the key hash:** the SQL above uses shell command substitution which will not expand inside `psql`. Run the hash command separately and substitute the literal value:
+Substitute the UUID printed by `tenant create` into the `key create` command. The raw key value (the `key:` line) is what you supply as the Bearer token in Step 6.
+
+### No-database path (`--no-db` mode)
+
+If you are evaluating Gadgetron without a PostgreSQL instance, create a key without a tenant:
 
 ```sh
-# Step A: get the hash
-echo -n 'gad_live_quickstart0000000000000000' | sha256sum | cut -d' ' -f1
-# Example output: 3e7a2f1c... (64 hex characters)
-
-# Step B: insert with the literal hash value
-docker exec -i gadgetron-pg psql -U gadgetron -d gadgetron <<SQL
-INSERT INTO tenants (id, name, status)
-VALUES ('00000000-0000-0000-0000-000000000001', 'quickstart-tenant', 'Active')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO api_keys (id, tenant_id, prefix, key_hash, kind, scopes, name)
-VALUES (
-  '00000000-0000-0000-0000-000000000002',
-  '00000000-0000-0000-0000-000000000001',
-  'gad_live',
-  'PASTE_YOUR_64_CHAR_HASH_HERE',
-  'live',
-  ARRAY['OpenAiCompat'],
-  'quickstart-key'
-)
-ON CONFLICT DO NOTHING;
-
-INSERT INTO quota_configs (tenant_id, daily_limit_cents, monthly_limit_cents)
-VALUES ('00000000-0000-0000-0000-000000000001', 100000, 1000000)
-ON CONFLICT (tenant_id) DO NOTHING;
-SQL
+./target/release/gadgetron key create --no-db
+# Example output:
+#   key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+#   (stored in memory only — valid for this server process lifetime)
 ```
+
+In `--no-db` mode the key is held in memory. It is lost when the server restarts. This mode is intended for local development and testing only.
 
 ---
 

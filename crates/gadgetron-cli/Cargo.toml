@@ -22,3 +22,6 @@ axum = { workspace = true }
 sqlx = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+reqwest = { workspace = true }
