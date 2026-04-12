@@ -35,7 +35,7 @@ Expected output: `localhost:5432 - accepting connections`
 ## Step 2 — Clone and build
 
 ```sh
-git clone https://github.com/your-org/gadgetron.git
+git clone https://github.com/NacBang/gadgetron.git
 cd gadgetron
 cargo build --release -p gadgetron-cli
 ```
@@ -316,7 +316,7 @@ curl -s http://localhost:8080/ready | jq .
 The terminal dashboard runs independently of the server. In a separate terminal:
 
 ```sh
-cargo run -p gadgetron-tui
+./target/release/gadgetron --tui
 ```
 
 The dashboard shows a 3-column layout (Nodes / Models / Requests) with color-coded GPU metrics. In Sprint 5 it displays demo data; live cluster data requires Sprint 6. Press `q` or `Esc` to exit. See [tui.md](tui.md) for the full reference.

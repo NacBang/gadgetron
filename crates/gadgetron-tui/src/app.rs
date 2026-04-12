@@ -2,6 +2,7 @@ use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -29,8 +30,8 @@ pub struct App {
     pub gpu_metrics: Arc<RwLock<Vec<GpuMetrics>>>,
     /// Model status list.
     pub model_statuses: Arc<RwLock<Vec<ModelStatus>>>,
-    /// Recent request log (max 100 entries).
-    pub request_log: Arc<RwLock<Vec<RequestEntry>>>,
+    /// Recent request log (max 100 entries). VecDeque for O(1) front eviction.
+    pub request_log: Arc<RwLock<VecDeque<RequestEntry>>>,
     /// Update channel receiver. `None` = no data source connected (demo mode).
     update_rx: Option<broadcast::Receiver<WsMessage>>,
 }
@@ -119,7 +120,7 @@ impl App {
             },
         ];
 
-        let request_log = vec![
+        let request_log = VecDeque::from([
             RequestEntry {
                 request_id: "req-a1b2c3d4".to_string(),
                 tenant_id: "tenant-1".to_string(),
@@ -156,7 +157,7 @@ impl App {
                 total_tokens: 64,
                 timestamp: Utc::now(),
             },
-        ];
+        ]);
 
         let health = ClusterHealth {
             total_nodes: 2,
@@ -207,9 +208,9 @@ impl App {
                 }
                 Ok(WsMessage::RequestLog(entry)) => {
                     let mut log = self.request_log.write().unwrap();
-                    log.push(entry);
+                    log.push_back(entry);
                     if log.len() > REQUEST_LOG_CAPACITY {
-                        log.remove(0);
+                        log.pop_front();
                     }
                 }
                 Ok(WsMessage::HealthUpdate(h)) => {

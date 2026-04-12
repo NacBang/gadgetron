@@ -4,6 +4,21 @@ All authenticated endpoints require a `Bearer` token in the `Authorization` head
 
 Every response from an authenticated endpoint includes an `x-request-id` header with a UUID value. Include this value when filing bug reports.
 
+**Python (openai SDK):**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="gad_live_...")
+resp = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(resp.choices[0].message.content)
+```
+
+Replace `api_key` with the key you created in [quickstart.md](quickstart.md) Step 4. Replace `model` with a model ID returned by `GET /v1/models`.
+
 ---
 
 ## Error response format
