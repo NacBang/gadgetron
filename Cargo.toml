@@ -80,3 +80,8 @@ moka = { version = "0.12", features = ["future"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
+
+# Testing infrastructure
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+criterion = { version = "0.5", features = ["async_tokio"] }

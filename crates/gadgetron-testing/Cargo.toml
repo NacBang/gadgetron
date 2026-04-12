@@ -17,3 +17,10 @@ tokio-stream = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 wiremock = "0.6"
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

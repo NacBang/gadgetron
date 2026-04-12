@@ -308,3 +308,15 @@ curl -s http://localhost:8080/ready | jq .
 - Understand the auth and scope system: see [auth.md](auth.md)
 - Full API reference: see [api-reference.md](api-reference.md)
 - Troubleshoot errors: see [troubleshooting.md](troubleshooting.md)
+
+---
+
+## Optional: open the TUI dashboard
+
+The terminal dashboard runs independently of the server. In a separate terminal:
+
+```sh
+cargo run -p gadgetron-tui
+```
+
+The dashboard shows a 3-column layout (Nodes / Models / Requests) with color-coded GPU metrics. In Sprint 5 it displays demo data; live cluster data requires Sprint 6. Press `q` or `Esc` to exit. See [tui.md](tui.md) for the full reference.
