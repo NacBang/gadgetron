@@ -23,6 +23,7 @@ pub enum NodeErrorKind {
     ProcessSpawnFailed,
     VramAllocationFailed,
     PortAllocationFailed,
+    ProcessKillFailed,
 }
 
 impl fmt::Display for NodeErrorKind {
@@ -33,6 +34,7 @@ impl fmt::Display for NodeErrorKind {
             Self::ProcessSpawnFailed => write!(f, "process_spawn_failed"),
             Self::VramAllocationFailed => write!(f, "vram_allocation_failed"),
             Self::PortAllocationFailed => write!(f, "port_allocation_failed"),
+            Self::ProcessKillFailed => write!(f, "process_kill_failed"),
         }
     }
 }
@@ -357,6 +359,25 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("PoolTimeout"));
         assert!(display.contains("connection timed out"));
+    }
+
+    #[test]
+    fn node_error_kind_process_kill_failed_display() {
+        let kind = NodeErrorKind::ProcessKillFailed;
+        assert_eq!(format!("{kind}"), "process_kill_failed");
+        // Confirm it round-trips through the GadgetronError wrapper.
+        let err = GadgetronError::Node {
+            kind: NodeErrorKind::ProcessKillFailed,
+            message: "SIGKILL timed out".into(),
+        };
+        let display = format!("{err}");
+        assert!(
+            display.contains("process_kill_failed"),
+            "display: {display}"
+        );
+        assert!(display.contains("SIGKILL timed out"), "display: {display}");
+        assert_eq!(err.error_code(), "node_error");
+        assert_eq!(err.http_status_code(), 500);
     }
 
     #[test]
