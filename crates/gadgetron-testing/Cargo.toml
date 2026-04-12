@@ -7,20 +7,25 @@ rust-version.workspace = true
 description = "Test utilities: mock providers, fake GPU nodes, PG harness, fixtures"
 
 [dependencies]
-gadgetron-core = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-futures = { workspace = true }
-tokio-stream = { workspace = true }
-uuid = { workspace = true }
-tracing = { workspace = true }
-wiremock = "0.6"
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
-reqwest = { workspace = true }
+gadgetron-core      = { workspace = true }
+gadgetron-gateway   = { workspace = true }
+gadgetron-router    = { workspace = true }
+gadgetron-xaas      = { workspace = true }
+async-trait         = { workspace = true }
+tokio               = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+futures             = { workspace = true }
+tokio-stream        = { workspace = true }
+uuid                = { workspace = true }
+tracing             = { workspace = true }
+axum                = { workspace = true }
+sqlx                = { workspace = true }
+reqwest             = { workspace = true }
+sha2                = "0.10"
+hex                 = "0.4"
+wiremock            = "0.6"
 
 [dev-dependencies]
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
+tokio     = { workspace = true, features = ["test-util"] }
