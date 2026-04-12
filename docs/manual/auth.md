@@ -1,5 +1,7 @@
 # Authentication and Authorization
 
+> **Note:** `gadgetron key` CLI is not yet implemented. Create keys via SQL — see [quickstart.md](quickstart.md) Step 4.
+
 ---
 
 ## API key format

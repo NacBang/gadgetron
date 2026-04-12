@@ -21,14 +21,30 @@ docker run -d --name gadgetron-db \
   -e POSTGRES_USER=gadgetron -e POSTGRES_PASSWORD=gadgetron -e POSTGRES_DB=gadgetron \
   -p 5432:5432 postgres:16
 
-# 2. Start Gadgetron
+# 2. Start Gadgetron (run once to apply migrations, then Ctrl-C)
 export OPENAI_API_KEY="sk-your-key"
 export GADGETRON_DATABASE_URL="postgresql://gadgetron:gadgetron@localhost:5432/gadgetron"
 cargo run -- serve
 
-# 3. Create tenant + API key
-gadgetron tenant create --name "dev-team"
-gadgetron key create --tenant-id <uuid> --scope openai-compat
+# 3. Create tenant + API key via SQL
+# Note: CLI key management (`gadgetron key create`) is coming in a future sprint.
+# For now, insert directly into PostgreSQL. See docs/manual/quickstart.md Step 4
+# for the full instructions including key hashing.
+docker exec -i gadgetron-db psql -U gadgetron -d gadgetron <<'SQL'
+INSERT INTO tenants (id, name, status)
+VALUES ('00000000-0000-0000-0000-000000000001', 'dev-team', 'Active');
+
+-- Replace key_hash with: echo -n 'gad_live_YOUR_SECRET' | sha256sum | cut -d' ' -f1
+INSERT INTO api_keys (tenant_id, prefix, key_hash, kind, scopes, name)
+VALUES (
+  '00000000-0000-0000-0000-000000000001',
+  'gad_live',
+  'PASTE_YOUR_64_CHAR_SHA256_HASH_HERE',
+  'live',
+  ARRAY['OpenAiCompat'],
+  'dev-key'
+);
+SQL
 
 # 4. Send first request
 curl http://localhost:8080/v1/chat/completions \

@@ -116,12 +116,12 @@ impl GadgetronError {
         match self {
             Self::Config(_) => "Configuration is invalid. Check your gadgetron.toml and environment variables.",
             Self::Provider(_) => "The upstream LLM provider returned an error. Check provider status and API key validity.",
-            Self::Routing(_) => "No suitable provider found for this request. Verify model availability and routing configuration.",
+            Self::Routing(_) => "No suitable provider found for this request. Verify model availability and routing configuration. Run GET /v1/models to check available models.",
             Self::StreamInterrupted { .. } => "The response stream was interrupted. This may indicate a provider timeout or network issue.",
-            Self::QuotaExceeded { .. } => "Your API usage quota has been exceeded. Contact your administrator to increase limits.",
+            Self::QuotaExceeded { .. } => "Your API usage quota has been exceeded. Update quota_configs table to increase limits, or see docs/manual/troubleshooting.md.",
             Self::TenantNotFound => "Invalid API key. Verify your API key is correct and has not been revoked.",
             Self::Forbidden => "Your API key does not have permission for this operation. Check your key's assigned scopes.",
-            Self::Billing(_) => "A billing calculation error occurred. Contact support if this persists.",
+            Self::Billing(_) => "A billing calculation error occurred. Check server logs for billing details. File an issue at github.com/NacBang/gadgetron if this persists.",
             Self::DownloadFailed(_) => "Model download failed. Check network connectivity and model repository access.",
             Self::HotSwapFailed(_) => "Model hot-swap failed. The previous model version remains active.",
             Self::Database { .. } => "A database error occurred. Check PostgreSQL connectivity and disk space.",
@@ -133,7 +133,7 @@ impl GadgetronError {
         match self {
             Self::Config(_) => "invalid_request_error",
             Self::Provider(_) => "api_error",
-            Self::Routing(_) => "invalid_request_error",
+            Self::Routing(_) => "server_error",
             Self::StreamInterrupted { .. } => "api_error",
             Self::QuotaExceeded { .. } => "quota_error",
             Self::TenantNotFound => "authentication_error",
@@ -278,6 +278,11 @@ mod tests {
         assert_eq!(
             GadgetronError::Config("".into()).error_type(),
             "invalid_request_error"
+        );
+        // Routing returns 503, so its error_type must be server_error, not invalid_request_error.
+        assert_eq!(
+            GadgetronError::Routing("".into()).error_type(),
+            "server_error"
         );
     }
 

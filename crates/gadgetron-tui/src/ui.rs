@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
@@ -12,7 +12,7 @@ use crate::app::App;
 /// ├──────────────┬──────────────┬───────────────┤
 /// │  Nodes/GPU   │    Models    │   Requests    │  <- Body (Min)
 /// ├──────────────┴──────────────┴───────────────┤
-/// │  q: quit | r: refresh                       │  <- Footer (3 rows)
+/// │  q/Esc: quit                                 │  <- Footer (3 rows)
 /// └─────────────────────────────────────────────┘
 /// ```
 pub fn draw(f: &mut Frame, app: &App) {
@@ -70,16 +70,31 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_nodes_panel(f: &mut Frame, area: Rect, app: &App) {
     let metrics = app.gpu_metrics.read().unwrap();
+
+    let block = Block::default()
+        .title(" Nodes ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Green));
+
+    if metrics.is_empty() {
+        let msg = Paragraph::new("No nodes connected")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(msg, area);
+        return;
+    }
+
     let items: Vec<ListItem> = metrics
         .iter()
         .map(|m| {
             let text = format!(
-                "[{}] GPU{} {:.0}% VRAM:{}/{}MB {}C",
+                "[{}] GPU{} {:.0}% VRAM:{:.1}G/{:.1}G {}C",
                 m.node_id,
                 m.gpu_index,
                 m.utilization_pct,
-                m.vram_used_mb,
-                m.vram_total_mb,
+                m.vram_used_mb as f64 / 1024.0,
+                m.vram_total_mb as f64 / 1024.0,
                 m.temperature_c,
             );
             // Color the row by temperature as primary signal; VRAM overrides to Red when critical.
@@ -95,60 +110,93 @@ fn draw_nodes_panel(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Nodes ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Green)),
-    );
+    let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 
 fn draw_models_panel(f: &mut Frame, area: Rect, app: &App) {
+    use gadgetron_core::ui::ModelState;
+
     let statuses = app.model_statuses.read().unwrap();
+
+    let block = Block::default()
+        .title(" Models ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Yellow));
+
+    if statuses.is_empty() {
+        let msg = Paragraph::new("No models loaded")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(msg, area);
+        return;
+    }
+
     let items: Vec<ListItem> = statuses
         .iter()
-        .map(|m| ListItem::new(format!("[{}] {} {}", m.state, m.model_id, m.provider,)))
+        .map(|m| {
+            let text = format!("[{}] {} {}", m.state, m.model_id, m.provider);
+            let color = match m.state {
+                ModelState::Running => Color::Green,
+                ModelState::Loading | ModelState::Draining => Color::Yellow,
+                ModelState::Stopped | ModelState::Error => Color::Red,
+                #[allow(unreachable_patterns)]
+                _ => Color::Gray,
+            };
+            ListItem::new(text).style(Style::default().fg(color))
+        })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Models ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Yellow)),
-    );
+    let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 
 fn draw_requests_panel(f: &mut Frame, area: Rect, app: &App) {
     let log = app.request_log.read().unwrap();
+
+    let block = Block::default()
+        .title(" Requests ")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Blue));
+
+    if log.is_empty() {
+        let msg = Paragraph::new("Waiting for requests...")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(msg, area);
+        return;
+    }
+
     let items: Vec<ListItem> = log
         .iter()
         .rev() // newest request at top
         .take(50)
         .map(|r| {
-            ListItem::new(format!(
+            let text = format!(
                 "{} {} {}ms HTTP{}",
                 r.request_id.get(..8).unwrap_or(&r.request_id),
                 r.model,
                 r.latency_ms,
                 r.status,
-            ))
+            );
+            // HTTP 4xx/5xx or explicit stream error status codes render as Red.
+            let color = if r.status >= 400 {
+                Color::Red
+            } else {
+                Color::Reset
+            };
+            ListItem::new(text).style(Style::default().fg(color))
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Requests ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Blue)),
-    );
+    let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(" q: quit | r: refresh | arrows: navigate ")
-        .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(" q/Esc: quit ").style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, area);
 }
 
@@ -160,17 +208,17 @@ fn draw_footer(f: &mut Frame, area: Rect) {
 /// |------------|---------------|
 /// | < 60 °C    | Green         |
 /// | 60–74 °C   | Yellow        |
-/// | 75–84 °C   | Red           |
-/// | ≥ 85 °C    | LightRed      |
+/// | 75–84 °C   | LightRed      |
+/// | ≥ 85 °C    | Red           |
 pub fn temp_color(t: f32) -> Color {
     if t < 60.0 {
         Color::Green
     } else if t < 75.0 {
         Color::Yellow
     } else if t < 85.0 {
-        Color::Red
-    } else {
         Color::LightRed
+    } else {
+        Color::Red
     }
 }
 
@@ -220,15 +268,15 @@ mod tests {
     }
 
     #[test]
-    fn temp_color_75_to_84_is_red() {
-        assert_eq!(temp_color(75.0), Color::Red);
-        assert_eq!(temp_color(84.9), Color::Red);
+    fn temp_color_75_to_84_is_light_red() {
+        assert_eq!(temp_color(75.0), Color::LightRed);
+        assert_eq!(temp_color(84.9), Color::LightRed);
     }
 
     #[test]
-    fn temp_color_85_and_above_is_light_red() {
-        assert_eq!(temp_color(85.0), Color::LightRed);
-        assert_eq!(temp_color(110.0), Color::LightRed);
+    fn temp_color_85_and_above_is_red() {
+        assert_eq!(temp_color(85.0), Color::Red);
+        assert_eq!(temp_color(110.0), Color::Red);
     }
 
     // ── vram_color ───────────────────────────────────────────────────────
