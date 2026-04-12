@@ -1,56 +1,161 @@
 # Installation
 
-## Prerequisites
+Gadgetron runs on **Linux** (Ubuntu 22.04+) and **macOS** (13+). This guide covers a fresh-system install — no prior Rust or PostgreSQL required.
 
-| Requirement | Minimum version | Notes |
-|-------------|-----------------|-------|
-| Rust toolchain | 1.80 | Set in `Cargo.toml` `rust-version`. Install via [rustup.rs](https://rustup.rs). |
-| PostgreSQL | 16 | Gadgetron runs its own migrations on startup. PostgreSQL 15 may work but is untested. |
-| Git | any | To clone the repository. |
-| Docker | any | Optional. Required only if you use the Docker one-liner in the quickstart. |
+---
 
-Gadgetron does not require a GPU to run. GPU support is used only by the node-management subsystem (Sprint 4+). The gateway itself runs on any Linux or macOS host that can reach PostgreSQL.
+## Ubuntu 22.04 (from scratch)
 
-## Build from source
+### Step 1: System packages
 
-Clone the repository and build the `gadgetron-cli` binary:
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  curl build-essential pkg-config libssl-dev \
+  git ca-certificates \
+  postgresql postgresql-client
+```
 
-```sh
-git clone https://github.com/your-org/gadgetron.git
+### Step 2: Rust toolchain
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+rustc --version   # must be 1.80 or later
+cargo --version
+```
+
+### Step 3: Clone and build
+
+```bash
+git clone https://github.com/NacBang/gadgetron.git
 cd gadgetron
 cargo build --release -p gadgetron-cli
 ```
 
-The compiled binary is placed at:
+Build time: ~3-5 minutes on a cold cache. The binary is at `target/release/gadgetron`.
 
+### Step 4: PostgreSQL setup
+
+```bash
+# Start PostgreSQL
+sudo service postgresql start
+
+# Create user and database
+sudo -u postgres createuser -s $USER
+createdb gadgetron
 ```
-target/release/gadgetron
-```
 
-Build time on a modern machine is approximately 3-5 minutes on a cold cache (many workspace crates). Subsequent builds are incremental.
+### Step 5: Verify
 
-To verify the build succeeded:
-
-```sh
+```bash
+# Check binary
 ./target/release/gadgetron --help
+
+# Run tests
+cargo test --workspace --lib
 ```
 
-You should see basic help output. The binary starts the server when invoked without subcommands; see [quickstart.md](quickstart.md) for the full start sequence.
+### Step 6: First run
 
-### Cross-compilation
+```bash
+export GADGETRON_DATABASE_URL="postgresql://localhost:5432/gadgetron"
+./target/release/gadgetron serve --config gadgetron.toml
+```
 
-Cross-compilation is not documented in this manual. Use the host architecture that matches your deployment target to avoid glibc version mismatches.
+See [quickstart.md](quickstart.md) for creating a tenant, API key, and sending your first request.
 
-## Installing the binary system-wide (optional)
+---
 
-After building, copy the binary to a directory on your `PATH`:
+## macOS (from scratch)
 
-```sh
+### Step 1: Homebrew
+
+If not installed:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+### Step 2: System packages
+
+```bash
+brew install postgresql@16 git
+```
+
+### Step 3: Rust toolchain
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+rustc --version   # must be 1.80 or later
+```
+
+### Step 4: Clone and build
+
+```bash
+git clone https://github.com/NacBang/gadgetron.git
+cd gadgetron
+cargo build --release -p gadgetron-cli
+```
+
+### Step 5: PostgreSQL setup
+
+```bash
+brew services start postgresql@16
+createdb gadgetron
+```
+
+### Step 6: Verify
+
+```bash
+./target/release/gadgetron --help
+cargo test --workspace --lib
+```
+
+### Step 7: First run
+
+```bash
+export GADGETRON_DATABASE_URL="postgresql://$(whoami)@localhost:5432/gadgetron"
+./target/release/gadgetron serve --config gadgetron.toml
+```
+
+---
+
+## Requirements summary
+
+| Component | Minimum version | Install command |
+|-----------|----------------|-----------------|
+| Rust | 1.80 | `rustup` (see above) |
+| PostgreSQL | 14+ (16 recommended) | `apt install postgresql` / `brew install postgresql@16` |
+| OpenSSL dev | any | `apt install libssl-dev` (Ubuntu only; macOS includes it) |
+| C compiler | any | `apt install build-essential` / Xcode CLT (macOS) |
+
+Gadgetron does not require a GPU. GPU support is used only by the node-management subsystem. The gateway runs on any host that can reach PostgreSQL and your LLM providers.
+
+---
+
+## Install binary system-wide (optional)
+
+```bash
 sudo cp target/release/gadgetron /usr/local/bin/gadgetron
+gadgetron --help
 ```
+
+---
 
 ## Docker
 
-Docker support is not yet available (planned for a future sprint). When a Docker image is published, this section will include the `docker pull` and `docker run` commands.
+Docker support is planned for a future sprint. No official image has been published yet.
 
-Do not use any unofficial or community-built Docker images for Gadgetron at this time; no official image has been released.
+---
+
+## Troubleshooting install issues
+
+| Problem | Fix |
+|---------|-----|
+| `rustc: command not found` after install | Run `source $HOME/.cargo/env` or restart your shell |
+| `error: linker cc not found` | Install `build-essential` (Ubuntu) or Xcode CLT: `xcode-select --install` (macOS) |
+| `openssl/ssl.h: No such file` | Install `libssl-dev` (Ubuntu): `sudo apt install libssl-dev` |
+| `could not connect to server` (PostgreSQL) | Start PG: `sudo service postgresql start` (Ubuntu) / `brew services start postgresql@16` (macOS) |
+| `createdb: database creation failed` | Ensure your user has PG superuser role: `sudo -u postgres createuser -s $USER` |
+| `cargo build` timeout or OOM | Ensure at least 4 GB RAM and 2 GB disk for compilation |
