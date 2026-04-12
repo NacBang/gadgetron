@@ -44,6 +44,22 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gadgetron_test
+          POSTGRES_PASSWORD: gadgetron_test
+          POSTGRES_DB: gadgetron_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gadgetron_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://gadgetron_test:gadgetron_test@localhost:5432/gadgetron_test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -56,6 +72,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit cargo-deny --locked
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@cargo-deny
       - run: cargo audit
       - run: cargo deny check licenses bans advisories
