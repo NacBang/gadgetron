@@ -1,9 +1,9 @@
 # Phase 2 Overview — Knowledge-Layer Personal Assistant Platform
 
-> **Status**: Draft v2 (addressed Round 0 chief-architect + Round 1.5 dx/security + Round 2 qa feedback)
+> **Status**: Draft v3 (Round 2 review addressed — 4 reviewers, 2026-04-13)
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13
-> **Supersedes**: Draft v1 (rejected — all 4 reviewers REVISE)
+> **Supersedes**: Draft v2 (addressed Round 0 chief-architect + Round 1.5 dx/security + Round 2 qa feedback)
 
 ## Table of Contents
 
@@ -205,19 +205,32 @@ Steps:
    - Creates a starter `wiki/README.md` page so the first search returns something
    - Prints "Next: start OpenWebUI and Gadgetron" with exact copy-paste commands for step 4
 
-3. **Generate an API key**
-   ```sh
-   ./target/release/gadgetron key create --scope open_ai_compat
-   ```
-   (Phase 1 command.) Copy the `gad_live_*` key — you need it for OpenWebUI.
-
-4. **Start Gadgetron, OpenWebUI, and SearXNG**
+   **2b. (Optional — Docker path only)** If you plan to run via Docker Compose, generate the compose file now:
    ```sh
    ./target/release/gadgetron kairos init --docker > docker-compose.yml
+   ```
+   Note: `kairos init --docker` prints compose YAML to stdout (re-reading the workspace from step 2). It does NOT mutate `~/.gadgetron/`; re-running is safe. Skip this sub-step if running natively.
+
+3. **Generate an API key**
+   ```sh
+   ./target/release/gadgetron key create --no-db
+   ```
+   (Phase 1 command — `--no-db` creates an in-memory key without requiring PostgreSQL, suitable for local P2A single-user setup. For a persistent key, see `docs/manual/auth.md` for `key create --tenant-id <uuid>`.) Copy the `gad_live_*` key — you need it for OpenWebUI.
+
+4. **Start Gadgetron, OpenWebUI, and SearXNG**
+   Docker Compose path (using the file generated in step 2b):
+   ```sh
    docker compose up -d
    ./target/release/gadgetron serve --config ~/.gadgetron/gadgetron.toml
    ```
-   (`--docker` flag scaffolds a ready-to-run `docker-compose.yml` — see Appendix C.)
+   Native path (without Docker):
+   ```sh
+   ./target/release/gadgetron serve --config ~/.gadgetron/gadgetron.toml
+   # Start OpenWebUI and SearXNG per their own install docs, pointing at Gadgetron http://localhost:8080
+   ```
+   (Appendix C shows the complete Docker Compose YAML.)
+
+   Tip: `kairos init`-generated config sets a kairos-only routing strategy. If you add other providers to `gadgetron.toml`, see `02-kairos-agent.md §11` for routing options — `round_robin` with kairos in the pool causes confusing failures.
 
 5. **Chat**
    - Browse to `http://localhost:3000` (OpenWebUI)
@@ -318,9 +331,13 @@ wiki_max_page_bytes = 1_048_576
 # env: GADGETRON_KNOWLEDGE_SEARXNG_URL
 searxng_url = "http://127.0.0.1:8888"
 
-# Per-query timeout.
+# Per-query timeout in seconds. Range [1, 60]. Default 10.
 # env: GADGETRON_KNOWLEDGE_SEARCH_TIMEOUT_SECS
-search_timeout_secs = 5
+timeout_secs = 10
+
+# Max search results returned per query. Range [1, 50]. Default 5.
+# env: GADGETRON_KNOWLEDGE_SEARCH_MAX_RESULTS
+max_results = 5
 
 [kairos]
 # Claude Code binary. Resolved via $PATH if relative.
@@ -489,10 +506,20 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 
 ### Audit logging (updated)
 
-- Reuse existing `AuditWriter`. Add new fields (backward-compat):
-  - `kairos_dispatched: bool`
-  - `tools_called: Vec<String>` (**names only per M6**, parsed from Claude Code stream-json `tool_use` events)
-  - `subprocess_duration_ms: i32`
+Kairos extends the existing Phase 1 `AuditEntry` struct with these fields:
+
+| Field | Type | Source | Purpose |
+|-------|------|--------|---------|
+| `request_id` | `String` (UUIDv4) | Gateway request middleware (existing Phase 1) | Forensic correlation with HTTP access log, tracing span, and error replay |
+| `kairos_dispatched` | `bool` | Set by router when `model == "kairos"` | Distinguishes kairos path from other providers |
+| `tools_called` | `Vec<String>` | Accumulated in `ClaudeCodeSession` via in-memory `Arc<Mutex<Vec<String>>>` field, written to the audit entry at session end | Post-facto review of which MCP tools a given request invoked (SOC2 CC7.2 anomaly triage) |
+| `subprocess_duration_ms` | `i64` | Measured from spawn to final stream close | Performance and load analysis |
+| `subprocess_exit_code` | `Option<i32>` | From `Child::wait()` | Distinguishes clean exit from error/signal termination |
+
+**Accumulation mechanism for `tools_called`**: `ClaudeCodeSession` holds a `tool_log: Arc<Mutex<Vec<String>>>`. The stdout parsing task, on each `tool_use` event, does `self.tool_log.lock().push(tool_name.clone())` (names only — arguments discarded). At session end, the parent `provider.rs` reads `Arc::try_unwrap(session.tool_log).unwrap().into_inner().unwrap()` and writes the vector into the `AuditEntry` via the existing audit writer. The tracing `info!` event in §6.2 is additional (for live observability), NOT the persistence mechanism.
+
+**Test**: `audit_entry_contains_request_id_and_tool_names` — send a request, assert persisted AuditEntry has both `request_id` and the tool names (see `02-kairos-agent.md §14 testing strategy`).
+
 - `KairosErrorKind::AgentError.stderr_redacted` is included in audit at INFO/WARN level only, NEVER in HTTP response body
 - Wiki writes are additionally audited in git history via `git log`
 
@@ -632,6 +659,7 @@ Per security-compliance-lead Round 1.5 SEC-8.
 - **CC6.1 (logical access)**: wiki write access is governed only by OS file permissions in P2A. Acceptable for single-user; a gap for P2C. Flagged.
 - **CC6.6 (logical access over infrastructure)**: MCP server runs as stdio child of Claude Code, no network exposure. Reduced attack surface vs. a network service. Documented as a control.
 - **CC7.2 (anomaly detection)**: audit log covers dispatch + tool call + subprocess duration. `wiki_write_secret_suspected` entries (M5) support anomaly triage.
+- **CC9.2 (Vendor risk mgmt)**: New dependencies (`git2` → libgit2 C library; `reqwest`; future `rmcp` at P2B+) assessed via `cargo audit` + `cargo deny` gate (existing Phase 1 CI). `git2` C library CVE feed monitored quarterly per security policy.
 
 ### User-facing disclosures (pre-merge manual requirements)
 
@@ -660,7 +688,7 @@ Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-kairos` c
 
 - Reuse existing `metrics_middleware` — already captures `/v1/chat/completions` latency; kairos dispatch path is transparent to it (kairos is just another provider)
 - New trace spans: `kairos::provider::chat_stream`, `kairos::session::spawn`, `kairos::stream::parse`
-- Log Claude Code stderr at `debug` level with `request_id` correlation tag **after `redact_stderr` per M2**
+- Log Claude Code stderr at `debug` level with `request_id` correlation tag **after `redact_stderr` per M2** — the same `request_id` that appears in the persisted `AuditEntry.request_id` field
 - TUI Requests panel shows kairos requests alongside normal chat completions (no TUI changes needed)
 
 ---
@@ -686,7 +714,9 @@ pub enum WikiErrorKind {
     PageTooLarge { path: String, bytes: usize },     // exceeds wiki_max_page_bytes
     PathEscape { input: String },                    // path traversal attempt (M3)
     GitCorruption { path: String, reason: String },  // locked index, detached HEAD, missing objects
+    CredentialBlocked { path: String, pattern: String },  // M5 PEM/AKIA/GCP pattern detected in write body
 }
+// Canonical definition: `docs/design/phase2/01-knowledge-layer.md` §8.1.
 
 // In GadgetronError:
 //   Kairos { kind: KairosErrorKind, message: String }
@@ -703,10 +733,11 @@ Variant count: 12 → 14 (still `#[non_exhaustive]`; test `all_twelve_variants_e
 | `KairosErrorKind::SpawnFailed` | 503 | `kairos_spawn_failed` | `server_error` | "The Kairos assistant is not available. The server could not start the Claude Code process. Check server logs for details." |
 | `KairosErrorKind::AgentError` | 500 | `kairos_agent_error` | `server_error` | "The Kairos assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator." |
 | `KairosErrorKind::Timeout` | 504 | `kairos_timeout` | `server_error` | "The Kairos assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request." |
-| `WikiErrorKind::Conflict` | 409 | `wiki_conflict` | `server_error` | "A wiki page could not be saved because it was modified by another process (path: {path}). Resolve the git conflict in the wiki directory, then retry." |
+| `WikiErrorKind::Conflict` | 409 | `wiki_conflict` | `invalid_request_error` | "A wiki page could not be saved because it was modified by another process (path: {path}). Resolve the git conflict in the wiki directory, then retry." |
 | `WikiErrorKind::PageTooLarge` | 413 | `wiki_page_too_large` | `invalid_request_error` | "The wiki page exceeds the maximum size ({bytes} > {limit} bytes). Split the content into multiple pages." |
 | `WikiErrorKind::PathEscape` | 400 | `wiki_invalid_path` | `invalid_request_error` | "The requested wiki page path is invalid. Page paths must not contain `..`, absolute paths, or special characters." |
 | `WikiErrorKind::GitCorruption` | 503 | `wiki_git_corrupted` | `server_error` | "The wiki git repository is in an inconsistent state. Run `git status` in the wiki directory and resolve manually." |
+| `WikiErrorKind::CredentialBlocked` | 422 | `wiki_credential_blocked` | `invalid_request_error` | "The wiki write was blocked because it contains a credential pattern (detected: {pattern_name}). Remove the secret and retry." |
 
 **Policy**: `stderr_redacted` is written to audit at WARN level but NEVER echoed in the HTTP response body. The user-visible message above is the entire HTTP 500 response body. Unit test `http_500_response_does_not_leak_stderr` enforces this.
 
@@ -738,26 +769,39 @@ Each phase exit criteria: design doc → cross-review 통과 → TDD impl → ma
 
 ## 14. Open Questions for User
 
-1. **OpenWebUI confirmation** — default pick for Web UI. LibreChat / Lobe Chat are alternatives. OK?
-2. **Wiki git history granularity** — auto-commit on every write (noisy but safe) vs. batch commit per subprocess session (cleaner log). Default proposal: per-write auto-commit with abstract messages (M5). Confirm.
-3. **SearXNG bundling** — ship in our docker-compose (bundle) vs. user provides URL (BYOC). Default proposal: bundle in compose, but config accepts external URL for users who already run one. Confirm.
-4. **P2A timeline** — 4 weeks. Confirm or adjust.
-5. **`rmcp` SDK status verification** — the design depends on `rmcp` being stable enough. **Action**: I will verify `rmcp` maturity (release cadence, issue tracker, last release date) before the `01-knowledge-layer.md` detail spec starts. If unsuitable, fall back to implementing MCP stdio protocol manually (the spec is small and well-defined). Reported in `01-knowledge-layer.md`.
-6. **M4 `--allowed-tools` enforcement** — I will verify this via Claude Code docs + behavioral test before `02-kairos-agent.md` is finalized. If enforcement is advisory, P2A scope gains a Linux sandbox (seccomp/AppArmor) as a blocker.
+1. **Q1**: OpenWebUI confirmed as the default Web UI (2026-04-13 user decision — rationale: most widely deployed self-hosted OpenAI-compatible chat UI). Alternatives LibreChat / Lobe Chat remain supported via custom docker-compose — not bundled.
+2. **Wiki git history granularity** — per-write auto-commit (abstract messages, M5). RESOLVED: per-write auto-commit with abstract messages per M5.
+3. **SearXNG bundling** — RESOLVED: bundle SearXNG in compose but config accepts external URL for users who already run one.
+4. **Q4**: ~~P2A 4-week timeline~~ — withdrawn 2026-04-13. Phase 2A proceeds at PM-set sprint cadence. Strategic deviations (scope/architecture/lock-in/trade-off) escalated per `feedback_pm_decision_authority`.
+5. **`rmcp` SDK status verification** — RESOLVED (deferred to P2B+; `01-knowledge-layer.md §6` uses manual stdio fallback as the P2A default). No action required for P2A.
+6. **M4 `--allowed-tools` enforcement** — **RESOLVED 2026-04-13**. Behavioral test on `claude 2.1.104` confirmed enforcement at the binary level, surviving `--dangerously-skip-permissions`. Stdin contract verified as Option B (plain text, `--input-format text` default). ADR-P2A-01 is **ACCEPTED**; `CLAUDE_CODE_MIN_VERSION = 2.1.104`. kairos implementation is unblocked. Full transcript in `docs/adr/ADR-P2A-01-allowed-tools-enforcement.md` §Verification result.
 
 ---
 
-## 15. Next Steps
+## 15. Next Steps — v3 status (2026-04-13)
 
-1. **User confirms Q1-Q4** above (Q5-Q6 are PM-resolved).
-2. Write `docs/design/phase2/01-knowledge-layer.md` — detailed implementation spec for `gadgetron-knowledge` (wiki, MCP, search, full STRIDE per component).
-3. Write `docs/design/phase2/02-kairos-agent.md` — detailed implementation spec for `gadgetron-kairos` (provider impl, session, streaming, M1-M6 enforcement).
-4. Both specs → 4-agent parallel cross-review cycle (Round 1.5 security/dx + Round 2 qa + Round 3 chief-architect).
-5. Address all review blockers before implementation.
-6. Write ADR-P2A-01, ADR-P2A-02, ADR-P2A-03 per §8.
-7. Draft **Korean manual section** `docs/manual/kairos.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md`.
-8. Update `docs/00-overview.md` with 하방/상방 framing.
-9. TDD implementation starts on P2A.
+Completed through v3 cycle:
+- ✅ Q1 (OpenWebUI), Q4 (timeline) resolved 2026-04-13
+- ✅ `01-knowledge-layer.md` v3 detailed spec
+- ✅ `02-kairos-agent.md` v3 detailed spec
+- ✅ Round 1.5 + Round 2 cross-reviews (4 agents each) — all blockers resolved in v3
+- ✅ ADR-P2A-01, P2A-02, P2A-03 authored and v3-patched; P2A-01 **ACCEPTED** after behavioral verification
+- ✅ Q6 M4 `--allowed-tools` behavioral verification — PASS on claude 2.1.104
+- ✅ `docs/00-overview.md` 하방/상방 framing updated (prior PR)
+
+Remaining P2A pre-impl work:
+1. Draft **Korean manual section** `docs/manual/kairos.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md` rule.
+2. Commit + push Round 2 review cycle + v3 docs + manual draft as a single PR.
+3. TDD implementation starts on P2A: Red (failing tests) → Green (minimum code) → Refactor. Order:
+   - `gadgetron-knowledge::wiki` path resolution (M3) + proptest corpus
+   - `gadgetron-knowledge::wiki` read/write + git backend + M5 credential BLOCK
+   - `gadgetron-knowledge::mcp` server (manual stdio fallback)
+   - `gadgetron-knowledge::search::searxng` client
+   - `gadgetron-core` error variant extension (`Kairos`, `Wiki` — already landed in Phase 2 Kairos + Wiki error PR #13)
+   - `gadgetron-kairos::spawn` + `ClaudeCodeSession` subprocess lifecycle
+   - `gadgetron-kairos::stream` event parser
+   - `gadgetron-kairos::provider` `LlmProvider` impl + router registration
+   - E2E: 5 assertions in `02-kairos-agent.md` §14.5 (requires `claude` binary, gated by `GADGETRON_E2E_CLAUDE=1`)
 
 ---
 
@@ -800,8 +844,9 @@ claude \
   -p \
   --output-format stream-json \
   --mcp-config <tempfile-path> \
-  --allowed-tools mcp__knowledge__wiki_list,mcp__knowledge__wiki_get,\
+  --allowedTools mcp__knowledge__wiki_list,mcp__knowledge__wiki_get,\
 mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_search \
+  --strict-mcp-config \
   --dangerously-skip-permissions \
   [--model $claude_model]
 ```
@@ -809,15 +854,21 @@ mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_searc
 - `-p`: headless (print) mode
 - `--output-format stream-json`: emits one JSON event per line on stdout
 - `--mcp-config <path>`: temp JSON file containing `{ "mcpServers": { "knowledge": { "command": "gadgetron", "args": ["mcp", "serve"] } } }`. **Tempfile is created via `tempfile::NamedTempFile::new_in(process_owned_dir)` with chmod 0600 per M1.** Its path is passed to Claude Code; lifetime is bound to the subprocess (drop at end of request).
-- `--allowed-tools`: whitelist — only our knowledge tools are permitted. **M4 verification pending — enforcement level must be confirmed before 02-kairos-agent.md is finalized.**
-- `--dangerously-skip-permissions`: required for `-p` mode with `--allowed-tools`; the ADR (P2A-01) documents the risk acceptance
+- `--allowedTools`: whitelist — only our knowledge tools are permitted. **M4 verified 2026-04-13 on claude 2.1.104 — enforcement is at the binary level and survives `--dangerously-skip-permissions`. ADR-P2A-01 is ACCEPTED.** `CLAUDE_CODE_MIN_VERSION = 2.1.104` is the startup-check floor.
+- `--strict-mcp-config`: REQUIRED — makes Claude Code use ONLY the MCP servers in our tempfile, ignoring any ambient `~/.claude/mcp_servers.json`. Load-bearing for M4: without this flag, an operator's user-level MCP config could add tools outside the allowlist.
+- `--dangerously-skip-permissions`: required for `-p` mode to skip interactive confirmation prompts; the allowlist above is still enforced. ADR-P2A-02 documents the risk acceptance.
 - `$claude_model`: if `kairos.claude_model` is set, pass `--model <value>`
-- Stdin: message history JSON (Claude Code `-p` stdin contract to be confirmed in `02-kairos-agent.md`)
+- Stdin: **plain text prompt** — concatenated conversation history as `User: ...\n\nAssistant: ...\n\n`. `--input-format text` is the default; no flag needed. See `02-kairos-agent.md §5 feed_stdin` for the exact format.
 
-**Subprocess environment:**
-- `ANTHROPIC_BASE_URL` = `kairos.claude_base_url` if set, else unset (= default)
-- `HOME` inherited (so `~/.claude/` session works)
-- Everything else default
+**Subprocess environment (SEC-B1 — env allowlist, NOT default inheritance):**
+- `tokio::process::Command` calls `cmd.env_clear()` first, then adds ONLY these vars:
+  - `HOME` (required for `~/.claude/` credential resolution)
+  - `PATH` set to `/usr/local/bin:/usr/bin:/bin` (explicit allowlist, not operator's PATH)
+  - `LANG`, `LC_ALL` (UTF-8 handling; inherited if set, else `en_US.UTF-8`)
+  - `TMPDIR` (subprocess tempfile creation; inherited if set, else `/tmp`)
+  - `ANTHROPIC_BASE_URL` ONLY if `kairos.claude_base_url` is set in config
+- ALL other env vars — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DATABASE_URL`, `AWS_*`, `SSH_AUTH_SOCK`, `CARGO_REGISTRY_TOKEN`, and anything else — are EXPLICITLY EXCLUDED from the subprocess. Claude Code uses `~/.claude/` credentials only.
+- Rationale: prevent silent credential exfiltration. See `02-kairos-agent.md §5.1` for the `build_claude_command` implementation and the `build_claude_command_env_does_not_inherit_api_key` regression test.
 
 **Subprocess ownership (per chief-architect Round 3):**
 - `ClaudeCodeSession` is an owned struct that holds `tokio::process::Child`, `ChildStdin`, `ChildStdout`
@@ -890,8 +941,17 @@ This document v2 incorporates the following review rounds (2026-04-13):
 | security-compliance-lead | Round 1.5 security | REVISE | SEC-1 threat model §8, SEC-2 M4, SEC-3 M2 redact, SEC-4 M1 tempfile, SEC-5 wiki_max_page_bytes + M5, SEC-6 M6 tools_called names only, SEC-7 manual warning (P2A pre-merge requirement), SEC-8 §10 compliance, SEC-9 M3 proptest corpus, SEC-10 P2C reopen tag |
 | qa-test-architect | Round 2 testability | REVISE | A1 MCP conformance, A2 SSE conformance, A3 Rust fake-claude, A4 KairosE2EFixture, A5 proptest, A6 determinism, A7 E2E gate, A8 concurrent spawn load, A9 file location table, A10 git recovery |
 
-Next round: v2 of this doc should re-pass Round 0 (chief-architect) + Round 1.5 (dx + security) + Round 2 (qa) before `01-knowledge-layer.md` and `02-kairos-agent.md` detail specs begin.
+**Round 2 (2026-04-13) — v3 fixes:**
+
+| Reviewer | Verdict | Items resolved in v3 |
+|---|---|---|
+| chief-architect | APPROVE WITH MINOR | 3 compile-error blockers resolved in v3 (CA-B1..B3), 4 nits + 4 determinism items addressed |
+| dx-product-lead | APPROVE WITH MINOR | 3 blockers resolved (DX-B1..B3 — key create flag, kairos init --docker confusion, CredentialBlocked error table), nits + determinism items addressed |
+| security-compliance-lead | REVISE | 4 new blockers resolved in v3: SEC-B1 (env_clear allowlist), SEC-B2 (request_id + tools_called accumulation), SEC-B3 (claude_binary validation — in 02), SEC-B4 (redact_stderr ReDoS cap — in 02); CC9.2 nit addressed; ADR adjustments applied (P2A-01 version floor, P2A-02 non-root precondition, P2A-03 prompt-injection cross-ref) |
+| qa-test-architect | APPROVE WITH MINOR | 0 blockers; 2 non-blocking items (NB-1, NB-2) + 2 determinism defects (DET-1, DET-2) + audit log stub body addressed |
+
+Next round: v3 of this doc is ready for final ratification before `01-knowledge-layer.md` and `02-kairos-agent.md` detail specs move to implementation.
 
 ---
 
-*End of overview draft v2. Ready for second-round cross-review.*
+*End of overview draft v3. Round 2 review addressed. Ready for implementation gate.*

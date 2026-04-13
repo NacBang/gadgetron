@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ACCEPTED (P2A single-user scope only) |
+| **Status** | ACCEPTED (P2A single-user scope only) (v3 — Round 2 review addressed) |
 | **Date** | 2026-04-13 |
 | **Author** | security-compliance-lead |
 | **Parent docs** | `docs/design/phase2/00-overview.md` v2 §8 M8; `docs/design/phase2/02-kairos-agent.md` v2 §15.3 |
@@ -222,6 +222,33 @@ This tag also appears at the relevant locations in:
 
 ---
 
+## Deployment preconditions (non-root user assumption)
+
+This risk acceptance EXPLICITLY ASSUMES that `gadgetron serve` runs as a
+NON-PRIVILEGED OS user (typically a dedicated `gadgetron` service account)
+with filesystem access limited to:
+- `~/.gadgetron/` (wiki path + config + audit log)
+- `~/.claude/` (credential session — READ-ONLY if possible)
+- `$TMPDIR` for subprocess-owned tempfiles
+
+Running `gadgetron serve` as root (or any user with broad filesystem access)
+is EXPLICITLY UNSUPPORTED for P2A. In a root context, a `wiki_write` with a
+successful M3 bypass (symlink race) could corrupt arbitrary system files; the
+`--dangerously-skip-permissions` flag removes the Claude Code interactive
+confirmation safety net that would otherwise catch this.
+
+**Operator action required**: install and run `gadgetron` as a non-root
+user. If your deployment platform (systemd, docker-compose, Kubernetes) runs
+as root by default, configure `User=gadgetron` (systemd) or `user: gadgetron`
+(compose) or `securityContext.runAsUser` (K8s).
+
+**This precondition does NOT apply to P2A single-user local desktop** — the
+desktop user running `cargo run` or `./target/release/gadgetron serve` is
+already the owner of `~/.gadgetron/` and `~/.claude/`, so their privilege
+level is de facto limited by their filesystem ACLs.
+
+---
+
 ## References
 
 | Document | Section | Relevance |
@@ -236,3 +263,9 @@ This tag also appears at the relevant locations in:
 | `docs/adr/ADR-P2A-01-allowed-tools-enforcement.md` | Part 1 | Conditioned PASS required for this acceptance |
 | `docs/design/phase2/00-overview.md` v2 | §10 Compliance (GDPR/SOC2) | P2C GDPR obligations listed |
 | OWASP LLM Top 10 | LLM02 — Insecure Output Handling | Secondary category |
+
+---
+
+## Changelog
+
+- **2026-04-13 — Round 2**: added non-root user precondition section (`runAsUser`, `User=gadgetron`, filesystem ACL constraint). Status bumped to v3.

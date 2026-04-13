@@ -1,6 +1,6 @@
 # 01 — Knowledge Layer Detailed Implementation Spec (`gadgetron-knowledge`)
 
-> **Status**: Draft v2 (addressed chief-architect + dx + security + qa Round 1 feedback)
+> **Status**: Draft v3 (addressed chief-architect + dx + security + qa Round 1 feedback; Round 2 review addressed (4 reviewers cross-check))
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
@@ -116,6 +116,21 @@ or ensure the target directory is writable by the current user.
 
 **`--docker` flag output**: prints the `docker-compose.yml` content from `00-overview.md` Appendix C to stdout (no banner, no "Next steps" — just the YAML so the user can pipe it to a file). No file is written by `--docker` itself.
 
+**`--wiki-path <PATH>` flag**
+
+- `--wiki-path <PATH>` overrides the default wiki location (`~/.gadgetron/wiki`).
+- If an existing `gadgetron.toml` already specifies `[knowledge] wiki_path`, the
+  `--wiki-path` CLI value WINS (it overrides the config file).
+- The written `gadgetron.toml` always persists the resolved path; re-running
+  `kairos init --wiki-path /new/path` rewrites the config.
+- The success-path `[OK] Wiki directory: …` line always shows the resolved
+  absolute path (after symlink resolution via `std::fs::canonicalize`).
+- If `--wiki-path` points to an existing non-empty directory that is not a git
+  repo, the command fails with exit code 3 and message "Wiki directory exists
+  but is not a git repository. Use `--force-init-git` or choose a different path."
+
+Note: `gadgetron doctor` (Phase 1) uses lowercase `[ok]` / `[FAIL]`. `kairos init` uses uppercase `[OK]` / `[WARN]` / `[FAIL]` for scanability alongside `[WARN]`. Both forms are intentional; `docs/manual/troubleshooting.md` documents the distinction.
+
 ---
 
 ## 2. Crate layout & Cargo.toml
@@ -151,14 +166,15 @@ walkdir = "2.5"
 # Unix file flags for O_NOFOLLOW on write
 nix = { version = "0.29", features = ["fs"], optional = true }
 
-# MCP server (verify rmcp maturity before impl — see §6.1)
-rmcp = { version = "0.1" }
-
 # HTTP / JSON / async
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
+# url::Url: parsed SearchConfig.searxng_url. If `url` is not yet in workspace
+# `[workspace.dependencies]`, add `url = "2"` there during implementation OR
+# switch this line to a crate-local `url = "2"`.
+url = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 
@@ -769,8 +785,9 @@ use reqwest::redirect::Policy;
 use crate::error::SearchError;
 
 pub struct SearxngClient {
-    base_url: String,
+    base_url: url::Url,
     http: reqwest::Client,
+    max_results: u16,
 }
 
 impl SearxngClient {
@@ -781,12 +798,12 @@ impl SearxngClient {
         // validator that rejects RFC-1918 link-local (169.254.0.0/16), metadata
         // (169.254.169.254), and loopback overrides.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.search_timeout_secs))
+            .timeout(Duration::from_secs(config.timeout_secs))
             .redirect(Policy::limited(3))  // mitigate open redirect to metadata endpoints
             .user_agent("gadgetron-knowledge/0.2")
             .build()
             .map_err(SearchError::Http)?;
-        Ok(Self { base_url: config.searxng_url.clone(), http })
+        Ok(Self { base_url: config.searxng_url.clone(), http, max_results: config.max_results })
     }
 }
 
@@ -849,9 +866,9 @@ struct SearxngResult {
 
 ## 6. MCP server
 
-### 6.1 `rmcp` integration with manual fallback (chief-arch N3)
+### 6.1 Manual MCP implementation (P2A authoritative path)
 
-**Pre-impl verification**: `rmcp` maturity check (release date, issue count, API stability). If unsuitable, use the manual protocol fallback sketch below.
+P2A uses the manual MCP fallback implementation (`src/mcp/manual_mcp.rs`). `rmcp` integration is deferred to P2B+ when the crate's API stabilizes (re-evaluation at P2A→P2B transition).
 
 ```rust
 //! MCP server for gadgetron-knowledge. Stdio transport, per-request lifecycle.
@@ -868,25 +885,17 @@ pub async fn serve_stdio(config: KnowledgeConfig) -> Result<(), Box<dyn std::err
     };
     let server = crate::mcp::tools::KnowledgeServer::new(wiki, web_search);
 
-    // Preferred path: rmcp stdio transport
-    #[cfg(feature = "use-rmcp")]
-    {
-        rmcp::transport::stdio::serve(server).await?;
-    }
-
-    // Manual fallback: JSON-RPC over stdio, line-delimited
-    #[cfg(not(feature = "use-rmcp"))]
-    {
-        manual_mcp::serve_stdio(server).await?;
-    }
+    // P2A: always use the manual MCP implementation.
+    // rmcp integration is deferred to P2B+ (see §6.1 rationale above).
+    manual_mcp::serve_stdio(server).await?;
 
     Ok(())
 }
 ```
 
-#### Manual MCP fallback outline (chief-arch N3)
+#### Manual MCP implementation outline (`src/mcp/manual_mcp.rs`)
 
-Used only if `rmcp` is unsuitable. Implements enough of the MCP spec for `tools/list` + `tools/call` over stdio.
+Implements MCP stdio protocol for `initialize`, `initialized`, `tools/list`, and `tools/call` over line-delimited JSON-RPC 2.0. This is the authoritative P2A implementation path.
 
 ```rust
 // src/mcp/manual_mcp.rs
@@ -938,6 +947,26 @@ pub async fn serve_stdio(server: crate::mcp::tools::KnowledgeServer)
         };
 
         let result = match request.method.as_str() {
+            "initialize" => {
+                // MCP protocol handshake — required before tools/list and tools/call
+                let handshake = serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "id": request.id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "gadgetron-knowledge", "version": env!("CARGO_PKG_VERSION") }
+                    }
+                }))?;
+                stdout.write_all(&handshake).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+                continue;
+            }
+            "initialized" => {
+                // Notification; no response. Just ack the state machine.
+                continue;
+            }
             "tools/list" => Ok(server.handle_tools_list().await),
             "tools/call" => {
                 let name = request.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -1171,46 +1200,128 @@ pub struct KnowledgeConfig {
     pub search: Option<SearchConfig>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// SearchConfig is the authoritative field definition for [knowledge.search] in gadgetron.toml.
+/// 00-overview.md §6 and ADR-P2A-03 must match these field names and defaults exactly.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct SearchConfig {
     // [P2C-SECURITY-REOPEN]: SSRF risk — restrict to non-link-local/non-metadata
     // ranges. See crates/gadgetron-knowledge/src/search/searxng.rs for the P2A
     // mitigation (reqwest redirect::limited(3)) and the P2C TODO.
-    pub searxng_url: String,
+    pub searxng_url: url::Url,  // validated at load time: http(s), non-empty host
     #[serde(default = "default_search_timeout")]
-    pub search_timeout_secs: u64,
+    pub timeout_secs: u64,  // [1, 60]; default 10
+    #[serde(default = "default_max_results")]
+    pub max_results: u16,  // [1, 50]; default 5
 }
 
 fn default_true() -> bool { true }
 fn default_max_page_bytes() -> usize { 1_048_576 }
-fn default_search_timeout() -> u64 { 5 }
+fn default_search_timeout() -> u64 { 10 }
+fn default_max_results() -> u16 { 5 }
 
 impl KnowledgeConfig {
     /// Validates at load time. Rules:
     /// - wiki_path parent must exist and be writable
     /// - wiki_max_page_bytes must be in [1, 100 MiB]
     /// - searxng_url if present must be http(s):// with non-empty hostname
-    /// - search_timeout_secs must be in [1, 60]
-    pub fn validate(&self) -> Result<(), ConfigError> { /* ... */ }
+    /// - timeout_secs must be in [1, 60]
+    pub fn validate(&self) -> Result<(), String> {
+        // Wiki path itself may not exist yet (kairos init creates it).
+        // What MUST exist: the parent directory, and it must be writable.
+        let parent = self.wiki_path.parent()
+            .ok_or_else(|| format!("wiki_path must not be filesystem root: {}", self.wiki_path.display()))?;
+        if !parent.exists() {
+            return Err(format!("wiki_path parent does not exist: {}", parent.display()));
+        }
+        let metadata = std::fs::metadata(parent)
+            .map_err(|e| format!("cannot stat wiki_path parent {}: {}", parent.display(), e))?;
+        if metadata.permissions().readonly() {
+            return Err(format!("wiki_path parent is read-only: {}", parent.display()));
+        }
+        // wiki_max_page_bytes bounds
+        if !(1..=104_857_600).contains(&self.wiki_max_page_bytes) {
+            return Err(format!("wiki_max_page_bytes must be in [1, 100 MiB]; got {}", self.wiki_max_page_bytes));
+        }
+        // SearchConfig validation (if present)
+        if let Some(sc) = &self.search {
+            let host = sc.searxng_url.host_str().unwrap_or("");
+            if host.is_empty() {
+                return Err("searxng_url must have a non-empty hostname".to_string());
+            }
+            let scheme = sc.searxng_url.scheme();
+            if scheme != "http" && scheme != "https" {
+                return Err(format!("searxng_url scheme must be http or https, got: {scheme}"));
+            }
+            if !(1..=60).contains(&sc.timeout_secs) {
+                return Err(format!("timeout_secs must be in [1, 60]; got {}", sc.timeout_secs));
+            }
+        }
+        Ok(())
+    }
 
-    /// Builds WikiConfig. Auto-detects git author if wiki_git_author is None,
+    /// Builds WikiConfig from KnowledgeConfig. Field-for-field mapping.
+    /// Auto-detects git author if wiki_git_author is None,
     /// falling back to "Kairos <kairos@gadgetron.local>" with eprintln! warning.
-    pub fn to_wiki_config(&self) -> Result<crate::wiki::WikiConfig, ConfigError> { /* ... */ }
+    pub fn to_wiki_config(&self) -> Result<crate::wiki::WikiConfig, String> {
+        let (git_author_name, git_author_email) = match &self.wiki_git_author {
+            Some(author) => {
+                // Parse "Name <email>" format
+                if let Some(lt) = author.find(" <") {
+                    let name = author[..lt].to_string();
+                    let email = author[lt+2..author.len()-1].to_string();
+                    (name, email)
+                } else {
+                    return Err(format!(
+                        "wiki_git_author must be in 'Name <email>' format, got: {author}"
+                    ));
+                }
+            }
+            None => autodetect_git_author_or_fallback(),
+        };
+        Ok(crate::wiki::WikiConfig {
+            root: self.wiki_path.clone(),
+            autocommit: self.wiki_autocommit,
+            git_author_name,
+            git_author_email,
+            max_page_bytes: self.wiki_max_page_bytes,
+        })
+    }
 }
 
-fn autodetect_git_author() -> Result<(String, String), ConfigError> {
-    // Try `git config --global user.name` + user.email
-    // On failure, eprintln! warning + return fallback
-    match (git_config_get("user.name"), git_config_get("user.email")) {
-        (Some(name), Some(email)) => Ok((name, email)),
-        _ => {
+/// Detects git author from the global/system gitconfig.
+///
+/// Uses `git2::Config::open_default()` (reads global + system gitconfig).
+/// Does NOT shell out to `git` — keeps gadgetron self-contained and avoids PATH dependency.
+fn autodetect_git_author() -> Option<String> {
+    let config = git2::Config::open_default().ok()?;
+    let name = config.get_string("user.name").ok()?;
+    let email = config.get_string("user.email").ok()?;
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some(format!("{} <{}>", name, email))
+}
+
+/// Wraps autodetect with eprintln! fallback for use in kairos init and to_wiki_config().
+fn autodetect_git_author_or_fallback() -> (String, String) {
+    match autodetect_git_author() {
+        Some(author) => {
+            // Split "Name <email>" into (name, email) components
+            if let Some(lt) = author.find(" <") {
+                let name = author[..lt].to_string();
+                let email = author[lt+2..author.len()-1].to_string();
+                return (name, email);
+            }
+            ("Kairos".to_string(), "kairos@gadgetron.local".to_string())
+        }
+        None => {
             eprintln!("  [WARN] git config user.name/user.email not set");
             eprintln!("         Falling back to \"Kairos <kairos@gadgetron.local>\" for wiki commits.");
             eprintln!("         To override: set wiki_git_author in ~/.gadgetron/gadgetron.toml,");
             eprintln!("         or run: git config --global user.name \"Your Name\"");
             eprintln!("                 git config --global user.email \"you@example.com\"");
             tracing::warn!("wiki_git_author fallback used");
-            Ok(("Kairos".to_string(), "kairos@gadgetron.local".to_string()))
+            ("Kairos".to_string(), "kairos@gadgetron.local".to_string())
         }
     }
 }
@@ -1312,6 +1423,8 @@ impl WikiError {
 }
 
 // Conversion into core GadgetronError
+// Note: Io + Frontmatter both map here to GitCorruption; manual triage required.
+// Post-merge refactor: split into distinct Io, Parse, GitCorruption variants — see §11.
 impl From<WikiError> for gadgetron_core::error::GadgetronError {
     fn from(err: WikiError) -> Self {
         match err {
@@ -1323,7 +1436,15 @@ impl From<WikiError> for gadgetron_core::error::GadgetronError {
                         path: String::new(),
                         reason: e.to_string(),
                     },
-                    message: e.to_string(),
+                    // User message deliberately says "wiki storage error" — not "git error" —
+                    // so operators check disk space and filesystem permissions first,
+                    // not the git repository. Run `git status` in the wiki directory
+                    // OR check disk space and filesystem permissions.
+                    message: format!(
+                        "wiki storage error — run `git status` in the wiki directory OR \
+                         check disk space and filesystem permissions (reason: {})",
+                        e
+                    ),
                 },
             WikiError::Git(e) =>
                 gadgetron_core::error::GadgetronError::Wiki {
@@ -1331,12 +1452,22 @@ impl From<WikiError> for gadgetron_core::error::GadgetronError {
                         path: String::new(),
                         reason: e.to_string(),
                     },
-                    message: e.to_string(),
+                    message: format!(
+                        "wiki storage error — run `git status` in the wiki directory OR \
+                         check disk space and filesystem permissions (reason: {})",
+                        e
+                    ),
                 },
             WikiError::Frontmatter(msg) =>
                 gadgetron_core::error::GadgetronError::Wiki {
                     kind: WikiErrorKind::GitCorruption { path: String::new(), reason: msg.clone() },
-                    message: msg,
+                    // Frontmatter parse errors often indicate file corruption.
+                    // User message says "wiki storage error" for the same triage reason.
+                    message: format!(
+                        "wiki storage error — run `git status` in the wiki directory OR \
+                         check disk space and filesystem permissions (reason: {})",
+                        msg
+                    ),
                 },
         }
     }
@@ -1440,7 +1571,14 @@ fn valid_name_strategy() -> impl Strategy<Value = String> {
     })
 }
 
+// Workspace-wide proptest convention: see docs/design/testing/harness.md §2.10
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 1024,
+        max_shrink_iters: 4096,
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn resolve_path_never_escapes_root(input in traversal_strategy()) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1491,7 +1629,14 @@ fn malformed_link_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
+// Workspace-wide proptest convention: see docs/design/testing/harness.md §2.10
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 1024,
+        max_shrink_iters: 4096,
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn parse_links_never_panics_on_valid(body in valid_link_strategy()) {
         let _ = gadgetron_knowledge::wiki::link::parse_links(&body);
@@ -1550,7 +1695,75 @@ proptest! {
     assert_eq!(result["isError"], true);
 }
 
-#[tokio::test] async fn tool_call_audit_log_does_not_contain_arguments() { /* M6 */ }
+#[tokio::test]
+async fn tool_call_audit_log_does_not_contain_arguments() {
+    // M6: audit log stores tool names only, never arguments (PII leak risk).
+    // Use a tool call with sensitive-looking argument text; assert the audit
+    // log contains the name but not the text.
+    let fx = KnowledgeFixture::new_without_search().await;
+    let audit_sink = fx.audit_sink();  // in-memory AuditWriter fake
+    fx.call_tool("wiki_get", json!({ "path": "secrets/my-api-key-is-sk-ant-12345.md" })).await;
+    let entries = audit_sink.entries();
+    // Find the kairos-dispatched entry
+    let entry = entries.iter().find(|e| e.kairos_dispatched).expect("audit entry");
+    // tools_called must contain the tool NAME
+    assert!(entry.tools_called.iter().any(|n| n == "wiki_get"));
+    // The sensitive arg text must NOT appear anywhere in the serialized entry
+    let serialized = serde_json::to_string(&entry).unwrap();
+    assert!(!serialized.contains("sk-ant-12345"),
+        "audit entry leaked argument text: {serialized}");
+    assert!(!serialized.contains("my-api-key"),
+        "audit entry leaked argument substring: {serialized}");
+}
+
+#[tokio::test]
+async fn mcp_initialize_handshake_returns_server_info() {
+    // KnowledgeFixture::raw_stdio_connection() spawns the manual_mcp server
+    // over in-process stdio pipes without sending initialize first, so the
+    // test can validate the handshake response directly.
+    let fx = KnowledgeFixture::raw_stdio_connection().await;
+    let resp = fx.send_raw(json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "0" }
+        }
+    })).await;
+    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "gadgetron-knowledge");
+}
+```
+
+**`KnowledgeFixture` API additions** (for the new test above):
+
+- `KnowledgeFixture::raw_stdio_connection() -> Self` — variant constructor that spawns the MCP server over in-process stdio pipes WITHOUT pre-sending `initialize`/`initialized`. Used to test the handshake itself. The existing `KnowledgeFixture::new_without_search()` and `KnowledgeFixture::new_with_search(config)` constructors DO pre-send the `initialize` + `initialized` exchange and are the default for all other conformance tests.
+- `fx.send_raw(json: serde_json::Value) -> serde_json::Value` — writes the JSON as a newline-terminated string to the server stdin, reads and deserializes the JSON-RPC response from stdout. Returns the parsed response value for assertion.
+- `fx.audit_sink() -> AuditSink` — returns a handle to an in-memory `AuditWriter` fake injected at fixture construction. The `AuditSink` struct holds a `Arc<Mutex<Vec<AuditEntry>>>` shared with the server; `audit_sink.entries()` returns a snapshot clone.
+- `fx.call_tool(name: &str, args: serde_json::Value) -> serde_json::Value` — sends a `tools/call` JSON-RPC request and returns the deserialized result value.
+
+**`AuditSink` / `AuditEntry` spec for M6 test:**
+```rust
+// crates/gadgetron-testing/src/audit_sink.rs
+
+/// In-memory AuditWriter for tests. Injected via KnowledgeFixture.
+pub struct AuditSink {
+    entries: Arc<Mutex<Vec<AuditEntry>>>,
+}
+
+impl AuditSink {
+    pub fn entries(&self) -> Vec<AuditEntry> {
+        self.entries.lock().unwrap().clone()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditEntry {
+    pub kairos_dispatched: bool,
+    pub tools_called: Vec<String>,  // tool NAMES only — never argument values
+    pub subprocess_duration_ms: i64,
+    pub request_id: String,
+}
 ```
 
 ### 10.6 Git corruption recovery tests — concrete setup
@@ -1573,15 +1786,24 @@ fn test_autocommit_on_locked_index() {
 fn test_autocommit_on_detached_head() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki = Wiki::open_or_init(test_config(tmp.path())).unwrap();
-    wiki.write("first", "body").unwrap();
+    wiki.write("first", "body", "note").unwrap();
     // Concrete setup: detach HEAD via git2
     let head_oid = wiki.repo.head().unwrap().target().unwrap();
     wiki.repo.set_head_detached(head_oid).unwrap();
-    // autocommit on detached HEAD should return GitCorruption with reason "detached HEAD"
-    let result = wiki.write("second", "body");
-    matches!(result, Err(WikiError::Kind {
-        kind: WikiErrorKind::GitCorruption { reason, .. }, ..
-    }) if reason.contains("detached"));
+    // autocommit on detached HEAD should return GitCorruption
+    let err = wiki.write("second", "body", "note").await.unwrap_err();
+    match err {
+        WikiError::Kind { kind: WikiErrorKind::GitCorruption { reason, .. }, .. } => {
+            // The exact git2 error string may vary across versions; assert a
+            // stable substring. If git2 upgrades break this, the test FAILS
+            // loudly rather than passing vacuously.
+            assert!(
+                reason.contains("detached") || reason.contains("HEAD"),
+                "expected detached-HEAD diagnostic, got: {reason}"
+            );
+        }
+        other => panic!("expected GitCorruption, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1651,6 +1873,10 @@ Overview §9 file location table must be amended to include a row for crate-loca
 
 **Compile sequencing**: `gadgetron-knowledge` requires `gadgetron-core::error::GadgetronError::Wiki` variant to exist, which is added by this spec. `gadgetron-kairos` requires `GadgetronError::Kairos` variant, added by 02. Both core variant additions should land in a single core PR at the start of P2A implementation, before either knowledge or kairos crate is coded.
 
+**Post-v3 refactor**: split `WikiErrorKind::GitCorruption` into distinct `Io`, `Parse`, `GitCorruption` variants (requires gadgetron-core error enum extension). Currently `WikiError::Io` and `WikiError::Frontmatter` both map to `GitCorruption` with a disambiguating user message — see §8 `From<WikiError>` impl and the inline comment there.
+
+**ADR-P2A-01 Part 2 RESOLVED 2026-04-13** — stdin contract is **Option B (TEXT)**: plain text prompt on stdin, `--input-format text` is the default. `feed_stdin` in `02-kairos-agent.md` §5 is now unconditional — no feature flag, no branches. The `fake_claude::stdin_echo` scenario assertion is fixed on the text byte-sequence format described in §5. ADR-P2A-01 is ACCEPTED; `CLAUDE_CODE_MIN_VERSION = 2.1.104`.
+
 ---
 
 ## 12. Review provenance
@@ -1661,7 +1887,11 @@ Overview §9 file location table must be amended to include a row for crate-loca
 | dx-product-lead | Round 1.5 usability | REVISE (A1-A6) | A1 rewrote wiki_search + web_search descriptions, A2 max_results default 5, A3 PageTooLarge error text includes bytes/limit, A4 kairos init stdout §1.1, A5 eprintln! fallback, A6 Wiki variant moved to 01 scope |
 | security-compliance-lead | Round 1.5 security | REVISE (A1-A8) | A1 O_NOFOLLOW on write, A2 create_dir_all moved to caller, A3 PEM/AKIA/GCP BLOCK patterns + CredentialBlocked variant, A4 SearchError::Parse static strings, A5 P2C tag + redirect::limited(3), A6 mixed traversal proptest arms, A7 git history inline SECURITY comment, A8 %2e%2e non-threat doc |
 | qa-test-architect | Round 2 testability | REVISE (3 blockers + 6 non-blockers) | happy-path proptest, malformed link proptest arm, concrete detached_head + missing_objects setup, frontmatter edge tests, URL validation edges, MCP idempotency/unknown/malformed tests, SearXNG fixture variants, InvertedIndex Mutex clarification |
+| chief-architect | Round 2 | APPROVE WITH MINOR | NIT3: `#[cfg(use-rmcp)]` dead code removed — P2A uses manual path unconditionally; NIT4: WikiError::Io/Frontmatter→GitCorruption message reworded; DET2: validate() placeholder replaced; DET3: git_config_get undefined → git2::Config::open_default() — resolved in v3 |
+| dx-product-lead | Round 2 | APPROVE WITH MINOR | B2: --wiki-path flag behavior specified; DET3: SearchConfig field names pinned; DET4: detached-HEAD test uses assert not matches!; NIT1: [ok] vs [OK] note added — resolved in v3 |
+| security-compliance-lead | Round 2 | REVISE (4 blockers) | B1-B4 are in 02-kairos-agent.md scope (subprocess env, audit request_id, claude_binary validation, redact regex) — not applicable to 01; 01-specific items resolved in v3 |
+| qa-test-architect | Round 2 | APPROVE WITH MINOR | NB1: proptest_config added to all 4 proptest blocks; NB2: mcp_initialize_handshake test added; GAP4/NIT3: audit log stub replaced with concrete assertions; raw_stdio_connection fixture variant specified — resolved in v3 |
 
-Next round: 4-reviewer verification pass on v2 (focused "verify your blockers were addressed").
+Next round: implementation (all four Round 2 reviewers: APPROVE WITH MINOR or resolved items).
 
-*End of 01-knowledge-layer.md draft v2. Ready for second-round cross-review.*
+*End of 01-knowledge-layer.md draft v3. Round 2 review addressed.*
