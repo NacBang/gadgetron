@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ACCEPTED |
+| **Status** | ACCEPTED (v3 — Round 2 review addressed) |
 | **Date** | 2026-04-13 |
 | **Author** | security-compliance-lead |
 | **Parent docs** | `docs/design/phase2/00-overview.md` v2 §8 M7; §10 Compliance, Disclosure 2; `docs/design/phase2/01-knowledge-layer.md` v2 §9 M7 |
@@ -91,11 +91,12 @@ before any P2A implementation PR merges to `main`.
 `docs/design/phase2/00-overview.md` v2 §10 Disclosure 2):
 
 > **Privacy note**: Web search via Kairos proxies your queries through SearXNG to
-> Google, Bing, DuckDuckGo, and Brave (depending on SearXNG configuration). Queries
-> are anonymized at the SearXNG layer, but the search engines receive the query text.
-> SearXNG may log queries depending on its own configuration. Gadgetron itself does
-> not store your search queries. If you need stricter privacy, disable `web_search`
-> by leaving `searxng_url` unset in your config.
+> the search engines configured in your SearXNG instance (by default: Google, Bing,
+> DuckDuckGo, Brave — but your administrator may have enabled different engines).
+> Queries are anonymized at the SearXNG layer, but the search engines receive the
+> query text. SearXNG may log queries depending on its own configuration. Gadgetron
+> itself does not store your search queries. If you need stricter privacy, disable
+> `web_search` by leaving `searxng_url` unset in your config.
 
 This text must appear in `docs/manual/kairos.md` under a clearly labeled
 "Privacy and Security" or equivalent section. It must appear both in the Korean
@@ -137,8 +138,13 @@ max_results = 5
 timeout_secs = 10
 ```
 
-When `searxng_url` is unset, `SearxngClient::new()` returns `None` and the MCP
-server does not include `web_search` in the tools list returned to Claude Code.
+When `searxng_url` is unset, `KnowledgeConfig.search` is `None`. The MCP server's
+`serve_stdio` constructor checks `if let Some(ref search_cfg) = config.search`
+before calling `SearxngClient::new(search_cfg)`. If `None`, no `SearxngClient` is
+constructed and `web_search` is not registered in the MCP tool list returned to
+Claude Code. (Note: `SearxngClient::new(&SearchConfig) -> Result<Self, SearchError>`
+takes a non-optional `SearchConfig` and can fail on invalid URL / TLS init; the
+`Option` selection is handled one layer up in `KnowledgeConfig`.)
 This is the complete opt-out mechanism — no separate `web_search_enabled` flag is
 needed.
 
@@ -177,8 +183,7 @@ without sign-off from security-compliance-lead that the disclosure is present.
 
 ### For implementation
 
-- `gadgetron-knowledge/src/search/searxng.rs` — `SearxngClient::new()` takes
-  `Option<Url>` and returns `Option<SearxngClient>` (None when not configured)
+- `gadgetron-knowledge/src/search/searxng.rs` — The `Option<SearxngClient>` selection is handled at the `KnowledgeConfig` layer — `SearxngClient::new()` itself takes a non-optional `&SearchConfig` and returns `Result<Self, SearchError>`. The caller (`serve_stdio` in `01-knowledge-layer.md §6.1`) checks `if let Some(ref search_cfg) = config.search { SearxngClient::new(search_cfg)? }` before calling. The MCP `web_search` tool is registered only if the client construction succeeds.
 - `gadgetron-knowledge/src/mcp/tools.rs` — tool list is conditional on
   `SearxngClient` presence; `web_search` is absent from the MCP tool list when
   the client is None
@@ -214,6 +219,28 @@ enables `web_search`, the following must be addressed:
 
 ---
 
+## Related threat: prompt injection via search results (out of scope for THIS ADR)
+
+SearXNG search results include `url` and `snippet` fields populated by upstream
+engines (Google, Bing, DuckDuckGo, Brave — depending on your SearXNG
+configuration). These fields may contain adversarial content designed to
+manipulate an LLM (prompt injection). This is a distinct threat from privacy
+disclosure.
+
+**Privacy ADR (this document)**: covers what data leaves the operator's
+machine to external search engines.
+
+**Prompt injection defense**: covered in `docs/design/phase2/00-overview.md §8`
+STRIDE table (SearXNG row, I category = High). Mitigation is M8 — risk
+acceptance for P2A (Claude Code is the reasoning agent and provides partial
+defense by its own prompt injection resistance). P2C+ may add content
+sanitization.
+
+These two concerns compose cleanly: PRIVACY (what leaves) is addressed here;
+ADVERSARIAL CONTENT (what comes back) is addressed in the STRIDE table.
+
+---
+
 ## References
 
 | Document | Section | Relevance |
@@ -229,3 +256,9 @@ enables `web_search`, the following must be addressed:
 | `docs/design/phase2/02-kairos-agent.md` v2 | §16 ADR table | Listed as impl blocker |
 | `docs/process/03-review-rubric.md` | §1.5 | Security review gate including this check |
 | GDPR | Art. 13, Art. 14 | Right to be informed; basis for user disclosure |
+
+---
+
+## Changelog
+
+- **2026-04-13 — Round 2**: added prompt-injection cross-reference section (out-of-scope clarification pointing to STRIDE table); updated disclosure text to "depending on your SearXNG instance" wording; reconciled `SearxngClient::new()` signature (non-optional `&SearchConfig`, `Result<Self>`) with `01-knowledge-layer.md §6.1`.

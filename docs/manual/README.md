@@ -17,6 +17,7 @@ This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust e
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |
 | [auth.md](auth.md) | API key format, how auth works, scope system |
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
+| [kairos.md](kairos.md) | **Phase 2A**: Kairos 개인 비서 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
 
 ---
 
