@@ -30,7 +30,7 @@ All errors return a JSON body in the following shape, matching the OpenAI error 
   "error": {
     "message": "Human-readable description of what went wrong and what to do.",
     "type": "authentication_error",
-    "code": "tenant_not_found"
+    "code": "invalid_api_key"
   }
 }
 ```
@@ -43,15 +43,16 @@ All errors return a JSON body in the following shape, matching the OpenAI error 
 
 ## Error codes
 
-All 12 error codes, their HTTP status, and the type they map to:
+All error codes, their HTTP status, and the type they map to:
 
 | `code` | HTTP status | `type` | When it occurs |
 |--------|-------------|--------|----------------|
-| `tenant_not_found` | 401 | `authentication_error` | Missing, malformed, or revoked API key |
+| `invalid_api_key` | 401 | `authentication_error` | Missing, malformed, or revoked API key |
 | `forbidden` | 403 | `permission_error` | Valid key but wrong scope for the requested route |
+| `request_too_large` | 413 | `invalid_request_error` | Request body exceeds the 4 MiB limit — see [Troubleshooting — HTTP 413](troubleshooting.md#http-413--request-body-too-large) |
 | `quota_exceeded` | 429 | `quota_error` | Tenant's daily spending limit reached |
 | `config_error` | 400 | `invalid_request_error` | Server configuration is invalid |
-| `routing_failure` | 503 | `invalid_request_error` | No provider available to serve the request |
+| `routing_failure` | 503 | `server_error` | No provider available to serve the request |
 | `provider_error` | 502 | `api_error` | Upstream LLM provider returned an error |
 | `stream_interrupted` | 502 | `api_error` | SSE stream was interrupted mid-response |
 | `billing_error` | 500 | `api_error` | Internal billing calculation error |
@@ -94,7 +95,7 @@ Submit a chat completion request. Compatible with OpenAI's `/v1/chat/completions
 
 Additional OpenAI request fields (`temperature`, `max_tokens`, `top_p`, etc.) are forwarded to the upstream provider as-is. Gadgetron does not validate them beyond JSON parsing.
 
-Maximum request body size: **4 MB** (enforced by the gateway before authentication).
+Maximum request body size: **4 MiB** (enforced by the gateway before authentication). Oversized requests return HTTP 413 with `error.code = "request_too_large"` and an OpenAI-shaped JSON body.
 
 **Non-streaming response (stream: false):**
 
