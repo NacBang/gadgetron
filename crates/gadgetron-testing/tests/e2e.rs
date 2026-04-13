@@ -157,9 +157,10 @@ async fn e2e_auth_missing_401() {
 
     let body: Value = resp.json().await.expect("body parse failed");
     assert_eq!(
-        body["error"]["code"], "tenant_not_found",
-        "error code must be 'tenant_not_found'"
+        body["error"]["code"], "invalid_api_key",
+        "error code must be 'invalid_api_key' (OpenAI-standard 401 code)"
     );
+    assert_eq!(body["error"]["type"], "authentication_error");
 
     fx.teardown().await;
 }
@@ -236,13 +237,19 @@ async fn e2e_quota_exceeded_429() {
 // Scenario 6 — Body too large → 413
 // ───────────────────────────────────────────────────────────────────
 
-/// POST /v1/chat/completions with a 5 MB body → HTTP 413.
+/// POST /v1/chat/completions with an oversized body → HTTP 413 +
+/// OpenAI-shaped JSON body (`error.code == "request_too_large"`).
+///
+/// Uses the smallest body that trips the 4 MiB limit (MAX_BODY_BYTES + 16) so
+/// CI memory usage stays bounded. Still exercises the full HTTP stack:
+/// reqwest → tower → RequestBodyLimitLayer → openai_shape_413 map_response.
 #[tokio::test]
 async fn e2e_body_too_large_413() {
     let fx = E2EFixture::new("x", 0).await;
 
-    // 5 MB — exceeds the 4 MB gateway limit.
-    let large_body = vec![b'x'; 5 * 1024 * 1024];
+    // MAX_BODY_BYTES = 4_194_304 (4 MiB). One byte over is enough to trigger 413.
+    // We use +16 for safety margin against any trivial header encoding differences.
+    let large_body = vec![b'x'; 4_194_304 + 16];
 
     let resp = fx
         .gw
@@ -255,7 +262,42 @@ async fn e2e_body_too_large_413() {
         .expect("request failed");
 
     let status = resp.status().as_u16();
-    assert_eq!(status, 413, "5 MB body must return 413 Payload Too Large");
+    assert_eq!(
+        status, 413,
+        "body over MAX_BODY_BYTES must return 413 Payload Too Large"
+    );
+
+    // A3 — body-shape assertions: hotfix-error-shape-findings.md
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .expect("413 response must carry Content-Type")
+        .to_str()
+        .expect("Content-Type must be ASCII");
+    assert!(
+        content_type.starts_with("application/json"),
+        "413 Content-Type must be JSON (OpenAI SDK calls response.json()), got {content_type:?}"
+    );
+
+    let body: Value = resp
+        .json()
+        .await
+        .expect("413 body must deserialize as JSON (not plain text)");
+    assert_eq!(
+        body["error"]["code"], "request_too_large",
+        "413 error.code must be 'request_too_large'"
+    );
+    assert_eq!(
+        body["error"]["type"], "invalid_request_error",
+        "413 error.type must be 'invalid_request_error'"
+    );
+    let msg = body["error"]["message"]
+        .as_str()
+        .expect("error.message must be a string");
+    assert!(
+        msg.contains("MiB"),
+        "error.message must embed the runtime body limit in MiB, got {msg:?}"
+    );
 
     fx.teardown().await;
 }

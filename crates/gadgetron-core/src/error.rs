@@ -93,7 +93,7 @@ impl GadgetronError {
             Self::Routing(_) => "routing_failure",
             Self::StreamInterrupted { .. } => "stream_interrupted",
             Self::QuotaExceeded { .. } => "quota_exceeded",
-            Self::TenantNotFound => "tenant_not_found",
+            Self::TenantNotFound => "invalid_api_key",
             Self::Forbidden => "forbidden",
             Self::Billing(_) => "billing_error",
             Self::DownloadFailed(_) => "download_failed",
@@ -210,7 +210,8 @@ mod tests {
         );
         assert_eq!(
             GadgetronError::TenantNotFound.error_code(),
-            "tenant_not_found"
+            "invalid_api_key",
+            "OpenAI SDK clients match on 'invalid_api_key' as the canonical 401 code",
         );
         assert_eq!(GadgetronError::Forbidden.error_code(), "forbidden");
         assert_eq!(
