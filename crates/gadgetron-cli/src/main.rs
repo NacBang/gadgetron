@@ -592,9 +592,12 @@ async fn serve(
         Arc<dyn gadgetron_xaas::auth::validator::KeyValidator + Send + Sync>,
         Option<sqlx::PgPool>,
     ) = if use_no_db {
-        let warning = "WARNING: Running without database — keys not validated, quota disabled";
-        eprintln!("{warning}");
-        tracing::warn!(mode = "no-db", "{}", warning);
+        // Both eprintln! and tracing::warn! are kept: eprintln! ensures visibility
+        // when RUST_LOG=off silences the tracing subscriber. No redundant "WARNING:"
+        // prefix — stderr channel and WARN level already imply it.
+        let msg = "Running without database — keys not validated, quota disabled";
+        eprintln!("{msg}");
+        tracing::warn!(mode = "no-db", "{}", msg);
         (
             Arc::new(gadgetron_xaas::auth::validator::InMemoryKeyValidator),
             None,
@@ -1099,16 +1102,13 @@ async fn check_provider_reachable(name: &str, endpoint: &str) -> DoctorCheck {
 
     let start = std::time::Instant::now();
     match client.get(endpoint).send().await {
-        Ok(resp) => {
+        // Any HTTP response (2xx/3xx/4xx/5xx) means the server is reachable.
+        // Only connection errors (refused/timeout/DNS) count as failure.
+        Ok(_resp) => {
             let ms = start.elapsed().as_millis();
             DoctorCheck {
                 label: format!("Provider {}:", name),
-                status: DoctorStatus::Pass(format!(
-                    "{} reachable ({} in {}ms)",
-                    endpoint,
-                    resp.status().as_u16(),
-                    ms
-                )),
+                status: DoctorStatus::Pass(format!("{} reachable in {}ms", endpoint, ms)),
             }
         }
         Err(e) => DoctorCheck {
