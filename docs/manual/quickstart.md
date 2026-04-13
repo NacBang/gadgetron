@@ -282,10 +282,12 @@ curl -s http://localhost:8080/ready | jq .
 
 ## Optional: open the TUI dashboard
 
-The terminal dashboard runs independently of the server. In a separate terminal:
+The terminal dashboard is embedded in `gadgetron serve`. Instead of running the server headless, start it with `--tui`:
 
 ```sh
-./target/release/gadgetron --tui
+./target/release/gadgetron serve --tui --config gadgetron.toml
 ```
 
-The dashboard shows a 3-column layout (Nodes / Models / Requests) with color-coded GPU metrics. In Sprint 5 it displays demo data; live cluster data requires Sprint 6. Press `q` or `Esc` to exit. See [tui.md](tui.md) for the full reference.
+The dashboard shows a 3-column layout (Nodes / Models / Requests) with color-coded GPU metrics. As of Sprint 6+ it renders live data streamed from the gateway via an internal broadcast channel (request entries, GPU metrics, model states). Press `q` or `Esc` to exit — the server shuts down gracefully with a 5-second audit drain.
+
+`--tui` requires a real interactive terminal (both stdin and stdout must be TTYs). If you run it under systemd, CI, or with piped input, it exits immediately with code 2 and a clear error message. See [tui.md](tui.md) for the full reference and the TTY requirement.

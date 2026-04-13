@@ -186,7 +186,7 @@ Or change `[server].bind` in `gadgetron.toml`.
   "error": {
     "message": "Invalid API key. Verify your API key is correct and has not been revoked.",
     "type": "authentication_error",
-    "code": "tenant_not_found"
+    "code": "invalid_api_key"
   }
 }
 ```
@@ -450,6 +450,37 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 ---
 
+### HTTP 413 — request body too large
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "Request body exceeds the 4 MiB limit. Reduce your request size or split it across multiple calls.",
+    "type": "invalid_request_error",
+    "code": "request_too_large"
+  }
+}
+```
+
+**Why:** The request body is larger than the gateway's 4 MiB (`4_194_304` bytes) hard limit. This limit is enforced **before** authentication, so it applies even to anonymous requests.
+
+Typical causes:
+1. Posting a very long conversation (100k+ tokens) without message pruning
+2. Attaching large base64-encoded images or binary blobs to `content`
+3. Copy-pasting a large file into a `content` field (common in interactive chat UIs)
+
+**Fix — reduce context size:**
+Trim the `messages` array or use a summarization pass before sending. For long conversations, keep only the last N turns plus a system message.
+
+**Fix — split the request:**
+If you are uploading a large document, chunk it into pieces that each fit under the limit and send them as separate turns.
+
+**The 4 MiB figure is hard-coded** in `crates/gadgetron-gateway/src/server.rs` as `MAX_BODY_BYTES`. If you need a larger limit for a research workload, rebuild with the constant bumped. The 4 MiB default assumes a 128k-token context window at ~4 bytes/token + 8× headroom.
+
+---
+
 ## Log interpretation
 
 Enable debug logging to see the full middleware trace:
@@ -469,3 +500,24 @@ Key log fields to look for:
 | `path` | The route that triggered the scope check |
 | `bind` | The address the server is actually listening on |
 | `name` | Provider name when a provider is registered |
+
+---
+
+## Audit log `latency_ms` interpretation
+
+The audit log emits `latency_ms` on every request. **Its meaning depends on whether the request was streaming or non-streaming.**
+
+### Non-streaming requests (`stream: false`)
+
+`latency_ms` = full middleware chain + upstream provider call + response serialization. This is the end-to-end latency you usually want. Typical values on healthy vLLM: 50–500 ms depending on model and prompt.
+
+### Streaming requests (`stream: true`)
+
+`latency_ms` = middleware chain + dispatch overhead **only**. It will always read as `0 ms` on modern hardware (sub-millisecond dispatch). This is **not a bug** — the audit entry is emitted at dispatch time, before the first SSE byte leaves the server, so the value captures how long Gadgetron took to hand the request off to the provider, not how long the full stream took. This is Phase 1 behavior; Phase 2 will capture total stream duration via a `Drop` guard on the SSE stream, and the `latency_ms` value will change meaning accordingly — until then, use the alternatives below.
+
+For real end-to-end streaming latency, use one of these alternatives:
+- **TUI dashboard** (`gadgetron serve --tui`) — the Requests panel shows wall-clock latency from the `metrics_middleware` layer, which measures the full chain including the stream body
+- **`/metrics` Prometheus histogram** — planned in Phase 2
+- **Client-side timing** — measure `time.perf_counter()` around the OpenAI SDK call
+
+This applies only to `status: "ok"` rows for streaming requests. Streaming failures (connection drops, provider 5xx) still record the wall-clock latency up to the failure point.

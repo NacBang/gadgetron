@@ -24,6 +24,26 @@ When `--tui` is set, the gateway starts normally and the TUI dashboard opens in 
 
 To exit, press `q` or `Esc`. The server shuts down gracefully (5-second audit drain) before the process exits.
 
+### TTY requirement
+
+`--tui` requires an interactive terminal — both stdin and stdout must be attached to a TTY. If you run `gadgetron serve --tui` from a non-interactive context (systemd, CI, SSH with `-T`, IDE task runners, pipe redirects), the server refuses to start and exits with code `2`:
+
+```
+Error: --tui requires an interactive terminal (stdin or stdout is not a TTY).
+
+  Cause: stdin/stdout is not connected to a terminal — this happens under systemd,
+         CI runners, SSH with -T, IDE task runners, and pipe redirects.
+
+  Next steps:
+    1. Run gadgetron from a regular shell (iTerm, Terminal.app, Alacritty, ...)
+    2. Remove --tui to run headless — the server is reachable at GET /health
+       and GET /v1/models once started.
+    3. For systemd/CI: omit --tui or set tui = false in gadgetron.toml.
+       See docs/manual/configuration.md for the full option reference.
+```
+
+This is intentional: the TUI uses crossterm raw-mode and alternate-screen escapes that only work on a real terminal. Running headless is always available — drop `--tui` to get a plain server log.
+
 ---
 
 ## Screen layout
