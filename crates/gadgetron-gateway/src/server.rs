@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::State,
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -25,9 +26,62 @@ use crate::middleware::{
     scope::scope_guard_middleware, tenant_context::tenant_context_middleware,
 };
 
-/// 4 MB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
+/// 4 MiB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
 /// Rationale: 128k-token window × ~4 bytes/token ≈ 512 KB; 8× headroom.
-const MAX_BODY_BYTES: usize = 4_194_304;
+pub(crate) const MAX_BODY_BYTES: usize = 4_194_304;
+
+/// Format a byte count as a human-readable MiB string (e.g. 4_194_304 → "4 MiB").
+/// Used by `openai_shape_413` so the 413 error message stays in sync with
+/// `MAX_BODY_BYTES` if an operator tunes the limit. No hard-coded "4 MB" literals.
+fn format_body_limit(limit: usize) -> String {
+    let mib = limit as f64 / 1_048_576.0;
+    if (mib.fract()).abs() < f64::EPSILON {
+        format!("{} MiB", mib as u64)
+    } else {
+        format!("{mib:.1} MiB")
+    }
+}
+
+/// `map_response` layer that converts `tower_http::RequestBodyLimitLayer`'s
+/// raw `413 Payload Too Large` plain-text response into the OpenAI-shaped
+/// `{error: {code, message, type}}` JSON that every other error path returns.
+///
+/// Rationale: OpenAI SDK clients call `response.json()` and surface the
+/// resulting `error.message` to developers. If the body is plain text,
+/// `json.JSONDecodeError` escapes as an opaque "server returned invalid
+/// JSON" — a terrible DX when the real cause is "you sent a 5 MB request".
+///
+/// Non-413 responses pass through unchanged. Async signature is required by
+/// `axum::middleware::map_response` even though the body is sync.
+async fn openai_shape_413(mut resp: Response<Body>) -> Response<Body> {
+    if resp.status() != StatusCode::PAYLOAD_TOO_LARGE {
+        return resp;
+    }
+    let message = format!(
+        "Request body exceeds the {} limit. Reduce your request size or split it across multiple calls.",
+        format_body_limit(MAX_BODY_BYTES),
+    );
+    let body_json = json!({
+        "error": {
+            "code": "request_too_large",
+            "message": message,
+            "type": "invalid_request_error",
+        }
+    });
+    let bytes = serde_json::to_vec(&body_json).expect("static JSON shape serializes");
+    let len = bytes.len();
+    *resp.body_mut() = Body::from(bytes);
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from_str(&len.to_string()).expect("usize string is ASCII"),
+    );
+    resp
+}
 
 /// Shared application state injected into every handler via `axum::State`.
 ///
@@ -199,9 +253,13 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(request_id_middleware))
         // Layer 2: distributed tracing spans.
         .layer(TraceLayer::new_for_http())
-        // Layer 1 (outermost): body size guard (4 MB). SEC-M2. Applied last so it
-        // wraps all other layers and is first to intercept the incoming request.
+        // Layer 1b: body size guard (4 MiB). SEC-M2. The raw 413 produced here
+        // is plain text ("length limit exceeded"), which breaks OpenAI SDK clients
+        // that call `response.json()`.
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        // Layer 1a (outermost): response shape guard. Catches the 413 above and
+        // rewrites the body to OpenAI-shaped JSON. Non-413 responses pass through.
+        .layer(middleware::map_response(openai_shape_413))
         .with_state(state.clone()); // clone BEFORE consuming state in public_routes
 
     let public_routes = Router::new()
@@ -421,6 +479,10 @@ mod tests {
     /// When `AppState.router` is `None`, `list_models_handler` falls back to
     /// iterating `state.providers` (empty map) → `{"object":"list","data":[]}`.
     /// This replaces the old "501 stub" test now that the real handler is wired.
+    ///
+    /// Also serves as a 2xx regression guard for the `openai_shape_413`
+    /// map_response layer: verifies successful responses keep their
+    /// `application/json` content type and are not rewritten.
     #[tokio::test]
     async fn list_models_returns_200_with_empty_list() {
         let state = make_state_with_validator(MockKeyValidator::new(vec![Scope::OpenAiCompat]));
@@ -435,6 +497,19 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        // Regression guard (A4): the openai_shape_413 map_response layer must
+        // not touch 2xx responses. Proves non-413 status passes through
+        // unmodified, with Content-Type preserved.
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("200 must carry a Content-Type")
+            .to_str()
+            .expect("Content-Type must be ASCII");
+        assert!(
+            ct.starts_with("application/json"),
+            "2xx Content-Type must be JSON, got {ct:?}"
+        );
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -717,5 +792,92 @@ mod tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["status"], "ready");
+    }
+
+    // ------------------------------------------------------------------
+    // Hotfix: 413 response shape (docs/design/polish/hotfix-error-shape-findings.md)
+    // ------------------------------------------------------------------
+
+    /// `format_body_limit` renders the runtime `MAX_BODY_BYTES` as a
+    /// human-readable MiB string. Pure function; no I/O.
+    #[test]
+    fn format_body_limit_renders_whole_and_fractional_mib() {
+        assert_eq!(format_body_limit(4_194_304), "4 MiB");
+        assert_eq!(format_body_limit(8_388_608), "8 MiB");
+        // 6 MiB == 6_291_456 — still whole.
+        assert_eq!(format_body_limit(6_291_456), "6 MiB");
+        // 4.5 MiB — fractional case uses one decimal place.
+        assert_eq!(format_body_limit(4_718_592), "4.5 MiB");
+    }
+
+    /// A1: body over `MAX_BODY_BYTES` must return `413` with a JSON
+    /// `Content-Type`. Regression guard for the OpenAI SDK compatibility
+    /// bug found in Test 6.
+    #[tokio::test]
+    async fn body_too_large_returns_413_with_json_content_type() {
+        let state = make_state_with_validator(MockKeyValidator::new(vec![Scope::OpenAiCompat]));
+        let app = build_router(state);
+
+        // Exactly one byte over the limit — cheapest trigger.
+        let oversized_body = vec![b'x'; MAX_BODY_BYTES + 1];
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("413 must carry a Content-Type")
+            .to_str()
+            .expect("Content-Type must be ASCII");
+        assert!(
+            ct.starts_with("application/json"),
+            "413 Content-Type must be JSON, got {ct:?}"
+        );
+    }
+
+    /// A2: the 413 body must be OpenAI-shaped JSON with the correct error
+    /// envelope so SDK clients can parse it. Also proves the message embeds
+    /// the dynamic MiB formatter (no hard-coded "4 MB" literal).
+    #[tokio::test]
+    async fn body_too_large_returns_openai_shaped_json() {
+        let state = make_state_with_validator(MockKeyValidator::new(vec![Scope::OpenAiCompat]));
+        let app = build_router(state);
+
+        let oversized_body = vec![b'x'; MAX_BODY_BYTES + 1];
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(oversized_body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .expect("413 body must deserialize as JSON (not plain text)");
+
+        assert_eq!(value["error"]["code"], "request_too_large");
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        let msg = value["error"]["message"]
+            .as_str()
+            .expect("error.message must be a string");
+        assert!(!msg.is_empty(), "error.message must not be empty");
+        assert!(
+            msg.contains("MiB"),
+            "error.message must embed dynamic MiB limit (no hard-coded '4 MB'), got {msg:?}"
+        );
     }
 }
