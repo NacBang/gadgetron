@@ -1,6 +1,6 @@
 # Gadgetron — 전체 설계 개요
 
-> **버전**: 0.1.0
+> **버전**: 0.1.0-phase1 (Phase 1 tagged) → Phase 2 진행 중
 > **에디션**: 2021
 > **라이선스**: MIT
 > **최소 Rust**: 1.80
@@ -10,20 +10,32 @@
 
 ## 1. 제품 비전과 차별점
 
-### 1.1 비전
+### 1.1 비전 — 하방/상방 2층 구조
 
-**"GPU 클러스터 위에서 동작하는, 서브밀리초 P99 레이턴시를 보장하는 AI 오케스트레이션 플랫폼"**
+**Gadgetron의 궁극 제품: 지식 레이어 기반 개인 비서 플랫폼.** 개인에게 자신의 지식을 학습·저장하고 능동적으로 도와주는 AI 비서를 제공하는 것이 목적이며, 제공 형태는 로컬 / on-premise / 클라우드 세 가지입니다.
 
-Gadgetron은 대규모 LLM 서비스 인프라를 단일 바이너리로 통합하는 Rust 네이티브 플랫폼입니다. 클라우드 API와 로컬 GPU 추론을 하나의 추상화 계층으로 묶고, GPU 리소스 스케줄링부터 에이전트 오케스트레이션까지 계층형 서비스(XaaS) 모델로 제공합니다.
+이 제품은 두 개의 계층으로 구성됩니다:
+
+| 계층 | 이름 | 상태 | 역할 |
+|------|------|------|------|
+| **하방 (Lower)** | LLM 오케스트레이션 인프라 | **Phase 1 완료 (v0.1.0-phase1)** | GPU 클러스터 위에서 서브밀리초 P99 오버헤드로 다중 프로바이더 LLM을 라우팅·배포·모니터링 |
+| **상방 (Upper)** | 지식 레이어 기반 개인 비서 (Kairos) | **Phase 2 진행 중** | 하방 위에서 Claude Code를 에이전트로 삼아 개인 wiki·웹 검색·미디어를 도구로 활용해 사용자를 돕는 personal assistant |
+
+**하방 단독 가치**: Rust 네이티브 단일 바이너리 LLM 게이트웨이. LiteLLM/Portkey/OpenRouter 대비 P99 < 1ms, 로컬 GPU 1급, 단일 배포 단위. 독립된 SDK/API 소비자 대상 인프라로도 유효.
+
+**상방의 결정적 디자인**: Claude Code (CLI) 가 에이전트 본체. Rust는 절차적 오케스트레이션을 작성하지 **않으며**, MCP 서버와 subprocess 관리자로만 기능. 사용자의 Claude Max 구독이 에이전트 두뇌를 담당하므로 API 과금·프롬프트 엔지니어링·에이전트 루프 재구현 모두 회피.
+
+**상세 설계**: `docs/design/phase2/00-overview.md` (vision + STRIDE), `01-knowledge-layer.md` (`gadgetron-knowledge` crate), `02-kairos-agent.md` (`gadgetron-kairos` crate).
 
 ### 1.2 미션
 
-1. **레이턴시 제거** — GC pause, 직렬화 오버헤드, 네트워크 홉을 원천 차단하여 P99 < 1ms 오버헤드 달성
-2. **GPU 자원 최적화** — NUMA 토폴로지, NVLink/NVSwitch 인터커넥트, 열/전력 예산을 고려한 스케줄링
-3. **계층형 추상화** — GPUaaS -> ModelaaS -> AgentaaS로 점진적 추상화 제공
-4. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 전체 플랫폼 구동, 마이크로서비스 난비 지양
-5. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원
-6. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows를 Phase 3로 단계적 지원
+1. **지식 레이어 기반 개인 비서** — wiki + 웹 검색 + (P2B+) SQLite/vector/media 를 Claude Code에 MCP 도구로 노출; 사용자가 자신의 지식을 축적하며 비서가 능동적으로 활용
+2. **레이턴시 제거** — GC pause, 직렬화 오버헤드, 네트워크 홉을 원천 차단하여 P99 < 1ms 오버헤드 달성 (하방)
+3. **GPU 자원 최적화** — NUMA 토폴로지, NVLink/NVSwitch 인터커넥트, 열/전력 예산을 고려한 스케줄링 (하방)
+4. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 하방 + 상방 전체 구동, 마이크로서비스 난비 지양
+5. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원 (하방)
+6. **오픈소스 최대 활용** — Claude Code / OpenWebUI / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화 (상방)
+7. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (kairos는 Unix 전용으로 시작)
 
 ### 1.3 경쟁 차별화
 
@@ -108,7 +120,7 @@ Gadgetron의 독보적 위치:
                    |                               |
                    +-------------------------------+
 
-  실제 의존성 (Cargo.toml 기준):
+  실제 의존성 (Phase 1 기준, Cargo.toml):
     core        <- (외부 crate만)
     provider    <- core
     router      <- core, provider
@@ -116,7 +128,14 @@ Gadgetron의 독보적 위치:
     scheduler   <- core, node
     node        <- core
     tui         <- core, router, scheduler, node
-    cli         <- core, provider, router, gateway, scheduler, node, tui
+    xaas        <- core                                    (Phase 1 XaaS: auth/quota/audit)
+    testing     <- core, provider, gateway, xaas           (Phase 1 E2E harness)
+    cli         <- core, provider, router, gateway, scheduler, node, tui, xaas
+
+  Phase 2 신규 (설계 완료, 구현 예정):
+    knowledge   <- core                                    (Phase 2: wiki + search + MCP server)
+    kairos      <- core, knowledge                         (Phase 2: LlmProvider impl → router 등록)
+    cli         <- +knowledge, kairos                      (mcp serve + kairos init 서브커맨드)
 ```
 
 ### 2.2 런타임 컴포넌트 다이어그램
@@ -754,69 +773,90 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 
 ---
 
-## 5. Phase 1 (MVP), Phase 2 (상용화), Phase 3 (플랫폼화) 로드맵
+## 5. 로드맵 — 하방 (Phase 1) / 상방 (Phase 2) / 운영 하드닝 (Phase 3)
 
-### Phase 1 -- MVP (v0.1, 현재 구현 상태)
+### Phase 1 — 하방: LLM 오케스트레이션 인프라 (v0.1.0-phase1, **완료**)
 
-**목표**: 단일 노드에서 클라우드+로컬 LLM 프록시 작동
+**목표**: 단일 노드에서 OpenAI 호환 게이트웨이로 다중 프로바이더를 라우팅하고, 기본 XaaS (auth/quota/audit) 제공.
 
-| 항목 | 상태 | 크레이트 | 상세 |
-|------|------|---------|------|
-| 기본 라우팅 (6종) | 구현됨 | `gadgetron-router` | RoundRobin, CostOptimal, LatencyOptimal, QualityOptimal, Fallback, Weighted |
-| 클라우드 프로바이더 | 구현됨 | `gadgetron-provider` | `OpenAiProvider`, `AnthropicProvider` |
-| 로컬 프로바이더 | 구현됨 | `gadgetron-provider` | `OllamaProvider`, `VllmProvider`, `SglangProvider` |
-| 스트리밍 SSE | 구현됨 | `gadgetron-gateway` | `chat_chunk_to_sse()` + `KeepAlive(15s)` |
-| TOML 설정 | 구현됨 | `gadgetron-core` | `AppConfig::load()` + `${ENV}` 치환 |
-| GPU 모니터링 | 구현됨 | `gadgetron-node` | `ResourceMonitor` + NVML feature gate |
-| TUI 대시보드 | 구현됨 | `gadgetron-tui` | ratatui 기본 레이아웃 (Nodes, Models, Requests) |
-| 모델 배포/해제 | 구현됨 | `gadgetron-scheduler` | `Scheduler::deploy/undeploy` + LRU eviction |
-| lock-free 메트릭 | 구현됨 | `gadgetron-router` | `MetricsStore` (DashMap) |
-| 헬스체크 | 구현됨 | `gadgetron-provider` | `LlmProvider::health()` |
-| VRAM 추정 | 구현됨 | `gadgetron-core` | `estimate_vram_mb()` + `Quantization` 열거형 |
-| 엔진별 프로세스 관리 | 구현됨 | `gadgetron-node` | `NodeAgent::start_model/stop_model` |
-| API 라우트 정의 | 구현됨 | `gadgetron-gateway` | 10개 엔드포인트 라우트 등록 |
-| 핸들러 구현 | 스텁 | `gadgetron-gateway` | TODO: Router/Scheduler 통합 필요 |
-| Gemini 프로바이더 | 미구현 | `gadgetron-provider` | TODO |
-| CLI 통합 부팅 | 부분 | `gadgetron-cli` | 설정 로드만 구현, 컴포넌트 와이어링 TODO |
+**크레이트 (10개, 모두 구현 완료)**:
+- `gadgetron-core` — 공통 타입·트레이트·에러 (12 GadgetronError variants)
+- `gadgetron-provider` — 6 provider adapter (OpenAI/Anthropic/Gemini/Ollama/vLLM/SGLang)
+- `gadgetron-router` — 6 routing strategy + MetricsStore
+- `gadgetron-gateway` — axum HTTP server + middleware chain + SSE
+- `gadgetron-scheduler` — VRAM-aware + LRU/Priority eviction + bin packing
+- `gadgetron-node` — NodeAgent (process mgmt) + ResourceMonitor
+- `gadgetron-tui` — Ratatui 대시보드 (`serve --tui`)
+- `gadgetron-cli` — 단일 바이너리 entry point + `doctor`/`init`/`tenant`/`key` 서브커맨드
+- `gadgetron-xaas` — auth + tenant + quota + audit (PostgreSQL + sqlx runtime queries)
+- `gadgetron-testing` — mock providers + fake GPU node + E2E harness
 
-### Phase 2 -- Commercial (v0.5)
+**완료된 기능**:
+- OpenAI 호환 `/v1/chat/completions` (stream + non-stream)
+- 6 provider / 6 routing strategy / Bearer auth (moka cached) / in-memory quota
+- Audit broadcast channel + optional PostgreSQL 영속화 + no-db 모드
+- TUI 실시간 대시보드 / graceful shutdown / `gadgetron doctor` 사전 점검
+- Phase 1 v0.1.0 manual QA Tests 1-9 전부 통과 (P99 bench: 65ns resolve, 50µs middleware chain, 20-15000× SLO 여유)
+- Hotfix PRs #7-10: streaming audit latency Phase 1 semantics 명확화, 401 `invalid_api_key` + 413 `request_too_large` OpenAI-compat, `--tui` TTY pre-check, 매뉴얼 동기화
 
-**목표**: 프로덕션급 다중 노드 클러스터
+**Phase 1 알려진 제약 (Phase 2 TODO)**:
+- Streaming audit `latency_ms=0` (dispatch-time only; 02-kairos-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
+- Audit `provider=None` (실제 라우팅된 provider 미기록)
+
+### Phase 2 — 상방: 지식 레이어 기반 개인 비서 플랫폼 (v0.2, **진행 중**)
+
+**목표**: Phase 1 인프라 위에 Claude Code를 에이전트로 하는 개인 비서 플랫폼 구축. 단일 사용자 로컬 배포부터 시작해 멀티유저·미디어·클라우드 스토리지까지 확장.
+
+**핵심 아키텍처 결정**: Claude Code (CLI) 가 에이전트 본체. Rust는 MCP 서버와 subprocess 관리자만 제공. `gadgetron-kairos`는 `LlmProvider` trait를 구현해서 router에 `"kairos"` 이름으로 등록 — gateway dispatch 코드 변경 0.
+
+**신규 크레이트 (2개)**:
+- `gadgetron-knowledge` — wiki (md+git2+Obsidian `[[link]]`) / SearXNG 프록시 / rmcp stdio MCP 서버. 도메인 leaf 크레이트.
+- `gadgetron-kairos` — `LlmProvider` 구현 / `ClaudeCodeSession` (owned consuming + `kill_on_drop(true)`) / stream-json → ChatChunk 번역기 / `tempfile` M1 / `redact_stderr` M2.
+
+**Phase 2 서브-스프린트 (16주)**:
+
+| 서브-스프린트 | 기간 | 증명 목표 |
+|---|---|---|
+| **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
+| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + OpenWebUI. Acceptance: 사용자가 OpenWebUI 모델 드롭다운에서 `kairos` 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 |
+| **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
+| **P2C — Multi + Storage** | 4주 | `KairosManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
+| **P2D — Media & Polish** | 4주 | `whisper.cpp` 오디오 STT + CLIP ONNX 이미지 캡션 + 비디오 프레임 샘플링 + 운영 배포 docs/manual |
+
+**Phase 2 보안 (00-overview §8 STRIDE + M1-M8)**:
+- **M1** MCP 설정 tempfile mkstemp atomic 0600 (`#[cfg(not(unix))] compile_error!`)
+- **M2** `redact_stderr()` — Anthropic/Gadgetron/Bearer/generic/AWS/PEM 패턴 (catch-all 금지로 진단 정보 보존)
+- **M3** `wiki::fs::resolve_path` pure 함수 + `O_NOFOLLOW` 최종 파일 오픈
+- **M4** `--allowed-tools` enforcement 검증 (ADR-P2A-01, 구현 전 PM 행동 테스트)
+- **M5** `wiki_write` BLOCK (PEM/AKIA/GCP) + AUDIT (토큰 패턴) + `wiki_max_page_bytes` 캡
+- **M6** `tools_called` 는 툴 이름만 감사 (arguments 제외)
+- **M7** SearXNG + git 영구성 디스클로저 (`docs/manual/kairos.md` 머지 전 필수)
+- **M8** P2A 단일유저 리스크 수락 (ADR-P2A-02)
+
+**배포 형태 (동일 코드베이스, 스토리지만 swap)**:
+1. **Local** — 단일 유저 데스크탑, 파일시스템 스토리지 (P2A)
+2. **On-premise** — 팀/조직, 로컬 또는 NAS 스토리지 (P2C+)
+3. **Cloud** — SaaS형, S3/GCS, 멀티 테넌트 격리 (P2C+)
+
+### Phase 3 — 운영 하드닝 & XaaS 풀 스택 (v1.0)
+
+**목표**: Phase 2 상방을 프로덕션 운영 가능한 멀티 노드/멀티 테넌트 플랫폼으로 승격.
 
 | 항목 | 설명 | 관련 크레이트 |
 |------|------|-------------|
-| NUMA 인식 스케줄링 | GPU-NUMA 노드 선호도 기반 배치 결정 | `gadgetron-scheduler` |
-| MIG(Time-slicing) | NVIDIA MIG 파티셔닝, GPU 타임슬라이싱 | `gadgetron-node` |
-| 열/전력 스로틀링 | `GpuInfo::temperature_c`, `power_draw_w` 기반 요청 제한 | `gadgetron-scheduler` + `gadgetron-node` |
-| 인터커넥트 인식 | NVLink/NVSwitch 토폴로지 고려 텐서 병렬 배치 | `gadgetron-scheduler` |
-| 핫 리로드 | TOML 설정 변경 시 무중단 반영 | `gadgetron-core` |
 | K8s 통합 | CRD 기반 모델 배포, HPA/VPA 오토스케일링 | 신규 `gadgetron-k8s` |
 | Slurm 통합 | HPC 클러스터 잡 서브미션 | 신규 `gadgetron-slurm` |
-| 인증/인가 | API Key, RBAC, 테넌트 격리 | `gadgetron-gateway` |
+| NUMA/MIG/인터커넥트 인식 스케줄링 | NVLink/NVSwitch 토폴로지 + NUMA 선호도 기반 텐서 병렬 배치 | `gadgetron-scheduler` |
+| 열/전력 스로틀링 | `GpuInfo::temperature_c`, `power_draw_w` 기반 요청 제한 | `gadgetron-scheduler` + `gadgetron-node` |
+| 핫 리로드 | TOML 설정 변경 시 무중단 반영 | `gadgetron-core` |
 | 영구 메트릭 | Prometheus 익스포터, 시계열 DB 저장 | `gadgetron-router` |
-| Web UI | GPU/모델/요청 실시간 대시보드 | 신규 `gadgetron-web` |
-| 동적 포트 할당 | `NodeAgent::start_model`의 하드코딩 포트 해소 | `gadgetron-node` |
-| 게이트웨이 핸들러 완성 | `routes::*` 핸들러에 Router/Scheduler 통합 | `gadgetron-gateway` |
-| 설정 검증 | 시작 시 프로바이더 연결, 노드 헬스 사전 검증 | `gadgetron-cli` |
-
-### Phase 3 -- Platform (v1.0)
-
-**목표**: XaaS 풀 스택 플랫폼
-
-| 항목 | 설명 |
-|------|------|
-| GPUaaS | GPU 단위 할당, MIG 파티션, 타임슬라이스 관리 |
-| ModelaaS | 모델 자동 배포, 오토스케일링, A/B 테스트 |
-| AgentaaS | 멀티 에이전트 오케스트레이션, 툴 사용, 메모리 |
-| 벤더마이그레이션 | 클라우드 <-> 로컬 자동 페일오버 |
-| 비용 최적화 | 실시간 비용 추적, 예산 한도, 자동 프로바이더 전환 |
-| 멀티 테넌시 | 조직 격리, 리소스 쿼터, 사용량 청구 |
-| 플러그인 시스템 | 커스텀 프로바이더, 라우팅 전략, 미들웨어 |
-| 글로벌 분산 | 리전 간 라우팅, 지연 시간 최적화 |
-| Profiling 기반 오토튜닝 | vLLM/SGLang 파라미터 자동 최적화 |
-| HuggingFace Hub 통합 | 모델 카탈로그/다운로드 |
-| 컨테이너 런타임 | Docker/Podman/containerd 모델 서빙 |
-| OpenTelemetry | 분산 트레이싱 |
+| GPUaaS / ModelaaS / AgentaaS | 계층형 추상화 (Phase 2 Kairos는 AgentaaS의 첫 소비자) | `gadgetron-xaas` 확장 |
+| 벤더 마이그레이션 | 클라우드 ↔ 로컬 자동 페일오버 | `gadgetron-router` + `gadgetron-scheduler` |
+| 멀티 테넌시 강화 | 조직 격리, 리소스 쿼터, 사용량 청구 (Phase 2 KairosManager 기반) | `gadgetron-xaas` + `gadgetron-kairos` |
+| 플러그인 시스템 | 커스텀 provider / routing / MCP 도구 | 워크스페이스 확장 |
+| HuggingFace Hub 통합 | 모델 카탈로그/다운로드 | `gadgetron-scheduler` |
+| OpenTelemetry | 분산 트레이싱 | `gadgetron-gateway` |
+| 글로벌 분산 | 리전 간 라우팅, 지연 최적화 | `gadgetron-router` |
 
 ---
 
