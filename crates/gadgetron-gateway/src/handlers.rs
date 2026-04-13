@@ -135,27 +135,45 @@ async fn handle_streaming(
     router: std::sync::Arc<gadgetron_router::Router>,
     quota_token: gadgetron_xaas::quota::enforcer::QuotaToken,
 ) -> Response {
+    // Measure dispatch latency BEFORE spawning the audit task (previous bug:
+    // the value was captured inside tokio::spawn, always yielding 0ms).
+    //
+    // KNOWN Phase 1 BEHAVIOR (not a bug — documented for operators):
+    //   latency_ms captures ONLY middleware chain + dispatch overhead (sub-millisecond
+    //   on current hardware). Streaming total duration is NOT measured because the
+    //   audit entry is fired before the first byte leaves the server.
+    //
+    //   For real end-to-end latency, use:
+    //   - `metrics_middleware` → TUI RequestLog broadcast (measures full chain)
+    //   - `/metrics` Prometheus histogram (Phase 2)
+    //   - Client-side timing (current best option)
+    //
+    //   Phase 2: wrap the SSE stream in a Drop guard that captures total duration
+    //   and accumulates output_tokens from the final stream chunk.
+    let latency_ms = ctx.started_at.elapsed().as_millis() as i32;
     let stream = router.chat_stream(req.clone());
 
     // Fire-and-forget: quota and audit at dispatch time (A4 semantics).
     let audit_writer = state.audit_writer.clone();
     let quota_enforcer = state.quota_enforcer.clone();
-    let ctx_clone = ctx.clone();
+    let tenant_id = ctx.tenant_id;
+    let api_key_id = ctx.api_key_id;
+    let request_id = ctx.request_id;
     let model = req.model.clone();
 
     tokio::spawn(async move {
         quota_enforcer.record_post(&quota_token, 0).await;
         audit_writer.send(AuditEntry {
-            tenant_id: ctx_clone.tenant_id,
-            api_key_id: ctx_clone.api_key_id,
-            request_id: ctx_clone.request_id,
+            tenant_id,
+            api_key_id,
+            request_id,
             model: Some(model),
             provider: None,
             status: AuditStatus::Ok,
             input_tokens: 0,
             output_tokens: 0,
             cost_cents: 0,
-            latency_ms: ctx_clone.started_at.elapsed().as_millis() as i32,
+            latency_ms,
         });
     });
 
