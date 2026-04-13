@@ -39,6 +39,82 @@ impl fmt::Display for NodeErrorKind {
     }
 }
 
+/// Kairos agent subsystem error kinds (Phase 2).
+///
+/// Nested variant pattern matching `DatabaseErrorKind` and `NodeErrorKind`
+/// — avoids a flat explosion of `GadgetronError` variants.
+///
+/// Corresponds to `GadgetronError::Kairos { kind, message }`. HTTP dispatch
+/// is handled centrally; see `GadgetronError::http_status_code`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KairosErrorKind {
+    /// Claude Code binary not found on PATH (`which` failed). HTTP 503.
+    NotInstalled,
+    /// Claude Code subprocess spawn failed for reasons other than binary
+    /// absence (permissions, resource limits, etc.). HTTP 503.
+    SpawnFailed { reason: String },
+    /// Claude Code subprocess exited with non-zero status mid-stream.
+    /// `stderr_redacted` is ALREADY redacted via `gadgetron_kairos::redact_stderr`
+    /// per 00-overview §8 M2. HTTP 500.
+    AgentError {
+        exit_code: i32,
+        stderr_redacted: String,
+    },
+    /// Subprocess wallclock exceeded `kairos.request_timeout_secs`. HTTP 504.
+    Timeout { seconds: u64 },
+}
+
+impl fmt::Display for KairosErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInstalled => write!(f, "not_installed"),
+            Self::SpawnFailed { .. } => write!(f, "spawn_failed"),
+            Self::AgentError { .. } => write!(f, "agent_error"),
+            Self::Timeout { .. } => write!(f, "timeout"),
+        }
+    }
+}
+
+/// Wiki knowledge layer error kinds (Phase 2).
+///
+/// Paired with `GadgetronError::Wiki { kind, message }`. See
+/// `docs/design/phase2/01-knowledge-layer.md` §8 for the canonical
+/// specification of each kind and its HTTP mapping.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WikiErrorKind {
+    /// Path traversal attempt rejected by `wiki::fs::resolve_path`. HTTP 400.
+    PathEscape { input: String },
+    /// Content exceeds `wiki_max_page_bytes`. HTTP 413.
+    /// All 3 fields are load-bearing for the user-visible error message.
+    PageTooLarge {
+        path: String,
+        bytes: usize,
+        limit: usize,
+    },
+    /// Content matched a BLOCK credential pattern (PEM / AKIA / GCP). HTTP 422.
+    /// See 01-knowledge-layer.md §4.8 for the pattern list.
+    CredentialBlocked { path: String, pattern: String },
+    /// Git repo in inconsistent state (locked index / detached HEAD /
+    /// missing objects / etc.). HTTP 503.
+    GitCorruption { path: String, reason: String },
+    /// Merge conflict during auto-commit. HTTP 409.
+    Conflict { path: String },
+}
+
+impl fmt::Display for WikiErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PathEscape { .. } => write!(f, "path_escape"),
+            Self::PageTooLarge { .. } => write!(f, "page_too_large"),
+            Self::CredentialBlocked { .. } => write!(f, "credential_blocked"),
+            Self::GitCorruption { .. } => write!(f, "git_corruption"),
+            Self::Conflict { .. } => write!(f, "conflict"),
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum GadgetronError {
@@ -83,6 +159,24 @@ pub enum GadgetronError {
         kind: NodeErrorKind,
         message: String,
     },
+
+    /// Kairos agent subsystem error (Phase 2). Subprocess spawn/run failures,
+    /// timeouts. Never contains raw subprocess stderr — only post-redaction
+    /// content per M2. Added by `docs/design/phase2/02-kairos-agent.md` §9.
+    #[error("Kairos error ({kind}): {message}")]
+    Kairos {
+        kind: KairosErrorKind,
+        message: String,
+    },
+
+    /// Wiki knowledge layer error (Phase 2). Path traversal, oversize pages,
+    /// blocked credentials, git corruption. Added by
+    /// `docs/design/phase2/01-knowledge-layer.md` §8.
+    #[error("Wiki error ({kind}): {message}")]
+    Wiki {
+        kind: WikiErrorKind,
+        message: String,
+    },
 }
 
 impl GadgetronError {
@@ -111,23 +205,68 @@ impl GadgetronError {
                 NodeErrorKind::InvalidMigProfile => "node_invalid_mig_profile",
                 _ => "node_error",
             },
+            Self::Kairos { kind, .. } => match kind {
+                KairosErrorKind::NotInstalled => "kairos_not_installed",
+                KairosErrorKind::SpawnFailed { .. } => "kairos_spawn_failed",
+                KairosErrorKind::AgentError { .. } => "kairos_agent_error",
+                KairosErrorKind::Timeout { .. } => "kairos_timeout",
+            },
+            Self::Wiki { kind, .. } => match kind {
+                WikiErrorKind::PathEscape { .. } => "wiki_invalid_path",
+                WikiErrorKind::PageTooLarge { .. } => "wiki_page_too_large",
+                WikiErrorKind::CredentialBlocked { .. } => "wiki_credential_blocked",
+                WikiErrorKind::GitCorruption { .. } => "wiki_git_corrupted",
+                WikiErrorKind::Conflict { .. } => "wiki_conflict",
+            },
         }
     }
 
-    pub fn error_message(&self) -> &'static str {
+    /// Returns a user-visible error message.
+    ///
+    /// Return type changed from `&'static str` to `String` in Phase 2 to
+    /// support runtime interpolation of values (Kairos timeout seconds,
+    /// Wiki page size limits, etc.). Existing variants `.to_string()` their
+    /// static literals — zero semantic change for callers.
+    pub fn error_message(&self) -> String {
         match self {
-            Self::Config(_) => "Configuration is invalid. Check your gadgetron.toml and environment variables.",
-            Self::Provider(_) => "The upstream LLM provider returned an error. Check provider status and API key validity.",
-            Self::Routing(_) => "No suitable provider found for this request. Verify model availability and routing configuration. Run GET /v1/models to check available models.",
-            Self::StreamInterrupted { .. } => "The response stream was interrupted. This may indicate a provider timeout or network issue.",
-            Self::QuotaExceeded { .. } => "Your API usage quota has been exceeded. Update quota_configs table to increase limits, or see docs/manual/troubleshooting.md.",
-            Self::TenantNotFound => "Invalid API key. Verify your API key is correct and has not been revoked.",
-            Self::Forbidden => "Your API key does not have permission for this operation. Check your key's assigned scopes.",
-            Self::Billing(_) => "A billing calculation error occurred. Check server logs for billing details. File an issue at github.com/NacBang/gadgetron if this persists.",
-            Self::DownloadFailed(_) => "Model download failed. Check network connectivity and model repository access.",
-            Self::HotSwapFailed(_) => "Model hot-swap failed. The previous model version remains active.",
-            Self::Database { .. } => "A database error occurred. Check PostgreSQL connectivity and disk space.",
-            Self::Node { .. } => "A node-level error occurred. Check GPU availability and NVML driver status.",
+            Self::Config(_) => "Configuration is invalid. Check your gadgetron.toml and environment variables.".to_string(),
+            Self::Provider(_) => "The upstream LLM provider returned an error. Check provider status and API key validity.".to_string(),
+            Self::Routing(_) => "No suitable provider found for this request. Verify model availability and routing configuration. Run GET /v1/models to check available models.".to_string(),
+            Self::StreamInterrupted { .. } => "The response stream was interrupted. This may indicate a provider timeout or network issue.".to_string(),
+            Self::QuotaExceeded { .. } => "Your API usage quota has been exceeded. Update quota_configs table to increase limits, or see docs/manual/troubleshooting.md.".to_string(),
+            Self::TenantNotFound => "Invalid API key. Verify your API key is correct and has not been revoked.".to_string(),
+            Self::Forbidden => "Your API key does not have permission for this operation. Check your key's assigned scopes.".to_string(),
+            Self::Billing(_) => "A billing calculation error occurred. Check server logs for billing details. File an issue at github.com/NacBang/gadgetron if this persists.".to_string(),
+            Self::DownloadFailed(_) => "Model download failed. Check network connectivity and model repository access.".to_string(),
+            Self::HotSwapFailed(_) => "Model hot-swap failed. The previous model version remains active.".to_string(),
+            Self::Database { .. } => "A database error occurred. Check PostgreSQL connectivity and disk space.".to_string(),
+            Self::Node { .. } => "A node-level error occurred. Check GPU availability and NVML driver status.".to_string(),
+            // Kairos variants — NEVER includes the `stderr_redacted` field content.
+            // Enforced by test `kairos_agent_error_message_does_not_contain_stderr`.
+            Self::Kairos { kind, .. } => match kind {
+                KairosErrorKind::NotInstalled =>
+                    "The Kairos assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`.".to_string(),
+                KairosErrorKind::SpawnFailed { .. } =>
+                    "The Kairos assistant is not available. The server could not start the Claude Code process. Run `gadgetron serve` with `RUST_LOG=gadgetron_kairos=debug` for spawn diagnostics, or check `journalctl -u gadgetron` for spawn errors.".to_string(),
+                KairosErrorKind::AgentError { .. } =>
+                    "The Kairos assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator.".to_string(),
+                KairosErrorKind::Timeout { seconds } =>
+                    format!("The Kairos assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request."),
+            },
+            // Wiki variants — always safe to surface to clients
+            // (path/bytes/limit are user-provided values, not secrets).
+            Self::Wiki { kind, .. } => match kind {
+                WikiErrorKind::PathEscape { .. } =>
+                    "The requested wiki page path is invalid. Page paths must not contain `..`, absolute paths, or special characters.".to_string(),
+                WikiErrorKind::PageTooLarge { bytes, limit, .. } =>
+                    format!("Page too large: {bytes} bytes exceeds the {limit}-byte limit. Split the content into multiple smaller pages."),
+                WikiErrorKind::CredentialBlocked { pattern, .. } =>
+                    format!("Credential detected in content (pattern: {pattern}). Wiki writes must not contain unambiguous secrets. Remove the credential and retry."),
+                WikiErrorKind::GitCorruption { .. } =>
+                    "The wiki git repository is in an inconsistent state. Run `git status` in the wiki directory and resolve manually.".to_string(),
+                WikiErrorKind::Conflict { path } =>
+                    format!("A wiki page could not be saved because it was modified by another process (path: {path}). Resolve the git conflict in the wiki directory, then retry."),
+            },
         }
     }
 
@@ -145,6 +284,13 @@ impl GadgetronError {
             Self::HotSwapFailed(_) => "api_error",
             Self::Database { .. } => "server_error",
             Self::Node { .. } => "server_error",
+            Self::Kairos { .. } => "server_error",
+            Self::Wiki { kind, .. } => match kind {
+                WikiErrorKind::PathEscape { .. } => "invalid_request_error",
+                WikiErrorKind::PageTooLarge { .. } => "invalid_request_error",
+                WikiErrorKind::CredentialBlocked { .. } => "invalid_request_error",
+                _ => "server_error",
+            },
         }
     }
 
@@ -169,6 +315,18 @@ impl GadgetronError {
             Self::Node { kind, .. } => match kind {
                 NodeErrorKind::InvalidMigProfile => 400,
                 _ => 500,
+            },
+            Self::Kairos { kind, .. } => match kind {
+                KairosErrorKind::NotInstalled | KairosErrorKind::SpawnFailed { .. } => 503,
+                KairosErrorKind::AgentError { .. } => 500,
+                KairosErrorKind::Timeout { .. } => 504,
+            },
+            Self::Wiki { kind, .. } => match kind {
+                WikiErrorKind::PathEscape { .. } => 400,
+                WikiErrorKind::PageTooLarge { .. } => 413,
+                WikiErrorKind::CredentialBlocked { .. } => 422,
+                WikiErrorKind::GitCorruption { .. } => 503,
+                WikiErrorKind::Conflict { .. } => 409,
             },
         }
     }
@@ -242,6 +400,97 @@ mod tests {
             .error_code(),
             "node_invalid_mig_profile"
         );
+        // Phase 2: Kairos kinds
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::NotInstalled,
+                message: "".into(),
+            }
+            .error_code(),
+            "kairos_not_installed"
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::SpawnFailed { reason: "x".into() },
+                message: "".into(),
+            }
+            .error_code(),
+            "kairos_spawn_failed"
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::AgentError {
+                    exit_code: 42,
+                    stderr_redacted: "[REDACTED:anthropic_key]".into()
+                },
+                message: "".into(),
+            }
+            .error_code(),
+            "kairos_agent_error"
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::Timeout { seconds: 300 },
+                message: "".into(),
+            }
+            .error_code(),
+            "kairos_timeout"
+        );
+        // Phase 2: Wiki kinds
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::PathEscape {
+                    input: "../etc/passwd".into()
+                },
+                message: "".into(),
+            }
+            .error_code(),
+            "wiki_invalid_path"
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::PageTooLarge {
+                    path: "notes".into(),
+                    bytes: 2_000_000,
+                    limit: 1_048_576
+                },
+                message: "".into(),
+            }
+            .error_code(),
+            "wiki_page_too_large"
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::CredentialBlocked {
+                    path: "notes".into(),
+                    pattern: "pem_private_key".into()
+                },
+                message: "".into(),
+            }
+            .error_code(),
+            "wiki_credential_blocked"
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::GitCorruption {
+                    path: "".into(),
+                    reason: "locked index".into()
+                },
+                message: "".into(),
+            }
+            .error_code(),
+            "wiki_git_corrupted"
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::Conflict {
+                    path: "notes".into()
+                },
+                message: "".into(),
+            }
+            .error_code(),
+            "wiki_conflict"
+        );
     }
 
     #[test]
@@ -285,6 +534,59 @@ mod tests {
         // Routing returns 503, so its error_type must be server_error, not invalid_request_error.
         assert_eq!(
             GadgetronError::Routing("".into()).error_type(),
+            "server_error"
+        );
+        // Phase 2: Kairos always server_error
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::NotInstalled,
+                message: "".into(),
+            }
+            .error_type(),
+            "server_error"
+        );
+        // Phase 2: Wiki PathEscape / PageTooLarge / CredentialBlocked = invalid_request_error
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::PathEscape { input: "".into() },
+                message: "".into(),
+            }
+            .error_type(),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::PageTooLarge {
+                    path: "".into(),
+                    bytes: 0,
+                    limit: 0
+                },
+                message: "".into(),
+            }
+            .error_type(),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::CredentialBlocked {
+                    path: "".into(),
+                    pattern: "".into()
+                },
+                message: "".into(),
+            }
+            .error_type(),
+            "invalid_request_error"
+        );
+        // Wiki GitCorruption / Conflict = server_error
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::GitCorruption {
+                    path: "".into(),
+                    reason: "".into()
+                },
+                message: "".into(),
+            }
+            .error_type(),
             "server_error"
         );
     }
@@ -343,6 +645,93 @@ mod tests {
             .http_status_code(),
             500
         );
+        // Phase 2: Kairos HTTP codes
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::NotInstalled,
+                message: "".into(),
+            }
+            .http_status_code(),
+            503
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::SpawnFailed { reason: "".into() },
+                message: "".into(),
+            }
+            .http_status_code(),
+            503
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::AgentError {
+                    exit_code: 1,
+                    stderr_redacted: "".into()
+                },
+                message: "".into(),
+            }
+            .http_status_code(),
+            500
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::Timeout { seconds: 300 },
+                message: "".into(),
+            }
+            .http_status_code(),
+            504
+        );
+        // Phase 2: Wiki HTTP codes
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::PathEscape { input: "".into() },
+                message: "".into(),
+            }
+            .http_status_code(),
+            400
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::PageTooLarge {
+                    path: "".into(),
+                    bytes: 0,
+                    limit: 0
+                },
+                message: "".into(),
+            }
+            .http_status_code(),
+            413
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::CredentialBlocked {
+                    path: "".into(),
+                    pattern: "".into()
+                },
+                message: "".into(),
+            }
+            .http_status_code(),
+            422
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::GitCorruption {
+                    path: "".into(),
+                    reason: "".into()
+                },
+                message: "".into(),
+            }
+            .http_status_code(),
+            503
+        );
+        assert_eq!(
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::Conflict { path: "".into() },
+                message: "".into(),
+            }
+            .http_status_code(),
+            409
+        );
     }
 
     #[test]
@@ -382,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn all_twelve_variants_exist() {
+    fn all_fourteen_variants_exist() {
         let variants: Vec<GadgetronError> = vec![
             GadgetronError::Config("".into()),
             GadgetronError::Provider("".into()),
@@ -404,7 +793,167 @@ mod tests {
                 kind: NodeErrorKind::InvalidMigProfile,
                 message: "".into(),
             },
+            // Phase 2 additions
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::NotInstalled,
+                message: "".into(),
+            },
+            GadgetronError::Wiki {
+                kind: WikiErrorKind::Conflict {
+                    path: "notes".into(),
+                },
+                message: "".into(),
+            },
         ];
-        assert_eq!(variants.len(), 12);
+        assert_eq!(variants.len(), 14);
+    }
+
+    /// M2 enforcement — 02-kairos-agent.md §9: the user-visible error message
+    /// must NEVER contain the `stderr_redacted` field content, regardless of
+    /// what that field holds. Generic string only.
+    #[test]
+    fn kairos_agent_error_message_does_not_contain_stderr() {
+        let err = GadgetronError::Kairos {
+            kind: KairosErrorKind::AgentError {
+                exit_code: 42,
+                stderr_redacted: "sensitive-token-leaked-here-abc123def456".into(),
+            },
+            message: "should not matter".into(),
+        };
+        let msg = err.error_message();
+        assert!(
+            !msg.contains("sensitive-token-leaked-here"),
+            "user-visible message must NOT echo stderr_redacted content, got: {msg}"
+        );
+        assert!(
+            !msg.contains("abc123def456"),
+            "user-visible message must NOT echo stderr_redacted content, got: {msg}"
+        );
+        // And the message must still be meaningful
+        assert!(msg.contains("Kairos") || msg.contains("assistant"));
+    }
+
+    /// Kairos Timeout message must interpolate the configured timeout seconds
+    /// so the user knows what the limit actually was.
+    #[test]
+    fn kairos_timeout_message_interpolates_seconds() {
+        let err = GadgetronError::Kairos {
+            kind: KairosErrorKind::Timeout { seconds: 300 },
+            message: "".into(),
+        };
+        assert!(err.error_message().contains("300"));
+    }
+
+    /// Wiki PageTooLarge message must include both `bytes` and `limit` so
+    /// the caller knows exactly how much over they were — dx Round 1 A3.
+    #[test]
+    fn wiki_page_too_large_message_includes_bytes_and_limit() {
+        let err = GadgetronError::Wiki {
+            kind: WikiErrorKind::PageTooLarge {
+                path: "huge".into(),
+                bytes: 2_000_000,
+                limit: 1_048_576,
+            },
+            message: "".into(),
+        };
+        let msg = err.error_message();
+        assert!(msg.contains("2000000") || msg.contains("2_000_000"));
+        assert!(msg.contains("1048576") || msg.contains("1_048_576"));
+    }
+
+    /// Wiki CredentialBlocked message must include the pattern name so the
+    /// user knows WHY it was blocked.
+    #[test]
+    fn wiki_credential_blocked_message_includes_pattern() {
+        let err = GadgetronError::Wiki {
+            kind: WikiErrorKind::CredentialBlocked {
+                path: "leaked".into(),
+                pattern: "pem_private_key".into(),
+            },
+            message: "".into(),
+        };
+        let msg = err.error_message();
+        assert!(msg.contains("pem_private_key"));
+    }
+
+    /// `KairosErrorKind::Display` produces the expected snake_case token.
+    #[test]
+    fn kairos_error_kind_display() {
+        assert_eq!(
+            format!("{}", KairosErrorKind::NotInstalled),
+            "not_installed"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                KairosErrorKind::SpawnFailed {
+                    reason: "ignored".into()
+                }
+            ),
+            "spawn_failed"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                KairosErrorKind::AgentError {
+                    exit_code: 1,
+                    stderr_redacted: "ignored".into()
+                }
+            ),
+            "agent_error"
+        );
+        assert_eq!(
+            format!("{}", KairosErrorKind::Timeout { seconds: 300 }),
+            "timeout"
+        );
+    }
+
+    /// `WikiErrorKind::Display` produces the expected snake_case token.
+    #[test]
+    fn wiki_error_kind_display() {
+        assert_eq!(
+            format!(
+                "{}",
+                WikiErrorKind::PathEscape {
+                    input: "ignored".into()
+                }
+            ),
+            "path_escape"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                WikiErrorKind::PageTooLarge {
+                    path: "".into(),
+                    bytes: 0,
+                    limit: 0
+                }
+            ),
+            "page_too_large"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                WikiErrorKind::CredentialBlocked {
+                    path: "".into(),
+                    pattern: "".into()
+                }
+            ),
+            "credential_blocked"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                WikiErrorKind::GitCorruption {
+                    path: "".into(),
+                    reason: "".into()
+                }
+            ),
+            "git_corruption"
+        );
+        assert_eq!(
+            format!("{}", WikiErrorKind::Conflict { path: "".into() }),
+            "conflict"
+        );
     }
 }
