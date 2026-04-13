@@ -519,6 +519,32 @@ async fn key_revoke(pool: &sqlx::PgPool, key_id: Uuid) -> Result<()> {
 // Core serve function
 // ---------------------------------------------------------------------------
 
+/// Pre-check: `--tui` requires a TTY on both stdin and stdout.
+///
+/// Separated from the `std::io::stdin()/stdout()` calls so unit tests can
+/// exercise every (tui_enabled × has_tty) combination without a real TTY.
+///
+/// Returns `Ok(())` when `tui_enabled == false` OR `has_tty == true`.
+/// Returns `Err` with a multi-line actionable message otherwise.
+fn require_tty_for_tui(tui_enabled: bool, has_tty: bool) -> anyhow::Result<()> {
+    if !tui_enabled || has_tty {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "--tui requires an interactive terminal (stdin or stdout is not a TTY).\n\
+         \n  \
+         Cause: stdin/stdout is not connected to a terminal — this happens under systemd,\n  \
+         \x20      CI runners, SSH with -T, IDE task runners, and pipe redirects.\n\
+         \n  \
+         Next steps:\n    \
+         1. Run gadgetron from a regular shell (iTerm, Terminal.app, Alacritty, ...)\n    \
+         2. Remove --tui to run headless — the server is reachable at GET /health\n       \
+            and GET /v1/models once started.\n    \
+         3. For systemd/CI: omit --tui or set tui = false in gadgetron.toml.\n       \
+            See docs/manual/configuration.md for the full option reference."
+    )
+}
+
 /// Run the gateway server.
 ///
 /// `no_db`: force no-db mode even when `GADGETRON_DATABASE_URL` is set.
@@ -580,6 +606,23 @@ async fn serve(
         .unwrap_or_else(|| config.server.bind.clone());
 
     tracing::info!(bind = %bind_addr, tui = tui_enabled, "gadgetron starting");
+
+    // Step 2.5: TTY pre-check when --tui requested.
+    //
+    // Without this, crossterm's enable_raw_mode() fails inside the TUI thread
+    // with ENXIO ("Device not configured"), a single tracing::warn is emitted,
+    // and the server silently runs headless — a terrible DX when the user
+    // explicitly asked for an interactive dashboard.
+    //
+    // Fail-fast with sysexits.h EX_USAGE (2) matches `gadgetron doctor`.
+    if tui_enabled {
+        use std::io::IsTerminal;
+        let has_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        if let Err(e) = require_tty_for_tui(tui_enabled, has_tty) {
+            eprintln!("Error: {e}");
+            std::process::exit(2);
+        }
+    }
 
     // Step 3: Determine DB mode.
     //   Priority: --no-db flag > --provider flag > env/config database_url
@@ -1427,6 +1470,55 @@ mod tests {
     #[test]
     fn main_compiles() {
         // Compilation is the assertion.
+    }
+
+    // ------------------------------------------------------------------
+    // Hotfix: --tui TTY pre-check
+    // (docs/design/polish/hotfix-tui-tty-precheck.md)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn require_tty_for_tui_ok_when_tui_disabled_and_no_tty() {
+        // --tui not requested, no TTY: OK (headless mode).
+        assert!(require_tty_for_tui(false, false).is_ok());
+    }
+
+    #[test]
+    fn require_tty_for_tui_ok_when_tui_disabled_and_has_tty() {
+        // --tui not requested, TTY present: OK (headless with stray terminal).
+        assert!(require_tty_for_tui(false, true).is_ok());
+    }
+
+    #[test]
+    fn require_tty_for_tui_ok_when_tui_enabled_and_has_tty() {
+        // Normal interactive path.
+        assert!(require_tty_for_tui(true, true).is_ok());
+    }
+
+    #[test]
+    fn require_tty_for_tui_errors_when_tui_enabled_and_no_tty() {
+        let err = require_tty_for_tui(true, false).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--tui requires"),
+            "error must start with '--tui requires', got: {msg}"
+        );
+        assert!(
+            msg.contains("stdin or stdout"),
+            "error must mention stdin or stdout, got: {msg}"
+        );
+        assert!(
+            msg.contains("Next steps:"),
+            "error must include 'Next steps:' label per dx-product-lead A1, got: {msg}"
+        );
+        assert!(
+            msg.contains("Remove --tui"),
+            "error must tell user how to run headless, got: {msg}"
+        );
+        assert!(
+            msg.contains("gadgetron.toml"),
+            "error must point to config file for systemd/CI, got: {msg}"
+        );
     }
 
     #[test]
