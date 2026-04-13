@@ -1,9 +1,9 @@
 # `gadgetron-testing` 크레이트 & 테스트 하네스 설계
 
 > **담당**: @qa-test-architect
-> **상태**: Round 2 retry
+> **상태**: ✅ Implemented (Sprint 5 commit `f6a2b0d`, 2026-04-12) — `gadgetron-testing` 크레이트 + PgHarness + GatewayHarness + MockLlmProvider + 7 e2e scenarios 머지. Round 3 retry 편집은 `session-pivot-2026-04-12.md` §"중단된 작업" 항목이었지만 구현이 먼저 수렴하여 후속 조치 불필요 (Phase C consolidation 반영).
 > **작성일**: 2026-04-11
-> **최종 업데이트**: 2026-04-12 (Round 2 retry — A1~A8 Critical + A9~A13 High, CI/CD operational readiness)
+> **최종 업데이트**: 2026-04-13 (retroactive status fix)
 > **관련 크레이트**: `gadgetron-testing` (신규), 전 workspace 크레이트
 > **Phase**: [P1]
 > **상위 결정**: D-20260411-05 (크레이트 신설), D-20260411-01 B (MVP), D-20260411-02 (Gemini Week 5-7), D-20260411-07 (UI types core), D-20260411-08 (`StreamInterrupted`), D-20260411-09 (감사 drop)

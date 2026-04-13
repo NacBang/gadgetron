@@ -1,7 +1,9 @@
 # Session Pivot — 2026-04-12
 
+> **[RESOLVED 2026-04-13]** 본 파일은 사건 기록(historical)으로 보존. 여기서 제안된 Step 2–6의 "8-axis architecture review"는 `docs/architecture/platform-architecture.md` v1 (400 KB, 7300+ 줄) + `docs/architecture/phase-c-review-results.md` (24 KB, 7 reviewer consolidation) 로 **완료**됨. 중단되었던 Round 3 retry 3 track은 Sprint 4–9 구현이 먼저 수렴하면서 실질적으로 흡수되었고, 아래 "중단된 작업" 섹션의 편집은 **불필요**로 판정. Phase 2 설계 3종(00/01/02) v3 까지 진행되어 이 파일 작성 시점의 우려는 모두 해소됨. 새 세션은 `docs/process/04-decision-log.md` + `docs/design/phase2/00-overview.md` 에서 출발하면 충분.
+
 > Week 1 Round 3 retry 중단, **전체 문서 재검토 (아키텍처 중심)**로 방향 변경.
-> 다음 세션이 이 파일을 먼저 읽고 context를 복원해야 함.
+> 다음 세션이 이 파일을 먼저 읽고 context를 복원해야 함. _(historical — see RESOLVED note above)_
 
 ---
 

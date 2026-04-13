@@ -1,7 +1,7 @@
 # Sprint 6: TUI Live Hardening
 
 > **담당**: @chief-architect
-> **상태**: Draft
+> **상태**: ✅ Implemented (commit `b06511b`, 2026-04-12) — broadcast channel + `/ready` PG check + graceful shutdown + clap CLI 완료
 > **작성일**: 2026-04-12
 > **최종 업데이트**: 2026-04-12
 > **관련 크레이트**: `gadgetron-cli`, `gadgetron-gateway`, `gadgetron-tui`, `gadgetron-core`, `gadgetron-xaas`, `gadgetron-router`

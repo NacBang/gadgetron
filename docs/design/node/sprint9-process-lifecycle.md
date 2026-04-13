@@ -1,7 +1,7 @@
 # Sprint 9: NodeAgent Process Lifecycle, Scheduler-Node Connection, VRAM Eviction Execution, Provider 0 Warning
 
 > **담당**: @gpu-scheduler-lead
-> **상태**: Draft
+> **상태**: ✅ Implemented (commit `02218b9`, 2026-04-12) — NodeAgent process lifecycle + Scheduler deploy + VRAM eviction 실행 경로 연결 완료
 > **작성일**: 2026-04-12
 > **최종 업데이트**: 2026-04-12
 > **관련 크레이트**: `gadgetron-node`, `gadgetron-scheduler`, `gadgetron-cli`, `gadgetron-core`

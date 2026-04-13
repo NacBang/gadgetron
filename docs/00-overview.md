@@ -1,10 +1,11 @@
 # Gadgetron — 전체 설계 개요
 
-> **버전**: 0.1.0-phase1 (Phase 1 tagged) → Phase 2 진행 중
+> **버전**: `0.1.0` (workspace) — Phase 1 구현 완료, Phase 2 설계 v3 확정 / 구현 착수 대기
 > **에디션**: 2021
 > **라이선스**: MIT
 > **최소 Rust**: 1.80
 > **바이너리 이름**: `gadgetron`
+> **릴리스 태그**: 아직 생성되지 않음 — [`docs/process/06-versioning-policy.md`](process/06-versioning-policy.md) 의 릴리스 트레인에 따라 Phase 1 최종 baseline을 `v0.1.0-phase1` 으로 태그할 예정
 
 ---
 
@@ -18,7 +19,7 @@
 
 | 계층 | 이름 | 상태 | 역할 |
 |------|------|------|------|
-| **하방 (Lower)** | LLM 오케스트레이션 인프라 | **Phase 1 완료 (v0.1.0-phase1)** | GPU 클러스터 위에서 서브밀리초 P99 오버헤드로 다중 프로바이더 LLM을 라우팅·배포·모니터링 |
+| **하방 (Lower)** | LLM 오케스트레이션 인프라 | **Phase 1 구현 완료** (workspace `0.1.0`, 태그는 릴리스 트레인 따라 예정) | GPU 클러스터 위에서 서브밀리초 P99 오버헤드로 다중 프로바이더 LLM을 라우팅·배포·모니터링 |
 | **상방 (Upper)** | 지식 레이어 기반 개인 비서 (Kairos) | **Phase 2 진행 중** | 하방 위에서 Claude Code를 에이전트로 삼아 개인 wiki·웹 검색·미디어를 도구로 활용해 사용자를 돕는 personal assistant |
 
 **하방 단독 가치**: Rust 네이티브 단일 바이너리 LLM 게이트웨이. LiteLLM/Portkey/OpenRouter 대비 P99 < 1ms, 로컬 GPU 1급, 단일 배포 단위. 독립된 SDK/API 소비자 대상 인프라로도 유효.
@@ -253,12 +254,15 @@ Gadgetron의 독보적 위치:
 | 모듈 | 공개 타입 | 설명 |
 |------|----------|------|
 | `config` | `AppConfig`, `ServerConfig`, `ProviderConfig`, `LocalModelConfig` | TOML 설정 파싱, `${ENV}` 변수 치환 |
-| `error` | `GadgetronError`, `Result<T>` | 11개 변형의 통합 에러 열거형 |
+| `context` | `TenantContext`, `Scope` (3-variant) | 요청 범위 테넌트 컨텍스트 (D-20260411-10) |
+| `error` | `GadgetronError`, `Result<T>`, `DatabaseErrorKind`, `NodeErrorKind`, `KairosErrorKind`, `WikiErrorKind` | 14개 variant 통합 에러 열거형 (Phase 1 12 + Phase 2 신규 Kairos/Wiki 2) |
 | `message` | `Message`, `Role`, `Content`, `ContentPart`, `ImageUrl` | 채팅 메시지 모델 (멀티모달 + 툴 지원) |
 | `model` | `ModelState`, `InferenceEngine`, `ModelDeployment`, `Quantization`, `estimate_vram_mb()` | 모델 수명주기, VRAM 추정 |
 | `node` | `NodeResources`, `GpuInfo`, `NodeConfig`, `NodeStatus` | 노드 하드웨어 메트릭 |
 | `provider` | `ChatRequest`, `ChatResponse`, `ChatChunk`, `Choice`, `ChunkChoice`, `ChunkDelta`, `Usage`, `ModelInfo`, `Tool`, `ToolFunction`, `ToolCallChunk`, `FunctionChunk`, `LlmProvider` | LLM 프로바이더 트레이트 및 요청/응답 타입 |
 | `routing` | `RoutingStrategy`, `RoutingConfig`, `CostEntry`, `RoutingDecision`, `ProviderMetrics` | 라우팅 전략 및 메트릭 데이터 |
+| `secret` | `Secret<T>` | Debug-safe 비밀 래퍼 (API 키, DB URL) |
+| `ui` | `WsMessage`, `NodeRow`, `ModelRow`, `RequestRow`, ... | TUI/Web 공유 UI 타입 (D-20260411-07) |
 
 **핵심 트레이트**:
 
@@ -275,25 +279,34 @@ pub trait LlmProvider: Send + Sync {
 }
 ```
 
-**핵심 에러 타입**:
+**핵심 에러 타입** (실제 `crates/gadgetron-core/src/error.rs`):
 
 ```rust
-// error.rs
+// error.rs — #[non_exhaustive]
 pub enum GadgetronError {
-    Provider(String),
-    Router(String),
-    Scheduler(String),
-    Node(String),
+    // Phase 1 (12 variants)
     Config(String),
-    NoProvider(String),
-    AllProvidersFailed(String),
-    InsufficientResources(String),
-    ModelNotFound(String),
-    NodeNotFound(String),
-    HealthCheckFailed { provider: String, reason: String },
-    Timeout(u64),
+    Provider(String),
+    Routing(String),
+    StreamInterrupted { reason: String },
+    QuotaExceeded { tenant_id: Uuid },
+    TenantNotFound,
+    Forbidden,
+    Billing(String),
+    DownloadFailed(String),
+    HotSwapFailed(String),
+    Database { kind: DatabaseErrorKind, message: String },
+    Node { kind: NodeErrorKind, message: String },
+
+    // Phase 2 (2 variants — already landed in core via PR #13)
+    Kairos { kind: KairosErrorKind, message: String },  // subprocess lifecycle
+    Wiki   { kind: WikiErrorKind,   message: String },  // knowledge layer
 }
 ```
+
+- `Timeout`, `HealthCheckFailed`, `NoProvider`, `AllProvidersFailed`, `InsufficientResources`, `ModelNotFound`, `NodeNotFound` 같은 레거시 variant는 D-13 + D-20260411-08/13 에서 모두 대체되었음.
+- `error_code(&self) -> &'static str` 가 각 variant + sub-kind 에 대응하는 machine-readable 문자열을 반환 (e.g. `invalid_api_key`, `quota_exceeded`, `db_pool_timeout`, `kairos_spawn_failed`, `wiki_credential_blocked`). OpenAI error shape 호환 매핑.
+- HTTP 매핑: `Config → 400`, `Provider → 502`, `Routing → 503`, `StreamInterrupted → 502`, `QuotaExceeded → 429`, `TenantNotFound → 401`, `Forbidden → 403`, `Database → 503` 등. `crates/gadgetron-gateway/src/error.rs`에서 `IntoResponse` 구현.
 
 **설정 로딩**:
 
@@ -775,12 +788,12 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 
 ## 5. 로드맵 — 하방 (Phase 1) / 상방 (Phase 2) / 운영 하드닝 (Phase 3)
 
-### Phase 1 — 하방: LLM 오케스트레이션 인프라 (v0.1.0-phase1, **완료**)
+### Phase 1 — 하방: LLM 오케스트레이션 인프라 (workspace `0.1.0`, **구현 완료**)
 
 **목표**: 단일 노드에서 OpenAI 호환 게이트웨이로 다중 프로바이더를 라우팅하고, 기본 XaaS (auth/quota/audit) 제공.
 
 **크레이트 (10개, 모두 구현 완료)**:
-- `gadgetron-core` — 공통 타입·트레이트·에러 (12 GadgetronError variants)
+- `gadgetron-core` — 공통 타입·트레이트·에러 (Phase 1 12개 + Phase 2 선착지 `Kairos`/`Wiki` 2개 = 총 14개 `GadgetronError` variants, `#[non_exhaustive]`)
 - `gadgetron-provider` — 6 provider adapter (OpenAI/Anthropic/Gemini/Ollama/vLLM/SGLang)
 - `gadgetron-router` — 6 routing strategy + MetricsStore
 - `gadgetron-gateway` — axum HTTP server + middleware chain + SSE
@@ -796,7 +809,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - 6 provider / 6 routing strategy / Bearer auth (moka cached) / in-memory quota
 - Audit broadcast channel + optional PostgreSQL 영속화 + no-db 모드
 - TUI 실시간 대시보드 / graceful shutdown / `gadgetron doctor` 사전 점검
-- Phase 1 v0.1.0 manual QA Tests 1-9 전부 통과 (P99 bench: 65ns resolve, 50µs middleware chain, 20-15000× SLO 여유)
+- Phase 1 `0.1.0` manual QA Tests 1–9 전부 통과 (P99 bench: 65 ns resolve, 50 µs middleware chain, 20–15000× SLO 여유)
 - Hotfix PRs #7-10: streaming audit latency Phase 1 semantics 명확화, 401 `invalid_api_key` + 413 `request_too_large` OpenAI-compat, `--tui` TTY pre-check, 매뉴얼 동기화
 
 **Phase 1 알려진 제약 (Phase 2 TODO)**:
@@ -817,7 +830,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 
 | 서브-스프린트 | 기간 | 증명 목표 |
 |---|---|---|
-| **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
+| **P1.5** | 1주 | `docs/design/phase2/` 설계 3종 v3 + ADR P2A-01~03 머지 (**완료**). `v0.1.0-phase1` 태그는 [versioning policy](../process/06-versioning-policy.md)의 릴리스 트레인에 따라 별도 릴리스 PR로 처리 |
 | **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + OpenWebUI. Acceptance: 사용자가 OpenWebUI 모델 드롭다운에서 `kairos` 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 |
 | **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
 | **P2C — Multi + Storage** | 4주 | `KairosManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |

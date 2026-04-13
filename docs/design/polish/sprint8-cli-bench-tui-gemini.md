@@ -1,7 +1,7 @@
 # Sprint 8: CLI Completion, Criterion Benchmarks, TUI Scroll/Focus, Gemini Adapter
 
 > **담당**: @chief-architect
-> **상태**: Draft
+> **상태**: ✅ Implemented (commit `4170891`, 2026-04-12) — CLI completion, criterion benches (auth_cache/middleware_chain/router), TUI nav, Gemini provider 474 LOC 전부 머지
 > **작성일**: 2026-04-12
 > **최종 업데이트**: 2026-04-12
 > **관련 크레이트**: `gadgetron-cli`, `gadgetron-gateway`, `gadgetron-tui`, `gadgetron-provider`, `gadgetron-xaas`

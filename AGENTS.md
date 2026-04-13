@@ -49,6 +49,8 @@
 | [`docs/process/02-document-template.md`](docs/process/02-document-template.md) | 설계 문서 필수 템플릿 |
 | [`docs/process/03-review-rubric.md`](docs/process/03-review-rubric.md) | 크로스 리뷰 체크리스트 |
 | [`docs/process/04-decision-log.md`](docs/process/04-decision-log.md) | 에스컬레이션 결정 기록부 |
+| [`docs/process/05-development-process.md`](docs/process/05-development-process.md) | 스프린트 사이클 8단계 + 절대 규칙 |
+| [`docs/process/06-versioning-policy.md`](docs/process/06-versioning-policy.md) | SemVer + Phase marker + 릴리스 트레인 |
 
 ## 핵심 배경 문서
 

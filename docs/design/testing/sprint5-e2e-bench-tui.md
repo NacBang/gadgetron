@@ -1,7 +1,7 @@
 # Sprint 5 — E2E, Criterion Benchmarks, TUI Wiring
 
 > **담당**: @qa-test-architect
-> **상태**: Draft
+> **상태**: ✅ Implemented (commits `106966e` + `f6a2b0d`, 2026-04-12) — E2E 7 scenarios, criterion 3 benches, TUI 배선 완료
 > **작성일**: 2026-04-12
 > **최종 업데이트**: 2026-04-12
 > **관련 크레이트**: `gadgetron-testing`, `gadgetron-core`, `gadgetron-gateway`, `gadgetron-tui`, `gadgetron-xaas`

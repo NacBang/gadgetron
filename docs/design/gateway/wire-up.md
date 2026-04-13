@@ -1,9 +1,9 @@
 # Gateway Middleware Chain Wire-Up — Sprint 3
 
 > **담당**: @gateway-router-lead
-> **상태**: Draft
+> **상태**: ✅ Implemented (commit `6c80faa`, 2026-04-12) — 자체 선언 Draft였으나 Round 1/2/3 피드백이 Sprint 5/6/8 설계 문서를 통해 분산 반영되었으며 구현·E2E·bench·매뉴얼 모두 머지됨. 재귀적 Round 1~3 로그는 `docs/reviews/round1-week1-results.md` + Phase C consolidation 에서 커버.
 > **작성일**: 2026-04-12
-> **최종 업데이트**: 2026-04-12
+> **최종 업데이트**: 2026-04-13 (retroactive status fix)
 > **관련 크레이트**: `gadgetron-gateway`, `gadgetron-router`, `gadgetron-xaas`, `gadgetron-core`, `gadgetron-cli`
 > **Phase**: [P1]
 

@@ -1,7 +1,7 @@
 # Sprint 7: User Journey — Zero to First Request
 
 > **담당**: @dx-product-lead
-> **상태**: Draft
+> **상태**: ✅ Implemented (commit `d7da479`, 2026-04-12) — `tenant` / `key` / `init` / `--no-db` / `doctor` 서브커맨드 + hotfix `c419d66` 반영
 > **작성일**: 2026-04-12
 > **최종 업데이트**: 2026-04-12
 > **관련 크레이트**: `gadgetron-cli`, `gadgetron-xaas`, `gadgetron-gateway`, `gadgetron-core`

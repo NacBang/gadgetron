@@ -1,7 +1,7 @@
 # Sprint 4: vLLM + SGLang Provider Activation
 
 > **담당**: @inference-engine-lead
-> **상태**: Draft
+> **상태**: ✅ Implemented (commit `d53aa60`, 2026-04-12) — 코드/테스트/문서 동기화 완료
 > **작성일**: 2026-04-12
 > **최종 업데이트**: 2026-04-12
 > **관련 크레이트**: `gadgetron-cli`, `gadgetron-provider`, `gadgetron-core`

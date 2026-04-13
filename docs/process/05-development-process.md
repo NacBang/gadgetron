@@ -46,6 +46,7 @@
 ⑧ PR + Merge
    └→ git commit → gh pr create → merge
    └→ clean state에서 다음 Sprint 시작
+   └→ Sprint baseline 태깅은 `docs/process/06-versioning-policy.md` §2 릴리스 트레인 따름
 ```
 
 ## 2. 절대 규칙
