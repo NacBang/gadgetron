@@ -15,7 +15,6 @@
 //!    generated names alone — the dedicated symlink test in `wiki/fs.rs` covers
 //!    the symlink escape case).
 
-use gadgetron_core::error::WikiErrorKind;
 use gadgetron_knowledge::wiki::resolve_path;
 use gadgetron_knowledge::WikiError;
 use proptest::prelude::*;
@@ -77,10 +76,11 @@ proptest! {
                 // All error variants are acceptable for hostile input — we only
                 // require no panic and no silent success outside the root.
                 // (Io error is acceptable for e.g. non-UTF8 filenames on macOS.)
-                prop_assert!(matches!(
+                let ok = matches!(
                     e,
                     WikiError::Kind { .. } | WikiError::Io(_) | WikiError::Frontmatter(_)
-                ));
+                );
+                prop_assert!(ok);
             }
         }
     }

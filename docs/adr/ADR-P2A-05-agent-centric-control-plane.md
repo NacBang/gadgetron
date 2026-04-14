@@ -2,12 +2,13 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ACCEPTED (stub — detailed design in `docs/design/phase2/04-mcp-tool-registry.md`) |
+| **Status** | ACCEPTED (stub — detailed design in `docs/design/phase2/04-mcp-tool-registry.md` v2) |
 | **Date** | 2026-04-14 |
 | **Author** | PM (Claude), user-directed |
 | **Parent** | `docs/process/04-decision-log.md` **D-20260414-04** |
 | **Blocks** | `docs/design/phase2/04-mcp-tool-registry.md` (authoring), Phase 2C infra tool rollout, Phase 3 scheduler/cluster tool rollout |
 | **Supersedes (partial)** | `docs/design/phase2/00-overview.md §1 + §2` (하방/상방 프레이밍 → Agent-Centric), §3 "Explicit non-goals" Anthropic `/v1/messages` 조항 (local shim 으로 조건부 reopen) |
+| **Amended by** | **ADR-P2A-06** (2026-04-14) — §(d) "승인 카드 UX — 채팅 입력 금지, UI 카드 필수" and §(e) "서버 측 approval 흐름 — SSE + `/v1/approvals/{id}`" are **deferred to Phase 2B**. Four pre-impl reviews on `04 v1` returned 24 combined blockers; ~15 concentrated on the cross-process approval bridge (SEC-MCP-B1), race-free state machine (SEC-MCP-B7/CA-MCP-B5), and scope middleware collision (SEC-MCP-B4). Per user direction 2026-04-14, the approval flow is deferred to P2B with a fresh design round. The control-plane scaffold (trait, registry, `AgentConfig`, brain modes, `agent.*` reservation) ships as planned in `04 v2`. |
 
 ---
 

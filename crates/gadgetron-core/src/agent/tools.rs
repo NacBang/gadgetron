@@ -44,13 +44,11 @@ pub trait McpToolProvider: Send + Sync + 'static {
     /// Dispatch a tool call.
     ///
     /// `name` is the full namespaced name (e.g. `"wiki.read"`, not `"read"`).
-    /// The registry pre-validates that `name.starts_with(self.category())`
-    /// before invoking this method.
-    async fn call(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<ToolResult, McpError>;
+    /// The registry routes by full tool name via a HashMap lookup — it does
+    /// NOT assume `name.starts_with(self.category())`. Tool names and
+    /// categories are independent identifiers; a `"knowledge"` category may
+    /// host tools named `"wiki.read"`, `"web.search"`, etc.
+    async fn call(&self, name: &str, args: serde_json::Value) -> Result<ToolResult, McpError>;
 
     /// Optional runtime availability check. A provider gated on a Cargo
     /// feature or runtime config returns `false` to be excluded from the
@@ -170,12 +168,28 @@ pub const RESERVED_CATEGORY: &str = "agent";
 
 /// Validate that a tool schema does not violate the reserved-namespace
 /// cardinal rule. Called by `McpToolRegistry::register` on every tool.
+///
+/// Three defense layers (ADR-P2A-05 §14, SEC-MCP-B3):
+/// 1. Category cannot be `"agent"` — the entire category is reserved.
+/// 2. Tool name cannot start with `"agent."` — defense in depth against a
+///    provider declaring a non-agent category but smuggling in an
+///    `agent.set_brain`-style tool.
+/// 3. Specific well-known meta-operation names are banned regardless of
+///    namespace prefix (covers unnamespaced legacy names).
 pub fn ensure_tool_name_allowed(name: &str, category: &str) -> Result<(), McpError> {
     if category == RESERVED_CATEGORY {
         return Err(McpError::Denied {
             reason: format!(
                 "category 'agent' is permanently reserved and cannot host tools \
                  (ADR-P2A-05 §14); provider {name:?} rejected"
+            ),
+        });
+    }
+    if name.starts_with("agent.") {
+        return Err(McpError::Denied {
+            reason: format!(
+                "tool {name:?} starts with the reserved 'agent.' prefix \
+                 (ADR-P2A-05 §14) — the agent cannot modify its own environment"
             ),
         });
     }
@@ -205,6 +219,15 @@ mod tests {
         assert!(ensure_tool_name_allowed("agent.set_brain", "custom").is_err());
         assert!(ensure_tool_name_allowed("set_brain", "custom").is_err());
         assert!(ensure_tool_name_allowed("read_config", "infrastructure").is_err());
+    }
+
+    #[test]
+    fn any_agent_prefix_is_rejected_even_if_not_in_reserved_list() {
+        // Defense in depth per SEC-MCP-B3 — `agent.*` prefix catches
+        // future meta-operation names without requiring a list update.
+        assert!(ensure_tool_name_allowed("agent.anything_else", "knowledge").is_err());
+        assert!(ensure_tool_name_allowed("agent.foo", "custom").is_err());
+        assert!(ensure_tool_name_allowed("agent.read_current_brain", "knowledge").is_err());
     }
 
     #[test]

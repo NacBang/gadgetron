@@ -13,6 +13,7 @@ members = [
     "crates/gadgetron-testing",
     "crates/gadgetron-web",
     "crates/gadgetron-knowledge",
+    "crates/gadgetron-kairos",
 ]
 
 [workspace.package]
@@ -34,6 +35,7 @@ gadgetron-xaas = { path = "crates/gadgetron-xaas" }
 gadgetron-testing = { path = "crates/gadgetron-testing" }
 gadgetron-web = { path = "crates/gadgetron-web" }
 gadgetron-knowledge = { path = "crates/gadgetron-knowledge" }
+gadgetron-kairos = { path = "crates/gadgetron-kairos" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -66,6 +68,7 @@ anyhow = "1"
 futures = "0.3"
 tokio-stream = "0.1"
 eventsource-stream = "0.2"
+async-stream = "0.3"
 
 # System monitoring
 sysinfo = "0.33"
@@ -90,6 +93,12 @@ clap = { version = "4", features = ["derive"] }
 
 # Cryptography / randomness
 rand = "0.8"
+
+# Wiki (knowledge layer)
+git2 = { version = "0.20", default-features = false }
+regex = "1"
+once_cell = "1"
+libc = "0.2"
 
 # Testing infrastructure
 testcontainers = "0.23"

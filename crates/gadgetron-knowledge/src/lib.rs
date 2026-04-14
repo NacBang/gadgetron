@@ -6,15 +6,21 @@
 //! P2A implementation is built incrementally per the TDD order in
 //! `docs/design/phase2/00-overview.md §15`:
 //!
-//! 1. wiki path resolution (M3) + proptest — this commit
-//! 2. wiki read/write + git2 backend + credential block (M5) — next
-//! 3. MCP server (stdio) — next
-//! 4. SearXNG client — next
+//! - Step 1 (landed): `wiki::fs` path resolution + proptest
+//! - Step 2 (landed): `wiki::git` autocommit + `wiki::secrets` M5 BLOCK
+//! - Step 3 (landed): `wiki::link` Obsidian `[[link]]` parser
+//! - Step 4 (landed): `wiki::index` in-memory inverted index
+//! - Step 5 (this commit): `search::searxng` WebSearch + SearXNG client
+//! - Step 11 (next): `mcp::KnowledgeToolProvider` trait impl
 //!
 //! See `docs/design/phase2/01-knowledge-layer.md` for the full design.
 
+pub mod config;
 pub mod error;
+pub mod mcp;
+pub mod search;
 pub mod wiki;
 
-pub use error::WikiError;
+pub use error::{SearchError, WikiError};
 pub use gadgetron_core::error::WikiErrorKind;
+pub use mcp::KnowledgeToolProvider;

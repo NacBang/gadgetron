@@ -25,10 +25,19 @@ pub enum WikiError {
 
 impl WikiError {
     /// Construct a `Kind` variant from a `WikiErrorKind`, using its Display as the
-    /// human-readable message. For richer messages, construct `Kind { .. }` directly.
+    /// human-readable message. For richer messages, use `kind_with_message`.
     pub fn kind(kind: WikiErrorKind) -> Self {
         let msg = kind.to_string();
         Self::Kind { kind, message: msg }
+    }
+
+    /// Construct a `Kind` variant with an explicit operator-facing message.
+    /// Preferred for git + I/O error paths where the kind alone is too terse.
+    pub fn kind_with_message(kind: WikiErrorKind, message: impl Into<String>) -> Self {
+        Self::Kind {
+            kind,
+            message: message.into(),
+        }
     }
 
     /// Shorthand for `WikiErrorKind::PathEscape`.
@@ -46,6 +55,37 @@ impl WikiError {
             _ => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SearchError — local to the web-search subsystem. Mapped into a structured
+// MCP tool error at the tool dispatch boundary (future `search::tool` module).
+// ---------------------------------------------------------------------------
+
+#[derive(Error, Debug)]
+pub enum SearchError {
+    /// Transport / network-level failure talking to the SearXNG upstream.
+    ///
+    /// The underlying `reqwest::Error` is preserved for tracing but MUST NOT
+    /// be surfaced to the agent / HTTP client as a plaintext string — the
+    /// MCP dispatch boundary renders a fixed-text error message per security
+    /// A4 in `01-knowledge-layer.md §5.2`.
+    #[error("search transport error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    /// Parse failure on the SearXNG JSON response.
+    ///
+    /// **SECURITY invariant (A4)**: this string MUST be a fixed constant.
+    /// Dynamic content (serde error detail, raw body, upstream payload)
+    /// MUST NOT be interpolated in — it risks leaking upstream info to the
+    /// agent. Enforced by test `parse_error_text_does_not_include_response_body`.
+    #[error("search parse error: {0}")]
+    Parse(String),
+
+    /// Upstream returned a non-2xx status. Fixed-string error, no body
+    /// interpolation.
+    #[error("search upstream error: {0}")]
+    Upstream(String),
 }
 
 impl From<WikiError> for GadgetronError {

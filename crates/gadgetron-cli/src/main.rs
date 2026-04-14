@@ -120,6 +120,36 @@ enum Commands {
         #[arg(long, short = 'c')]
         config: Option<PathBuf>,
     },
+
+    /// Run the Model Context Protocol (MCP) stdio server.
+    ///
+    /// This subcommand is invoked by Claude Code as a child process via
+    /// the `--mcp-config` JSON file that Kairos writes per request.
+    /// It reads JSON-RPC 2.0 messages from stdin, dispatches tool calls
+    /// through the registered `McpToolProvider`s (currently just
+    /// `KnowledgeToolProvider` from `[knowledge]`), and writes responses
+    /// to stdout.
+    ///
+    /// Not intended for direct operator use. `gadgetron serve` is the
+    /// user-facing entry point; the mcp serve subcommand exists only as
+    /// the child-side of the Kairos subprocess bridge.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCmd,
+    },
+}
+
+/// Subcommands for `gadgetron mcp`.
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Run the stdio MCP server on the current process's stdin/stdout.
+    /// Exits cleanly on stdin EOF (parent process exit).
+    Serve {
+        /// Path to the config file containing the `[knowledge]` section.
+        /// Defaults to `gadgetron.toml` in the current directory.
+        #[arg(long, short = 'c')]
+        config: Option<PathBuf>,
+    },
 }
 
 /// Subcommands for `gadgetron tenant`.
@@ -226,9 +256,71 @@ async fn main() -> Result<()> {
         Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
 
+        Some(Commands::Mcp {
+            command: McpCmd::Serve { config },
+        }) => cmd_mcp_serve(config).await,
+
         // No subcommand given: default to `serve` with no flags.
         None => serve(None, None, false, false, None).await,
     }
+}
+
+/// `gadgetron mcp serve` — run the stdio MCP server.
+///
+/// Reads the `[knowledge]` section from the config file, builds a
+/// `KnowledgeToolProvider`, freezes it into an `McpToolRegistry`, and
+/// calls `gadgetron_kairos::serve_stdio(registry)` to handle the
+/// JSON-RPC 2.0 message loop on stdin/stdout.
+///
+/// Exits cleanly on stdin EOF. Errors in config loading or provider
+/// construction produce a descriptive message on stderr and exit
+/// code 1.
+async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
+    use std::sync::Arc;
+
+    let config_path: PathBuf = config_path_override
+        .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
+
+    if !config_path.exists() {
+        anyhow::bail!(
+            "config file not found: {}. Run `gadgetron kairos init` first, or pass --config.",
+            config_path.display()
+        );
+    }
+
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+
+    let knowledge_cfg = gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
+                 requires the knowledge layer to be configured.",
+                config_path.display()
+            )
+        })?;
+
+    knowledge_cfg
+        .validate()
+        .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
+
+    let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
+        .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
+
+    let mut builder = gadgetron_kairos::McpToolRegistryBuilder::new();
+    builder
+        .register(Arc::new(provider))
+        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
+    let registry = Arc::new(builder.freeze());
+
+    // Drive the stdio loop until EOF.
+    gadgetron_kairos::serve_stdio(registry)
+        .await
+        .map_err(|e| anyhow::anyhow!("mcp stdio server error: {e}"))?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -720,10 +812,19 @@ async fn serve(
     }
 
     // Coerce Arc<dyn LlmProvider + Send + Sync> → Arc<dyn LlmProvider> for Router::new.
-    let providers_for_router: HashMap<String, Arc<dyn LlmProvider>> = providers_ss
+    let mut providers_for_router: HashMap<String, Arc<dyn LlmProvider>> = providers_ss
         .iter()
         .map(|(k, v)| (k.clone(), Arc::clone(v) as Arc<dyn LlmProvider>))
         .collect();
+
+    // Step 9a (P2A Kairos wiring): if `[knowledge]` is present in the
+    // config file, construct the knowledge layer, register it as a
+    // KnowledgeToolProvider in an McpToolRegistry, and register
+    // KairosProvider as the `"kairos"` entry in the router map.
+    //
+    // Silent skip when `[knowledge]` is absent — operators who haven't
+    // run `gadgetron kairos init` get a normal non-Kairos server.
+    register_kairos_if_configured(&config_path, &config, &mut providers_for_router);
 
     // Step 10: Build the LLM router.
     let metrics_store = Arc::new(MetricsStore::new());
@@ -837,6 +938,102 @@ async fn serve(
 // ---------------------------------------------------------------------------
 // Graceful shutdown: SIGTERM (Unix) or Ctrl-C
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Phase 2A Kairos registration — P2A Step 22
+// ---------------------------------------------------------------------------
+
+/// Build the knowledge layer + McpToolRegistry + KairosProvider and
+/// register it into the router's provider map under the `"kairos"`
+/// key, IF the operator has a `[knowledge]` section in their
+/// gadgetron.toml.
+///
+/// Silent no-op when `[knowledge]` is absent — non-Kairos operators
+/// get a standard server with no knowledge-layer behavior.
+///
+/// Errors (malformed `[knowledge]`, wiki init failure, etc.) are
+/// surfaced via `tracing::error!` and the Kairos provider is skipped,
+/// NOT propagated — the server still starts with the other providers.
+/// This matches the Phase 1 tolerance model for individual provider
+/// construction failures.
+fn register_kairos_if_configured(
+    config_path: &std::path::Path,
+    app_config: &AppConfig,
+    providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
+) {
+    // We re-read the toml file to extract the `[knowledge]` section.
+    // The main AppConfig load path doesn't include a `knowledge`
+    // field — adding one would require cross-crate type sharing
+    // (gadgetron-core ↔ gadgetron-knowledge) that's more churn than
+    // a ~5 ms second file read.
+    if !config_path.exists() {
+        return;
+    }
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                path = %config_path.display(),
+                error = %e,
+                "kairos: cannot re-read config file; skipping knowledge layer"
+            );
+            return;
+        }
+    };
+
+    let knowledge_cfg =
+        match gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw) {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => {
+                // No [knowledge] section → kairos not available.
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "kairos: [knowledge] section malformed; skipping"
+                );
+                return;
+            }
+        };
+
+    if let Err(e) = knowledge_cfg.validate() {
+        tracing::error!(error = %e, "kairos: [knowledge] validation failed; skipping");
+        return;
+    }
+
+    // Build the KnowledgeToolProvider (opens/inits the wiki repo).
+    let provider = match gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = ?e, "kairos: KnowledgeToolProvider::new failed; skipping");
+            return;
+        }
+    };
+
+    // Freeze the registry with the single P2A provider.
+    let mut builder = gadgetron_kairos::McpToolRegistryBuilder::new();
+    if let Err(e) = builder.register(Arc::new(provider)) {
+        tracing::error!(error = ?e, "kairos: registry.register failed; skipping");
+        return;
+    }
+    let registry = Arc::new(builder.freeze());
+
+    // Register KairosProvider under the "kairos" model id in the
+    // router map. The existing provider map already holds concrete
+    // OpenAI/Anthropic/vLLM/etc entries; this adds one more.
+    let agent_cfg = Arc::new(app_config.agent.clone());
+    gadgetron_kairos::register_with_router(agent_cfg, registry, providers);
+    tracing::info!(
+        model = "kairos",
+        "kairos: registered (KnowledgeToolProvider active; web.search = {})",
+        if providers.get("kairos").is_some() {
+            "configured_via_knowledge_section"
+        } else {
+            "none"
+        }
+    );
+}
 
 async fn shutdown_signal() {
     let ctrl_c = async {

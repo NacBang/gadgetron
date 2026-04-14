@@ -52,7 +52,9 @@ fn make_env(
 #[test]
 fn build_rs_skip_env_creates_fallback_index() {
     let tmp = tempfile::tempdir().unwrap();
-    let env = make_env(&tmp, true, true, /*skip=*/ true, /*strict=*/ false);
+    let env = make_env(
+        &tmp, true, true, /*skip=*/ true, /*strict=*/ false,
+    );
     let outcome = build_logic::run(&env).expect("run");
     assert_eq!(outcome, BuildOutcome::Skipped("skip-env"));
     let html = fs::read_to_string(env.dist_dir.join("index.html")).unwrap();
@@ -79,7 +81,9 @@ fn build_rs_lockfile_missing_errors_when_scaffolded() {
 fn build_rs_not_scaffolded_creates_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     // No package.json → bootstrap state
-    let env = make_env(&tmp, /*pkg=*/ false, /*lock=*/ false, false, false);
+    let env = make_env(
+        &tmp, /*pkg=*/ false, /*lock=*/ false, false, false,
+    );
     let outcome = build_logic::run(&env).expect("run");
     assert_eq!(outcome, BuildOutcome::FallbackCreated("not-scaffolded"));
     let html = fs::read_to_string(env.dist_dir.join("index.html")).unwrap();
@@ -109,4 +113,3 @@ fn build_rs_fallback_index_contains_gadgetron_title() {
     assert!(!html.to_ascii_lowercase().contains("open webui"));
     assert!(!html.to_ascii_lowercase().contains("open-webui"));
 }
-

@@ -9,9 +9,7 @@
 
 use axum::{
     http::{
-        header::{
-            HeaderName, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
-        },
+        header::{HeaderName, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS},
         HeaderValue,
     },
     Router,
@@ -25,7 +23,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// panics on control characters at const construction time. The test
 /// `csp_string_has_no_newlines` locks this in. Appendix B of the design doc shows
 /// the human-readable layout; THIS const is the authoritative byte sequence.
-pub(crate) const CSP: &str = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; \
+pub const CSP: &str = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; \
     frame-src 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; \
     style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; \
     worker-src 'self'; manifest-src 'self'; media-src 'self'; object-src 'none'; \

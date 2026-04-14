@@ -791,34 +791,79 @@ Each phase exit criteria: design doc → cross-review 통과 → TDD impl → ma
 
 ---
 
-## 15. Next Steps — v3 status (2026-04-13)
+## 15. Next Steps — v3 status (2026-04-13) + v4 Path 1 (2026-04-14)
 
 Completed through v3 cycle:
 - ✅ Q1 (Web UI) resolved 2026-04-13 as OpenWebUI → **re-resolved 2026-04-14 as `gadgetron-web` (assistant-ui)** per D-20260414-02
 - ✅ Q4 (timeline) resolved 2026-04-13
 - ✅ `01-knowledge-layer.md` v3 detailed spec
-- ✅ `02-kairos-agent.md` v3 detailed spec
+- ✅ `02-kairos-agent.md` v3 detailed spec (patched to v4 on 2026-04-14 for agent-centric alignment)
 - ✅ Round 1.5 + Round 2 cross-reviews (4 agents each) — all blockers resolved in v3
 - ✅ ADR-P2A-01, P2A-02, P2A-03 authored and v3-patched; P2A-01 **ACCEPTED** after behavioral verification
 - ✅ Q6 M4 `--allowed-tools` behavioral verification — PASS on claude 2.1.104
 - ✅ `docs/00-overview.md` 하방/상방 framing updated (prior PR)
+- ✅ **2026-04-14** — ADR-P2A-05 Agent-Centric Control Plane + `04-mcp-tool-registry.md` v1 (PM authored)
+- ✅ **2026-04-14** — Round 1.5 dx, Round 1.5 security, Round 2 qa, Round 3 chief-architect on `04 v1`: all **BLOCK**, 24 combined blockers
+- ✅ **2026-04-14** — **ADR-P2A-06** authored: interactive approval flow deferred to Phase 2B (Path 1 scope cut)
+- ✅ **2026-04-14** — `04 v2` authored (Path 1 scope), `02-kairos-agent.md v4` alignment patch, `ADR-P2A-05` amended, `gadgetron-kairos` crate scaffolded
 
-Remaining P2A pre-impl work:
-1. Draft **Korean manual section** `docs/manual/kairos.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md` rule.
-2. Commit + push Round 2 review cycle + v3 docs + manual draft as a single PR.
-3. **NEW (D-20260414-02)**: Author `docs/design/phase2/03-gadgetron-web.md` — `gadgetron-web` crate design: Cargo.toml, `build.rs` / `cargo xtask build-web` pipeline, assistant-ui component composition, XSS hardening strategy, threat model rewrite of §8 `gadgetron-web` row, `web-ui` Cargo feature on `gadgetron-gateway`. Ship through Round 1.5 (dx + security) + Round 2 (qa) + Round 3 (chief-architect) before any code lands.
-4. **NEW (D-20260414-03)**: Author `docs/design/database/backend-trait.md` — `DatabaseBackend` trait, profile selector (`local`/`server`/`inmemory`), SQLite backport plan for Phase 1 Postgres-specific SQL, migration file layout. Ship through chief-architect + qa-test-architect + security-compliance-lead reviews. Not a P2A blocker — target before P2B entry.
-5. TDD implementation starts on P2A: Red (failing tests) → Green (minimum code) → Refactor. Order:
-   - `gadgetron-knowledge::wiki` path resolution (M3) + proptest corpus
-   - `gadgetron-knowledge::wiki` read/write + git backend + M5 credential BLOCK
-   - `gadgetron-knowledge::mcp` server (manual stdio fallback)
-   - `gadgetron-knowledge::search::searxng` client
-   - `gadgetron-core` error variant extension (`Kairos`, `Wiki` — already landed in Phase 2 Kairos + Wiki error PR #13)
-   - `gadgetron-kairos::spawn` + `ClaudeCodeSession` subprocess lifecycle
-   - `gadgetron-kairos::stream` event parser
-   - `gadgetron-kairos::provider` `LlmProvider` impl + router registration
-   - `gadgetron-web` scaffolding + assistant-ui wiring + `gadgetron-gateway` `web-ui` feature gate (parallelizable with knowledge/kairos work once `03-gadgetron-web.md` is approved)
-   - E2E: 5 assertions in `02-kairos-agent.md` §14.5 (requires `claude` binary, gated by `GADGETRON_E2E_CLAUDE=1`) + Web UI smoke test (`gadgetron-web` serves `/web` and loads `kairos` in model list)
+### Remaining P2A pre-impl work
+
+1. Draft **Korean manual section** `docs/manual/kairos.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md` rule. Update §15.1 "brain model" to reference `[agent.brain]` instead of `[kairos]`.
+2. **NEW (D-20260414-03)**: Author `docs/design/database/backend-trait.md` — `DatabaseBackend` trait, profile selector, SQLite backport plan. Not a P2A blocker — target before P2B entry.
+3. `gadgetron kairos init` patch to emit full `[agent]` section (DX-MCP-B1 live item)
+
+### P2A TDD order — Path 1 (approval flow deferred to P2B per ADR-P2A-06)
+
+TDD Red → Green → Refactor. Each step is a PR; cross-crate PRs are fine but each PR must compile and pass its own tests.
+
+**Phase 1 — Knowledge layer foundation (independent of agent plane)**
+1. `gadgetron-knowledge::wiki::fs` path resolution (M3) + proptest corpus — already LANDED
+2. `gadgetron-knowledge::wiki::git` — auto-commit, credential BLOCK M5, corruption recovery tests (per 01 v3)
+3. `gadgetron-knowledge::wiki::link` — Obsidian `[[link]]` parser + backlink index
+4. `gadgetron-knowledge::wiki::search` — in-memory inverted index
+5. `gadgetron-knowledge::search::searxng` — SearXNG JSON API client (per 01 v3)
+
+**Phase 2 — Agent control plane scaffold (core types already landed)**
+6. `gadgetron-core` migration pass: `AppConfig::load` pre-deserialize hook to rewrite `[kairos]` → `[agent.brain]` per `04 v2 §11.1` + `v0_1_x_kairos_config_loads_with_deprecation_warning` test
+7. `gadgetron-core::agent::config` — add `request_timeout_secs` and `max_concurrent_subprocesses` fields on `AgentConfig` (migration targets); add P2A-stage check rejecting `mode = "gadgetron_local"` at `validate()`; add `EnvResolver` injection for V11 testability (QA-MCP-M3)
+8. `gadgetron-core` error extension: 6 new `KairosErrorKind::Tool*` variants + `From<McpError> for GadgetronError` conversions per `04 v2 §10.1`
+9. `gadgetron-core::agent::tools` startup warning emitter: when any `WriteToolsConfig.*` field resolves to `Ask`, emit `tracing::warn!("agent.tools.{field}=ask has no effect in Phase 2A — approval flow is deferred to P2B per ADR-P2A-06")`
+
+**Phase 3 — MCP registry + knowledge provider**
+10. `gadgetron-kairos::registry::{McpToolRegistryBuilder, McpToolRegistry}` builder/freeze pattern per `04 v2 §2.1`
+11. `gadgetron-knowledge::mcp::KnowledgeToolProvider` — first `McpToolProvider` implementation
+12. `gadgetron-knowledge::tests::mcp_conformance` — `tools/list` / `tools/call` / unknown-tool conformance tests
+13. `gadgetron-testing::mocks::mcp::fake_tool_provider::FakeToolProvider` — per `04 v2 §16` (QA-MCP-B2 live item)
+14. `gadgetron-kairos::tests::registry` — builder + freeze + dispatch + `build_allowed_tools` tests (including 2 proptests)
+
+**Phase 4 — Kairos subprocess lifecycle (02-kairos-agent.md v4)**
+15. `gadgetron-kairos::mcp_config` — tempfile (M1, unix 0600 atomic)
+16. `gadgetron-kairos::spawn` — Command builder with `kill_on_drop(true)` + env allowlist (per 02 v4 §5.1)
+17. `gadgetron-kairos::redact` — `redact_stderr` (M2, per 02 v4 §8)
+18. `gadgetron-kairos::session` — `ClaudeCodeSession` subprocess lifecycle (consuming `run()`)
+19. `gadgetron-kairos::stream` — stream-json → `ChatChunk` translator (per 02 v4 §6)
+20. `gadgetron-kairos::provider::KairosProvider` — `LlmProvider` impl + `register_with_router`
+21. `gadgetron-kairos::tests::sse_conformance` + `subprocess_determinism` + `redact_stderr` + `mcp_config_tmpfile` per 02 v4 §14
+
+**Phase 5 — CLI + gateway wiring**
+22. `gadgetron-cli::bin::gadgetron` — compose `McpToolRegistryBuilder` + all providers in `main()`, pass frozen registry to `KairosProvider`
+23. `gadgetron-cli::mcp_serve` — new `gadgetron mcp serve` subcommand (stdio MCP server dispatching via `McpToolRegistry`)
+24. `gadgetron-cli::kairos_init` — patch to emit full `[agent]` section (DX-MCP-B1)
+25. `gadgetron-cli::features` — declare `web-ui`, `agent-read`, `agent-write`, `agent-destructive`, `infra-tools`, `scheduler-tools`, `slurm`, `k8s` per `04 v2 §6.1` + `headless_build_strips_write_tools` test
+26. `gadgetron-gateway` — no new handlers on `/v1/*` beyond existing. `/v1/approvals/{id}` is **NOT** in P2A.
+
+**Phase 6 — Integration + E2E**
+27. `gadgetron-testing::tests::kairos_integration` — full provider registration + real router + fake-claude binary (per 02 v4 §14)
+28. `gadgetron-testing::tests::kairos_e2e` — real `claude` binary, 5 assertions from 02 v4 §14.5 (gated by `GADGETRON_E2E_CLAUDE=1`)
+29. `gadgetron-web` Web UI smoke test — `/web` serves, `kairos` appears in `/v1/models` list
+
+**Deferred to Phase 2B** (tracked in ADR-P2A-06 §Phase 2B):
+- `ApprovalRegistry`, `PendingApproval`, cross-process bridge (SEC-MCP-B1)
+- SSE `gadgetron.approval_required`, `POST /v1/approvals/{id}`
+- `<ApprovalCard>` frontend, "Allow always" localStorage, rate limiter
+- `Scope::AgentApproval` variant, scope middleware refactor
+- ADR-P2A-01 Part 3 slow-MCP-response verification
 
 ---
 

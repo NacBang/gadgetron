@@ -46,6 +46,17 @@ impl fmt::Display for NodeErrorKind {
 ///
 /// Corresponds to `GadgetronError::Kairos { kind, message }`. HTTP dispatch
 /// is handled centrally; see `GadgetronError::http_status_code`.
+///
+/// # Subprocess kinds (P2A, 02-kairos-agent.md v4)
+/// - `NotInstalled`, `SpawnFailed`, `AgentError`, `Timeout`
+///
+/// # MCP tool dispatch kinds (P2A, 04-mcp-tool-registry.md v2 §10.1)
+/// - `ToolUnknown`, `ToolDenied`, `ToolRateLimited`, `ToolApprovalTimeout`,
+///   `ToolInvalidArgs`, `ToolExecution`
+/// - Populated by `impl From<McpError> for GadgetronError` at the dispatch
+///   boundary. `ToolApprovalTimeout` is reserved for P2B (no approval flow
+///   in P2A per ADR-P2A-06) but the variant ships in P2A for forward
+///   compatibility of the enum surface.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KairosErrorKind {
@@ -63,6 +74,33 @@ pub enum KairosErrorKind {
     },
     /// Subprocess wallclock exceeded `kairos.request_timeout_secs`. HTTP 504.
     Timeout { seconds: u64 },
+
+    // ---- MCP tool dispatch kinds (04 v2 §10.1) ----
+    /// Agent called a tool name that is not registered with the MCP tool
+    /// registry. Indicates version mismatch between Claude Code's cached
+    /// tool manifest and the live registry. HTTP 500.
+    ToolUnknown { name: String },
+    /// Tool call denied by policy (never-mode subcategory, feature gate
+    /// disabled, reserved namespace violation). The `reason` is a fixed
+    /// operator-facing string drawn from the MCP server; does NOT contain
+    /// subprocess stderr content. HTTP 403.
+    ToolDenied { reason: String },
+    /// Tool rate-limit exceeded. Only used by Destructive-tier tools in P2B+.
+    /// P2A never emits this variant (T3 `enabled = false` is forced by V5).
+    /// HTTP 429.
+    ToolRateLimited {
+        tool: String,
+        remaining: u32,
+        limit: u32,
+    },
+    /// Approval flow timed out waiting for user decision. Reserved for P2B
+    /// (no approval flow in P2A). HTTP 504.
+    ToolApprovalTimeout { secs: u64 },
+    /// Arguments passed to the tool did not match its input schema. HTTP 400.
+    ToolInvalidArgs { reason: String },
+    /// Tool execution failed at the provider level (wiki write I/O failure,
+    /// SearXNG HTTP error, etc.). HTTP 500.
+    ToolExecution { reason: String },
 }
 
 impl fmt::Display for KairosErrorKind {
@@ -72,6 +110,12 @@ impl fmt::Display for KairosErrorKind {
             Self::SpawnFailed { .. } => write!(f, "spawn_failed"),
             Self::AgentError { .. } => write!(f, "agent_error"),
             Self::Timeout { .. } => write!(f, "timeout"),
+            Self::ToolUnknown { .. } => write!(f, "tool_unknown"),
+            Self::ToolDenied { .. } => write!(f, "tool_denied"),
+            Self::ToolRateLimited { .. } => write!(f, "tool_rate_limited"),
+            Self::ToolApprovalTimeout { .. } => write!(f, "tool_approval_timeout"),
+            Self::ToolInvalidArgs { .. } => write!(f, "tool_invalid_args"),
+            Self::ToolExecution { .. } => write!(f, "tool_execution"),
         }
     }
 }
@@ -210,6 +254,12 @@ impl GadgetronError {
                 KairosErrorKind::SpawnFailed { .. } => "kairos_spawn_failed",
                 KairosErrorKind::AgentError { .. } => "kairos_agent_error",
                 KairosErrorKind::Timeout { .. } => "kairos_timeout",
+                KairosErrorKind::ToolUnknown { .. } => "kairos_tool_unknown",
+                KairosErrorKind::ToolDenied { .. } => "kairos_tool_denied",
+                KairosErrorKind::ToolRateLimited { .. } => "kairos_tool_rate_limited",
+                KairosErrorKind::ToolApprovalTimeout { .. } => "kairos_tool_approval_timeout",
+                KairosErrorKind::ToolInvalidArgs { .. } => "kairos_tool_invalid_args",
+                KairosErrorKind::ToolExecution { .. } => "kairos_tool_execution",
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => "wiki_invalid_path",
@@ -243,6 +293,11 @@ impl GadgetronError {
             Self::Node { .. } => "A node-level error occurred. Check GPU availability and NVML driver status.".to_string(),
             // Kairos variants — NEVER includes the `stderr_redacted` field content.
             // Enforced by test `kairos_agent_error_message_does_not_contain_stderr`.
+            //
+            // Tool-dispatch variants (04 v2 §10.1) are safe to interpolate
+            // because their content comes from the MCP server, not subprocess
+            // stderr. Provider authors are instructed to keep reason strings
+            // operator-readable and non-sensitive.
             Self::Kairos { kind, .. } => match kind {
                 KairosErrorKind::NotInstalled =>
                     "The Kairos assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`.".to_string(),
@@ -252,6 +307,18 @@ impl GadgetronError {
                     "The Kairos assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator.".to_string(),
                 KairosErrorKind::Timeout { seconds } =>
                     format!("The Kairos assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request."),
+                KairosErrorKind::ToolUnknown { name } =>
+                    format!("The agent requested tool {name:?}, which is not registered on this server. This usually means a version mismatch between the agent's cached tool manifest and the live MCP registry. Restart `gadgetron serve` to refresh the manifest."),
+                KairosErrorKind::ToolDenied { reason } =>
+                    format!("A tool call was denied by policy: {reason}. Check your `[agent.tools.*]` configuration in `gadgetron.toml`."),
+                KairosErrorKind::ToolRateLimited { tool, remaining, limit } =>
+                    format!("Tool {tool:?} is rate-limited ({remaining}/{limit} calls remaining this hour). Wait and retry, or increase `[agent.tools.destructive].max_per_hour` in `gadgetron.toml`."),
+                KairosErrorKind::ToolApprovalTimeout { secs } =>
+                    format!("A tool call required user approval but none arrived within {secs} seconds. (Approval flow is not functional in Phase 2A — this error indicates a misconfiguration or a forward-compat P2B path.)"),
+                KairosErrorKind::ToolInvalidArgs { reason } =>
+                    format!("The agent passed invalid arguments to a tool: {reason}. This is an agent-side bug; try rephrasing your request."),
+                KairosErrorKind::ToolExecution { reason } =>
+                    format!("A tool failed to execute: {reason}. Check server logs for details."),
             },
             // Wiki variants — always safe to surface to clients
             // (path/bytes/limit are user-provided values, not secrets).
@@ -284,7 +351,16 @@ impl GadgetronError {
             Self::HotSwapFailed(_) => "api_error",
             Self::Database { .. } => "server_error",
             Self::Node { .. } => "server_error",
-            Self::Kairos { .. } => "server_error",
+            Self::Kairos { kind, .. } => match kind {
+                // Tool-dispatch variants get OpenAI-taxonomy-aligned types so
+                // SDK clients can `match` on the shape (invalid_request_error
+                // vs permission_error vs quota_error).
+                KairosErrorKind::ToolDenied { .. } => "permission_error",
+                KairosErrorKind::ToolInvalidArgs { .. } => "invalid_request_error",
+                KairosErrorKind::ToolRateLimited { .. } => "quota_error",
+                KairosErrorKind::ToolApprovalTimeout { .. } => "server_error",
+                _ => "server_error",
+            },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => "invalid_request_error",
                 WikiErrorKind::PageTooLarge { .. } => "invalid_request_error",
@@ -320,6 +396,12 @@ impl GadgetronError {
                 KairosErrorKind::NotInstalled | KairosErrorKind::SpawnFailed { .. } => 503,
                 KairosErrorKind::AgentError { .. } => 500,
                 KairosErrorKind::Timeout { .. } => 504,
+                KairosErrorKind::ToolUnknown { .. } => 500,
+                KairosErrorKind::ToolDenied { .. } => 403,
+                KairosErrorKind::ToolRateLimited { .. } => 429,
+                KairosErrorKind::ToolApprovalTimeout { .. } => 504,
+                KairosErrorKind::ToolInvalidArgs { .. } => 400,
+                KairosErrorKind::ToolExecution { .. } => 500,
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => 400,
@@ -333,6 +415,43 @@ impl GadgetronError {
 }
 
 pub type Result<T> = std::result::Result<T, GadgetronError>;
+
+// ---------------------------------------------------------------------------
+// McpError → GadgetronError conversion (04-mcp-tool-registry.md v2 §10.1)
+// ---------------------------------------------------------------------------
+
+/// Maps an `McpError` from the MCP dispatch boundary into a
+/// `GadgetronError::Kairos` variant so the gateway can render HTTP + SSE
+/// responses through the single user-facing error path per D-13.
+///
+/// Called at the `KairosProvider::chat_stream` seam when a tool call
+/// returns `Err`. The `message` field is a generic one-line summary; the
+/// `kind` holds the structured payload that `error_message()`,
+/// `http_status_code()`, and `error_code()` consume.
+impl From<crate::agent::tools::McpError> for GadgetronError {
+    fn from(err: crate::agent::tools::McpError) -> Self {
+        use crate::agent::tools::McpError;
+        let kind = match err {
+            McpError::UnknownTool(name) => KairosErrorKind::ToolUnknown { name },
+            McpError::Denied { reason } => KairosErrorKind::ToolDenied { reason },
+            McpError::RateLimited {
+                tool,
+                remaining,
+                limit,
+            } => KairosErrorKind::ToolRateLimited {
+                tool,
+                remaining,
+                limit,
+            },
+            McpError::ApprovalTimeout { secs } => KairosErrorKind::ToolApprovalTimeout { secs },
+            McpError::InvalidArgs(reason) => KairosErrorKind::ToolInvalidArgs { reason },
+            McpError::Execution(reason) => KairosErrorKind::ToolExecution { reason },
+        };
+        // Generic summary — the kind carries the structured detail.
+        let message = format!("tool dispatch error: {kind}");
+        GadgetronError::Kairos { kind, message }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -536,10 +655,51 @@ mod tests {
             GadgetronError::Routing("".into()).error_type(),
             "server_error"
         );
-        // Phase 2: Kairos always server_error
+        // Phase 2: Kairos subprocess kinds = server_error
         assert_eq!(
             GadgetronError::Kairos {
                 kind: KairosErrorKind::NotInstalled,
+                message: "".into(),
+            }
+            .error_type(),
+            "server_error"
+        );
+        // Phase 2: Kairos tool-dispatch kinds (04 v2 §10.1)
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolDenied {
+                    reason: "never".into()
+                },
+                message: "".into(),
+            }
+            .error_type(),
+            "permission_error"
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolInvalidArgs {
+                    reason: "missing path".into()
+                },
+                message: "".into(),
+            }
+            .error_type(),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolRateLimited {
+                    tool: "x".into(),
+                    remaining: 0,
+                    limit: 3
+                },
+                message: "".into(),
+            }
+            .error_type(),
+            "quota_error"
+        );
+        assert_eq!(
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolUnknown { name: "x".into() },
                 message: "".into(),
             }
             .error_type(),
@@ -905,6 +1065,109 @@ mod tests {
         assert_eq!(
             format!("{}", KairosErrorKind::Timeout { seconds: 300 }),
             "timeout"
+        );
+    }
+
+    // ---- MCP tool dispatch conversions (04 v2 §10.1) ----
+
+    #[test]
+    fn from_mcp_unknown_tool_maps_to_tool_unknown_kind() {
+        let err: GadgetronError =
+            crate::agent::tools::McpError::UnknownTool("wiki.ghost".into()).into();
+        assert_eq!(err.error_code(), "kairos_tool_unknown");
+        assert_eq!(err.http_status_code(), 500);
+        let msg = err.error_message();
+        assert!(msg.contains("wiki.ghost"), "msg: {msg}");
+    }
+
+    #[test]
+    fn from_mcp_denied_preserves_reason() {
+        let err: GadgetronError = crate::agent::tools::McpError::Denied {
+            reason: "tool disabled by policy (never)".into(),
+        }
+        .into();
+        assert_eq!(err.error_code(), "kairos_tool_denied");
+        assert_eq!(err.http_status_code(), 403);
+        assert!(err.error_message().contains("disabled by policy"));
+    }
+
+    #[test]
+    fn from_mcp_rate_limited_includes_tool_and_counts() {
+        let err: GadgetronError = crate::agent::tools::McpError::RateLimited {
+            tool: "infra.deploy_model".into(),
+            remaining: 0,
+            limit: 3,
+        }
+        .into();
+        assert_eq!(err.error_code(), "kairos_tool_rate_limited");
+        assert_eq!(err.http_status_code(), 429);
+        let msg = err.error_message();
+        assert!(msg.contains("infra.deploy_model"));
+        assert!(msg.contains("3"));
+    }
+
+    #[test]
+    fn from_mcp_approval_timeout_maps_to_504() {
+        let err: GadgetronError =
+            crate::agent::tools::McpError::ApprovalTimeout { secs: 60 }.into();
+        assert_eq!(err.error_code(), "kairos_tool_approval_timeout");
+        assert_eq!(err.http_status_code(), 504);
+        assert!(err.error_message().contains("60"));
+    }
+
+    #[test]
+    fn from_mcp_invalid_args_maps_to_400() {
+        let err: GadgetronError =
+            crate::agent::tools::McpError::InvalidArgs("missing field 'path'".into()).into();
+        assert_eq!(err.error_code(), "kairos_tool_invalid_args");
+        assert_eq!(err.http_status_code(), 400);
+        assert!(err.error_message().contains("missing field"));
+    }
+
+    #[test]
+    fn from_mcp_execution_maps_to_500() {
+        let err: GadgetronError =
+            crate::agent::tools::McpError::Execution("SearXNG returned 502".into()).into();
+        assert_eq!(err.error_code(), "kairos_tool_execution");
+        assert_eq!(err.http_status_code(), 500);
+        assert!(err.error_message().contains("SearXNG"));
+    }
+
+    #[test]
+    fn kairos_tool_variants_display_tokens() {
+        assert_eq!(
+            format!("{}", KairosErrorKind::ToolUnknown { name: "x".into() }),
+            "tool_unknown"
+        );
+        assert_eq!(
+            format!("{}", KairosErrorKind::ToolDenied { reason: "x".into() }),
+            "tool_denied"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                KairosErrorKind::ToolRateLimited {
+                    tool: "x".into(),
+                    remaining: 0,
+                    limit: 3
+                }
+            ),
+            "tool_rate_limited"
+        );
+        assert_eq!(
+            format!("{}", KairosErrorKind::ToolApprovalTimeout { secs: 60 }),
+            "tool_approval_timeout"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                KairosErrorKind::ToolInvalidArgs { reason: "x".into() }
+            ),
+            "tool_invalid_args"
+        );
+        assert_eq!(
+            format!("{}", KairosErrorKind::ToolExecution { reason: "x".into() }),
+            "tool_execution"
         );
     }
 

@@ -7,6 +7,7 @@
 //! `tests/web_headless.rs` covers the opposite case (`--no-default-features`).
 
 #![cfg(feature = "web-ui")]
+#![allow(clippy::field_reassign_with_default)]
 
 use axum::http::StatusCode;
 use axum_test::TestServer;
@@ -76,11 +77,27 @@ async fn web_service_serves_index_html() {
 }
 
 #[tokio::test]
+#[ignore = "hyper normalizes /%2e%2e/Cargo.toml to /Cargo.toml before routing, so \
+            the traversal never reaches validate_and_decode — tracked as a \
+            separate gateway test issue. Unit-level rejection is covered in \
+            crates/gadgetron-web/src/path.rs tests (traversal_variants_all_rejected). \
+            See web_service_rejects_hidden_file_path below for the live HTTP \
+            defense-in-depth check."]
 async fn web_service_rejects_path_traversal() {
     let web_router = gadgetron_web::service(&translate_config(&WebConfig::default()));
     let server = TestServer::new(web_router).unwrap();
-    // %2e%2e decodes to .. — the gadgetron-web path validator rejects it outright.
     let resp = server.get("/%2e%2e/Cargo.toml").await;
+    assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn web_service_rejects_hidden_file_path() {
+    // Live HTTP check that `validate_and_decode` actually gates requests:
+    // `.env` triggers rule 5 (hidden file) and does NOT get normalized
+    // away by hyper. 400 Bad Request proves the validator is wired in.
+    let web_router = gadgetron_web::service(&translate_config(&WebConfig::default()));
+    let server = TestServer::new(web_router).unwrap();
+    let resp = server.get("/.env").await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
 }
 
