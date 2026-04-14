@@ -1,78 +1,156 @@
 # Gadgetron
 
-Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway overhead.
+Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway overhead **plus a built-in personal assistant** (Kairos) backed by Claude Code + a git-versioned markdown wiki.
+
+**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: personal assistant MVP per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md); interactive approval flow deferred to Phase 2B.
 
 ## Features
 
+### Infrastructure (Phase 1)
+
 - **OpenAI-compatible API** — drop-in `/v1/chat/completions` with SSE streaming
-- **6 LLM providers** — OpenAI, Anthropic, Ollama, vLLM, SGLang (Gemini: Sprint 7+)
+- **6 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, vLLM, SGLang
 - **6 routing strategies** — RoundRobin, CostOptimal, LatencyOptimal, QualityOptimal, Fallback, Weighted
 - **GPU-aware scheduling** — VRAM bin-packing, NUMA topology, MIG support
 - **Multi-tenant platform** — API key auth, per-tenant quota (i64 cents), audit logging
 - **Single binary** — `gadgetron serve` runs the full stack
 
+### Agent-Centric Control Plane (Phase 2A)
+
+- **Kairos personal assistant** — Claude Code CLI wrapped as an OpenAI-compatible provider (`model = "kairos"`). Per `02-kairos-agent.md v4`.
+- **`McpToolProvider` trait** — stable plugin interface for MCP tool providers; `gadgetron-core::agent::tools`. P2A ships `KnowledgeToolProvider`; P2B/P2C extend with `InfraToolProvider`, `SchedulerToolProvider`, etc.
+- **`McpToolRegistry` builder/freeze** — `gadgetron-kairos::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
+- **3-tier × 3-mode permission model** — `Tier::{Read, Write, Destructive}` × `ToolMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
+- **`[kairos]` → `[agent.brain]` migration** — `AppConfig::load` rewrites legacy v0.1.x config sections automatically with `tracing::warn!` per moved field. See [04 v2 §11.1](docs/design/phase2/04-mcp-tool-registry.md).
+- **Reserved `agent.*` namespace** — agent cannot modify its own brain/config. Three-layer defense: category check, prefix check, specific-name list. Per `ensure_tool_name_allowed`.
+
+### Knowledge Layer (Phase 2A)
+
+- **Markdown wiki + git** — `wiki::Wiki` aggregate; every write is an auto-commit with an abstract message (no user query / content in commit messages). `git2` / libgit2 backed.
+- **Path traversal guard** — `wiki::fs::resolve_path` enforces M3: no `..`, no null bytes, no symlink escape, NFC/NFD boundary stays inside `wiki_root`.
+- **Credential BLOCK + AUDIT (M5)** — `wiki::secrets` rejects PEM private keys, AWS access keys, and GCP service-account JSON BEFORE touching disk. Bearer tokens, Anthropic / Gadgetron keys trigger AUDIT warnings but do not block.
+- **Obsidian `[[link]]` parser** — `wiki::link`. Supports `[[target|alias]]`, `[[target#heading]]`, UTF-8 Korean/CJK targets, fenced / inline code-block exclusion.
+- **In-memory inverted index** — `wiki::index`. Rebuilt per call at P2A scale; ~20-50 ms for <10k pages.
+- **SearXNG web search** — `search::searxng`. Bounded HTTP timeout + redirect limit + fixed-text error sanitization per A4.
+- **5 MCP tools** — `wiki.list`, `wiki.get`, `wiki.search`, `wiki.write`, `web.search` (last one optional, configured via `[knowledge.search]`).
+
+### Stdio MCP Server (Phase 2A)
+
+- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio MCP server (`gadgetron-kairos::mcp_server`). Invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per `01-knowledge-layer.md v3 §6.1`.
+
 ## Quick Start
 
 ```bash
-# Prerequisites: Docker, an OpenAI API key
+# Prerequisites: Rust 1.85+, git, PostgreSQL (optional for no-db mode),
+#                Claude Code CLI if you want Kairos.
 
-# 1. Start PostgreSQL
-docker run -d --name gadgetron-db \
-  -e POSTGRES_USER=gadgetron -e POSTGRES_PASSWORD=gadgetron -e POSTGRES_DB=gadgetron \
-  -p 5432:5432 postgres:16
+# 1. Build
+cargo build --release
 
-# 2. Start Gadgetron (run once to apply migrations, then Ctrl-C)
-export OPENAI_API_KEY="sk-your-key"
-export GADGETRON_DATABASE_URL="postgresql://gadgetron:gadgetron@localhost:5432/gadgetron"
-cargo run -- serve
+# 2. Minimal `gadgetron.toml` for the personal-assistant profile
+cat > gadgetron.toml <<'TOML'
+[server]
+bind = "127.0.0.1:8080"
 
-# 3. Create tenant + API key via SQL
-# Note: CLI key management (`gadgetron key create`) is coming in a future sprint.
-# For now, insert directly into PostgreSQL. See docs/manual/quickstart.md Step 4
-# for the full instructions including key hashing.
-docker exec -i gadgetron-db psql -U gadgetron -d gadgetron <<'SQL'
-INSERT INTO tenants (id, name, status)
-VALUES ('00000000-0000-0000-0000-000000000001', 'dev-team', 'Active');
+[agent]
+binary = "claude"
+claude_code_min_version = "2.1.104"
+request_timeout_secs = 300
+max_concurrent_subprocesses = 4
 
--- Replace key_hash with: echo -n 'gad_live_YOUR_SECRET' | sha256sum | cut -d' ' -f1
-INSERT INTO api_keys (tenant_id, prefix, key_hash, kind, scopes, name)
-VALUES (
-  '00000000-0000-0000-0000-000000000001',
-  'gad_live',
-  'PASTE_YOUR_64_CHAR_SHA256_HASH_HERE',
-  'live',
-  ARRAY['OpenAiCompat'],
-  'dev-key'
-);
-SQL
+[agent.brain]
+mode = "claude_max"   # uses ~/.claude/ OAuth
 
-# 4. Send first request
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer gad_live_..." \
+[knowledge]
+wiki_path = "~/.gadgetron/wiki"
+wiki_autocommit = true
+wiki_max_page_bytes = 1048576
+
+# [knowledge.search]   # optional — uncomment to enable web.search tool
+# searxng_url = "http://127.0.0.1:8888"
+# timeout_secs = 10
+# max_results = 5
+TOML
+
+# 3. Run the server (no-db mode)
+./target/release/gadgetron serve --no-db
+
+# 4. Chat with Kairos
+curl -sN http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer gad_live_<your_key>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{
+    "model": "kairos",
+    "stream": true,
+    "messages": [
+      {"role":"user","content":"wiki에 오늘 회의 내용을 저장해줘"}
+    ]
+  }'
 ```
+
+The full platform quickstart (PostgreSQL, multi-tenant, provider configs) lives in [`docs/manual/quickstart.md`](docs/manual/quickstart.md). The Kairos user manual section is [`docs/manual/kairos.md`](docs/manual/kairos.md).
 
 ## Architecture
 
 ```
 gadgetron (single binary)
-├── gadgetron-core       — shared types, traits, errors (leaf crate)
-├── gadgetron-provider   — 6 LLM provider adapters
-├── gadgetron-router     — 6 routing strategies + MetricsStore
-├── gadgetron-gateway    — axum HTTP server + Tower middleware + SSE
-├── gadgetron-scheduler  — VRAM bin-packing + LRU eviction
-├── gadgetron-node       — NodeAgent + GPU ResourceMonitor
-├── gadgetron-xaas       — auth, tenant, quota, audit (PostgreSQL)
-├── gadgetron-testing    — mocks, fakes, test harnesses
-├── gadgetron-tui        — Ratatui terminal dashboard
-└── gadgetron-cli        — CLI entry point
+├── gadgetron-core        — shared types, traits, errors, agent config + trait
+├── gadgetron-provider    — 6 LLM provider adapters (HTTP)
+├── gadgetron-router      — 6 routing strategies + MetricsStore
+├── gadgetron-gateway     — axum HTTP server + Tower middleware + SSE
+├── gadgetron-scheduler   — VRAM bin-packing + LRU eviction
+├── gadgetron-node        — NodeAgent + GPU ResourceMonitor
+├── gadgetron-xaas        — auth, tenant, quota, audit (PostgreSQL)
+├── gadgetron-testing     — mocks, fakes, test harnesses
+├── gadgetron-tui         — Ratatui terminal dashboard
+├── gadgetron-web         — embedded assistant-ui Web UI (include_dir!)
+├── gadgetron-knowledge   — wiki (fs/git/secrets/link/index) + searxng + KnowledgeToolProvider
+├── gadgetron-kairos      — McpToolRegistry, ClaudeCodeSession, KairosProvider, mcp_server
+└── gadgetron-cli         — CLI entry point (gadgetron serve / mcp serve / init / doctor)
+```
+
+Data flow for a Kairos chat:
+
+```
+POST /v1/chat/completions?model=kairos
+      │
+      ▼
+gadgetron-gateway  ──►  LlmRouter  ──►  KairosProvider::chat_stream
+                                               │
+                                               ▼
+                            ClaudeCodeSession::run(self)
+                                               │
+                                    spawn `claude -p` ──── stream-json ──► parse_event → ChatChunk
+                                               │
+                                    ┌──────────┴──────────┐
+                                    │                     │
+                                    ▼                     ▼
+                       (agent calls a tool)         mcp_config tempfile
+                                    │                     │
+                                    ▼                     │
+                    Claude Code spawns child:             │
+                    `gadgetron mcp serve`  ◄──────────────┘
+                                    │
+                                    ▼
+                           JSON-RPC 2.0 stdio
+                                    │
+                                    ▼
+                    McpToolRegistry::dispatch
+                                    │
+                                    ▼
+                   KnowledgeToolProvider::call
+                                    │
+                                    ▼
+                      Wiki / SearxngClient (M5 enforcement)
 ```
 
 ## Development
 
 ```bash
-# Run all tests
+# Run all tests (Ubuntu 22.04 + Rust 1.94+ recommended; see dev-container)
+cargo test --workspace --exclude gadgetron-testing
+
+# Full suite including e2e (requires live PostgreSQL)
 cargo test --workspace
 
 # Check formatting + lints
@@ -82,37 +160,86 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Security scan
 cargo audit
 cargo deny check licenses bans advisories
+
+# Live stdio smoke test for `gadgetron mcp serve`
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wiki.write","arguments":{"name":"hello","content":"# Hello"}}}' \
+  | target/debug/gadgetron mcp serve --config gadgetron.toml
+```
+
+### Docker dev container (Ubuntu 22.04 + Rust stable)
+
+```bash
+docker run -d --name gadgetron-dev \
+  -v $(pwd):/workspace -w /workspace \
+  ubuntu:22.04 sleep infinity
+
+docker exec gadgetron-dev bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq curl build-essential pkg-config libssl-dev git ca-certificates cmake
+  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  source /root/.cargo/env
+  rustup default stable
+'
+
+docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --workspace --exclude gadgetron-testing'
 ```
 
 ## Design Documents
 
+### Phase 1 — Infrastructure
 | Document | Status |
 |----------|--------|
 | [Platform Architecture](docs/architecture/platform-architecture.md) | Approved (v1, 7300+ lines, 4 rounds) |
 | [XaaS Phase 1](docs/design/xaas/phase1.md) | Approved (4 rounds, 23 fixes) |
-| [Gateway Wire-up](docs/design/gateway/wire-up.md) | Draft (Round 0 self-check; Round 1+ pending) |
+| [Gateway Wire-up](docs/design/gateway/wire-up.md) | Draft |
 | [Core Types](docs/design/core/types-consolidation.md) | Round 3 Approved |
-| [Testing Harness](docs/design/testing/harness.md) | Round 2 retry |
+| [Testing Harness](docs/design/testing/harness.md) | Round 2 |
 
-## Sprint Progress
+### Phase 2A — Personal Assistant
+| Document | Status |
+|----------|--------|
+| [Phase 2A Overview](docs/design/phase2/00-overview.md) | v3 approved |
+| [01 — Knowledge Layer](docs/design/phase2/01-knowledge-layer.md) | v3 approved |
+| [02 — Kairos Agent](docs/design/phase2/02-kairos-agent.md) | v4 (Path 1 aligned) |
+| [03 — gadgetron-web](docs/design/phase2/03-gadgetron-web.md) | v2.1 approved |
+| [04 — MCP Tool Registry](docs/design/phase2/04-mcp-tool-registry.md) | **v2 (Path 1 scope cut)** |
 
-| Sprint | Scope | Tests |
-|--------|-------|-------|
-| 1 | Core types (GadgetronError, Secret, TenantContext, ProcessState FSM) | 35 |
-| 2 | XaaS (PostgreSQL schema, PgKeyValidator, QuotaEnforcer, AuditWriter) | 17 |
-| 3 | Gateway wire-up (IntoResponse, middleware, SSE) | 14 |
-| 4 | vLLM + SGLang provider activation | included above |
-| 5 | E2E harness, criterion benchmarks, TUI wiring | included above |
-| 6 | TUI live hardening (broadcast channel, /ready PG check, graceful shutdown) | included above |
-| **Total** | | **~100 passed** |
+### Phase 2A ADRs
+| ADR | Title |
+|-----|-------|
+| [P2A-01](docs/adr/ADR-P2A-01-allowed-tools-enforcement.md) | `--allowed-tools` enforcement verification (Claude Code 2.1.104) |
+| [P2A-02](docs/adr/ADR-P2A-02-dangerously-skip-permissions-risk-acceptance.md) | `--dangerously-skip-permissions` risk acceptance |
+| [P2A-03](docs/adr/ADR-P2A-03-searxng-privacy-disclosure.md) | SearXNG privacy disclosure |
+| [P2A-04](docs/adr/ADR-P2A-04-chat-ui-selection.md) | `gadgetron-web` (assistant-ui) over OpenWebUI |
+| [P2A-05](docs/adr/ADR-P2A-05-agent-centric-control-plane.md) | Agent-Centric Control Plane |
+| [P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md) | **Approval flow deferred to P2B (Path 1 scope cut)** |
+
+## Phase 2A Progress
+
+Tracked in [`docs/design/phase2/00-overview.md §15`](docs/design/phase2/00-overview.md). 20 of 29 TDD steps complete under Path 1.
+
+| Phase | Steps | Status |
+|-------|-------|--------|
+| **1 Knowledge foundation** | 1-5 | ✅ wiki::{fs, git, secrets, link, index} + search::searxng |
+| **2 Agent control plane** | 6-9 | ✅ AppConfig `[kairos]` → `[agent.brain]` migration, AgentConfig fields, KairosErrorKind tool variants, EnvResolver, ask-mode warn |
+| **3 MCP registry + provider** | 10-14 | ✅ McpToolRegistry, Wiki aggregate + KnowledgeToolProvider, cross-crate integration (12 absorbed, 13 deferred to P2B) |
+| **4 Kairos subprocess** | 15-21 | ✅ mcp_config (M1), spawn, redact (M2), session, stream, provider, inline tests |
+| **5 CLI wiring** | 22-26 | ✅ register_kairos_if_configured, `gadgetron mcp serve` subcommand; 24 (`init` `[agent]` emit) / 25 (feature gates) / 26 (gateway no-op) remain |
+| **6 Integration + E2E** | 27-29 | 🔲 fake_claude + real Claude E2E + gadgetron-web smoke |
+
+**Test matrix** (Rust 1.94 / Ubuntu 22.04 Docker): ~500 tests pass across the workspace, 0 failures excluding `gadgetron-testing` e2e (which requires live PostgreSQL).
 
 ## Team
 
-PM-led 10-agent architecture:
+PM-led specialist architecture:
 
 | Agent | Domain |
 |-------|--------|
-| chief-architect | Core types, cross-crate consistency |
+| chief-architect | Core types, cross-crate consistency, D-12 crate seams |
 | gateway-router-lead | HTTP gateway, routing, SSE |
 | inference-engine-lead | Provider adapters, protocol translation |
 | gpu-scheduler-lead | VRAM scheduling, NVML, MIG |
