@@ -11,6 +11,7 @@ gadgetron-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 # Wiki subsystem — git backend + credential patterns
 git2 = { workspace = true }
@@ -18,6 +19,11 @@ regex = { workspace = true }
 once_cell = { workspace = true }
 libc = { workspace = true }
 
+# Web search subsystem (SearXNG client)
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

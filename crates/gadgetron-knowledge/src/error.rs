@@ -57,6 +57,37 @@ impl WikiError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SearchError — local to the web-search subsystem. Mapped into a structured
+// MCP tool error at the tool dispatch boundary (future `search::tool` module).
+// ---------------------------------------------------------------------------
+
+#[derive(Error, Debug)]
+pub enum SearchError {
+    /// Transport / network-level failure talking to the SearXNG upstream.
+    ///
+    /// The underlying `reqwest::Error` is preserved for tracing but MUST NOT
+    /// be surfaced to the agent / HTTP client as a plaintext string — the
+    /// MCP dispatch boundary renders a fixed-text error message per security
+    /// A4 in `01-knowledge-layer.md §5.2`.
+    #[error("search transport error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    /// Parse failure on the SearXNG JSON response.
+    ///
+    /// **SECURITY invariant (A4)**: this string MUST be a fixed constant.
+    /// Dynamic content (serde error detail, raw body, upstream payload)
+    /// MUST NOT be interpolated in — it risks leaking upstream info to the
+    /// agent. Enforced by test `parse_error_text_does_not_include_response_body`.
+    #[error("search parse error: {0}")]
+    Parse(String),
+
+    /// Upstream returned a non-2xx status. Fixed-string error, no body
+    /// interpolation.
+    #[error("search upstream error: {0}")]
+    Upstream(String),
+}
+
 impl From<WikiError> for GadgetronError {
     fn from(err: WikiError) -> Self {
         match err {

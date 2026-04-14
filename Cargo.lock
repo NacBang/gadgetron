@@ -1132,15 +1132,19 @@ dependencies = [
 name = "gadgetron-knowledge"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "gadgetron-core",
  "git2",
  "libc",
  "once_cell",
  "proptest",
  "regex",
+ "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
