@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use gadgetron_core::agent::config::{AgentConfig, ToolMode};
-use gadgetron_core::agent::tools::{McpError, McpToolProvider};
+use gadgetron_core::agent::tools::McpError;
 use gadgetron_kairos::{McpToolRegistry, McpToolRegistryBuilder};
 use gadgetron_knowledge::config::WikiConfig;
 use gadgetron_knowledge::mcp::KnowledgeToolProvider;

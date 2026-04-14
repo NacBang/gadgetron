@@ -29,15 +29,16 @@ pub mod mcp_config;
 pub mod redact;
 pub mod registry;
 pub mod spawn;
+pub mod stream;
 
 pub use mcp_config::{build_config_json, write_config_file};
 pub use redact::redact_stderr;
 pub use registry::{McpToolRegistry, McpToolRegistryBuilder};
 pub use spawn::{build_claude_command, format_allowed_tools, SpawnError};
+pub use stream::{event_to_chat_chunks, parse_event, MessageDelta, StreamJsonEvent};
 
 // Placeholder module stubs — TDD Red→Green will flesh these out
 // per the order in `00-overview.md §15` (Phase 4 Steps 18-20).
 // pub mod provider;
 // pub mod session;
-// pub mod stream;
 // pub mod error;
