@@ -7,6 +7,7 @@
 //! `tests/web_headless.rs` covers the opposite case (`--no-default-features`).
 
 #![cfg(feature = "web-ui")]
+#![allow(clippy::field_reassign_with_default)]
 
 use axum::http::StatusCode;
 use axum_test::TestServer;

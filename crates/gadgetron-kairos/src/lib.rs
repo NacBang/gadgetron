@@ -25,6 +25,10 @@
 //!
 //! See `docs/design/phase2/04-mcp-tool-registry.md` v2 + `02-kairos-agent.md` v4.
 
+// Test code uses the `let mut cfg = X::default(); cfg.field = ...;` pattern
+// extensively. See the matching cfg_attr in gadgetron-core/src/lib.rs.
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 pub mod mcp_config;
 pub mod mcp_server;
 pub mod provider;

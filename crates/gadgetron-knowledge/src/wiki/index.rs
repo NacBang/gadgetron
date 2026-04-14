@@ -200,7 +200,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
             // pure ASCII. A single Hangul syllable or CJK ideograph is
             // meaningful and kept.
             let char_count = lowered.chars().count();
-            if char_count < 2 && lowered.chars().all(|c| c.is_ascii()) {
+            if char_count < 2 && lowered.is_ascii() {
                 return None;
             }
             Some(lowered)

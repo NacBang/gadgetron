@@ -212,7 +212,6 @@ pub fn build_claude_command_with_env(
 mod tests {
     use super::*;
     use gadgetron_core::agent::config::{BrainConfig, FakeEnv};
-    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     fn default_cfg() -> AgentConfig {
@@ -244,12 +243,17 @@ mod tests {
             .collect()
     }
 
+    /// Smoke-check that env_clear was called: the post-clear repopulation
+    /// produces a specific set of keys, so we verify the set is exactly
+    /// what our allowlist adds (HOME / PATH / LANG / LC_ALL / TMPDIR at
+    /// minimum, plus brain-mode-specific ones).
     fn env_cleared(cmd: &Command) -> bool {
-        cmd.as_std().get_envs().count() > 0 // cleared + repopulated
-            && cmd
-                .as_std()
-                .get_envs()
-                .all(|(k, _)| k != OsStr::new("PATH") || true) // ensure we inspect
+        let envs: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        envs.contains(&"HOME".to_string()) && envs.contains(&"PATH".to_string())
     }
 
     // ---- format_allowed_tools ----

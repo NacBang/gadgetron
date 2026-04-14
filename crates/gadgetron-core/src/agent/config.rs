@@ -250,10 +250,11 @@ impl Default for BrainConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrainMode {
     /// ~/.claude/ OAuth (Claude Max subscription). Default.
+    #[default]
     ClaudeMax,
     /// Explicit Anthropic API key + optional base URL override.
     ExternalAnthropic,
@@ -264,12 +265,6 @@ pub enum BrainMode {
     /// in Phase 2C. P2A accepts the config for forward compatibility but
     /// treats it as a startup error until the shim lands.
     GadgetronLocal,
-}
-
-impl Default for BrainMode {
-    fn default() -> Self {
-        Self::ClaudeMax
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,21 +476,16 @@ impl ToolsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolMode {
     /// Execute immediately; audit log records the call.
     Auto,
     /// Enqueue an approval card; user must Allow / Deny.
+    #[default]
     Ask,
     /// Always deny. Tool is also omitted from `--allowed-tools`.
     Never,
-}
-
-impl Default for ToolMode {
-    fn default() -> Self {
-        Self::Ask
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,21 +580,16 @@ impl Default for DestructiveToolsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExtraConfirmation {
     /// Approval card alone is sufficient (default).
+    #[default]
     None,
     /// Require a match against `GADGETRON_DESTRUCTIVE_TOKEN` env var.
     Env,
     /// Require a match against the contents of `extra_confirmation_token_file`.
     File,
-}
-
-impl Default for ExtraConfirmation {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl DestructiveToolsConfig {

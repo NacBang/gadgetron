@@ -20,6 +20,11 @@ use std::path::Component;
 ///    being over-restrictive. (SEC-W-B8)
 /// 5. Hidden files (any segment beginning with `.`)
 /// 6. Any component that is not `Component::Normal` (Parent / Root / Prefix / CurDir)
+///
+/// The `Err(())` shape is deliberate — the caller maps failure to a fixed
+/// HTTP 400 response with no detail (SEC-W-B4), so there is no structured
+/// error to carry. The `#[allow]` below documents the clippy override.
+#[allow(clippy::result_unit_err)]
 pub fn validate_and_decode(raw: &str) -> Result<String, ()> {
     if raw.contains('\0') || raw.contains('\\') {
         return Err(());
