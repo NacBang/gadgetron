@@ -10,6 +10,7 @@ gadgetron-core = { workspace = true }
 
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 
 # Wiki subsystem — git backend + credential patterns
 git2 = { workspace = true }
