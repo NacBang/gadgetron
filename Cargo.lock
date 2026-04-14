@@ -1053,6 +1053,8 @@ dependencies = [
  "clap",
  "gadgetron-core",
  "gadgetron-gateway",
+ "gadgetron-kairos",
+ "gadgetron-knowledge",
  "gadgetron-provider",
  "gadgetron-router",
  "gadgetron-tui",
@@ -1150,6 +1152,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tracing",
 ]
 

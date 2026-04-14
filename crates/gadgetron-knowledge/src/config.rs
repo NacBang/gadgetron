@@ -196,6 +196,26 @@ fn default_max_page_bytes() -> usize {
 }
 
 impl KnowledgeConfig {
+    /// Extract a `[knowledge]` section from a raw `gadgetron.toml`
+    /// content string. Returns `None` when the section is absent —
+    /// callers treat a missing `[knowledge]` as "knowledge layer
+    /// disabled, don't register Kairos".
+    ///
+    /// Returns `Err(String)` only on malformed toml OR when the
+    /// `[knowledge]` section is present but fails deserialization
+    /// (e.g. wrong field types). A missing section is NOT an error.
+    pub fn extract_from_toml_str(raw: &str) -> Result<Option<Self>, String> {
+        let value: toml::Value = raw
+            .parse()
+            .map_err(|e| format!("toml parse failed: {e}"))?;
+        let Some(section) = value.get("knowledge") else {
+            return Ok(None);
+        };
+        let cfg: Self = <Self as serde::Deserialize>::deserialize(section.clone())
+            .map_err(|e| format!("[knowledge] section failed to deserialize: {e}"))?;
+        Ok(Some(cfg))
+    }
+
     /// Validates at load time. Rules:
     /// - `wiki_path` parent must exist (wiki_path itself may not —
     ///   `gadgetron kairos init` creates it on first start).

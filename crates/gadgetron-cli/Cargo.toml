@@ -15,6 +15,8 @@ gadgetron-router = { workspace = true }
 gadgetron-gateway = { workspace = true }
 gadgetron-xaas = { workspace = true }
 gadgetron-tui = { workspace = true }
+gadgetron-kairos = { workspace = true }
+gadgetron-knowledge = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
