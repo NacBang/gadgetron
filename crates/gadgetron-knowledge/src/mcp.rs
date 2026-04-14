@@ -38,9 +38,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use gadgetron_core::agent::tools::{
-    McpError, McpToolProvider, Tier, ToolResult, ToolSchema,
-};
+use gadgetron_core::agent::tools::{McpError, McpToolProvider, Tier, ToolResult, ToolSchema};
 use gadgetron_core::error::WikiErrorKind;
 use serde_json::{json, Value};
 
@@ -65,35 +63,35 @@ impl KnowledgeToolProvider {
     ///   `wiki.search` and `web.search` result counts (both tools
     ///   share the cap for operator simplicity).
     pub fn new(config: KnowledgeConfig) -> Result<Self, WikiError> {
-        let wiki_config = config
-            .to_wiki_config()
-            .map_err(|msg| WikiError::kind_with_message(
+        let wiki_config = config.to_wiki_config().map_err(|msg| {
+            WikiError::kind_with_message(
                 WikiErrorKind::GitCorruption {
                     path: String::new(),
                     reason: msg.clone(),
                 },
                 format!("knowledge config translation failed: {msg}"),
-            ))?;
+            )
+        })?;
         let wiki = Arc::new(Wiki::open(wiki_config)?);
 
-        let (web_search, max_search_results): (Option<Arc<dyn WebSearch>>, usize) =
-            match config.search {
-                Some(sc) => {
-                    let max = sc.max_results as usize;
-                    let client = SearxngClient::new(&sc).map_err(|e| {
-                        WikiError::kind_with_message(
-                            WikiErrorKind::GitCorruption {
-                                path: String::new(),
-                                reason: format!("searxng client construction failed: {e}"),
-                            },
-                            "failed to build SearXNG client from [knowledge.search] config"
-                                .to_string(),
-                        )
-                    })?;
-                    (Some(Arc::new(client) as Arc<dyn WebSearch>), max.max(1))
-                }
-                None => (None, 10),
-            };
+        let (web_search, max_search_results): (Option<Arc<dyn WebSearch>>, usize) = match config
+            .search
+        {
+            Some(sc) => {
+                let max = sc.max_results as usize;
+                let client = SearxngClient::new(&sc).map_err(|e| {
+                    WikiError::kind_with_message(
+                        WikiErrorKind::GitCorruption {
+                            path: String::new(),
+                            reason: format!("searxng client construction failed: {e}"),
+                        },
+                        "failed to build SearXNG client from [knowledge.search] config".to_string(),
+                    )
+                })?;
+                (Some(Arc::new(client) as Arc<dyn WebSearch>), max.max(1))
+            }
+            None => (None, 10),
+        };
 
         Ok(Self {
             wiki,
@@ -302,7 +300,10 @@ impl KnowledgeToolProvider {
             .map(|n| n as usize)
             .unwrap_or(5)
             .min(50);
-        let hits = self.wiki.search(&query, max_results).map_err(map_wiki_err_generic)?;
+        let hits = self
+            .wiki
+            .search(&query, max_results)
+            .map_err(map_wiki_err_generic)?;
         Ok(ToolResult {
             content: json!({
                 "query": query,
@@ -397,21 +398,15 @@ fn map_wiki_err_read(err: WikiError, name: &str) -> McpError {
 /// function is explicitly updated.
 fn map_wiki_err_write(err: WikiError, _name: &str) -> McpError {
     match err.kind_ref() {
-        Some(WikiErrorKind::PathEscape { .. }) => {
-            McpError::InvalidArgs("invalid page path".into())
-        }
-        Some(WikiErrorKind::PageTooLarge { bytes, limit, .. }) => {
-            McpError::InvalidArgs(format!(
-                "page too large: {bytes} bytes exceeds the {limit}-byte limit"
-            ))
-        }
-        Some(WikiErrorKind::CredentialBlocked { pattern, .. }) => {
-            McpError::Denied {
-                reason: format!(
-                    "credential pattern {pattern:?} detected in content — refusing to write"
-                ),
-            }
-        }
+        Some(WikiErrorKind::PathEscape { .. }) => McpError::InvalidArgs("invalid page path".into()),
+        Some(WikiErrorKind::PageTooLarge { bytes, limit, .. }) => McpError::InvalidArgs(format!(
+            "page too large: {bytes} bytes exceeds the {limit}-byte limit"
+        )),
+        Some(WikiErrorKind::CredentialBlocked { pattern, .. }) => McpError::Denied {
+            reason: format!(
+                "credential pattern {pattern:?} detected in content — refusing to write"
+            ),
+        },
         Some(WikiErrorKind::Conflict { .. }) => {
             McpError::Execution("wiki git conflict — resolve manually and retry".into())
         }
@@ -480,16 +475,16 @@ mod tests {
     async fn wiki_write_then_get_round_trips_content() {
         let (_dir, p) = fresh_provider_no_search();
         let write_result = p
-            .call("wiki.write", json!({"name": "home", "content": "# Home\n\nbody"}))
+            .call(
+                "wiki.write",
+                json!({"name": "home", "content": "# Home\n\nbody"}),
+            )
             .await
             .unwrap();
         assert!(!write_result.is_error);
         assert_eq!(write_result.content["bytes"], 12);
 
-        let get_result = p
-            .call("wiki.get", json!({"name": "home"}))
-            .await
-            .unwrap();
+        let get_result = p.call("wiki.get", json!({"name": "home"})).await.unwrap();
         assert_eq!(get_result.content["content"], "# Home\n\nbody");
     }
 
@@ -574,7 +569,10 @@ mod tests {
         let wiki = Arc::new(Wiki::open(cfg).unwrap());
         let p = KnowledgeToolProvider::with_components(wiki, None, 10);
         let err = p
-            .call("wiki.write", json!({"name": "big", "content": "x".repeat(100)}))
+            .call(
+                "wiki.write",
+                json!({"name": "big", "content": "x".repeat(100)}),
+            )
             .await
             .expect_err("too large");
         match err {

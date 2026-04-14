@@ -30,8 +30,8 @@ use axum::{
 };
 use include_dir::{include_dir, Dir};
 
-pub mod path;
 mod mime;
+pub mod path;
 
 /// The mount prefix at which this service is expected to be nested by the gateway.
 /// MUST match `next.config.mjs` `basePath`. Verified by `build.rs` at compile time.
@@ -98,7 +98,9 @@ pub fn service(cfg: &ServiceConfig) -> Router {
 fn rewrite_api_base_in_index(api_base: &str) -> Bytes {
     let raw = WEB_DIST
         .get_file(INDEX_HTML)
-        .expect("gadgetron-web: web/dist/index.html missing from embedded assets (build.rs failure?)")
+        .expect(
+            "gadgetron-web: web/dist/index.html missing from embedded assets (build.rs failure?)",
+        )
         .contents();
     let raw_str = std::str::from_utf8(raw).expect("gadgetron-web: index.html is not valid UTF-8");
     let rewritten = raw_str.replace(
@@ -134,7 +136,8 @@ fn render_html(body: Bytes) -> Response {
 fn render_file(req_path: &str, body: &'static [u8]) -> Response {
     let content_type = mime::content_type_for(req_path);
     let mut resp = Response::new(Body::from(Bytes::from_static(body)));
-    resp.headers_mut().insert(header::CONTENT_TYPE, content_type);
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
     if req_path.starts_with("_next/static/") {
         resp.headers_mut().insert(
             header::CACHE_CONTROL,

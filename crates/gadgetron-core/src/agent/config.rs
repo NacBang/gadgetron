@@ -378,7 +378,8 @@ impl BrainConfig {
                 // V8 — local_model required
                 if self.local_model.is_empty() {
                     return Err(GadgetronError::Config(
-                        "agent.brain.local_model is required when brain.mode = 'gadgetron_local'".into(),
+                        "agent.brain.local_model is required when brain.mode = 'gadgetron_local'"
+                            .into(),
                     ));
                 }
                 // V9 — recursion guard
@@ -412,7 +413,8 @@ impl BrainConfig {
                     "agent.brain.mode = 'gadgetron_local' is not functional in Phase 2A. \
                      The internal /internal/agent-brain shim lands in Phase 2C per ADR-P2A-06. \
                      Use mode = 'claude_max' (default), 'external_anthropic', or \
-                     'external_proxy' until the shim ships.".into(),
+                     'external_proxy' until the shim ships."
+                        .into(),
                 ))
             }
         }
@@ -569,7 +571,6 @@ pub struct DestructiveToolsConfig {
     /// mode 0400 or 0600 at startup (V6).
     #[serde(default)]
     pub extra_confirmation_token_file: String,
-
     // NOTE: there is deliberately no `default_mode` field on this struct.
     // T3 mode is hardcoded Ask — cannot be changed via config (cardinal rule).
 }
@@ -612,7 +613,8 @@ impl DestructiveToolsConfig {
         if self.enabled && self.max_per_hour == 0 {
             return Err(GadgetronError::Config(
                 "agent.tools.destructive.max_per_hour must be > 0 when enabled=true; \
-                 use enabled=false to disable T3 tools entirely".into(),
+                 use enabled=false to disable T3 tools entirely"
+                    .into(),
             ));
         }
         // V6 — file mode requires readable token file with restrictive perms
@@ -681,8 +683,13 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = String::new();
-        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
-        assert!(err.to_string().contains("local_model is required"), "err: {err}");
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("local_model is required"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -690,8 +697,13 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "kairos/anything".into();
-        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
-        assert!(err.to_string().contains("cannot reference kairos"), "err: {err}");
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot reference kairos"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -699,8 +711,13 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "anthropic/claude-3-opus".into();
-        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
-        assert!(err.to_string().contains("Anthropic-family provider"), "err: {err}");
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Anthropic-family provider"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -709,8 +726,13 @@ mod config_tests {
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "vllm/llama3".into();
         // providers map is empty — V10 fires before the P2A rejection.
-        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
-        assert!(err.to_string().contains("not found in [providers.*]"), "err: {err}");
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not found in [providers.*]"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -728,7 +750,9 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "vllm/llama3".into();
-        let err = brain.validate_with_env(&providers, &empty_env()).unwrap_err();
+        let err = brain
+            .validate_with_env(&providers, &empty_env())
+            .unwrap_err();
         assert!(
             err.to_string().contains("not functional in Phase 2A"),
             "should be rejected by Path 1 guard; err: {err}"
@@ -743,7 +767,9 @@ mod config_tests {
         brain.mode = BrainMode::ExternalAnthropic;
         brain.external_anthropic_api_key_env = "MY_FAKE_KEY_VAR".into();
         let empty_env = FakeEnv::new();
-        let err = brain.validate_with_env(&empty_providers(), &empty_env).unwrap_err();
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env)
+            .unwrap_err();
         assert!(err.to_string().contains("is not set in the environment"));
     }
 
@@ -772,22 +798,34 @@ mod config_tests {
     fn request_timeout_secs_range_check() {
         let mut cfg = AgentConfig::default();
         cfg.request_timeout_secs = 5;
-        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_err());
         cfg.request_timeout_secs = 4000;
-        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_err());
         cfg.request_timeout_secs = 300;
-        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_ok());
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_ok());
     }
 
     #[test]
     fn max_concurrent_subprocesses_range_check() {
         let mut cfg = AgentConfig::default();
         cfg.max_concurrent_subprocesses = 0;
-        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_err());
         cfg.max_concurrent_subprocesses = 100;
-        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_err());
         cfg.max_concurrent_subprocesses = 4;
-        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_ok());
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_ok());
     }
 
     #[test]

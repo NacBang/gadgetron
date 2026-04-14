@@ -110,7 +110,10 @@ fn build_allowed_tools_output_is_deterministic() {
     let reg_a = register_knowledge(a);
     let reg_b = register_knowledge(b);
     let cfg = AgentConfig::default();
-    assert_eq!(reg_a.build_allowed_tools(&cfg), reg_b.build_allowed_tools(&cfg));
+    assert_eq!(
+        reg_a.build_allowed_tools(&cfg),
+        reg_b.build_allowed_tools(&cfg)
+    );
 }
 
 #[tokio::test]
@@ -119,10 +122,7 @@ async fn dispatch_wiki_write_then_wiki_get_round_trip_via_registry() {
     let registry = register_knowledge(provider);
 
     let write = registry
-        .dispatch(
-            "wiki.write",
-            json!({"name": "home", "content": "hello"}),
-        )
+        .dispatch("wiki.write", json!({"name": "home", "content": "hello"}))
         .await
         .expect("write");
     assert!(!write.is_error);
@@ -216,7 +216,10 @@ async fn dispatch_wiki_search_via_registry_returns_hits() {
         .await
         .unwrap();
     let result = registry
-        .dispatch("wiki.search", json!({"query": "quarterly", "max_results": 5}))
+        .dispatch(
+            "wiki.search",
+            json!({"query": "quarterly", "max_results": 5}),
+        )
         .await
         .expect("search");
     let hits = result.content["hits"].as_array().unwrap();

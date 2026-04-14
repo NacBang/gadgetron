@@ -289,8 +289,7 @@ pub fn build_router_with_web(
         return base;
     }
     let service_cfg = crate::web_csp::translate_config(web_cfg);
-    let web_router =
-        crate::web_csp::apply_web_headers(gadgetron_web::service(&service_cfg));
+    let web_router = crate::web_csp::apply_web_headers(gadgetron_web::service(&service_cfg));
     base.nest("/web", web_router)
 }
 

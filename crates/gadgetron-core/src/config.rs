@@ -265,9 +265,9 @@ fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
         );
     }
 
-    let mut value: toml::Value = source
-        .parse()
-        .map_err(|e| crate::error::GadgetronError::Config(format!("Failed to parse config: {e}")))?;
+    let mut value: toml::Value = source.parse().map_err(|e| {
+        crate::error::GadgetronError::Config(format!("Failed to parse config: {e}"))
+    })?;
 
     // Extract [kairos] table; if absent, no migration needed.
     let kairos = match value.as_table_mut().and_then(|t| t.remove("kairos")) {
@@ -365,10 +365,7 @@ fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
             }
             brain.insert("external_base_url".into(), v);
             if !brain.contains_key("mode") {
-                brain.insert(
-                    "mode".into(),
-                    toml::Value::String("external_proxy".into()),
-                );
+                brain.insert("mode".into(), toml::Value::String("external_proxy".into()));
             }
             emit_deprecation("kairos.claude_base_url -> agent.brain.external_base_url");
         }
@@ -580,7 +577,10 @@ max_concurrent_subprocesses = 4
         let v = parse_after_migration(src);
         assert_eq!(v["agent"]["binary"].as_str(), Some("claude"));
         assert_eq!(v["agent"]["request_timeout_secs"].as_integer(), Some(300));
-        assert_eq!(v["agent"]["max_concurrent_subprocesses"].as_integer(), Some(4));
+        assert_eq!(
+            v["agent"]["max_concurrent_subprocesses"].as_integer(),
+            Some(4)
+        );
         assert_eq!(
             v["agent"]["brain"]["external_base_url"].as_str(),
             Some("http://127.0.0.1:4000")

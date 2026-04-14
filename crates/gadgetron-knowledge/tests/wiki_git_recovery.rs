@@ -121,10 +121,7 @@ fn test_autocommit_on_unresolved_merge_conflict() {
     autocommit(&repo, Path::new("page.md"), &sig).expect("commit A");
 
     // Create a branch at the initial commit, switch to it, commit B
-    let initial = repo
-        .revparse_single("HEAD~1")
-        .expect("initial commit")
-        .id();
+    let initial = repo.revparse_single("HEAD~1").expect("initial commit").id();
     let initial_commit = repo.find_commit(initial).unwrap();
     repo.branch("other", &initial_commit, true).unwrap();
     repo.set_head("refs/heads/other").unwrap();
@@ -142,10 +139,7 @@ fn test_autocommit_on_unresolved_merge_conflict() {
         .unwrap();
 
     // Merge "other" into main to produce a conflict in the index.
-    let other_oid = repo
-        .revparse_single("refs/heads/other")
-        .unwrap()
-        .id();
+    let other_oid = repo.revparse_single("refs/heads/other").unwrap().id();
     let annotated = repo.find_annotated_commit(other_oid).unwrap();
     let _ = repo.merge(&[&annotated], None, None);
     // The working tree may now contain conflict markers; write new content

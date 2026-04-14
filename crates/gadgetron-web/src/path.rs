@@ -45,10 +45,7 @@ pub fn validate_and_decode(raw: &str) -> Result<String, ()> {
 
     // Walk components; only `Normal` is allowed.
     let p = std::path::Path::new(&decoded);
-    if !p
-        .components()
-        .all(|c| matches!(c, Component::Normal(_)))
-    {
+    if !p.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(());
     }
 
@@ -87,10 +84,7 @@ mod tests {
             "foo/.git/HEAD",
             "\u{FF0E}\u{FF0E}/etc/passwd",
         ] {
-            assert!(
-                validate_and_decode(bad).is_err(),
-                "should reject: {bad:?}"
-            );
+            assert!(validate_and_decode(bad).is_err(), "should reject: {bad:?}");
         }
     }
 }

@@ -82,11 +82,7 @@ pub struct ClaudeCodeSession {
 }
 
 impl ClaudeCodeSession {
-    pub fn new(
-        config: Arc<AgentConfig>,
-        allowed_tools: Vec<String>,
-        request: ChatRequest,
-    ) -> Self {
+    pub fn new(config: Arc<AgentConfig>, allowed_tools: Vec<String>, request: ChatRequest) -> Self {
         Self {
             config,
             allowed_tools,
@@ -143,15 +139,14 @@ async fn drive(
     })?;
 
     // 2. Build the Command (env_clear + allowlist + kill_on_drop).
-    let mut cmd =
-        build_claude_command(config, mcp_tmp.path(), allowed_tools).map_err(|e| {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::SpawnFailed {
-                    reason: e.to_string(),
-                },
-                message: format!("failed to build claude command: {e}"),
-            }
-        })?;
+    let mut cmd = build_claude_command(config, mcp_tmp.path(), allowed_tools).map_err(|e| {
+        GadgetronError::Kairos {
+            kind: KairosErrorKind::SpawnFailed {
+                reason: e.to_string(),
+            },
+            message: format!("failed to build claude command: {e}"),
+        }
+    })?;
 
     // 3. Spawn.
     let mut child: Child = cmd

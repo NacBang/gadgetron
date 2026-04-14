@@ -122,7 +122,10 @@ impl Wiki {
         }
 
         // Layer 2 — BLOCK patterns
-        if let Some(first) = super::secrets::check_block_patterns(content).into_iter().next() {
+        if let Some(first) = super::secrets::check_block_patterns(content)
+            .into_iter()
+            .next()
+        {
             return Err(WikiError::kind(WikiErrorKind::CredentialBlocked {
                 path: name.to_string(),
                 pattern: first.pattern_name.to_string(),
@@ -176,13 +179,15 @@ impl Wiki {
             let sig = signature(&self.config.git_author_name, &self.config.git_author_email)?;
             let rel = canonical
                 .strip_prefix(&self.config.root)
-                .map_err(|_| WikiError::kind_with_message(
-                    WikiErrorKind::GitCorruption {
-                        path: name.to_string(),
-                        reason: "resolved path escapes wiki root after write".into(),
-                    },
-                    format!("wiki_path escape after write for {name:?}"),
-                ))?
+                .map_err(|_| {
+                    WikiError::kind_with_message(
+                        WikiErrorKind::GitCorruption {
+                            path: name.to_string(),
+                            reason: "resolved path escapes wiki root after write".into(),
+                        },
+                        format!("wiki_path escape after write for {name:?}"),
+                    )
+                })?
                 .to_path_buf();
             Some(autocommit(&repo, &rel, &sig)?.to_string())
         } else {
@@ -346,9 +351,7 @@ mod tests {
     #[test]
     fn write_rejects_path_traversal() {
         let (_dir, wiki) = fresh_wiki();
-        let err = wiki
-            .write("../escape", "malicious")
-            .expect_err("rejected");
+        let err = wiki.write("../escape", "malicious").expect_err("rejected");
         assert!(matches!(
             err.kind_ref(),
             Some(WikiErrorKind::PathEscape { .. })
@@ -358,7 +361,8 @@ mod tests {
     #[test]
     fn write_nested_name_creates_parent_dir() {
         let (_dir, wiki) = fresh_wiki();
-        wiki.write("notes/2026/Q2", "quarterly review").expect("write");
+        wiki.write("notes/2026/Q2", "quarterly review")
+            .expect("write");
         let content = wiki.read("notes/2026/Q2").expect("read");
         assert_eq!(content, "quarterly review");
     }
@@ -435,7 +439,8 @@ mod tests {
     #[test]
     fn search_returns_relevant_pages() {
         let (_dir, wiki) = fresh_wiki();
-        wiki.write("meeting-notes", "quarterly review with the team").unwrap();
+        wiki.write("meeting-notes", "quarterly review with the team")
+            .unwrap();
         wiki.write("grocery-list", "milk, bread, eggs").unwrap();
         let hits = wiki.search("quarterly", 10).unwrap();
         assert_eq!(hits.len(), 1);

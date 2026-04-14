@@ -36,12 +36,12 @@ fn valid_link_strategy() -> impl Strategy<Value = String> {
 
 fn malformed_link_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
-        r"\[\[[a-z]{1,10}".prop_map(String::from),                              // unclosed
-        r"\[\[[a-z]{1,10}\]\]\]\]".prop_map(String::from),                      // double-close
-        r"\[\[[a-z]{1,5}\[\[[a-z]{1,5}\]\]\]\]".prop_map(String::from),         // nested
-        r"\[\[[|]{5,10}\]\]".prop_map(String::from),                            // many pipes only
-        r"\[\[#{5,10}\]\]".prop_map(String::from),                              // only heading marker
-        r"\[\[[a-z]{1,5}\n[a-z]{1,5}\]\]".prop_map(String::from),               // newline in body
+        r"\[\[[a-z]{1,10}".prop_map(String::from), // unclosed
+        r"\[\[[a-z]{1,10}\]\]\]\]".prop_map(String::from), // double-close
+        r"\[\[[a-z]{1,5}\[\[[a-z]{1,5}\]\]\]\]".prop_map(String::from), // nested
+        r"\[\[[|]{5,10}\]\]".prop_map(String::from), // many pipes only
+        r"\[\[#{5,10}\]\]".prop_map(String::from), // only heading marker
+        r"\[\[[a-z]{1,5}\n[a-z]{1,5}\]\]".prop_map(String::from), // newline in body
     ]
 }
 

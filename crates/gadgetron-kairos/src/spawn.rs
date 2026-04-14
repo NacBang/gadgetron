@@ -147,7 +147,8 @@ pub fn build_claude_command_with_env(
     );
     cmd.env(
         "LC_ALL",
-        env.get("LC_ALL").unwrap_or_else(|| "en_US.UTF-8".to_string()),
+        env.get("LC_ALL")
+            .unwrap_or_else(|| "en_US.UTF-8".to_string()),
     );
     cmd.env(
         "TMPDIR",
@@ -273,7 +274,10 @@ mod tests {
         let s = format_allowed_tools(&names);
         let idx_list = s.find("wiki.list").unwrap();
         let idx_write = s.find("wiki.write").unwrap();
-        assert!(idx_list < idx_write, "wiki.list must come before wiki.write");
+        assert!(
+            idx_list < idx_write,
+            "wiki.list must come before wiki.write"
+        );
     }
 
     #[test]
@@ -289,7 +293,8 @@ mod tests {
     fn build_claude_command_default_args_contain_required_flags() {
         let cfg = default_cfg();
         let tools = vec!["wiki.list".to_string(), "wiki.write".to_string()];
-        let cmd = build_claude_command_with_env(&cfg, &mcp_path(), &tools, &FakeEnv::new()).unwrap();
+        let cmd =
+            build_claude_command_with_env(&cfg, &mcp_path(), &tools, &FakeEnv::new()).unwrap();
         let args = args_of(&cmd);
         assert!(args.contains(&"-p".to_string()));
         assert!(args.iter().any(|a| a == "--output-format"));
@@ -396,7 +401,10 @@ mod tests {
         let cfg = default_cfg();
         let cmd = build_claude_command_with_env(&cfg, &mcp_path(), &[], &env).unwrap();
         let envs = envs_of(&cmd);
-        let lang = envs.iter().find(|(k, _)| k == "LANG").and_then(|(_, v)| v.clone());
+        let lang = envs
+            .iter()
+            .find(|(k, _)| k == "LANG")
+            .and_then(|(_, v)| v.clone());
         let tmpdir = envs
             .iter()
             .find(|(k, _)| k == "TMPDIR")
@@ -413,7 +421,9 @@ mod tests {
         cfg.brain = BrainConfig::default();
         cfg.brain.mode = BrainMode::ExternalAnthropic;
         cfg.brain.external_anthropic_api_key_env = "MY_KEY".into();
-        let env = FakeEnv::new().with("HOME", "/h").with("MY_KEY", "sk-ant-real");
+        let env = FakeEnv::new()
+            .with("HOME", "/h")
+            .with("MY_KEY", "sk-ant-real");
         let cmd = build_claude_command_with_env(&cfg, &mcp_path(), &[], &env).unwrap();
         let envs = envs_of(&cmd);
         let anth = envs

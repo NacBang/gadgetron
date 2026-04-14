@@ -9,9 +9,7 @@
 
 use axum::{
     http::{
-        header::{
-            HeaderName, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
-        },
+        header::{HeaderName, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS},
         HeaderValue,
     },
     Router,

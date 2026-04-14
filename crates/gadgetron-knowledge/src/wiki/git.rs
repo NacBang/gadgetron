@@ -30,7 +30,9 @@ pub fn open_or_init(
 ) -> Result<git2::Repository, WikiError> {
     match git2::Repository::open(root) {
         Ok(repo) => Ok(repo),
-        Err(e) if e.code() == git2::ErrorCode::NotFound => init_with_empty_commit(root, author_name, author_email),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
+            init_with_empty_commit(root, author_name, author_email)
+        }
         Err(e) => Err(map_git_error(e, root)),
     }
 }
@@ -46,16 +48,11 @@ fn init_with_empty_commit(
         let sig = signature(author_name, author_email)?;
         let mut index = repo.index().map_err(|e| map_git_error(e, root))?;
         let tree_id = index.write_tree().map_err(|e| map_git_error(e, root))?;
-        let tree = repo.find_tree(tree_id).map_err(|e| map_git_error(e, root))?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            "initial commit",
-            &tree,
-            &[],
-        )
-        .map_err(|e| map_git_error(e, root))?;
+        let tree = repo
+            .find_tree(tree_id)
+            .map_err(|e| map_git_error(e, root))?;
+        repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
+            .map_err(|e| map_git_error(e, root))?;
     }
     Ok(repo)
 }
@@ -106,11 +103,15 @@ pub fn autocommit(
     let path_display = relative_path.to_string_lossy().into_owned();
 
     // Stage the file.
-    let mut index = repo.index().map_err(|e| map_git_error_for_path(e, &path_display))?;
+    let mut index = repo
+        .index()
+        .map_err(|e| map_git_error_for_path(e, &path_display))?;
     index
         .add_path(relative_path)
         .map_err(|e| map_git_error_for_path(e, &path_display))?;
-    index.write().map_err(|e| map_git_error_for_path(e, &path_display))?;
+    index
+        .write()
+        .map_err(|e| map_git_error_for_path(e, &path_display))?;
 
     // Build the tree from the staged index.
     let tree_id = index
@@ -152,7 +153,14 @@ pub fn autocommit(
     let parents: Vec<&git2::Commit> = parent_commit.as_ref().map(|c| vec![c]).unwrap_or_default();
 
     let oid = repo
-        .commit(Some("HEAD"), signature, signature, &message, &tree, &parents)
+        .commit(
+            Some("HEAD"),
+            signature,
+            signature,
+            &message,
+            &tree,
+            &parents,
+        )
         .map_err(|e| map_git_error_for_path(e, &path_display))?;
 
     Ok(oid)
@@ -237,9 +245,7 @@ fn map_git_error_for_path(e: git2::Error, path: &str) -> WikiError {
         "missing objects".to_string()
     } else if raw.to_ascii_lowercase().contains("detached") {
         "detached HEAD".to_string()
-    } else if raw.to_ascii_lowercase().contains("not found")
-        || code == git2::ErrorCode::NotFound
-    {
+    } else if raw.to_ascii_lowercase().contains("not found") || code == git2::ErrorCode::NotFound {
         format!("git resource not found: {raw}")
     } else {
         raw.clone()
@@ -337,7 +343,12 @@ mod tests {
 
         let sig = signature("X", "x@y.z").unwrap();
         let oid = autocommit(&repo, Path::new("note.md"), &sig).unwrap();
-        let msg = repo.find_commit(oid).unwrap().message().unwrap().to_string();
+        let msg = repo
+            .find_commit(oid)
+            .unwrap()
+            .message()
+            .unwrap()
+            .to_string();
 
         assert!(!msg.contains("USER PRIVATE QUERY"));
         assert!(!msg.contains("DO NOT LEAK"));

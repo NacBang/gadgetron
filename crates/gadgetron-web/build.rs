@@ -18,7 +18,11 @@
 #[path = "build_logic.rs"]
 mod build_logic;
 
-use std::{env, fs, path::{Path, PathBuf}, process::ExitCode};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 fn main() -> ExitCode {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));

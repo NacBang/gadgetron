@@ -981,20 +981,21 @@ fn register_kairos_if_configured(
         }
     };
 
-    let knowledge_cfg = match gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw) {
-        Ok(Some(cfg)) => cfg,
-        Ok(None) => {
-            // No [knowledge] section → kairos not available.
-            return;
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "kairos: [knowledge] section malformed; skipping"
-            );
-            return;
-        }
-    };
+    let knowledge_cfg =
+        match gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw) {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => {
+                // No [knowledge] section → kairos not available.
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "kairos: [knowledge] section malformed; skipping"
+                );
+                return;
+            }
+        };
 
     if let Err(e) = knowledge_cfg.validate() {
         tracing::error!(error = %e, "kairos: [knowledge] validation failed; skipping");
@@ -1026,7 +1027,11 @@ fn register_kairos_if_configured(
     tracing::info!(
         model = "kairos",
         "kairos: registered (KnowledgeToolProvider active; web.search = {})",
-        if providers.get("kairos").is_some() { "configured_via_knowledge_section" } else { "none" }
+        if providers.get("kairos").is_some() {
+            "configured_via_knowledge_section"
+        } else {
+            "none"
+        }
     );
 }
 

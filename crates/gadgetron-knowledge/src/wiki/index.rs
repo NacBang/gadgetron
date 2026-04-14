@@ -142,7 +142,11 @@ impl InvertedIndex {
     /// Empty queries and queries containing only filtered tokens return
     /// an empty `Vec`.
     pub fn search(&self, query: &str, max_results: usize) -> Vec<WikiSearchHit> {
-        let query_tokens: Vec<String> = tokenize(query).into_iter().collect::<HashSet<_>>().into_iter().collect();
+        let query_tokens: Vec<String> = tokenize(query)
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         if query_tokens.is_empty() || max_results == 0 {
             return Vec::new();
         }
@@ -349,11 +353,8 @@ mod tests {
 
     #[test]
     fn page_count_reflects_unique_pages() {
-        let idx = InvertedIndex::build_from_pages(vec![
-            ("a", "foo bar"),
-            ("b", "baz"),
-            ("c", "quux"),
-        ]);
+        let idx =
+            InvertedIndex::build_from_pages(vec![("a", "foo bar"), ("b", "baz"), ("c", "quux")]);
         assert_eq!(idx.page_count(), 3);
     }
 

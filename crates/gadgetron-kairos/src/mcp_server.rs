@@ -113,9 +113,7 @@ impl RpcResponse {
 /// `registry` is the frozen `McpToolRegistry` built by the caller
 /// with all the providers it wants to expose (typically just
 /// `KnowledgeToolProvider` in P2A).
-pub async fn serve_stdio(
-    registry: Arc<McpToolRegistry>,
-) -> std::io::Result<()> {
+pub async fn serve_stdio(registry: Arc<McpToolRegistry>) -> std::io::Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
@@ -165,10 +163,7 @@ pub async fn serve_stdio(
 /// Dispatch one request against the registry. Pure async function
 /// extracted from `serve_stdio` so unit tests can call it directly
 /// without routing through real stdio.
-pub async fn handle_request(
-    registry: &McpToolRegistry,
-    request: RpcRequest,
-) -> RpcResponse {
+pub async fn handle_request(registry: &McpToolRegistry, request: RpcRequest) -> RpcResponse {
     match request.method.as_str() {
         "initialize" => {
             let result = json!({
@@ -244,9 +239,7 @@ fn mcp_error_as_tool_result(err: &McpError) -> Value {
             tool,
             remaining,
             limit,
-        } => format!(
-            "rate limited for {tool}: {remaining}/{limit} remaining this hour"
-        ),
+        } => format!("rate limited for {tool}: {remaining}/{limit} remaining this hour"),
         McpError::ApprovalTimeout { secs } => format!("approval timed out after {secs}s"),
         McpError::InvalidArgs(msg) => format!("invalid arguments: {msg}"),
         McpError::Execution(msg) => format!("execution failed: {msg}"),
@@ -282,8 +275,8 @@ async fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gadgetron_core::agent::tools::{McpToolProvider, Tier, ToolResult};
     use async_trait::async_trait;
+    use gadgetron_core::agent::tools::{McpToolProvider, Tier, ToolResult};
     use std::sync::Arc;
 
     struct FakeProvider;
@@ -398,10 +391,13 @@ mod tests {
         let reg = fresh_registry();
         let resp = handle_request(
             &reg,
-            request("tools/call", json!({
-                "name": "wiki.get",
-                "arguments": { "name": "home" }
-            })),
+            request(
+                "tools/call",
+                json!({
+                    "name": "wiki.get",
+                    "arguments": { "name": "home" }
+                }),
+            ),
         )
         .await;
         let result = resp.result.unwrap();
@@ -422,10 +418,13 @@ mod tests {
         let reg = fresh_registry();
         let resp = handle_request(
             &reg,
-            request("tools/call", json!({
-                "name": "wiki.write",
-                "arguments": { "name": "x", "content": "y" }
-            })),
+            request(
+                "tools/call",
+                json!({
+                    "name": "wiki.write",
+                    "arguments": { "name": "x", "content": "y" }
+                }),
+            ),
         )
         .await;
         assert!(resp.error.is_none(), "denied ≠ RPC error");
@@ -441,10 +440,13 @@ mod tests {
         let reg = fresh_registry();
         let resp = handle_request(
             &reg,
-            request("tools/call", json!({
-                "name": "does.not.exist",
-                "arguments": {}
-            })),
+            request(
+                "tools/call",
+                json!({
+                    "name": "does.not.exist",
+                    "arguments": {}
+                }),
+            ),
         )
         .await;
         assert!(resp.error.is_none());
@@ -461,11 +463,7 @@ mod tests {
         // Structural error — no "name" field at all. This IS a JSON-RPC
         // protocol error, distinct from a tool-level error.
         let reg = fresh_registry();
-        let resp = handle_request(
-            &reg,
-            request("tools/call", json!({ "arguments": {} })),
-        )
-        .await;
+        let resp = handle_request(&reg, request("tools/call", json!({ "arguments": {} }))).await;
         let err = resp.error.expect("must be RPC error");
         assert_eq!(err.code, -32602);
         assert!(err.message.contains("name"));

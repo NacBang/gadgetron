@@ -37,7 +37,7 @@ use gadgetron_core::agent::config::AgentConfig;
 use gadgetron_core::error::{GadgetronError, KairosErrorKind, Result};
 use gadgetron_core::message::{Content, Message, Role};
 use gadgetron_core::provider::{
-    ChatRequest, ChatResponse, ChatChunk, Choice, LlmProvider, ModelInfo, Usage,
+    ChatChunk, ChatRequest, ChatResponse, Choice, LlmProvider, ModelInfo, Usage,
 };
 
 use crate::registry::McpToolRegistry;
@@ -155,10 +155,7 @@ impl LlmProvider for KairosProvider {
         if path.is_absolute() && !path.exists() {
             return Err(GadgetronError::Kairos {
                 kind: KairosErrorKind::NotInstalled,
-                message: format!(
-                    "configured claude binary not found: {}",
-                    self.config.binary
-                ),
+                message: format!("configured claude binary not found: {}", self.config.binary),
             });
         }
         Ok(())

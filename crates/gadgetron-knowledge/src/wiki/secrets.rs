@@ -39,8 +39,7 @@ static BLOCK_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         ),
         (
             "gcp_service_account",
-            Regex::new(r#""private_key_id"\s*:\s*"[a-f0-9]{40}""#)
-                .expect("valid gcp regex"),
+            Regex::new(r#""private_key_id"\s*:\s*"[a-f0-9]{40}""#).expect("valid gcp regex"),
         ),
     ]
 });

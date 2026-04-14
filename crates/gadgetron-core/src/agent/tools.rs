@@ -48,11 +48,7 @@ pub trait McpToolProvider: Send + Sync + 'static {
     /// NOT assume `name.starts_with(self.category())`. Tool names and
     /// categories are independent identifiers; a `"knowledge"` category may
     /// host tools named `"wiki.read"`, `"web.search"`, etc.
-    async fn call(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<ToolResult, McpError>;
+    async fn call(&self, name: &str, args: serde_json::Value) -> Result<ToolResult, McpError>;
 
     /// Optional runtime availability check. A provider gated on a Cargo
     /// feature or runtime config returns `false` to be excluded from the

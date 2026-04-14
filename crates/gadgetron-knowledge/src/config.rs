@@ -205,9 +205,7 @@ impl KnowledgeConfig {
     /// `[knowledge]` section is present but fails deserialization
     /// (e.g. wrong field types). A missing section is NOT an error.
     pub fn extract_from_toml_str(raw: &str) -> Result<Option<Self>, String> {
-        let value: toml::Value = raw
-            .parse()
-            .map_err(|e| format!("toml parse failed: {e}"))?;
+        let value: toml::Value = raw.parse().map_err(|e| format!("toml parse failed: {e}"))?;
         let Some(section) = value.get("knowledge") else {
             return Ok(None);
         };
@@ -242,7 +240,8 @@ impl KnowledgeConfig {
             ));
         }
         if let Some(sc) = &self.search {
-            sc.validate().map_err(|e| format!("knowledge.search: {e}"))?;
+            sc.validate()
+                .map_err(|e| format!("knowledge.search: {e}"))?;
         }
         Ok(())
     }
@@ -303,10 +302,7 @@ fn autodetect_git_author_or_fallback() -> (String, String) {
         target: "knowledge_config",
         "git config user.name / user.email not set — falling back to 'Kairos <kairos@gadgetron.local>'"
     );
-    (
-        "Kairos".to_string(),
-        "kairos@gadgetron.local".to_string(),
-    )
+    ("Kairos".to_string(), "kairos@gadgetron.local".to_string())
 }
 
 // ---------------------------------------------------------------------------

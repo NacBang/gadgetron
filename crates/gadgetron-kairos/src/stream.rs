@@ -113,10 +113,7 @@ pub fn parse_event(line: &str) -> Result<Option<StreamJsonEvent>, serde_json::Er
 pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<ChatChunk> {
     match event {
         StreamJsonEvent::MessageDelta {
-            delta: MessageDelta {
-                text: Some(t),
-                ..
-            },
+            delta: MessageDelta { text: Some(t), .. },
         } if !t.is_empty() => {
             vec![build_chunk(req, Some(t), None)]
         }
@@ -152,7 +149,11 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
     }
 }
 
-fn build_chunk(req: &ChatRequest, content: Option<String>, finish_reason: Option<String>) -> ChatChunk {
+fn build_chunk(
+    req: &ChatRequest,
+    content: Option<String>,
+    finish_reason: Option<String>,
+) -> ChatChunk {
     ChatChunk {
         id: format!("chatcmpl-kairos-{}", uuid::Uuid::new_v4()),
         object: "chat.completion.chunk".to_string(),
@@ -225,7 +226,11 @@ mod tests {
     fn parse_event_tool_result_variant() {
         let line = r#"{"type":"tool_result","tool_use_id":"call_1","content":{"ok":true},"is_error":false}"#;
         match parse_event(line) {
-            Ok(Some(StreamJsonEvent::ToolResult { tool_use_id, is_error, .. })) => {
+            Ok(Some(StreamJsonEvent::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            })) => {
                 assert_eq!(tool_use_id, "call_1");
                 assert!(!is_error);
             }
@@ -246,7 +251,10 @@ mod tests {
     fn parse_event_message_usage_variant() {
         let line = r#"{"type":"message_usage","input_tokens":10,"output_tokens":20}"#;
         match parse_event(line) {
-            Ok(Some(StreamJsonEvent::MessageUsage { input_tokens, output_tokens })) => {
+            Ok(Some(StreamJsonEvent::MessageUsage {
+                input_tokens,
+                output_tokens,
+            })) => {
                 assert_eq!(input_tokens, 10);
                 assert_eq!(output_tokens, 20);
             }

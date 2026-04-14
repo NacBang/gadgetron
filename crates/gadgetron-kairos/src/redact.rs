@@ -59,10 +59,8 @@ static REDACTION_PATTERNS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
         ),
         (
             "generic_secret",
-            Regex::new(
-                r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*[A-Za-z0-9+/]{20,512}",
-            )
-            .expect("valid generic regex"),
+            Regex::new(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*[A-Za-z0-9+/]{20,512}")
+                .expect("valid generic regex"),
         ),
         (
             "aws_access_key",
@@ -95,7 +93,8 @@ mod tests {
 
     #[test]
     fn redacts_anthropic_key() {
-        let input = "error: token sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh was rejected";
+        let input =
+            "error: token sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh was rejected";
         let out = redact_stderr(input);
         assert!(out.contains("[REDACTED:anthropic_key]"));
         assert!(!out.contains("sk-ant-api03"));
@@ -147,7 +146,8 @@ mod tests {
 
     #[test]
     fn is_idempotent() {
-        let input = "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJ and AKIAIOSFODNN7EXAMPLE";
+        let input =
+            "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJ and AKIAIOSFODNN7EXAMPLE";
         let once = redact_stderr(input);
         let twice = redact_stderr(&once);
         assert_eq!(once, twice);
@@ -189,7 +189,8 @@ mod tests {
 
     #[test]
     fn redacts_multiple_secrets_in_one_pass() {
-        let input = "key1: sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJ and AKIAIOSFODNN7EXAMPLE";
+        let input =
+            "key1: sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJ and AKIAIOSFODNN7EXAMPLE";
         let out = redact_stderr(input);
         assert!(out.contains("[REDACTED:anthropic_key]"));
         assert!(out.contains("[REDACTED:aws_access_key]"));

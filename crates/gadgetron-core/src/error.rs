@@ -1072,7 +1072,8 @@ mod tests {
 
     #[test]
     fn from_mcp_unknown_tool_maps_to_tool_unknown_kind() {
-        let err: GadgetronError = crate::agent::tools::McpError::UnknownTool("wiki.ghost".into()).into();
+        let err: GadgetronError =
+            crate::agent::tools::McpError::UnknownTool("wiki.ghost".into()).into();
         assert_eq!(err.error_code(), "kairos_tool_unknown");
         assert_eq!(err.http_status_code(), 500);
         let msg = err.error_message();
@@ -1139,12 +1140,7 @@ mod tests {
             "tool_unknown"
         );
         assert_eq!(
-            format!(
-                "{}",
-                KairosErrorKind::ToolDenied {
-                    reason: "x".into()
-                }
-            ),
+            format!("{}", KairosErrorKind::ToolDenied { reason: "x".into() }),
             "tool_denied"
         );
         assert_eq!(
@@ -1159,28 +1155,18 @@ mod tests {
             "tool_rate_limited"
         );
         assert_eq!(
-            format!(
-                "{}",
-                KairosErrorKind::ToolApprovalTimeout { secs: 60 }
-            ),
+            format!("{}", KairosErrorKind::ToolApprovalTimeout { secs: 60 }),
             "tool_approval_timeout"
         );
         assert_eq!(
             format!(
                 "{}",
-                KairosErrorKind::ToolInvalidArgs {
-                    reason: "x".into()
-                }
+                KairosErrorKind::ToolInvalidArgs { reason: "x".into() }
             ),
             "tool_invalid_args"
         );
         assert_eq!(
-            format!(
-                "{}",
-                KairosErrorKind::ToolExecution {
-                    reason: "x".into()
-                }
-            ),
+            format!("{}", KairosErrorKind::ToolExecution { reason: "x".into() }),
             "tool_execution"
         );
     }
