@@ -25,11 +25,12 @@
 //!
 //! See `docs/design/phase2/04-mcp-tool-registry.md` v2 + `02-kairos-agent.md` v4.
 
-// Placeholder module stubs — TDD Red→Green will flesh these out after
-// the Phase 2A crate scaffolding lands. Each module corresponds to a
-// discrete TDD step documented in `00-overview.md §15`.
+pub mod registry;
 
-// pub mod registry;
+pub use registry::{McpToolRegistry, McpToolRegistryBuilder};
+
+// Placeholder module stubs — TDD Red→Green will flesh these out
+// per the order in `00-overview.md §15` (Phase 4 onward).
 // pub mod provider;
 // pub mod session;
 // pub mod stream;
