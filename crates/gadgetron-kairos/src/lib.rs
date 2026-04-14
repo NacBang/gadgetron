@@ -25,16 +25,18 @@
 //!
 //! See `docs/design/phase2/04-mcp-tool-registry.md` v2 + `02-kairos-agent.md` v4.
 
+pub mod mcp_config;
+pub mod redact;
 pub mod registry;
 
+pub use mcp_config::{build_config_json, write_config_file};
+pub use redact::redact_stderr;
 pub use registry::{McpToolRegistry, McpToolRegistryBuilder};
 
 // Placeholder module stubs — TDD Red→Green will flesh these out
-// per the order in `00-overview.md §15` (Phase 4 onward).
+// per the order in `00-overview.md §15` (Phase 4 Steps 16/18-20).
 // pub mod provider;
 // pub mod session;
 // pub mod stream;
 // pub mod spawn;
-// pub mod mcp_config;
-// pub mod redact;
 // pub mod error;
