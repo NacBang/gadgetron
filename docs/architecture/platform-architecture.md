@@ -3257,7 +3257,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 # crates/gadgetron-web/Cargo.toml
 [package]
 name = "gadgetron-web"
-version = "0.1.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tower-serve-static = "0.1"  # 정적 파일 embed + serve
@@ -5080,7 +5082,7 @@ pub async fn aggregate_health(components: Vec<(&str, HealthStatus)>) -> HealthDe
     "audit_channel": {"status": "healthy", "pending": 120, "capacity": 4096}
   },
   "uptime_seconds": 3600,
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
 ```
 

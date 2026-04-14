@@ -1,9 +1,11 @@
 # Phase 2 Overview — Knowledge-Layer Personal Assistant Platform
 
-> **Status**: Draft v3 (Round 2 review addressed — 4 reviewers, 2026-04-13)
+> **Status**: Draft v3 (Round 2 review addressed — 4 reviewers, 2026-04-13) — **partial supersede 2026-04-14**
 > **Author**: PM (Claude)
-> **Date**: 2026-04-13
+> **Date**: 2026-04-13 (v3) · 2026-04-14 (partial supersede)
 > **Supersedes**: Draft v2 (addressed Round 0 chief-architect + Round 1.5 dx/security + Round 2 qa feedback)
+>
+> ⚠ **2026-04-14 partial supersede notice**: Sections referencing **OpenWebUI** are superseded by `docs/process/04-decision-log.md` **D-20260414-02**. Phase 2A now ships a built-in `gadgetron-web` crate (assistant-ui + Next.js, embedded via `include_dir!`) instead of bundling OpenWebUI as a sibling process. Threat model §8 row "OpenWebUI" and Appendix C docker-compose are **to be rewritten** in `docs/design/phase2/03-gadgetron-web.md`. DB profile strategy (local=SQLite / server=Postgres) is governed by **D-20260414-03**; §7 "Vector store" row stays but the containing profile must be read in conjunction with that decision.
 
 ## Table of Contents
 
@@ -72,8 +74,8 @@ Zero new dependencies in gateway. Zero new dispatch code. Kairos is just another
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  Web UI (OpenWebUI, OSS sibling process)                      │
-│  User chats; selects "kairos" model                           │
+│  Web UI (`gadgetron-web` — assistant-ui, embedded in binary)  │
+│  User opens http://localhost:8080/web ; selects "kairos"      │
 └──────────────────────────────┬────────────────────────────────┘
                                │ POST /v1/chat/completions
                                │   model="kairos", stream=true
@@ -135,7 +137,7 @@ Minimum viable personal assistant. Everything else deferred.
 | Web search | SearXNG instance URL in config; single MCP tool `web_search` |
 | Claude Code subprocess | `claude -p --output-format=stream-json --mcp-config=<tmp>`; stdin = message history JSON |
 | Provider integration | `gadgetron-kairos` implements `LlmProvider`; registered in router as `"kairos"`. Gateway unchanged. |
-| Web UI | **OpenWebUI** as sibling process (Docker or native); points at `http://gadgetron:8080/v1` |
+| Web UI | **`gadgetron-web` crate** (NEW, P2A) — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT) + Next.js + Tailwind, built to `web/dist/`, embedded in the Rust binary via `include_dir!`, mounted at `/web` by `gadgetron-gateway` under feature `web-ui`. BYOK auth: user pastes Gadgetron API key into the UI's settings page. **Supersedes prior OpenWebUI sibling-process plan (D-20260414-02).** |
 | Storage | Local filesystem only, path configurable |
 | Session | Stateless per request — OpenAI `messages` array forwarded as Claude conversation history |
 | Agent | Claude Code only (single, no enum/dispatcher) |
@@ -163,11 +165,11 @@ Minimum viable personal assistant. Everything else deferred.
 | Custom Rust agent framework | See Appendix A — Claude Code already does this, better. |
 
 ### Acceptance criteria
-1. User opens OpenWebUI in browser, authenticates with Gadgetron API key
-2. User selects "kairos" model in OpenWebUI model dropdown
+1. User opens `http://localhost:8080/web` (served by `gadgetron-web`), pastes Gadgetron API key in the settings page
+2. User selects "kairos" model in the `gadgetron-web` model dropdown (populated from `/v1/models`)
 3. User sends a Korean or English message
 4. Kairos spawns `claude -p`, which uses wiki and web_search MCP tools as needed
-5. Streaming response appears in OpenWebUI chat within 2s TTFB
+5. Streaming response appears in `gadgetron-web` chat within 2s TTFB
 6. User can create new wiki pages via a conversational request ("이 내용을 wiki에 저장해")
 7. Wiki directory is a valid git repo with timestamped auto-commits
 8. Existing Phase 1 `/v1/chat/completions` with non-kairos models (vllm, sglang, etc.) still works unchanged
@@ -180,8 +182,9 @@ Minimum viable personal assistant. Everything else deferred.
 
 Prerequisites:
 - Rust toolchain (Phase 1 quick-start in `docs/manual/installation.md` covers this)
+- Node.js + npm (for building the bundled `gadgetron-web` crate; required once at `cargo build` time, not at runtime)
 - Claude Code CLI installed and `claude login` completed (prerequisite — Gadgetron does not install Claude Code for you)
-- Docker with compose (for OpenWebUI + SearXNG), OR native installations of both
+- Optional: Docker for running a local SearXNG instance. Native SearXNG install is also supported.
 - `git` available on PATH (for wiki auto-commit)
 
 Steps:
@@ -203,38 +206,27 @@ Steps:
    - Checks `claude --version` is available on PATH; prints a friendly error if not
    - Writes a minimal `~/.gadgetron/gadgetron.toml` with `[knowledge]` and `[kairos]` sections pre-filled
    - Creates a starter `wiki/README.md` page so the first search returns something
-   - Prints "Next: start OpenWebUI and Gadgetron" with exact copy-paste commands for step 4
+   - Prints "Next: start Gadgetron and open /web" with exact copy-paste commands for step 4
 
-   **2b. (Optional — Docker path only)** If you plan to run via Docker Compose, generate the compose file now:
-   ```sh
-   ./target/release/gadgetron kairos init --docker > docker-compose.yml
-   ```
-   Note: `kairos init --docker` prints compose YAML to stdout (re-reading the workspace from step 2). It does NOT mutate `~/.gadgetron/`; re-running is safe. Skip this sub-step if running natively.
+   **2b. (Optional — SearXNG only)** If you want the `web_search` MCP tool, start a local SearXNG instance (Docker or native) and set `[knowledge.search].searxng_url` in `~/.gadgetron/gadgetron.toml`. `gadgetron-web` itself is served in-process by `gadgetron serve` — no compose file needed for the Web UI.
 
 3. **Generate an API key**
    ```sh
    ./target/release/gadgetron key create --no-db
    ```
-   (Phase 1 command — `--no-db` creates an in-memory key without requiring PostgreSQL, suitable for local P2A single-user setup. For a persistent key, see `docs/manual/auth.md` for `key create --tenant-id <uuid>`.) Copy the `gad_live_*` key — you need it for OpenWebUI.
+   (Phase 1 command — creates a local key using the `inmemory` database profile. For a persistent key, pick `local` profile (SQLite) or `server` profile (Postgres) per **D-20260414-03** — see `docs/manual/configuration.md` once the profile selector lands. Copy the `gad_live_*` key — you paste it into `gadgetron-web` in step 5.)
 
-4. **Start Gadgetron, OpenWebUI, and SearXNG**
-   Docker Compose path (using the file generated in step 2b):
-   ```sh
-   docker compose up -d
-   ./target/release/gadgetron serve --config ~/.gadgetron/gadgetron.toml
-   ```
-   Native path (without Docker):
+4. **Start Gadgetron** (single process, single binary)
    ```sh
    ./target/release/gadgetron serve --config ~/.gadgetron/gadgetron.toml
-   # Start OpenWebUI and SearXNG per their own install docs, pointing at Gadgetron http://localhost:8080
    ```
-   (Appendix C shows the complete Docker Compose YAML.)
+   This one command serves the OpenAI-compat API on `:8080/v1`, the `gadgetron-web` UI on `:8080/web`, and the kairos provider under the hood. No sibling containers required.
 
    Tip: `kairos init`-generated config sets a kairos-only routing strategy. If you add other providers to `gadgetron.toml`, see `02-kairos-agent.md §11` for routing options — `round_robin` with kairos in the pool causes confusing failures.
 
 5. **Chat**
-   - Browse to `http://localhost:3000` (OpenWebUI)
-   - Login with the Gadgetron API key from step 3 (paste into the OpenAI-compat key field in Settings)
+   - Browse to `http://localhost:8080/web`
+   - Open Settings, paste the Gadgetron API key from step 3
    - Model dropdown → pick **`kairos`**
    - Type: "wiki에서 README를 찾아서 요약해"
    - Response streams in; the assistant reads the starter page via `wiki_get` MCP tool and returns a summary
@@ -280,13 +272,31 @@ gadgetron-kairos/              ← agent adapter crate; impl LlmProvider
 │   └── config.rs        # KairosConfig + toml schema
 ```
 
+### Added (NEW P2A crate per D-20260414-02)
+
+```
+gadgetron-web/                 ← Web UI crate, embedded static assets
+├── Cargo.toml                 # include_dir = "0.7", tower-serve-static = "0.1"
+├── build.rs                   # npm run build → copies web/dist/ into OUT_DIR (gated on GADGETRON_SKIP_WEB_BUILD)
+├── src/
+│   └── lib.rs                 # pub fn service() -> tower::Service — returns static asset serving layer
+└── web/                       # assistant-ui + Next.js project root
+    ├── package.json           # @assistant-ui/react, next, react, tailwindcss
+    ├── app/                   # Next.js app router pages (chat, settings, model picker)
+    ├── components/            # shadcn-style composable chat primitives
+    └── dist/                  # build output, include_dir!-embedded at cargo build time
+```
+
+See D-20260414-02 and `docs/design/phase2/03-gadgetron-web.md` (upcoming) for Cargo.toml, build pipeline, XSS hardening, threat model, and the `web-ui` feature flag on `gadgetron-gateway`.
+
 ### Modified crates
 - `gadgetron-core` — `AppConfig` gains `[knowledge]` and `[kairos]` sections; `GadgetronError` gains 2 nested variants (see §12)
 - `gadgetron-cli` — gains `kairos init` subcommand AND `mcp serve` subcommand (stdio MCP server, delegates to `gadgetron-knowledge::mcp::serve`)
 - `gadgetron-router` — registers kairos provider by name from config (minimal wiring — same pattern as existing provider registration)
-- Workspace `Cargo.toml` — 2 new members
+- `gadgetron-gateway` — gains Cargo feature `web-ui` (default on). When enabled, mounts `gadgetron_web::service()` under `/web` via `router.nest_service`. No new dispatch paths on `/v1/*`.
+- Workspace `Cargo.toml` — **3 new members** (`gadgetron-knowledge`, `gadgetron-kairos`, `gadgetron-web`)
 
-**Explicit non-change:** `gadgetron-gateway` is unchanged. No new dispatch branches, no new handlers, no new dependencies. This is enforced by the kairos crate not appearing in gateway's `Cargo.toml` dependencies.
+**Explicit non-change:** `gadgetron-gateway` HTTP dispatch paths on `/v1/*` are unchanged. No new handlers, no new `/v1/*` routes. The `web-ui` feature adds a *static* asset mount only.
 
 ### MCP server lifecycle (per-request, not shared)
 
@@ -390,17 +400,19 @@ Per "오픈소스 최대한 활용" directive. All versions must be pinned in `C
 | MCP SDK | `rmcp` (official Rust MCP SDK) | Official; matches Claude Code client | **Validate maturity before P2A impl** (risk in §14) |
 | Subprocess | `tokio::process::Command` | Already in workspace | — |
 | Temp files | `tempfile` | Secure permission handling, process-owned dir | **Required** for MCP config tmpfile per §8 |
-| **Web UI chat** | **OpenWebUI** (deployed sibling) | Most mature OSS chat UI; OpenAI-compat; RAG/doc built-in; BSD-3 | Docker image digest pinned |
+| **Web UI chat** | **`gadgetron-web` crate (NEW, P2A)** — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT, shadcn + Radix headless components) + Next.js + Tailwind | MIT end-to-end; embedded in Rust binary via `include_dir!`; single-binary deployment; Gadgetron branding fully owned | See **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md` (upcoming) |
 | Vector store (P2B+) | `sqlite-vec` extension | Embedded SQLite extension; "가볍게" principle | — |
 | Embedding model (P2B+) | `ort` (ONNX Runtime) + `bge-small-en-v1.5` or `multilingual-e5-small` | Fully local; Korean support | — |
 | PDF extraction (P2B+) | `pdf-extract` or `lopdf` | Pure Rust | — |
 | Audio STT (P2D+) | `whisper.cpp` via FFI | Local, OSS | — |
 | Image captioning (P2D+) | CLIP / BLIP via `ort` | Local, OSS | — |
 
-**Chat UI comparison (OpenWebUI chosen):**
-- OpenWebUI — most mature, docker-ready, RAG/doc-upload built-in, active community, BSD-3. **Pick for P2A.**
-- LibreChat — MIT, multi-provider. Fallback if OpenWebUI blocks.
-- Lobe Chat — MIT, Next.js, polished, lighter. Fallback.
+**Chat UI comparison (assistant-ui chosen 2026-04-14 — supersedes prior OpenWebUI pick):**
+- **assistant-ui** — MIT, headless React component library, shadcn + Radix, bring-your-own-backend. Embedded into `gadgetron-web` crate; Gadgetron owns branding, data model, and deployment artifact. **Pick for P2A** (see D-20260414-02).
+- ~~OpenWebUI~~ — dropped 2026-04-14: license moved from BSD-3 to custom Open WebUI License in April 2025 with branding preservation clause above 50 users; duplicates Gadgetron's user/session model with its own SQLite/Postgres; adds a sibling Python process that violates the single-binary principle.
+- LibreChat — MIT but MongoDB required; would add a third DB engine. Not pursued.
+- Lobe Chat — Apache-2.0, Next.js. Viable fallback if assistant-ui direction fails review.
+- big-AGI — MIT, Next.js, browser-local state. Viable lightweight fallback.
 
 ---
 
@@ -415,14 +427,14 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 | Claude Max OAuth session (`~/.claude/credentials.json` or equivalent) | **Critical** — grants access to user's paid Claude subscription | User |
 | Wiki content (user's knowledge base) | **High** — may contain PII, private notes, sensitive discussions | User |
 | SearXNG query history | **Medium** — reveals user intent | User |
-| Gadgetron API keys (`gad_*`) | **High** — grants access to OpenWebUI → Gadgetron | Operator |
+| Gadgetron API keys (`gad_*`) | **High** — grants access to `gadgetron-web` → Gadgetron API | Operator |
 | Wiki filesystem path (`~/.gadgetron/wiki/`) | **High** — OS file permissions govern access | OS |
 
 ### Trust boundaries
 
 | ID | Boundary | Crosses | Auth mechanism |
 |---|---|---|---|
-| B1 | OpenWebUI → Gadgetron HTTP | Network (localhost for P2A) | Bearer token (Phase 1 auth) |
+| B1 | `gadgetron-web` browser → Gadgetron HTTP | Same-origin (`:8080/web` ↔ `:8080/v1`) | Bearer token from browser localStorage (Phase 1 auth) |
 | B2 | Gadgetron → Claude Code subprocess | Process boundary (same OS user) | Parent/child trust; no in-process auth |
 | B3 | Claude Code → `gadgetron mcp serve` subprocess | Process boundary (grandchild of Gadgetron) | stdio parentage; no in-process auth |
 | B4 | `gadgetron mcp serve` → wiki filesystem | Filesystem | OS file permissions |
@@ -437,7 +449,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 | `gadgetron-knowledge` (wiki MCP) | Low | Medium — path traversal (mitigated by M3) | Low | Medium — wiki content permanent in git | Low | Low | Symlink race or unicode normalization bypass |
 | Claude Code subprocess | N/A | **High** — prompt injection via wiki/SearXNG can cause arbitrary `wiki_write` calls | Low | **High** — model reasons over potentially hostile content | Low — SIGTERM on timeout | **High** — `--dangerously-skip-permissions` bypasses interactive confirmation | `--allowed-tools` enforcement level (see M4) |
 | SearXNG | Low | Low | Low | **High** — query history in SearXNG logs; user has no control | Medium — unavailability blocks web_search | Low | Query log exposure at SearXNG host |
-| OpenWebUI | Medium — OpenWebUI has its own auth layer (must align) | Low | Low | Medium — may cache prompts/responses | Low | Low | OpenWebUI auth bypass if misconfigured |
+| `gadgetron-web` (assistant-ui) | **To be (re)assessed in `03-gadgetron-web.md`** — same-origin reduces CSRF exposure; API key in localStorage is XSS-sensitive; no separate auth layer (Gadgetron owns it). Threat model row to be rewritten post D-20260414-02. | | | | | | API key XSS exfiltration if UI renders untrusted content without sanitization |
 
 ### Mitigations (M1-M8)
 
@@ -677,10 +689,11 @@ Per security-compliance-lead Round 1.5 SEC-8.
 
 Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-kairos` code PR merges to `main` without these paragraphs present in `docs/manual/kairos.md` (Korean and English versions).
 
-### OpenWebUI API key handling (production)
+### `gadgetron-web` API key handling (post D-20260414-02)
 
-- Development: `OPENAI_API_KEY=${GADGETRON_API_KEY}` in Docker env is convenient but visible in `docker inspect`. Acceptable for local dev.
-- Production: MUST use a Docker secret mount (`docker secret` or `docker-compose`'s `secrets:` section) instead of env var. Appendix C updated accordingly.
+- The assistant-ui-based `gadgetron-web` frontend stores the Gadgetron API key in `localStorage` scoped to `:8080/web`. The user pastes it into the settings page after calling `gadgetron key create`. Because `gadgetron-web` and `/v1/*` are same-origin, no CORS is required and no third-party process ever sees the key.
+- Operator responsibility: ensure `gadgetron serve` is bound to a trusted interface (localhost for P2A single-user; TLS + reverse proxy for P2C). Key rotation via `gadgetron key create --rotate` (Phase 1 command) followed by user re-pasting in the Web UI.
+- XSS defense: `gadgetron-web` MUST sanitize any assistant-rendered HTML via `DOMPurify` or equivalent (tracked in `docs/design/phase2/03-gadgetron-web.md` — upcoming). Markdown rendering uses a hardened pipeline that strips `<script>`, `javascript:` URLs, and `onerror=` attributes.
 
 ---
 
@@ -758,7 +771,7 @@ MCP tool errors (wiki not found, search failure) are returned to Claude Code as 
 | Phase | 기간 | Deliverable |
 |---|---|---|
 | **P1.5** | 1주 | v0.1.0-phase1 tag, `docs/00-overview.md` 상방 반영, `docs/design/phase2/` 설계 3종 완결 (00 + 01 + 02), Korean manual section draft |
-| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + OpenWebUI 통합. Acceptance criteria §3. |
+| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 자체 빌드, 단일 바이너리 embed)**. Acceptance criteria §3. (D-20260414-02) |
 | **P2B — Rich Knowledge** | 4주 | SQLite + sqlite-vec 벡터 검색 + 텍스트/PDF ingest + 대화 auto-ingest hook |
 | **P2C — Multi + Storage** | 4주 | KairosManager per-tenant isolation + object_store (Local/S3/GCS) + SharedKnowledge 머지 seams + reopen security threat model |
 | **P2D — Media & Polish** | 4주 | Image(CLIP)/Audio(Whisper)/Video ingest + runtime skills + 운영 배포 |
@@ -769,7 +782,7 @@ Each phase exit criteria: design doc → cross-review 통과 → TDD impl → ma
 
 ## 14. Open Questions for User
 
-1. **Q1**: OpenWebUI confirmed as the default Web UI (2026-04-13 user decision — rationale: most widely deployed self-hosted OpenAI-compatible chat UI). Alternatives LibreChat / Lobe Chat remain supported via custom docker-compose — not bundled.
+1. **Q1**: ~~OpenWebUI confirmed as default~~ — **SUPERSEDED 2026-04-14 by D-20260414-02**. Phase 2A now ships a built-in `gadgetron-web` crate (assistant-ui + Next.js embedded via `include_dir!`) instead. Prior rationale (most widely deployed OSS chat UI) was invalidated by the April-2025 Open WebUI License branding clause and the single-binary architecture principle. Alternatives LibreChat (MongoDB-heavy) / Lobe Chat / big-AGI remain available as **documented fallbacks** but are not bundled.
 2. **Wiki git history granularity** — per-write auto-commit (abstract messages, M5). RESOLVED: per-write auto-commit with abstract messages per M5.
 3. **SearXNG bundling** — RESOLVED: bundle SearXNG in compose but config accepts external URL for users who already run one.
 4. **Q4**: ~~P2A 4-week timeline~~ — withdrawn 2026-04-13. Phase 2A proceeds at PM-set sprint cadence. Strategic deviations (scope/architecture/lock-in/trade-off) escalated per `feedback_pm_decision_authority`.
@@ -781,7 +794,8 @@ Each phase exit criteria: design doc → cross-review 통과 → TDD impl → ma
 ## 15. Next Steps — v3 status (2026-04-13)
 
 Completed through v3 cycle:
-- ✅ Q1 (OpenWebUI), Q4 (timeline) resolved 2026-04-13
+- ✅ Q1 (Web UI) resolved 2026-04-13 as OpenWebUI → **re-resolved 2026-04-14 as `gadgetron-web` (assistant-ui)** per D-20260414-02
+- ✅ Q4 (timeline) resolved 2026-04-13
 - ✅ `01-knowledge-layer.md` v3 detailed spec
 - ✅ `02-kairos-agent.md` v3 detailed spec
 - ✅ Round 1.5 + Round 2 cross-reviews (4 agents each) — all blockers resolved in v3
@@ -792,7 +806,9 @@ Completed through v3 cycle:
 Remaining P2A pre-impl work:
 1. Draft **Korean manual section** `docs/manual/kairos.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md` rule.
 2. Commit + push Round 2 review cycle + v3 docs + manual draft as a single PR.
-3. TDD implementation starts on P2A: Red (failing tests) → Green (minimum code) → Refactor. Order:
+3. **NEW (D-20260414-02)**: Author `docs/design/phase2/03-gadgetron-web.md` — `gadgetron-web` crate design: Cargo.toml, `build.rs` / `cargo xtask build-web` pipeline, assistant-ui component composition, XSS hardening strategy, threat model rewrite of §8 `gadgetron-web` row, `web-ui` Cargo feature on `gadgetron-gateway`. Ship through Round 1.5 (dx + security) + Round 2 (qa) + Round 3 (chief-architect) before any code lands.
+4. **NEW (D-20260414-03)**: Author `docs/design/database/backend-trait.md` — `DatabaseBackend` trait, profile selector (`local`/`server`/`inmemory`), SQLite backport plan for Phase 1 Postgres-specific SQL, migration file layout. Ship through chief-architect + qa-test-architect + security-compliance-lead reviews. Not a P2A blocker — target before P2B entry.
+5. TDD implementation starts on P2A: Red (failing tests) → Green (minimum code) → Refactor. Order:
    - `gadgetron-knowledge::wiki` path resolution (M3) + proptest corpus
    - `gadgetron-knowledge::wiki` read/write + git backend + M5 credential BLOCK
    - `gadgetron-knowledge::mcp` server (manual stdio fallback)
@@ -801,7 +817,8 @@ Remaining P2A pre-impl work:
    - `gadgetron-kairos::spawn` + `ClaudeCodeSession` subprocess lifecycle
    - `gadgetron-kairos::stream` event parser
    - `gadgetron-kairos::provider` `LlmProvider` impl + router registration
-   - E2E: 5 assertions in `02-kairos-agent.md` §14.5 (requires `claude` binary, gated by `GADGETRON_E2E_CLAUDE=1`)
+   - `gadgetron-web` scaffolding + assistant-ui wiring + `gadgetron-gateway` `web-ui` feature gate (parallelizable with knowledge/kairos work once `03-gadgetron-web.md` is approved)
+   - E2E: 5 assertions in `02-kairos-agent.md` §14.5 (requires `claude` binary, gated by `GADGETRON_E2E_CLAUDE=1`) + Web UI smoke test (`gadgetron-web` serves `/web` and loads `kairos` in model list)
 
 ---
 
@@ -884,49 +901,31 @@ mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_searc
 
 ---
 
-## Appendix C — OpenWebUI + SearXNG Integration
+## Appendix C — Deployment (post D-20260414-02)
 
-OpenWebUI is deployed as a sibling service. SearXNG is bundled in our compose (dedicated localhost instance). Two deployment modes:
+**Phase 2A now ships as a single binary. No docker-compose is required for the Web UI.** `gadgetron serve` exposes:
+- `:8080/v1/*` — existing OpenAI-compat API (Phase 1)
+- `:8080/web/*` — `gadgetron-web` (assistant-ui) static assets embedded via `include_dir!`, served by `gadgetron-gateway` under Cargo feature `web-ui` (on by default)
 
-**Local dev (native):**
-Run each service individually. See `gadgetron kairos init --docker` for the generated compose alternative.
-
-**Docker compose (ships with Gadgetron via `gadgetron kairos init --docker`):**
+**Optional SearXNG sidecar** (for the `web_search` MCP tool):
 ```yaml
-secrets:
-  gadgetron_api_key:
-    file: ./secrets/gadgetron_api_key
-
 services:
-  gadgetron:
-    image: gadgetron:0.2.0
-    # ... existing ...
-  openwebui:
-    # Pin to digest, not :main
-    image: ghcr.io/open-webui/open-webui@sha256:<pinned-digest>
-    environment:
-      OPENAI_API_BASE_URL: http://gadgetron:8080/v1
-      # Secret from file-mounted Docker secret, NOT env var
-      OPENAI_API_KEY_FILE: /run/secrets/gadgetron_api_key
-    secrets:
-      - gadgetron_api_key
-    ports:
-      - "3000:8080"
-    depends_on:
-      - gadgetron
   searxng:
     image: searxng/searxng@sha256:<pinned-digest>
     ports:
       - "127.0.0.1:8888:8080"  # localhost-only for privacy
 ```
+Set `[knowledge.search].searxng_url = "http://127.0.0.1:8888"` in `gadgetron.toml`. SearXNG can also be run natively — see `docs/adr/ADR-P2A-03-searxng-privacy-disclosure.md`.
 
-User experience:
-1. Browse to `http://localhost:3000`
-2. OpenWebUI fetches `/v1/models` from Gadgetron; sees `kairos` alongside existing models
-3. User picks `kairos`, starts chatting
-4. Each message is a `POST /v1/chat/completions` routed to the kairos provider
+**User experience:**
+1. Browse to `http://localhost:8080/web`
+2. Open Settings → paste the Gadgetron API key from `gadgetron key create`
+3. Model dropdown (populated by `gadgetron-web` from `/v1/models`) → pick `kairos`
+4. Start chatting. Each message is `POST /v1/chat/completions` (same origin, bearer auth from localStorage) routed to the kairos provider.
 
-**No OpenWebUI code changes required.** `/v1/models` just needs to include `kairos` in its response — the existing `list_models_handler` aggregates across registered providers.
+**No external chat UI or docker-compose required.** The existing `list_models_handler` already includes `kairos` once the provider is registered — `gadgetron-web` consumes the same `/v1/models` endpoint as any third-party client.
+
+See `docs/design/phase2/03-gadgetron-web.md` (upcoming) for crate layout, build pipeline (`cargo xtask build-web` or `build.rs` + `npm run build`), and threat-model rewrite.
 
 ---
 

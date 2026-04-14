@@ -143,6 +143,39 @@ gadgetron --help
 
 ---
 
+## Headless build (no Web UI)
+
+The default Gadgetron build includes the Web UI (`gadgetron-web` crate compiled into the binary via the `web-ui` Cargo feature on `gadgetron-gateway`, on by default). To produce a headless binary for API-only deployments (or for build environments without Node.js), use the `headless` alias:
+
+```bash
+cargo build --release --no-default-features --features headless -p gadgetron-cli
+```
+
+This disables the `web-ui` feature on `gadgetron-gateway` transitively and skips the `gadgetron-web` crate's `build.rs` entirely (no `npm` invocation required at build time).
+
+**Verify**:
+
+```bash
+./target/release/gadgetron serve &
+curl -I http://localhost:8080/web/   # HTTP/1.1 404 Not Found expected
+curl -sf http://localhost:8080/v1/models -H "Authorization: Bearer $KEY"  # API still works
+```
+
+The `/web/*` subtree is not registered and returns the generic 404 — no indication that `gadgetron-web` was compiled out (DX-W-NB4, information hiding for probe attempts).
+
+**Build requirements for default (with Web UI)**:
+
+| Component | Minimum version | Install |
+|---|---|---|
+| Node.js | 20.19.0 (pinned via `crates/gadgetron-web/web/.nvmrc`) | `nvm install 20.19.0` / `brew install node@20` |
+| npm | bundled with Node 20 (npm 10+) | — |
+
+If `npm` is not on PATH when building the default profile and you do NOT want the Web UI, set `GADGETRON_SKIP_WEB_BUILD=1` to embed a fallback `index.html` that displays "Gadgetron Web UI unavailable" — or use the `headless` alias above for a clean build.
+
+Related: `docs/manual/web.md` (Web UI setup), `docs/design/phase2/03-gadgetron-web.md §20` (feature flag topology).
+
+---
+
 ## Docker
 
 Docker support is planned for a future sprint. No official image has been published yet.
