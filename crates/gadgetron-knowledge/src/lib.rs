@@ -17,8 +17,10 @@
 
 pub mod config;
 pub mod error;
+pub mod mcp;
 pub mod search;
 pub mod wiki;
 
 pub use error::{SearchError, WikiError};
 pub use gadgetron_core::error::WikiErrorKind;
+pub use mcp::KnowledgeToolProvider;

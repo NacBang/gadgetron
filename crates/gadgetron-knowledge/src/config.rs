@@ -2,12 +2,17 @@
 //!
 //! Spec: `docs/design/phase2/01-knowledge-layer.md §7`.
 //!
-//! P2A currently surfaces the web-search config surface needed by
-//! `search::searxng`. The full `KnowledgeConfig` (wiki root path, git
-//! author identity, autocommit flag, etc.) lands with the `Wiki`
-//! aggregate in a follow-up commit.
+//! Exposes two layered config types:
+//!
+//! - `KnowledgeConfig` — the toml surface under `[knowledge]`. Includes
+//!   `wiki_path`, `wiki_autocommit`, `wiki_git_author`, `wiki_max_page_bytes`,
+//!   and an optional nested `[knowledge.search]` `SearchConfig`.
+//! - `WikiConfig` — the internal runtime config consumed by `Wiki::open`.
+//!   Derived from `KnowledgeConfig::to_wiki_config()` after git-author
+//!   auto-detection.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration for the web search subsystem.
 ///
@@ -145,5 +150,240 @@ mod tests {
         assert_eq!(parsed.scheme(), "http");
         assert_eq!(parsed.host_str(), Some("127.0.0.1"));
         assert_eq!(parsed.port(), Some(8888));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KnowledgeConfig — toml surface under `[knowledge]`
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeConfig {
+    /// Wiki storage root. Created + git-init'ed on first run if absent.
+    /// Env: `GADGETRON_KNOWLEDGE_WIKI_PATH`
+    pub wiki_path: PathBuf,
+
+    /// Auto-commit on every write. If false, writes are staged but
+    /// never committed — the operator handles commits manually.
+    /// Default true.
+    /// Env: `GADGETRON_KNOWLEDGE_WIKI_AUTOCOMMIT`
+    #[serde(default = "default_true")]
+    pub wiki_autocommit: bool,
+
+    /// Git author identity in `"Name <email>"` format. If `None`,
+    /// `KnowledgeConfig::to_wiki_config` auto-detects from the global
+    /// gitconfig and falls back to `"Kairos <kairos@gadgetron.local>"`.
+    /// Env: `GADGETRON_KNOWLEDGE_WIKI_GIT_AUTHOR`
+    #[serde(default)]
+    pub wiki_git_author: Option<String>,
+
+    /// Maximum bytes per wiki page. Range [1, 100 MiB]. Default 1 MiB.
+    /// Env: `GADGETRON_KNOWLEDGE_WIKI_MAX_PAGE_BYTES`
+    #[serde(default = "default_max_page_bytes")]
+    pub wiki_max_page_bytes: usize,
+
+    /// Nested `[knowledge.search]` block. When `None`, the `web.search`
+    /// MCP tool is omitted from the `KnowledgeToolProvider` manifest.
+    #[serde(default)]
+    pub search: Option<SearchConfig>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_max_page_bytes() -> usize {
+    1_048_576
+}
+
+impl KnowledgeConfig {
+    /// Validates at load time. Rules:
+    /// - `wiki_path` parent must exist (wiki_path itself may not —
+    ///   `gadgetron kairos init` creates it on first start).
+    /// - `wiki_max_page_bytes` must be in [1, 100 MiB]
+    /// - Nested `search` config (if present) passes its own validate.
+    pub fn validate(&self) -> Result<(), String> {
+        let parent = self.wiki_path.parent().ok_or_else(|| {
+            format!(
+                "wiki_path must not be the filesystem root: {}",
+                self.wiki_path.display()
+            )
+        })?;
+        // Empty parent is the current directory — always exists.
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err(format!(
+                "wiki_path parent does not exist: {}",
+                parent.display()
+            ));
+        }
+        if !(1..=104_857_600).contains(&self.wiki_max_page_bytes) {
+            return Err(format!(
+                "wiki_max_page_bytes must be in [1, 100 MiB]; got {}",
+                self.wiki_max_page_bytes
+            ));
+        }
+        if let Some(sc) = &self.search {
+            sc.validate().map_err(|e| format!("knowledge.search: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Build a runtime `WikiConfig` from this operator-facing config.
+    /// Parses `wiki_git_author` (or auto-detects via git2 Config) into
+    /// name + email pairs suitable for `git2::Signature::now`.
+    pub fn to_wiki_config(&self) -> Result<WikiConfig, String> {
+        let (git_author_name, git_author_email) = match &self.wiki_git_author {
+            Some(author) => parse_author(author)?,
+            None => autodetect_git_author_or_fallback(),
+        };
+        Ok(WikiConfig {
+            root: self.wiki_path.clone(),
+            autocommit: self.wiki_autocommit,
+            git_author_name,
+            git_author_email,
+            max_page_bytes: self.wiki_max_page_bytes,
+        })
+    }
+}
+
+fn parse_author(author: &str) -> Result<(String, String), String> {
+    // "Name <email>" format.
+    let lt = author.find(" <").ok_or_else(|| {
+        format!("wiki_git_author must be in 'Name <email>' format, got: {author}")
+    })?;
+    let gt = author.rfind('>').ok_or_else(|| {
+        format!("wiki_git_author must be in 'Name <email>' format, got: {author}")
+    })?;
+    if gt <= lt + 2 {
+        return Err(format!(
+            "wiki_git_author must be in 'Name <email>' format, got: {author}"
+        ));
+    }
+    let name = author[..lt].trim().to_string();
+    let email = author[lt + 2..gt].trim().to_string();
+    if name.is_empty() || email.is_empty() {
+        return Err(format!(
+            "wiki_git_author must be in 'Name <email>' format, got: {author}"
+        ));
+    }
+    Ok((name, email))
+}
+
+fn autodetect_git_author_or_fallback() -> (String, String) {
+    if let Ok(config) = git2::Config::open_default() {
+        let name = config.get_string("user.name").ok();
+        let email = config.get_string("user.email").ok();
+        if let (Some(n), Some(e)) = (name, email) {
+            if !n.is_empty() && !e.is_empty() {
+                return (n, e);
+            }
+        }
+    }
+    // Fallback when the system gitconfig is missing or empty.
+    tracing::warn!(
+        target: "knowledge_config",
+        "git config user.name / user.email not set — falling back to 'Kairos <kairos@gadgetron.local>'"
+    );
+    (
+        "Kairos".to_string(),
+        "kairos@gadgetron.local".to_string(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// WikiConfig — internal runtime config
+// ---------------------------------------------------------------------------
+
+/// Runtime-derived wiki config consumed by `Wiki::open`. Produced by
+/// `KnowledgeConfig::to_wiki_config()`.
+#[derive(Debug, Clone)]
+pub struct WikiConfig {
+    pub root: PathBuf,
+    pub autocommit: bool,
+    pub git_author_name: String,
+    pub git_author_email: String,
+    pub max_page_bytes: usize,
+}
+
+#[cfg(test)]
+mod knowledge_config_tests {
+    use super::*;
+
+    #[test]
+    fn parse_author_valid() {
+        let (n, e) = parse_author("Alice <alice@example.com>").unwrap();
+        assert_eq!(n, "Alice");
+        assert_eq!(e, "alice@example.com");
+    }
+
+    #[test]
+    fn parse_author_multi_word_name() {
+        let (n, e) = parse_author("Alice Smith <alice.smith@example.com>").unwrap();
+        assert_eq!(n, "Alice Smith");
+        assert_eq!(e, "alice.smith@example.com");
+    }
+
+    #[test]
+    fn parse_author_missing_angle() {
+        assert!(parse_author("Alice alice@example.com").is_err());
+    }
+
+    #[test]
+    fn parse_author_empty_email() {
+        assert!(parse_author("Alice <>").is_err());
+    }
+
+    #[test]
+    fn knowledge_config_validates_with_existing_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = KnowledgeConfig {
+            wiki_path: tmp.path().join("wiki"),
+            wiki_autocommit: true,
+            wiki_git_author: Some("Test <test@example.com>".into()),
+            wiki_max_page_bytes: 1024,
+            search: None,
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn knowledge_config_rejects_missing_parent() {
+        let cfg = KnowledgeConfig {
+            wiki_path: "/definitely/not/here/ever/wiki".into(),
+            wiki_autocommit: true,
+            wiki_git_author: None,
+            wiki_max_page_bytes: 1024,
+            search: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn knowledge_config_rejects_oversize_max_page_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = KnowledgeConfig {
+            wiki_path: tmp.path().join("wiki"),
+            wiki_autocommit: true,
+            wiki_git_author: None,
+            wiki_max_page_bytes: 200_000_000, // 200 MiB
+            search: None,
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn knowledge_config_to_wiki_config_with_explicit_author() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = KnowledgeConfig {
+            wiki_path: tmp.path().join("wiki"),
+            wiki_autocommit: false,
+            wiki_git_author: Some("Kairos <k@g.local>".into()),
+            wiki_max_page_bytes: 2048,
+            search: None,
+        };
+        let wc = cfg.to_wiki_config().unwrap();
+        assert_eq!(wc.git_author_name, "Kairos");
+        assert_eq!(wc.git_author_email, "k@g.local");
+        assert_eq!(wc.max_page_bytes, 2048);
+        assert!(!wc.autocommit);
     }
 }

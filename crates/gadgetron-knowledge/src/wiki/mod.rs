@@ -16,8 +16,10 @@ pub mod git;
 pub mod index;
 pub mod link;
 pub mod secrets;
+pub mod store;
 
 pub use fs::resolve_path;
 pub use index::{tokenize, InvertedIndex, WikiSearchHit};
 pub use link::{parse_links, WikiLink};
 pub use secrets::{check_audit_patterns, check_block_patterns, SecretPatternMatch};
+pub use store::{Wiki, WikiListEntry, WriteResult};
