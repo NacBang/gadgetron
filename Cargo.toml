@@ -68,6 +68,7 @@ anyhow = "1"
 futures = "0.3"
 tokio-stream = "0.1"
 eventsource-stream = "0.2"
+async-stream = "0.3"
 
 # System monitoring
 sysinfo = "0.33"
