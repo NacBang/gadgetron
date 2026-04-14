@@ -120,6 +120,36 @@ enum Commands {
         #[arg(long, short = 'c')]
         config: Option<PathBuf>,
     },
+
+    /// Run the Model Context Protocol (MCP) stdio server.
+    ///
+    /// This subcommand is invoked by Claude Code as a child process via
+    /// the `--mcp-config` JSON file that Kairos writes per request.
+    /// It reads JSON-RPC 2.0 messages from stdin, dispatches tool calls
+    /// through the registered `McpToolProvider`s (currently just
+    /// `KnowledgeToolProvider` from `[knowledge]`), and writes responses
+    /// to stdout.
+    ///
+    /// Not intended for direct operator use. `gadgetron serve` is the
+    /// user-facing entry point; the mcp serve subcommand exists only as
+    /// the child-side of the Kairos subprocess bridge.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCmd,
+    },
+}
+
+/// Subcommands for `gadgetron mcp`.
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Run the stdio MCP server on the current process's stdin/stdout.
+    /// Exits cleanly on stdin EOF (parent process exit).
+    Serve {
+        /// Path to the config file containing the `[knowledge]` section.
+        /// Defaults to `gadgetron.toml` in the current directory.
+        #[arg(long, short = 'c')]
+        config: Option<PathBuf>,
+    },
 }
 
 /// Subcommands for `gadgetron tenant`.
@@ -226,9 +256,71 @@ async fn main() -> Result<()> {
         Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
 
+        Some(Commands::Mcp {
+            command: McpCmd::Serve { config },
+        }) => cmd_mcp_serve(config).await,
+
         // No subcommand given: default to `serve` with no flags.
         None => serve(None, None, false, false, None).await,
     }
+}
+
+/// `gadgetron mcp serve` — run the stdio MCP server.
+///
+/// Reads the `[knowledge]` section from the config file, builds a
+/// `KnowledgeToolProvider`, freezes it into an `McpToolRegistry`, and
+/// calls `gadgetron_kairos::serve_stdio(registry)` to handle the
+/// JSON-RPC 2.0 message loop on stdin/stdout.
+///
+/// Exits cleanly on stdin EOF. Errors in config loading or provider
+/// construction produce a descriptive message on stderr and exit
+/// code 1.
+async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
+    use std::sync::Arc;
+
+    let config_path: PathBuf = config_path_override
+        .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
+
+    if !config_path.exists() {
+        anyhow::bail!(
+            "config file not found: {}. Run `gadgetron kairos init` first, or pass --config.",
+            config_path.display()
+        );
+    }
+
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+
+    let knowledge_cfg = gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
+                 requires the knowledge layer to be configured.",
+                config_path.display()
+            )
+        })?;
+
+    knowledge_cfg
+        .validate()
+        .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
+
+    let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
+        .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
+
+    let mut builder = gadgetron_kairos::McpToolRegistryBuilder::new();
+    builder
+        .register(Arc::new(provider))
+        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
+    let registry = Arc::new(builder.freeze());
+
+    // Drive the stdio loop until EOF.
+    gadgetron_kairos::serve_stdio(registry)
+        .await
+        .map_err(|e| anyhow::anyhow!("mcp stdio server error: {e}"))?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
