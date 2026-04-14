@@ -1,0 +1,36 @@
+[package]
+name = "gadgetron-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedded Gadgetron web UI (assistant-ui + Next.js, compiled into the binary)"
+exclude = [
+    "web/node_modules",
+    "web/.next",
+    "web/out",
+    "web/dist",
+]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["set-header"] }
+
+include_dir = { workspace = true }
+mime_guess = { workspace = true }
+percent-encoding = { workspace = true }
+
+tracing = { workspace = true }
+
+[features]
+default = []
+strict-build = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util", "macros"] }
+axum-test = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }

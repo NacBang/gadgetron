@@ -1559,6 +1559,8 @@ mod tests {
             providers,
             nodes: vec![],
             models: vec![],
+            web: gadgetron_core::config::WebConfig::default(),
+            agent: gadgetron_core::agent::AgentConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
         assert!(
@@ -1592,6 +1594,8 @@ mod tests {
             providers,
             nodes: vec![],
             models: vec![],
+            web: gadgetron_core::config::WebConfig::default(),
+            agent: gadgetron_core::agent::AgentConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
         assert!(
@@ -1625,6 +1629,8 @@ mod tests {
             providers,
             nodes: vec![],
             models: vec![],
+            web: gadgetron_core::config::WebConfig::default(),
+            agent: gadgetron_core::agent::AgentConfig::default(),
         };
         let map = build_providers(&cfg).expect("Gemini provider must now be implemented");
         assert!(

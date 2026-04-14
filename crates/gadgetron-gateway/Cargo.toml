@@ -9,9 +9,10 @@ gadgetron-core = { workspace = true }
 gadgetron-provider = { workspace = true }
 gadgetron-router = { workspace = true }
 gadgetron-xaas = { workspace = true }
+gadgetron-web = { workspace = true, optional = true }
 axum = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true, features = ["limit", "trace"] }
+tower-http = { workspace = true, features = ["limit", "trace", "set-header"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,10 +25,18 @@ chrono = { workspace = true }
 futures = { workspace = true }
 sqlx = { workspace = true }
 
+[features]
+default = ["web-ui"]
+# Compile-in the embedded Gadgetron Web UI (`gadgetron-web` crate).
+# Disable with `--no-default-features` for headless / API-only deployments
+# per D-20260414-02 M-W4 + docs/manual/installation.md "Headless build".
+web-ui = ["dep:gadgetron-web"]
+
 [dev-dependencies]
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 moka = { workspace = true }
+axum-test = { workspace = true }
 
 [[bench]]
 name = "middleware_chain"
