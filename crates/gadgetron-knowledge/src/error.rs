@@ -25,10 +25,19 @@ pub enum WikiError {
 
 impl WikiError {
     /// Construct a `Kind` variant from a `WikiErrorKind`, using its Display as the
-    /// human-readable message. For richer messages, construct `Kind { .. }` directly.
+    /// human-readable message. For richer messages, use `kind_with_message`.
     pub fn kind(kind: WikiErrorKind) -> Self {
         let msg = kind.to_string();
         Self::Kind { kind, message: msg }
+    }
+
+    /// Construct a `Kind` variant with an explicit operator-facing message.
+    /// Preferred for git + I/O error paths where the kind alone is too terse.
+    pub fn kind_with_message(kind: WikiErrorKind, message: impl Into<String>) -> Self {
+        Self::Kind {
+            kind,
+            message: message.into(),
+        }
     }
 
     /// Shorthand for `WikiErrorKind::PathEscape`.

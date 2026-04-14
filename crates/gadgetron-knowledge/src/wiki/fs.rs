@@ -11,7 +11,6 @@
 //! (SEC-W-B4) handles URL-level percent-decoding; that is a separate boundary.
 
 use crate::error::WikiError;
-use gadgetron_core::error::WikiErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_INPUT_BYTES: usize = 256;

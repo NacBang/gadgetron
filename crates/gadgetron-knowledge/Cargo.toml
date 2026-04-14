@@ -11,6 +11,12 @@ gadgetron-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# Wiki subsystem — git backend + credential patterns
+git2 = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
