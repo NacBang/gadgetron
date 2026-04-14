@@ -15,6 +15,69 @@ pub struct AppConfig {
     pub nodes: Vec<NodeConfig>,
     #[serde(default)]
     pub models: Vec<LocalModelConfig>,
+    #[serde(default)]
+    pub web: WebConfig,
+    #[serde(default)]
+    pub agent: crate::agent::AgentConfig,
+}
+
+/// Gadgetron Web UI (`gadgetron-web` crate) configuration.
+///
+/// Added by D-20260414-02 + `docs/design/phase2/03-gadgetron-web.md` §18.
+/// When `enabled = false`, the gateway does NOT mount the `/web/*` subtree
+/// at all — requests fall through to the default 404 handler (no information
+/// leak about whether `gadgetron-web` was compiled in).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+    /// URL path prefix where `/v1/*` is mounted as seen by the browser.
+    /// Default `"/v1"`. Change only if a reverse proxy rewrites the path.
+    /// `gadgetron-web` rewrites `<meta name="gadgetron-api-base" content="...">`
+    /// in the embedded `index.html` at startup using this value (SEC-W-B5).
+    #[serde(default = "default_api_base_path")]
+    pub api_base_path: String,
+}
+
+fn default_web_enabled() -> bool {
+    true
+}
+fn default_api_base_path() -> String {
+    "/v1".to_string()
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_enabled(),
+            api_base_path: default_api_base_path(),
+        }
+    }
+}
+
+impl WebConfig {
+    /// Validate the runtime-configurable fields.
+    ///
+    /// Deny list covers header-injection (`;`, `\n`, `\r`), HTML injection
+    /// (`<`, `>`), and JS/CSS string escape (`"`, `'`, backtick) — per
+    /// SEC-W-B3 + SEC-W-B9. Called from `AppConfig::load()` after
+    /// `resolve_env_vars` (see below).
+    pub fn validate(&self) -> crate::error::Result<()> {
+        const DENY: &[char] = &[';', '\n', '\r', '<', '>', '"', '\'', '`'];
+        if self.api_base_path.chars().any(|c| DENY.contains(&c)) {
+            return Err(crate::error::GadgetronError::Config(format!(
+                "web.api_base_path must not contain any of {DENY:?}; got {:?}",
+                self.api_base_path
+            )));
+        }
+        if !self.api_base_path.starts_with('/') {
+            return Err(crate::error::GadgetronError::Config(format!(
+                "web.api_base_path must start with '/'; got {:?}",
+                self.api_base_path
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +164,8 @@ impl Default for AppConfig {
             providers: Default::default(),
             nodes: vec![],
             models: vec![],
+            web: WebConfig::default(),
+            agent: crate::agent::AgentConfig::default(),
         }
     }
 }
@@ -117,6 +182,8 @@ impl AppConfig {
             crate::error::GadgetronError::Config(format!("Failed to parse config: {}", e))
         })?;
         config.resolve_env_vars();
+        config.web.validate()?;
+        config.agent.validate(&config.providers)?;
         Ok(config)
     }
 

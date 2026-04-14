@@ -4,10 +4,10 @@
 > **대상 독자**: Gadgetron 운영자 / 단일 유저 로컬 사용자.
 > **설계 출처**: `docs/design/phase2/00-overview.md` v3, `01-knowledge-layer.md` v3, `02-kairos-agent.md` v3, ADR-P2A-01/02/03.
 
-Kairos는 Gadgetron이 Phase 1(다중 프로바이더 LLM 게이트웨이)을 넘어 **지식 레이어 기반의 개인 비서 플랫폼**으로 올라가는 Phase 2의 첫 단계(P2A)입니다. 사용자가 OpenWebUI에서 `kairos` 모델을 선택해 대화하면, Gadgetron은 Claude Code CLI를 서브프로세스로 띄워 로컬 지식(md 위키)과 웹 검색(SearXNG)을 MCP 도구로 제공합니다. Claude Code 자체가 agent 루프를 돌리고, Rust 코드는 도구와 subprocess 관리만 책임집니다.
+Kairos는 Gadgetron이 Phase 1(다중 프로바이더 LLM 게이트웨이)을 넘어 **지식 레이어 기반의 개인 비서 플랫폼**으로 올라가는 Phase 2의 첫 단계(P2A)입니다. 사용자가 Gadgetron에 내장된 **`gadgetron-web` 웹 UI** (`http://localhost:8080/web`) 에서 `kairos` 모델을 선택해 대화하면, Gadgetron은 Claude Code CLI를 서브프로세스로 띄워 로컬 지식(md 위키)과 웹 검색(SearXNG)을 MCP 도구로 제공합니다. Claude Code 자체가 agent 루프를 돌리고, Rust 코드는 도구와 subprocess 관리만 책임집니다.
 
 - 하방(Phase 1): LLM 게이트웨이 — 외부 API 클라이언트, SDK 유저, 운영자 대상.
-- 상방(Phase 2): 개인 비서 플랫폼 — OpenWebUI 채팅으로 최종 사용자 대상.
+- 상방(Phase 2): 개인 비서 플랫폼 — `gadgetron-web` (assistant-ui 기반, 단일 바이너리 embed) 채팅으로 최종 사용자 대상 (D-20260414-02).
 
 같은 Gadgetron 바이너리가 두 레이어를 모두 제공합니다.
 
@@ -50,7 +50,7 @@ Gadgetron은 Claude Code를 `--dangerously-skip-permissions` 플래그와 함께
 2. **Claude Code CLI 설치**: `claude` 바이너리가 `PATH`에 있어야 합니다. 공식 설치 가이드는 https://docs.claude.com/en/docs/claude-code 를 참조하십시오.
 3. **Claude Code 로그인 완료**: `claude login`을 실행해 `~/.claude/` 아래에 OAuth 자격증명을 저장해야 합니다. 사용자의 Claude Max 구독이 Kairos의 "두뇌"를 담당하므로 API 키 과금이 발생하지 않습니다.
 4. **최소 Claude Code 버전**: `2.1.104` 이상. `gadgetron serve`는 시작 시 `claude --version`을 실행해 버전을 확인하고, 미만이면 거부합니다 (ADR-P2A-01 `CLAUDE_CODE_MIN_VERSION`).
-5. **Docker**: OpenWebUI + SearXNG 번들을 쓰려면 Docker 또는 Podman이 필요합니다. 네이티브 실행도 지원됩니다.
+5. **(선택) Docker**: SearXNG 를 컨테이너로 띄우려면 Docker 또는 Podman이 편리합니다. 네이티브 SearXNG 설치도 지원됩니다. **Web UI 는 Docker 없이 Gadgetron 바이너리에 이미 embed 되어 있습니다** — `gadgetron serve` 한 번이면 `http://localhost:8080/web` 에서 바로 열립니다 (D-20260414-02, 구 OpenWebUI 계획 폐기).
 
 ---
 
@@ -77,51 +77,51 @@ Phase 1 Gadgetron이 이미 동작 중이라고 가정합니다.
 
 옵션 플래그:
 - `--wiki-path <PATH>`: 기본 `~/.gadgetron/wiki` 대신 다른 디렉터리를 사용합니다. `gadgetron.toml`이 이미 `wiki_path`를 지정한 경우 CLI 값이 우선합니다.
-- `--docker`: `docker-compose.yml` YAML을 stdout으로 출력합니다 (워크스페이스는 변경하지 않음). 리다이렉트하여 사용: `gadgetron kairos init --docker > docker-compose.yml`.
+- `--docker`: **P2A 에서 미지원** (D-20260414-02, DX-W-B3 Option C). 호출 시 stderr 에 경고 출력 후 exit 0. Web UI 는 `gadgetron serve` 가 자동으로 embed 된 채 서빙하므로 별도 compose 가 필요 없습니다. SearXNG 는 `docker run -d --rm --name searxng -p 127.0.0.1:8888:8080 searxng/searxng` 로 수동 기동하십시오. P2B 에서 SearXNG-only 모드로 재도입될 가능성이 있습니다.
 
 Phase 1 `gadgetron doctor`는 `[ok]` / `[FAIL]` 소문자 스타일을 쓰고, Phase 2 `kairos init`은 `[OK]` / `[WARN]` / `[FAIL]` 대문자를 씁니다. 의도된 차이입니다.
 
-### 2. OpenWebUI + SearXNG 기동 (Docker 옵션)
+### 2. (선택) SearXNG 기동
+
+웹 검색 MCP 도구를 쓰려면 로컬 SearXNG 가 필요합니다. Docker 예시:
 
 ```sh
-./target/release/gadgetron kairos init --docker > docker-compose.yml
-docker compose up -d
+docker run -d --rm --name searxng -p 127.0.0.1:8888:8080 searxng/searxng
 ```
 
-`docker compose up` 뒤 Gadgetron, OpenWebUI, SearXNG 세 컨테이너가 기동합니다. OpenWebUI는 `http://localhost:3000`, Gadgetron은 `http://localhost:8080`, SearXNG는 `http://127.0.0.1:8888` (localhost-only) 에 각각 바인딩됩니다.
+네이티브 설치도 가능합니다 (SearXNG 공식 문서 참조). SearXNG 가 없어도 Kairos 는 동작하며, `web_search` MCP 도구만 노출되지 않습니다.
 
-**네이티브 실행을 선호하면**: 세 서비스를 각각 직접 실행하고 설정에서 `searxng_url`만 맞춰주면 됩니다. `docs/design/phase2/00-overview.md` §Appendix C를 참조하십시오.
+설정: `gadgetron.toml` 의 `[knowledge.search].searxng_url = "http://127.0.0.1:8888"`.
 
 ### 3. API 키 생성
 
-OpenWebUI가 Gadgetron에 인증하려면 API 키가 필요합니다:
+`gadgetron-web` 이 Gadgetron 에 인증하려면 API 키가 필요합니다:
 
 ```sh
 ./target/release/gadgetron key create --tenant-id default
 ```
 
-출력된 키(`gad_live_...`)를 OpenWebUI의 `OPENAI_API_KEY` 환경 변수로 설정하십시오. `docker-compose.yml`은 `./secrets/gadgetron_api_key` 파일을 마운트하는 방식을 사용합니다 (env var 대신 Docker secret).
+출력된 키(`gad_live_...`)를 복사해 두십시오. 5 단계에서 브라우저에 붙여넣습니다.
 
 상세: `docs/manual/auth.md`.
 
-### 4. Gadgetron 서버 기동
-
-Docker 옵션을 쓰지 않는 경우:
+### 4. Gadgetron 서버 기동 (단일 바이너리)
 
 ```sh
 ./target/release/gadgetron serve --config ~/.gadgetron/gadgetron.toml
 ```
 
-Docker compose 옵션을 썼다면 이미 기동되어 있습니다 (`docker compose ps`로 확인).
+이 한 줄이 `:8080/v1/*` (OpenAI-compat API) 와 `:8080/web/*` (`gadgetron-web` — assistant-ui 기반 채팅 UI) 를 모두 서빙합니다. 별도 컨테이너·sibling 프로세스·docker-compose 필요 없음 (D-20260414-02).
 
 **팁**: `kairos init`이 생성한 `gadgetron.toml`은 kairos 전용 라우팅 전략을 설정합니다 (`default_strategy = { type = "fallback", chain = ["kairos"] }`). 다른 프로바이더를 추가할 때는 `round_robin`과 kairos를 같은 풀에 넣지 마십시오 — Claude Code subprocess가 같은 풀의 다른 일반 LLM과 섞이면 혼란스러운 실패가 발생합니다. 자세한 내용은 `docs/design/phase2/02-kairos-agent.md` §11을 보십시오.
 
-### 5. OpenWebUI에서 첫 대화
+### 5. `gadgetron-web` 에서 첫 대화
 
-1. 브라우저에서 `http://localhost:3000` 접속.
-2. OpenWebUI가 `/v1/models`를 통해 Gadgetron의 모델 목록을 가져옵니다 — 기존 `vllm/...`, `sglang/...` 등과 함께 **`kairos`** 가 보여야 합니다.
-3. 모델로 `kairos` 선택 후 "내가 어제 뭐 했는지 위키에서 찾아줘" 같은 프롬프트를 보내보십시오.
-4. 내부 흐름: OpenWebUI → `POST /v1/chat/completions (model=kairos, stream=true)` → `gadgetron-gateway` → `gadgetron-router` → `gadgetron-kairos::provider` → `claude -p` subprocess → MCP tools (`wiki_search`, `wiki_get`, 필요 시 `web_search`) → stream-json 이벤트를 SSE로 변환해 OpenWebUI에 스트리밍.
+1. 브라우저에서 `http://localhost:8080/web` 접속. `gadgetron-web` 의 채팅 UI 가 로드됩니다 (assistant-ui 컴포넌트 기반, shadcn + Tailwind 스타일).
+2. 설정 아이콘 → API 키 입력란에 3 단계에서 복사한 `gad_live_...` 를 붙여넣고 저장. 키는 브라우저 localStorage 에만 저장되며, 같은 origin(`:8080`) 위에서만 `/v1/*` 호출에 사용됩니다.
+3. 모델 드롭다운이 `/v1/models` 를 통해 Gadgetron 의 모델 목록을 가져옵니다 — 기존 `vllm/...`, `sglang/...` 등과 함께 **`kairos`** 가 보여야 합니다.
+4. 모델로 `kairos` 선택 후 "내가 어제 뭐 했는지 위키에서 찾아줘" 같은 프롬프트를 보내보십시오.
+5. 내부 흐름: `gadgetron-web` 브라우저 → `POST /v1/chat/completions (model=kairos, stream=true)` (같은 origin, localStorage 의 Bearer 토큰) → `gadgetron-gateway` → `gadgetron-router` → `gadgetron-kairos::provider` → `claude -p` subprocess → MCP tools (`wiki_search`, `wiki_get`, 필요 시 `web_search`) → stream-json 이벤트를 SSE 로 변환해 `gadgetron-web` 에 스트리밍.
 
 첫 실행에서 Claude Code가 몇 초 지연될 수 있습니다 (모델 콜드 스타트). 두 번째 실행부터는 1초 안쪽이 일반적입니다.
 
@@ -210,7 +210,7 @@ max_concurrent_subprocesses = 4
 
 **SearXNG 차단**: 방화벽/프록시가 SearXNG 포트(기본 `127.0.0.1:8888`)를 막으면 `web_search` MCP 도구가 실패합니다. `curl http://127.0.0.1:8888/search?q=test&format=json` 로 직접 확인하십시오.
 
-**OpenWebUI가 kairos 모델을 못 봄**: OpenWebUI가 `/v1/models` 엔드포인트를 호출해 모델 목록을 가져오는지 확인하십시오. Gadgetron이 기동되지 않았거나 `gadgetron.toml`의 `[kairos]` 블록이 비어 있으면 모델이 나타나지 않습니다. `curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/models | jq '.data[] | .id'` 로 직접 확인.
+**`gadgetron-web` 이 `kairos` 모델을 못 봄**: 브라우저가 `/v1/models` 엔드포인트를 호출해 모델 목록을 가져오는지 확인하십시오. Gadgetron 이 기동되지 않았거나 `gadgetron.toml` 의 `[kairos]` 블록이 비어 있으면 모델이 나타나지 않습니다. `curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/models | jq '.data[] | .id'` 로 직접 확인. 브라우저 DevTools → Network 탭에서 `/v1/models` 요청의 응답을 확인하는 것도 도움이 됩니다. `/web` 이 404 면 `gadgetron-gateway` 가 `web-ui` Cargo feature 없이 빌드된 것이므로 `cargo build --features web-ui` 로 재빌드하십시오.
 
 ---
 
@@ -246,9 +246,13 @@ P2A는 **단일 유저 로컬**만 공식 지원합니다. 멀티 유저(Per-ten
 | `docs/manual/auth.md` | API 키 / 테넌트 / scope 시스템 |
 | `docs/manual/quickstart.md` | Phase 1 5분 빠른 시작 |
 | `docs/manual/troubleshooting.md` | Phase 1 공통 에러 해결 |
+| `docs/manual/web.md` | Gadgetron Web UI (`/web`) 설정, Origin 격리, 키 회전, 헤드리스 빌드 — D-20260414-02 이후 신규 |
+| `docs/design/phase2/03-gadgetron-web.md` | `gadgetron-web` crate 설계 (assistant-ui + Next.js embed) |
+| `docs/adr/ADR-P2A-04-chat-ui-selection.md` | OpenWebUI → assistant-ui 전환 근거 |
 
 ---
 
 ## 변경 이력
 
 - **2026-04-13 — v3 매뉴얼 초안**: Round 2 크로스리뷰 사이클 + ADR-P2A-01 M4 behavioral verification (PASS on claude 2.1.104) + 프라이버시 고지 2종 + 트러블슈팅 표. 구현 PR 머지 전 pre-merge gate 요건 충족.
+- **2026-04-14 — D-20260414-02 / ADR-P2A-04**: OpenWebUI sibling process 제거, `gadgetron-web` (assistant-ui + Next.js embed) 으로 전환. §2 Docker 전제 조건 갱신 (Web UI 는 Docker 불필요), §4 단일 바이너리 서버 기동, §5 `gadgetron-web` 기반 첫 대화 단계로 전면 재작성. `--docker` 플래그 P2A 미지원 처리 (graceful deprecation). `web.md` 및 `03-gadgetron-web.md` 연관 문서 추가.

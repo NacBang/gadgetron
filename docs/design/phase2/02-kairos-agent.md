@@ -1351,7 +1351,7 @@ MCP protocol handshake (`initialize`/`initialized`) is exercised by `01-knowledg
 | Subprocess stdout (streams to client) | **High** — assistant response reflecting wiki/search content | User |
 | Subprocess stderr | **High** — may include session diagnostics, partial tokens | User |
 | `KairosConfig` in-memory (claude_base_url, claude_model) | Medium | Operator |
-| `gadgetron-gateway` API key (Bearer) used by OpenWebUI | High | Operator |
+| `gadgetron-gateway` API key (Bearer) used by `gadgetron-web` (assistant-ui) browser client | High | Operator (key lives in user's browser localStorage on `:8080/web`; same-origin with `/v1/*`) |
 
 ### 15.2 Trust boundaries
 

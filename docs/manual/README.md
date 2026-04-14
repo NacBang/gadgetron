@@ -2,7 +2,7 @@
 
 Gadgetron is a Rust-native API gateway that presents an OpenAI-compatible HTTP interface in front of one or more LLM providers (OpenAI, Anthropic, Ollama, vLLM, SGLang). It handles authentication, per-tenant quota enforcement, request routing, and audit logging. It is designed to be self-hosted.
 
-This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust edition 2021, `rust-version = "1.80"`).
+This manual covers the Sprint 1-7 (Phase 1) implementation state, tagged `v0.1.0-phase1` (Rust edition 2021, `rust-version = "1.80"`). Workspace trunk is now `0.2.0` for in-progress Phase 2 work — see `docs/process/06-versioning-policy.md`.
 
 ---
 
@@ -18,6 +18,7 @@ This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust e
 | [auth.md](auth.md) | API key format, how auth works, scope system |
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
 | [kairos.md](kairos.md) | **Phase 2A**: Kairos 개인 비서 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
+| [web.md](web.md) | **Phase 2A**: Gadgetron Web UI — `http://localhost:8080/web` 채팅 UI 설정, Origin 격리, 키 회전, 헤드리스 빌드 |
 
 ---
 
