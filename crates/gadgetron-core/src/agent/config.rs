@@ -3,12 +3,59 @@
 //! Spec: `docs/design/phase2/04-mcp-tool-registry.md` §4 + §5.
 //! Decision: D-20260414-04, ADR-P2A-05.
 //!
-//! Validation rules V1..V14 are implemented in [`AgentConfig::validate`] and
-//! unit-tested in `config_tests` at the bottom of this file.
+//! Validation rules V1..V14 are implemented in [`AgentConfig::validate_with_env`]
+//! and unit-tested in `config_tests` at the bottom of this file. The trait
+//! [`EnvResolver`] exists so tests can inject a fake environment for V11
+//! without mutating process-global state — addresses QA-MCP-M3.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GadgetronError, Result};
+
+// ---------------------------------------------------------------------------
+// EnvResolver — injection seam for env-var lookups (QA-MCP-M3)
+// ---------------------------------------------------------------------------
+
+/// Pluggable environment-variable lookup. The production impl
+/// [`StdEnv`] forwards to `std::env::var`; tests inject a
+/// `HashMap`-backed fake via [`FakeEnv`].
+pub trait EnvResolver: Send + Sync {
+    fn get(&self, name: &str) -> Option<String>;
+}
+
+/// Process-environment resolver. Reads from `std::env::var` on every lookup.
+///
+/// This is the default resolver used by [`AgentConfig::validate`] — the
+/// zero-arg form preserves the pre-QA-MCP-M3 call-site shape.
+pub struct StdEnv;
+
+impl EnvResolver for StdEnv {
+    fn get(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+}
+
+/// Fake resolver for tests — never touches the process environment.
+#[derive(Debug, Default, Clone)]
+pub struct FakeEnv {
+    pub vars: std::collections::HashMap<String, String>,
+}
+
+impl FakeEnv {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with(mut self, name: &str, value: &str) -> Self {
+        self.vars.insert(name.to_string(), value.to_string());
+        self
+    }
+}
+
+impl EnvResolver for FakeEnv {
+    fn get(&self, name: &str) -> Option<String> {
+        self.vars.get(name).cloned()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level AgentConfig
@@ -25,6 +72,18 @@ pub struct AgentConfig {
     #[serde(default = "default_claude_code_min_version")]
     pub claude_code_min_version: String,
 
+    /// Subprocess wall-clock timeout for a single Claude Code invocation.
+    /// Range [10, 3600]. Default 300. Migrated from legacy
+    /// `[kairos].request_timeout_secs` per 04 v2 §11.1.
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+
+    /// Maximum number of concurrent Claude Code subprocesses. Range [1, 32].
+    /// Default 4. Migrated from legacy `[kairos].max_concurrent_subprocesses`
+    /// per 04 v2 §11.1.
+    #[serde(default = "default_max_concurrent_subprocesses")]
+    pub max_concurrent_subprocesses: usize,
+
     /// Brain model selection. Operator-explicit; no auto-detection (D-20260414-04 §g).
     #[serde(default)]
     pub brain: BrainConfig,
@@ -40,12 +99,20 @@ fn default_agent_binary() -> String {
 fn default_claude_code_min_version() -> String {
     "2.1.104".to_string()
 }
+fn default_request_timeout_secs() -> u64 {
+    300
+}
+fn default_max_concurrent_subprocesses() -> usize {
+    4
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             binary: default_agent_binary(),
             claude_code_min_version: default_claude_code_min_version(),
+            request_timeout_secs: default_request_timeout_secs(),
+            max_concurrent_subprocesses: default_max_concurrent_subprocesses(),
             brain: BrainConfig::default(),
             tools: ToolsConfig::default(),
         }
@@ -53,15 +120,89 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// Validate all rules V1..V14. Called from `AppConfig::load` after
-    /// deserialization + env var resolution.
+    /// Validate all rules V1..V14 using the process environment for V11
+    /// env-var checks. Forwarding shim over [`validate_with_env`] that
+    /// uses [`StdEnv`] — the single-arg form preserves the pre-QA-MCP-M3
+    /// call-site shape so existing `AppConfig::load` code compiles.
+    pub fn validate(
+        &self,
+        providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
+    ) -> Result<()> {
+        self.validate_with_env(providers, &StdEnv)
+    }
+
+    /// Validate all rules V1..V14 with an injectable env resolver.
     ///
     /// Returns `GadgetronError::Config(String)` with a unique, scannable
     /// message per rule so operators can diagnose the exact failure.
-    pub fn validate(&self, providers: &std::collections::HashMap<String, crate::config::ProviderConfig>) -> Result<()> {
+    pub fn validate_with_env(
+        &self,
+        providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
+        env: &dyn EnvResolver,
+    ) -> Result<()> {
+        // NEW range checks for the migrated fields (04 v2 §11.1).
+        if !(10..=3600).contains(&self.request_timeout_secs) {
+            return Err(GadgetronError::Config(format!(
+                "agent.request_timeout_secs must be in [10, 3600]; got {}",
+                self.request_timeout_secs
+            )));
+        }
+        if !(1..=32).contains(&self.max_concurrent_subprocesses) {
+            return Err(GadgetronError::Config(format!(
+                "agent.max_concurrent_subprocesses must be in [1, 32]; got {}",
+                self.max_concurrent_subprocesses
+            )));
+        }
         self.tools.validate()?;
-        self.brain.validate(providers)?;
+        self.brain.validate_with_env(providers, env)?;
         Ok(())
+    }
+
+    /// Emit startup-time warnings for configuration values that are
+    /// accepted but have no runtime effect in Phase 2A under Path 1.
+    ///
+    /// In particular, any T2 subcategory set to `Ask` mode is logged
+    /// because the approval flow is deferred to Phase 2B per ADR-P2A-06.
+    /// Operators see the warning on `gadgetron serve` startup and can
+    /// flip the relevant field to `Auto` or `Never` to silence it.
+    ///
+    /// Called by `AppConfig::load` after validation succeeds. Returns
+    /// the number of warnings emitted so tests can assert the count.
+    pub fn warn_unusable_modes_in_p2a(&self) -> usize {
+        let w = &self.tools.write;
+        let fields: &[(&str, &ToolMode)] = &[
+            ("default_mode", &w.default_mode),
+            ("wiki_write", &w.wiki_write),
+            ("infra_write", &w.infra_write),
+            ("scheduler_write", &w.scheduler_write),
+            ("provider_mutate", &w.provider_mutate),
+        ];
+
+        let mut count = 0usize;
+        for (name, mode) in fields {
+            if matches!(mode, ToolMode::Ask) {
+                tracing::warn!(
+                    target: "agent_config",
+                    field = %format!("agent.tools.write.{name}"),
+                    "ask mode has no effect in Phase 2A — approval flow is deferred to P2B per ADR-P2A-06. Set to 'auto' or 'never' to silence this warning."
+                );
+                count += 1;
+            }
+        }
+
+        // `brain.mode = gadgetron_local` fails validation in P2A anyway
+        // (`validate_with_env` returns the Path-1 rejection) but emit a
+        // warning here for grep-discoverable messaging.
+        if matches!(self.brain.mode, BrainMode::GadgetronLocal) {
+            tracing::warn!(
+                target: "agent_config",
+                field = "agent.brain.mode",
+                "brain.mode=gadgetron_local is not functional in Phase 2A — shim lands in P2C. AgentConfig::validate rejects this mode at startup."
+            );
+            count += 1;
+        }
+
+        count
     }
 }
 
@@ -169,9 +310,27 @@ impl Default for BrainShimConfig {
 }
 
 impl BrainConfig {
+    /// Process-env-backed shim over [`validate_with_env`].
     pub fn validate(
         &self,
         providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
+    ) -> Result<()> {
+        self.validate_with_env(providers, &StdEnv)
+    }
+
+    /// Validate brain mode rules with an injectable env resolver.
+    ///
+    /// Rules: V8, V9, V10 (gadgetron_local), V11 (external_anthropic env var),
+    /// V12 (recursion depth), V13 (loopback bind).
+    ///
+    /// **Path 1 gate** — `BrainMode::GadgetronLocal` is REJECTED at startup
+    /// in Phase 2A because the shim lands in P2C per ADR-P2A-06. Config
+    /// authors can pre-populate `[agent.brain]` for forward compatibility;
+    /// `AppConfig::load` fails until the shim exists.
+    pub fn validate_with_env(
+        &self,
+        providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
+        env: &dyn EnvResolver,
     ) -> Result<()> {
         // V12 — recursion depth floor
         if self.shim.max_recursion_depth < 1 {
@@ -193,8 +352,9 @@ impl BrainConfig {
         match self.mode {
             BrainMode::ClaudeMax => Ok(()),
             BrainMode::ExternalAnthropic => {
-                // V11 — required env var must be set
-                if std::env::var(&self.external_anthropic_api_key_env).is_err() {
+                // V11 — required env var must be set (via injected resolver)
+                let value = env.get(&self.external_anthropic_api_key_env);
+                if value.as_deref().unwrap_or("").is_empty() {
                     return Err(GadgetronError::Config(format!(
                         "agent.brain.external_anthropic_api_key_env {:?} is not set in the environment",
                         self.external_anthropic_api_key_env
@@ -211,6 +371,10 @@ impl BrainConfig {
                 Ok(())
             }
             BrainMode::GadgetronLocal => {
+                // Path 1 (ADR-P2A-06): the shim is P2C — reject at startup.
+                // V8/V9/V10 are also checked below so operators pre-filling
+                // the section get their most specific error first.
+
                 // V8 — local_model required
                 if self.local_model.is_empty() {
                     return Err(GadgetronError::Config(
@@ -242,7 +406,14 @@ impl BrainConfig {
                         self.shim.auth
                     )));
                 }
-                Ok(())
+
+                // Path 1: startup rejection once V8/V9/V10 pass.
+                Err(GadgetronError::Config(
+                    "agent.brain.mode = 'gadgetron_local' is not functional in Phase 2A. \
+                     The internal /internal/agent-brain shim lands in Phase 2C per ADR-P2A-06. \
+                     Use mode = 'claude_max' (default), 'external_anthropic', or \
+                     'external_proxy' until the shim ships.".into(),
+                ))
             }
         }
     }
@@ -486,6 +657,10 @@ mod config_tests {
         HashMap::new()
     }
 
+    fn empty_env() -> FakeEnv {
+        FakeEnv::new()
+    }
+
     #[test]
     fn v1_read_must_be_auto() {
         let mut cfg = ToolsConfig::default();
@@ -506,7 +681,8 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = String::new();
-        assert!(brain.validate(&empty_providers()).is_err());
+        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
+        assert!(err.to_string().contains("local_model is required"), "err: {err}");
     }
 
     #[test]
@@ -514,7 +690,8 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "kairos/anything".into();
-        assert!(brain.validate(&empty_providers()).is_err());
+        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
+        assert!(err.to_string().contains("cannot reference kairos"), "err: {err}");
     }
 
     #[test]
@@ -522,7 +699,8 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "anthropic/claude-3-opus".into();
-        assert!(brain.validate(&empty_providers()).is_err());
+        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
+        assert!(err.to_string().contains("Anthropic-family provider"), "err: {err}");
     }
 
     #[test]
@@ -530,8 +708,115 @@ mod config_tests {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
         brain.local_model = "vllm/llama3".into();
-        // providers map is empty — should fail
-        assert!(brain.validate(&empty_providers()).is_err());
+        // providers map is empty — V10 fires before the P2A rejection.
+        let err = brain.validate_with_env(&empty_providers(), &empty_env()).unwrap_err();
+        assert!(err.to_string().contains("not found in [providers.*]"), "err: {err}");
+    }
+
+    #[test]
+    fn gadgetron_local_mode_rejected_in_p2a_when_other_rules_pass() {
+        // V8/V9/V10 all pass — provider exists, local_model is fine —
+        // and then the Path 1 shim-deferral guard fires.
+        let mut providers = HashMap::new();
+        providers.insert(
+            "vllm".into(),
+            crate::config::ProviderConfig::Vllm {
+                endpoint: "http://127.0.0.1:8000".into(),
+                api_key: None,
+            },
+        );
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::GadgetronLocal;
+        brain.local_model = "vllm/llama3".into();
+        let err = brain.validate_with_env(&providers, &empty_env()).unwrap_err();
+        assert!(
+            err.to_string().contains("not functional in Phase 2A"),
+            "should be rejected by Path 1 guard; err: {err}"
+        );
+    }
+
+    // ---- V11 with injected EnvResolver (QA-MCP-M3) ----
+
+    #[test]
+    fn v11_external_anthropic_env_missing_rejected() {
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ExternalAnthropic;
+        brain.external_anthropic_api_key_env = "MY_FAKE_KEY_VAR".into();
+        let empty_env = FakeEnv::new();
+        let err = brain.validate_with_env(&empty_providers(), &empty_env).unwrap_err();
+        assert!(err.to_string().contains("is not set in the environment"));
+    }
+
+    #[test]
+    fn v11_external_anthropic_env_set_accepted() {
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ExternalAnthropic;
+        brain.external_anthropic_api_key_env = "MY_FAKE_KEY_VAR".into();
+        let env = FakeEnv::new().with("MY_FAKE_KEY_VAR", "sk-ant-whatever");
+        assert!(brain.validate_with_env(&empty_providers(), &env).is_ok());
+    }
+
+    #[test]
+    fn v11_external_anthropic_env_empty_string_rejected() {
+        // An env var set to empty string counts as missing.
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ExternalAnthropic;
+        brain.external_anthropic_api_key_env = "MY_FAKE_KEY_VAR".into();
+        let env = FakeEnv::new().with("MY_FAKE_KEY_VAR", "");
+        assert!(brain.validate_with_env(&empty_providers(), &env).is_err());
+    }
+
+    // ---- AgentConfig new fields (04 v2 §11.1 migration targets) ----
+
+    #[test]
+    fn request_timeout_secs_range_check() {
+        let mut cfg = AgentConfig::default();
+        cfg.request_timeout_secs = 5;
+        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        cfg.request_timeout_secs = 4000;
+        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        cfg.request_timeout_secs = 300;
+        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_ok());
+    }
+
+    #[test]
+    fn max_concurrent_subprocesses_range_check() {
+        let mut cfg = AgentConfig::default();
+        cfg.max_concurrent_subprocesses = 0;
+        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        cfg.max_concurrent_subprocesses = 100;
+        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_err());
+        cfg.max_concurrent_subprocesses = 4;
+        assert!(cfg.validate_with_env(&empty_providers(), &empty_env()).is_ok());
+    }
+
+    #[test]
+    fn new_fields_defaults() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.request_timeout_secs, 300);
+        assert_eq!(cfg.max_concurrent_subprocesses, 4);
+    }
+
+    // ---- warn_unusable_modes_in_p2a ----
+
+    #[test]
+    fn warn_unusable_modes_counts_ask_fields() {
+        // Default config has wiki_write=Auto but default_mode/infra_write/
+        // scheduler_write/provider_mutate = Ask.
+        let cfg = AgentConfig::default();
+        let count = cfg.warn_unusable_modes_in_p2a();
+        // 4 Ask fields: default_mode + infra_write + scheduler_write + provider_mutate.
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn warn_unusable_modes_zero_when_all_auto_or_never() {
+        let mut cfg = AgentConfig::default();
+        cfg.tools.write.default_mode = ToolMode::Auto;
+        cfg.tools.write.infra_write = ToolMode::Never;
+        cfg.tools.write.scheduler_write = ToolMode::Auto;
+        cfg.tools.write.provider_mutate = ToolMode::Never;
+        assert_eq!(cfg.warn_unusable_modes_in_p2a(), 0);
     }
 
     #[test]

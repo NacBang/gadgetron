@@ -178,12 +178,20 @@ impl AppConfig {
                 path, e
             ))
         })?;
-        let mut config: AppConfig = toml::from_str(&content).map_err(|e| {
+        // Pre-deserialize migration pass: rewrite any legacy `[kairos]`
+        // section into `[agent]` / `[agent.brain]` per `04-mcp-tool-registry.md
+        // v2 §11.1` and emit `tracing::warn!` per moved field. This is a
+        // best-effort migration; conflicts (same field set in both `[kairos]`
+        // and `[agent.*]`) are a hard error.
+        let migrated_content = migrate_legacy_kairos(&content)?;
+
+        let mut config: AppConfig = toml::from_str(&migrated_content).map_err(|e| {
             crate::error::GadgetronError::Config(format!("Failed to parse config: {}", e))
         })?;
         config.resolve_env_vars();
         config.web.validate()?;
         config.agent.validate(&config.providers)?;
+        config.agent.warn_unusable_modes_in_p2a();
         Ok(config)
     }
 
@@ -227,6 +235,153 @@ impl AppConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Legacy [kairos] → [agent] / [agent.brain] migration (04 v2 §11.1)
+// ---------------------------------------------------------------------------
+
+/// Rewrite a legacy `[kairos]` section into `[agent]` / `[agent.brain]` per
+/// the field mapping table in `04-mcp-tool-registry.md v2 §11.1`. Returns
+/// the migrated TOML source text ready for the strongly-typed deserialize.
+///
+/// Mapping:
+/// | legacy field                       | new destination                         |
+/// |------------------------------------|-----------------------------------------|
+/// | `kairos.claude_binary`             | `agent.binary`                          |
+/// | `kairos.claude_base_url`           | `agent.brain.external_base_url` + mode="external_proxy" |
+/// | `kairos.claude_model`              | DROPPED — emit ERROR-level log          |
+/// | `kairos.request_timeout_secs`      | `agent.request_timeout_secs`            |
+/// | `kairos.max_concurrent_subprocesses` | `agent.max_concurrent_subprocesses`   |
+///
+/// Conflict policy: if both `[kairos].X` and the target field are present,
+/// this function returns `Err(GadgetronError::Config(...))` — operators
+/// must pick one source of truth. Tracing warnings are emitted for every
+/// successful migration.
+fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
+    fn emit_deprecation(migration: &'static str) {
+        tracing::warn!(
+            target: "config_migration",
+            migration,
+            "deprecated Phase 2A field — will be removed in Phase 2C"
+        );
+    }
+
+    let mut value: toml::Value = source
+        .parse()
+        .map_err(|e| crate::error::GadgetronError::Config(format!("Failed to parse config: {e}")))?;
+
+    // Extract [kairos] table; if absent, no migration needed.
+    let kairos = match value.as_table_mut().and_then(|t| t.remove("kairos")) {
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            return Err(crate::error::GadgetronError::Config(
+                "legacy `[kairos]` must be a table".into(),
+            ))
+        }
+        None => return Ok(source.to_string()),
+    };
+
+    // claude_model is DROPPED (not migrated) — emit error log BEFORE we
+    // take any mutable borrows so we don't need to re-read the kairos
+    // table later.
+    if kairos.contains_key("claude_model") {
+        tracing::error!(
+            target: "config_migration",
+            legacy = "kairos.claude_model",
+            replacement = "agent.brain (operator-chosen)",
+            "legacy field `[kairos].claude_model` is dropped in Phase 2A — \
+             the agent cannot pick its own brain model (ADR-P2A-05 §14). \
+             Move brain-selection logic to `[agent.brain]` and remove this field."
+        );
+    }
+
+    let root = value
+        .as_table_mut()
+        .expect("value must be a table after parse");
+
+    // Ensure [agent] table exists (may already be present).
+    {
+        let agent_val = root
+            .entry("agent".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let agent = agent_val.as_table_mut().ok_or_else(|| {
+            crate::error::GadgetronError::Config("`[agent]` must be a table".into())
+        })?;
+
+        // Phase 1 — agent-level fields.
+        if let Some(v) = kairos.get("claude_binary").cloned() {
+            if agent.contains_key("binary") {
+                return Err(crate::error::GadgetronError::Config(
+                    "conflict: both `[kairos].claude_binary` and `[agent].binary` are \
+                     set — remove the legacy field from `[kairos]`"
+                        .into(),
+                ));
+            }
+            agent.insert("binary".into(), v);
+            emit_deprecation("kairos.claude_binary -> agent.binary");
+        }
+
+        if let Some(v) = kairos.get("request_timeout_secs").cloned() {
+            if agent.contains_key("request_timeout_secs") {
+                return Err(crate::error::GadgetronError::Config(
+                    "conflict: both `[kairos].request_timeout_secs` and \
+                     `[agent].request_timeout_secs` are set — remove the legacy field"
+                        .into(),
+                ));
+            }
+            agent.insert("request_timeout_secs".into(), v);
+            emit_deprecation("kairos.request_timeout_secs -> agent.request_timeout_secs");
+        }
+
+        if let Some(v) = kairos.get("max_concurrent_subprocesses").cloned() {
+            if agent.contains_key("max_concurrent_subprocesses") {
+                return Err(crate::error::GadgetronError::Config(
+                    "conflict: both `[kairos].max_concurrent_subprocesses` and \
+                     `[agent].max_concurrent_subprocesses` are set — remove the legacy field"
+                        .into(),
+                ));
+            }
+            agent.insert("max_concurrent_subprocesses".into(), v);
+            emit_deprecation(
+                "kairos.max_concurrent_subprocesses -> agent.max_concurrent_subprocesses",
+            );
+        }
+
+        // Phase 2 — brain-level fields. Re-enter the sub-table here so the
+        // earlier `agent` mut-borrow is released.
+        let brain_val = agent
+            .entry("brain".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let brain = brain_val.as_table_mut().ok_or_else(|| {
+            crate::error::GadgetronError::Config("`[agent.brain]` must be a table".into())
+        })?;
+
+        if let Some(v) = kairos.get("claude_base_url").cloned() {
+            if brain.contains_key("external_base_url") {
+                return Err(crate::error::GadgetronError::Config(
+                    "conflict: both `[kairos].claude_base_url` and \
+                     `[agent.brain].external_base_url` are set — remove the legacy field"
+                        .into(),
+                ));
+            }
+            brain.insert("external_base_url".into(), v);
+            if !brain.contains_key("mode") {
+                brain.insert(
+                    "mode".into(),
+                    toml::Value::String("external_proxy".into()),
+                );
+            }
+            emit_deprecation("kairos.claude_base_url -> agent.brain.external_base_url");
+        }
+    }
+
+    // Re-serialize the migrated value. `toml::to_string` can fail only for
+    // non-table roots, which is impossible given we parsed a table above.
+    let serialized = toml::to_string(&value).map_err(|e| {
+        crate::error::GadgetronError::Config(format!("config re-serialize failed: {e}"))
+    })?;
+    Ok(serialized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +400,192 @@ mod tests {
             AppConfig::expand_env("${NONEXISTENT_VAR}"),
             "${NONEXISTENT_VAR}"
         );
+    }
+
+    // ---- [kairos] → [agent.brain] migration (04 v2 §11.1) ----
+
+    fn parse_after_migration(src: &str) -> toml::Value {
+        let migrated = migrate_legacy_kairos(src).expect("migration ok");
+        migrated.parse::<toml::Value>().expect("re-parse ok")
+    }
+
+    #[test]
+    fn migration_no_kairos_section_is_identity_modulo_round_trip() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+request_timeout_ms = 30000
+"#;
+        let migrated = migrate_legacy_kairos(src).unwrap();
+        // Parse both to Value for a structural equality check — toml
+        // re-serialization may reorder keys and normalize whitespace.
+        let orig: toml::Value = src.parse().unwrap();
+        let new: toml::Value = migrated.parse().unwrap();
+        assert_eq!(orig, new);
+    }
+
+    #[test]
+    fn migration_moves_claude_binary_to_agent_binary() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+[kairos]
+claude_binary = "/usr/bin/claude"
+"#;
+        let v = parse_after_migration(src);
+        assert_eq!(
+            v["agent"]["binary"].as_str(),
+            Some("/usr/bin/claude"),
+            "migrated value: {v:#?}"
+        );
+        assert!(
+            v.as_table().unwrap().get("kairos").is_none(),
+            "legacy [kairos] should be removed"
+        );
+    }
+
+    #[test]
+    fn migration_moves_request_timeout_secs() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+[kairos]
+request_timeout_secs = 600
+"#;
+        let v = parse_after_migration(src);
+        assert_eq!(v["agent"]["request_timeout_secs"].as_integer(), Some(600));
+    }
+
+    #[test]
+    fn migration_moves_max_concurrent_subprocesses() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+[kairos]
+max_concurrent_subprocesses = 8
+"#;
+        let v = parse_after_migration(src);
+        assert_eq!(
+            v["agent"]["max_concurrent_subprocesses"].as_integer(),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn migration_claude_base_url_sets_external_proxy_mode() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+[kairos]
+claude_base_url = "http://127.0.0.1:4000"
+"#;
+        let v = parse_after_migration(src);
+        assert_eq!(
+            v["agent"]["brain"]["external_base_url"].as_str(),
+            Some("http://127.0.0.1:4000")
+        );
+        assert_eq!(
+            v["agent"]["brain"]["mode"].as_str(),
+            Some("external_proxy"),
+            "default mode should be external_proxy when legacy base_url is set"
+        );
+    }
+
+    #[test]
+    fn migration_claude_base_url_preserves_existing_mode() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+[agent.brain]
+mode = "external_anthropic"
+[kairos]
+claude_base_url = "http://localhost:4000"
+"#;
+        let v = parse_after_migration(src);
+        // Mode stays external_anthropic — migration doesn't overwrite.
+        assert_eq!(
+            v["agent"]["brain"]["mode"].as_str(),
+            Some("external_anthropic")
+        );
+        assert_eq!(
+            v["agent"]["brain"]["external_base_url"].as_str(),
+            Some("http://localhost:4000")
+        );
+    }
+
+    #[test]
+    fn migration_claude_model_is_dropped_not_migrated() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+[kairos]
+claude_model = "claude-3-5-sonnet-20241022"
+"#;
+        let v = parse_after_migration(src);
+        // claude_model must not appear under agent.brain.
+        let brain = v.get("agent").and_then(|a| a.get("brain"));
+        if let Some(brain) = brain {
+            if let Some(tbl) = brain.as_table() {
+                assert!(
+                    !tbl.contains_key("claude_model"),
+                    "claude_model must be dropped, got: {tbl:#?}"
+                );
+            }
+        }
+        // And of course [kairos] itself is gone.
+        assert!(v.as_table().unwrap().get("kairos").is_none());
+    }
+
+    #[test]
+    fn migration_conflict_on_binary_returns_err() {
+        let src = r#"
+[agent]
+binary = "/usr/local/bin/claude"
+[kairos]
+claude_binary = "/usr/bin/claude"
+"#;
+        let err = migrate_legacy_kairos(src).expect_err("conflict");
+        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("binary"));
+    }
+
+    #[test]
+    fn migration_conflict_on_external_base_url_returns_err() {
+        let src = r#"
+[agent.brain]
+external_base_url = "http://a"
+[kairos]
+claude_base_url = "http://b"
+"#;
+        let err = migrate_legacy_kairos(src).expect_err("conflict");
+        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("external_base_url"));
+    }
+
+    #[test]
+    fn migration_full_legacy_config_round_trips() {
+        // Operator upgrading from v0.1.x with the canonical legacy shape
+        // per `02-kairos-agent.md v3 §10`.
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+request_timeout_ms = 30000
+
+[kairos]
+claude_binary = "claude"
+claude_base_url = "http://127.0.0.1:4000"
+request_timeout_secs = 300
+max_concurrent_subprocesses = 4
+"#;
+        let v = parse_after_migration(src);
+        assert_eq!(v["agent"]["binary"].as_str(), Some("claude"));
+        assert_eq!(v["agent"]["request_timeout_secs"].as_integer(), Some(300));
+        assert_eq!(v["agent"]["max_concurrent_subprocesses"].as_integer(), Some(4));
+        assert_eq!(
+            v["agent"]["brain"]["external_base_url"].as_str(),
+            Some("http://127.0.0.1:4000")
+        );
+        assert_eq!(v["agent"]["brain"]["mode"].as_str(), Some("external_proxy"));
+        assert!(v.as_table().unwrap().get("kairos").is_none());
     }
 }
