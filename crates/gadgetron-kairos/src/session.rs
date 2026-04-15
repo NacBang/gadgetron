@@ -398,22 +398,106 @@ async fn drive(
     Ok(())
 }
 
-/// Write the OpenAI message history to stdin as a flattened plain-text
-/// conversation, then close the pipe.
-async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
-    let mut buf = String::new();
-    for msg in &req.messages {
-        let role_label = match msg.role {
-            Role::System => "System",
-            Role::User => "User",
-            Role::Assistant => "Assistant",
-            Role::Tool => "Tool",
-        };
-        buf.push_str(role_label);
-        buf.push_str(": ");
-        buf.push_str(msg.content.text().unwrap_or(""));
-        buf.push_str("\n\n");
+/// How `feed_stdin` should shape the stdin payload. Selected by the
+/// driver based on `SpawnMode` / `ChatRequest.conversation_id`.
+///
+/// Spec: `02-kairos-agent.md §5.2.6`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdinMode {
+    /// Flatten the full `req.messages` history into
+    /// `"{Role}: {content}\n\n"` blocks. Pre-A5 stateless fallback.
+    FlattenHistory,
+    /// First turn of a native session: write only the newest user
+    /// message (optionally prefixed with an earlier `System` message
+    /// that frames the conversation), with no role labels. Claude
+    /// Code stores this in a fresh jsonl keyed by `--session-id`.
+    NativeFirstTurn,
+    /// Resume turn of a native session: write ONLY the most recent
+    /// user message. The entire prior history is already in the
+    /// jsonl Claude Code loaded via `--resume`. Role labels are
+    /// omitted.
+    NativeResumeTurn,
+}
+
+/// Build the stdin payload bytes for a given mode. Separated from
+/// the async I/O so helpers + tests can verify the exact bytes.
+/// Returns `Err(KairosErrorKind::ToolInvalidArgs)` if a required
+/// message is missing (e.g. resume turn with no user message).
+pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String> {
+    match mode {
+        StdinMode::FlattenHistory => {
+            let mut buf = String::new();
+            for msg in &req.messages {
+                let role_label = match msg.role {
+                    Role::System => "System",
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                    Role::Tool => "Tool",
+                };
+                buf.push_str(role_label);
+                buf.push_str(": ");
+                buf.push_str(msg.content.text().unwrap_or(""));
+                buf.push_str("\n\n");
+            }
+            Ok(buf)
+        }
+        StdinMode::NativeFirstTurn => {
+            // Pick the last user message as the turn body. If the
+            // request also contains a System message, prepend it as a
+            // framing paragraph (two newlines separator). Assistant
+            // messages in the input — unexpected on a first turn —
+            // are ignored with a warning at the caller, NOT here.
+            let user_msg = req
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role, Role::User))
+                .ok_or_else(|| GadgetronError::Kairos {
+                    kind: KairosErrorKind::ToolInvalidArgs {
+                        reason: "first-turn request must contain at least one user message"
+                            .to_string(),
+                    },
+                    message: "native_first_turn: missing user message".to_string(),
+                })?;
+            let mut buf = String::new();
+            if let Some(sys) = req.messages.iter().find(|m| matches!(m.role, Role::System)) {
+                buf.push_str(sys.content.text().unwrap_or(""));
+                buf.push_str("\n\n");
+            }
+            buf.push_str(user_msg.content.text().unwrap_or(""));
+            Ok(buf)
+        }
+        StdinMode::NativeResumeTurn => {
+            // Resume turns MUST have the new user message as
+            // `messages.last()`. Anything else is a caller bug —
+            // the gateway is responsible for appending the new user
+            // turn to the client-supplied history.
+            let last = req.messages.last().ok_or_else(|| GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolInvalidArgs {
+                    reason: "resume-turn request must contain at least one message".to_string(),
+                },
+                message: "native_resume_turn: empty messages".to_string(),
+            })?;
+            if !matches!(last.role, Role::User) {
+                return Err(GadgetronError::Kairos {
+                    kind: KairosErrorKind::ToolInvalidArgs {
+                        reason: format!(
+                            "resume-turn expected messages.last().role == User, got {:?}",
+                            last.role
+                        ),
+                    },
+                    message: "native_resume_turn: last message is not user".to_string(),
+                });
+            }
+            Ok(last.content.text().unwrap_or("").to_string())
+        }
     }
+}
+
+/// Write the payload produced by `build_stdin_payload` to the child's
+/// stdin and close the pipe. Async I/O wrapper.
+async fn feed_stdin_with_mode(stdin: ChildStdin, req: &ChatRequest, mode: StdinMode) -> Result<()> {
+    let buf = build_stdin_payload(req, mode)?;
     let mut stdin = stdin;
     stdin
         .write_all(buf.as_bytes())
@@ -427,6 +511,12 @@ async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
     stdin.flush().await.ok();
     drop(stdin); // signal EOF to claude -p
     Ok(())
+}
+
+/// Back-compat wrapper preserving the `feed_stdin(stdin, req)` shape
+/// used by the pre-A7 driver. Defaults to `StdinMode::FlattenHistory`.
+async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
+    feed_stdin_with_mode(stdin, req, StdinMode::FlattenHistory).await
 }
 
 #[cfg(test)]
@@ -656,6 +746,213 @@ mod tests {
             #[allow(unreachable_patterns)]
             _ => panic!("unexpected ToolAuditEvent variant"),
         }
+    }
+
+    // ---- A7: feed_stdin modes (ADR-P2A-06 addendum item 7.5) ----
+
+    fn resume_request(history_len: usize) -> ChatRequest {
+        // Builds a request with `history_len - 1` historical messages
+        // plus a final user turn. `history_len == 1` → user-only.
+        let mut messages = vec![Message::system("system frame")];
+        for i in 0..history_len.saturating_sub(1) {
+            if i % 2 == 0 {
+                messages.push(Message::user(format!("user {i}")));
+            } else {
+                messages.push(Message::assistant(format!("assistant {i}")));
+            }
+        }
+        messages.push(Message::user("FINAL TURN"));
+        ChatRequest {
+            model: "kairos".into(),
+            messages,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        }
+    }
+
+    #[test]
+    fn flatten_history_stdin_preserves_full_transcript() {
+        let req = test_request();
+        let payload = build_stdin_payload(&req, StdinMode::FlattenHistory).unwrap();
+        assert!(payload.starts_with("System: be helpful\n\n"));
+        assert!(payload.contains("\nUser: hello\n\n"));
+        assert!(payload.contains("\nAssistant: hi\n\n"));
+        assert!(payload.ends_with("User: what is 2+2\n\n"));
+    }
+
+    #[test]
+    fn first_turn_stdin_contains_only_last_user_message_with_system_frame() {
+        // Per §5.2.10 item 9. A first-turn request with a System
+        // message + a new user turn writes `"{system}\n\n{user}"`.
+        let req = ChatRequest {
+            model: "kairos".into(),
+            messages: vec![Message::system("be helpful"), Message::user("hi")],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        };
+        let payload = build_stdin_payload(&req, StdinMode::NativeFirstTurn).unwrap();
+        assert_eq!(payload, "be helpful\n\nhi");
+        // Absolutely no role labels — this is a fresh prompt, not a log.
+        assert!(!payload.contains("User:"));
+        assert!(!payload.contains("System:"));
+    }
+
+    #[test]
+    fn first_turn_stdin_without_system_message_just_emits_user() {
+        let req = ChatRequest {
+            model: "kairos".into(),
+            messages: vec![Message::user("what time is it")],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        };
+        let payload = build_stdin_payload(&req, StdinMode::NativeFirstTurn).unwrap();
+        assert_eq!(payload, "what time is it");
+    }
+
+    #[test]
+    fn first_turn_stdin_with_no_user_message_errors() {
+        let req = ChatRequest {
+            model: "kairos".into(),
+            messages: vec![Message::system("be helpful")],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        };
+        let err = build_stdin_payload(&req, StdinMode::NativeFirstTurn).expect_err("must error");
+        match err {
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolInvalidArgs { .. },
+                ..
+            } => {}
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_turn_stdin_contains_only_last_user_message() {
+        // Per §5.2.10 item 10. Resume turns MUST write only the new
+        // user message; the entire history is already in the jsonl
+        // loaded by `--resume`.
+        let req = resume_request(6);
+        let payload = build_stdin_payload(&req, StdinMode::NativeResumeTurn).unwrap();
+        assert_eq!(payload, "FINAL TURN");
+        assert!(!payload.contains("system frame"));
+        assert!(!payload.contains("user 0"));
+        assert!(!payload.contains("assistant 1"));
+    }
+
+    #[test]
+    fn resume_turn_rejects_non_user_last_message() {
+        // Per §5.2.10 item 11. A resume turn whose last message is
+        // NOT user is a caller bug — gateway appends the new user
+        // message; if it didn't, we fail loud with ToolInvalidArgs.
+        let req = ChatRequest {
+            model: "kairos".into(),
+            messages: vec![Message::user("hi"), Message::assistant("hello")],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        };
+        let err = build_stdin_payload(&req, StdinMode::NativeResumeTurn)
+            .expect_err("must reject assistant-last");
+        match err {
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolInvalidArgs { reason },
+                ..
+            } => {
+                assert!(
+                    reason.contains("User"),
+                    "error reason must explain the user-last rule: {reason}"
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_turn_rejects_empty_messages() {
+        let req = ChatRequest {
+            model: "kairos".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        };
+        let err =
+            build_stdin_payload(&req, StdinMode::NativeResumeTurn).expect_err("must reject empty");
+        assert!(matches!(
+            err,
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::ToolInvalidArgs { .. },
+                ..
+            }
+        ));
+    }
+
+    // ---- A7: session error variant error_code + http status ----
+
+    #[test]
+    fn session_not_found_maps_to_http_404() {
+        let err = GadgetronError::Kairos {
+            kind: KairosErrorKind::SessionNotFound {
+                conversation_id: "ghost".to_string(),
+            },
+            message: "no such conversation".to_string(),
+        };
+        assert_eq!(err.http_status_code(), 404);
+        assert_eq!(err.error_code(), "kairos_session_not_found");
+    }
+
+    #[test]
+    fn session_concurrent_maps_to_http_429() {
+        let err = GadgetronError::Kairos {
+            kind: KairosErrorKind::SessionConcurrent {
+                conversation_id: "c1".to_string(),
+            },
+            message: "concurrent".to_string(),
+        };
+        assert_eq!(err.http_status_code(), 429);
+        assert_eq!(err.error_code(), "kairos_session_concurrent");
+    }
+
+    #[test]
+    fn session_corrupted_maps_to_http_500() {
+        let err = GadgetronError::Kairos {
+            kind: KairosErrorKind::SessionCorrupted {
+                conversation_id: "c1".to_string(),
+                reason: "jsonl missing".to_string(),
+            },
+            message: "corrupted".to_string(),
+        };
+        assert_eq!(err.http_status_code(), 500);
+        assert_eq!(err.error_code(), "kairos_session_corrupted");
     }
 
     // ---- B-2 regression lock (ADR-P2A-06 addendum item 5) ----
