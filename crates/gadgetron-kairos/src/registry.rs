@@ -479,8 +479,7 @@ mod tests {
         // runtime correctness gap Codex flagged in the pre-Phase-5 review
         // (`a304a359c467a6579`).
         let reg = registry_with_full_set();
-        let cfg =
-            cfg_with_overrides(ToolMode::Ask, ToolMode::Ask, ToolMode::Ask, false);
+        let cfg = cfg_with_overrides(ToolMode::Ask, ToolMode::Ask, ToolMode::Ask, false);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(
             !tools.contains(&"wiki.write".to_string()),
