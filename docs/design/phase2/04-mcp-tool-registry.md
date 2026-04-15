@@ -505,7 +505,7 @@ Deferred to P2B (along with the approval flow):
 
 **Home crate**: `gadgetron-xaas::audit` (CA-MCP-M2). `ToolAuditEvent` is a standalone enum co-located with Phase 1 audit writes. Persisted via the existing `audit_log` table with a new `event_type = "tool_call_completed"` value. Schema migration: `crates/gadgetron-xaas/migrations/NNNN_tool_audit_events.sql`.
 
-**Retention**: Phase 2A uses Phase 1 default retention (whatever that is currently — check `docs/design/phase1/*` for authoritative value). The `purge_audit_log` reference from v1 is **removed** — no such function exists in the codebase (SEC-MCP-B9). Tier-specific retention (30d / 90d / 365d) is a P2C+ topic and will land alongside the approval flow.
+**Retention**: Phase 2A inherits the existing Phase 1 `audit_log` retention — currently indefinite, subject to the migration schedule in `crates/gadgetron-xaas/migrations/` (no automatic purge function exists in the codebase; SEC-MCP-B9 rejected the v1 draft's `purge_audit_log` reference). Tier-specific retention (30d / 90d / 365d) is a P2C+ topic and will land alongside the approval flow. A retention runbook + GDPR Art. 17 erasure procedure is tracked as a P2B deliverable.
 
 ### 10.1 `McpError` → `GadgetronError` conversion (CA-MCP-B3)
 
@@ -513,12 +513,12 @@ Deferred to P2B (along with the approval flow):
 
 | `McpError` variant | `GadgetronError::Kairos { kind: ... }` | HTTP | `error_code` |
 |---|---|---|---|
-| `UnknownTool(_)` | `KairosErrorKind::ToolError { code: "mcp_unknown_tool" }` | 500 | `kairos_tool_error` |
+| `UnknownTool(name)` | `KairosErrorKind::ToolUnknown { name }` | 500 | `kairos_tool_unknown` |
 | `Denied { reason }` | `KairosErrorKind::ToolDenied { reason }` | 403 | `kairos_tool_denied` |
 | `RateLimited { .. }` | `KairosErrorKind::ToolRateLimited { .. }` | 429 | `kairos_tool_rate_limited` |
 | `ApprovalTimeout { secs }` | `KairosErrorKind::ToolApprovalTimeout { secs }` (P2B only — P2A never emits) | 504 | `kairos_tool_approval_timeout` |
-| `InvalidArgs(_)` | `KairosErrorKind::ToolInvalidArgs { reason }` | 400 | `kairos_tool_invalid_args` |
-| `Execution(_)` | `KairosErrorKind::ToolExecution { reason }` | 500 | `kairos_tool_execution_failed` |
+| `InvalidArgs(reason)` | `KairosErrorKind::ToolInvalidArgs { reason }` | 400 | `kairos_tool_invalid_args` |
+| `Execution(reason)` | `KairosErrorKind::ToolExecution { reason }` | 500 | `kairos_tool_execution_failed` |
 
 Implementation: 6 new variants on `KairosErrorKind` (which is already `#[non_exhaustive]` — additive, not breaking). The `From<McpError> for GadgetronError` impl lives in `crates/gadgetron-core/src/error.rs`, same file as other conversions. `stderr` redaction applies via `redact_stderr` before the `reason` string is embedded in the error variant (inherited pattern from `02-kairos-agent.md §8`).
 

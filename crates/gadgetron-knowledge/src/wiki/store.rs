@@ -177,8 +177,18 @@ impl Wiki {
                 &self.config.git_author_email,
             )?;
             let sig = signature(&self.config.git_author_name, &self.config.git_author_email)?;
+            // `canonical` comes from `fs::resolve_path`, which internally
+            // canonicalizes the root via `std::fs::canonicalize` (see
+            // `wiki/fs.rs` R5). On macOS this resolves symlink roots like
+            // `/var` → `/private/var`, so `self.config.root` (which may still
+            // be in its non-canonical form) cannot be used directly as the
+            // `strip_prefix` base — the prefix would not match and the
+            // auto-commit path would spuriously report
+            // `"resolved path escapes wiki root after write"`. Canonicalize
+            // the root here to match what `resolve_path` produced.
+            let canonical_root = fs::canonicalize(&self.config.root).map_err(WikiError::Io)?;
             let rel = canonical
-                .strip_prefix(&self.config.root)
+                .strip_prefix(&canonical_root)
                 .map_err(|_| {
                     WikiError::kind_with_message(
                         WikiErrorKind::GitCorruption {

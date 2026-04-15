@@ -51,8 +51,8 @@
 - New workspace crate `crates/gadgetron-web/`
 - `build.rs` that invokes `npm ci --ignore-scripts && npm run build` with a scrubbed environment (M-W3) to produce `web/dist/`
 - `include_dir!`-embedded static assets, served by a custom handler (not `tower_http::ServeDir`)
-- Public API: `pub fn service(cfg: &WebConfig) -> axum::Router` — takes a reference to `gadgetron_core::config::WebConfig` **at mount time** (not at `service()` time) to rewrite the runtime-discoverable API base path in the embedded `index.html` bytes (SEC-W-B5 fix)
-- `gadgetron-gateway` Cargo feature `web-ui` (default on) mounting via `apply_web_headers(gadgetron_web::service(&cfg.web))` nested under `/web`
+- Public API: `pub fn service(cfg: &ServiceConfig) -> axum::Router` — takes a reference to a **local** `gadgetron_web::ServiceConfig` at mount time to rewrite the runtime-discoverable API base path in the embedded `index.html` bytes (SEC-W-B5 fix). The gateway owns the `gadgetron_core::config::WebConfig → gadgetron_web::ServiceConfig` translation in `gadgetron-gateway::web_csp::translate_config` — this crate does NOT depend on `gadgetron-core` (CA-W-B4).
+- `gadgetron-gateway` Cargo feature `web-ui` (default on) mounting via `apply_web_headers(gadgetron_web::service(&translated))` nested under `/web`
 - Gateway helper `apply_web_headers(router: Router) -> Router` that applies the CSP + `X-Content-Type-Options` + `Referrer-Policy` + `Permissions-Policy` headers (M-W2) via `tower::ServiceBuilder`
 - Frontend: Next.js 14.2.x + [assistant-ui](https://github.com/assistant-ui/assistant-ui) **0.7.x** (pinned in `package.json`) + shadcn/ui + Tailwind CSS
 - Three routes: `/` (chat), `/settings` (API key + model picker defaults + cold-start banner), `/404` (fallback)
@@ -79,7 +79,7 @@ Same as v1 plus:
 ### Explicit non-goals
 
 Same as v1. Plus:
-- `gadgetron-web` does NOT depend on `gadgetron-core` (CA-W-B4). Allowed runtime deps: `axum`, `tower`, `tower-http`, `include_dir`, `mime_guess`, `tracing`, `thiserror`. `gadgetron-core::config::WebConfig` is passed **by reference** to `service(&WebConfig)` at mount time — the type lives in core, but `gadgetron-web` does not re-export or own it.
+- `gadgetron-web` does NOT depend on `gadgetron-core` (CA-W-B4). Allowed runtime deps: `axum`, `tower`, `tower-http`, `include_dir`, `mime_guess`, `tracing`, `thiserror`. The public surface is `fn service(cfg: &ServiceConfig) -> Router` where `ServiceConfig` is a local struct owned by `gadgetron-web` (no dependency on core). The gateway translates `gadgetron_core::config::WebConfig → gadgetron_web::ServiceConfig` in `gadgetron-gateway::web_csp::translate_config` before calling `service()`.
 - Runtime reconfiguration of CSP `connect-src` via config file — P2C only.
 
 ---
@@ -92,7 +92,7 @@ crates/gadgetron-web/
 ├── build.rs                         # hardened: env scrub, --ignore-scripts, BuildEnv extraction
 ├── README.md                        # build instructions; Node 20.19.0 via .nvmrc
 ├── src/
-│   ├── lib.rs                       # pub fn service(cfg: &WebConfig) -> Router + pub const BASE_PATH
+│   ├── lib.rs                       # pub fn service(cfg: &ServiceConfig) -> Router + pub const BASE_PATH
 │   ├── embed.rs                     # include_dir! static + MIME fast-path + index rewrite
 │   ├── path.rs                      # validate_and_decode() — percent decode + Path::components safety
 │   └── mime.rs                      # static MIME table (fast-path) + mime_guess fallback

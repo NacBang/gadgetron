@@ -4,8 +4,8 @@
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
-> **Scope**: `gadgetron-knowledge` crate + `gadgetron-core::error::GadgetronError::Wiki` variant + `gadgetron-cli` `mcp serve` subcommand stdout. References below to `gadgetron kairos init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-kairos` LlmProvider + subprocess is `02-kairos-agent.md`.
-> **Implementation determinism**: per `feedback_implementation_determinism.md`, every type signature, config field, error code, and test name is explicit. No TBD.
+> **Scope**: `gadgetron-knowledge` crate (`KnowledgeToolProvider` implementation) + `gadgetron-core::error::GadgetronError::Wiki` variant + reference-level documentation for the MCP protocol surface the knowledge provider exposes. The stdio MCP server transport is **hosted in `gadgetron-kairos::mcp_server`**, not in this crate — see `02-kairos-agent.md §5` and `04-mcp-tool-registry.md §2.1` for the authoritative transport implementation. References below to `gadgetron kairos init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-kairos` LlmProvider + subprocess is `02-kairos-agent.md`.
+> **Implementation determinism**: every type signature, config field, error code, and test name is explicit. No TBD.
 
 ## Table of Contents
 
@@ -28,9 +28,9 @@
 ## 1. Scope & Non-Scope
 
 ### In scope
-- `gadgetron-knowledge` crate: wiki store, web search proxy, MCP server over stdio
+- `gadgetron-knowledge` crate: wiki store, web search proxy, `KnowledgeToolProvider` (implements `gadgetron_core::agent::tools::McpToolProvider`)
 - **`gadgetron-core::error::GadgetronError::Wiki { kind: WikiErrorKind, message: String }` variant** (moved here from 02 per dx A6 and chief-architect B1)
-- `gadgetron-cli` gains `gadgetron mcp serve` subcommand (delegates to `gadgetron_knowledge::serve_stdio`)
+- `gadgetron-cli` gains `gadgetron mcp serve` subcommand which delegates to `gadgetron_kairos::serve_stdio`, serving a frozen `McpToolRegistry` assembled from `KnowledgeToolProvider` + future providers
 - future bootstrap UX fills the gap currently covered by manual `gadgetron.toml` authoring
 - Configuration schema `[knowledge]` and `[knowledge.search]` sections in `gadgetron.toml`
 
@@ -44,7 +44,7 @@
 - Architecture: kairos implements `LlmProvider` via router provider map
 - Error taxonomy: `WikiErrorKind` nested variant (this spec adds to core)
 - Security mitigations: M1 (tmpfile — 02), M2 (redact — 02), M3 (path traversal), M5 (size + pattern block/audit + git history), M6 (tools_called names), M7 (SearXNG + git permanence disclosures), M8 (P2A risk acceptance)
-- OSS stack: `git2`, `pulldown-cmark`, `gray_matter` + `toml`, `rmcp`, `reqwest`, `regex`, `once_cell`
+- OSS stack: `git2`, `pulldown-cmark`, `gray_matter` + `toml`, `reqwest`, `regex`, `once_cell`, plus a manual JSON-RPC 2.0 MCP transport implemented in `gadgetron-kairos::mcp_server` (see §6.1 — `rmcp` integration deferred to P2B+)
 
 ### 1.1 Bootstrap UX stdout contract (future, dx A4 blocker)
 
@@ -64,7 +64,7 @@ Gadgetron Kairos init — bootstrapping personal assistant workspace
 
 Next steps:
 
-  1. (Optional) Start a local SearXNG instance for web_search:
+  1. (Optional) Start a local SearXNG instance for web.search:
      Run SearXNG via Docker or native install, then set
      [knowledge.search].searxng_url in gadgetron.toml.
 
@@ -120,7 +120,7 @@ or ensure the target directory is writable by the current user.
 [WARN] --docker is not supported in P2A.
        OpenWebUI sibling process was removed (D-20260414-02); the Web UI is now
        embedded in the gadgetron binary and served at http://localhost:8080/web.
-       SearXNG (if you want web_search) should be started manually:
+       SearXNG (if you want web.search) should be started manually:
            docker run -d --rm --name searxng -p 127.0.0.1:8888:8080 searxng/searxng
        Then set [knowledge.search].searxng_url in ~/.gadgetron/gadgetron.toml.
        --docker will be re-introduced in P2B as SearXNG-only mode if needed.
@@ -878,9 +878,11 @@ struct SearxngResult {
 
 ## 6. MCP server
 
-### 6.1 Manual MCP implementation (P2A authoritative path)
+> **Implementation note (2026-04-15)**: The stdio MCP server is hosted in `crates/gadgetron-kairos/src/mcp_server.rs`, not in `gadgetron-knowledge`. `gadgetron-knowledge` provides only `KnowledgeToolProvider`, which is registered into `McpToolRegistry` at startup and served by the kairos stdio runtime. This section describes the **logical protocol surface** the knowledge provider exposes — §6.1 and §6.2 are reference-level pseudocode for schema shape, dispatch, and JSON-RPC envelopes. The authoritative transport code and `gadgetron mcp serve` entry point live in `02-kairos-agent.md §5` + `04-mcp-tool-registry.md §2.1`. Any discrepancy between the pseudocode here and the actual `gadgetron-kairos::mcp_server` implementation is resolved in favor of the kairos code.
 
-P2A uses the manual MCP fallback implementation (`src/mcp/manual_mcp.rs`). `rmcp` integration is deferred to P2B+ when the crate's API stabilizes (re-evaluation at P2A→P2B transition).
+### 6.1 Manual MCP transport (reference — real code in `gadgetron-kairos::mcp_server`)
+
+P2A ships a manual JSON-RPC 2.0 MCP transport. The authoritative implementation is `crates/gadgetron-kairos/src/mcp_server.rs`; the pseudocode below documents the protocol contract the knowledge layer assumes. `rmcp` crate integration is deferred to P2B+ when its API stabilizes (re-evaluation at P2A→P2B transition).
 
 ```rust
 //! MCP server for gadgetron-knowledge. Stdio transport, per-request lifecycle.
@@ -1009,10 +1011,10 @@ pub async fn serve_stdio(server: crate::mcp::tools::KnowledgeServer)
 ```rust
 use serde_json::{json, Value};
 
-/// wiki_list
+/// wiki.list
 pub fn schema_wiki_list() -> Value {
     json!({
-        "name": "wiki_list",
+        "name": "wiki.list",
         "description": "List all pages in the Kairos wiki. Returns page names, optional \
                         titles (from frontmatter or first H1), and modification times. Use \
                         this to discover what pages exist before searching or fetching.",
@@ -1022,10 +1024,10 @@ pub fn schema_wiki_list() -> Value {
 
 pub fn schema_wiki_get() -> Value {
     json!({
-        "name": "wiki_get",
+        "name": "wiki.get",
         "description": "Fetch a wiki page by its logical name. Returns the markdown body \
-                        and parsed frontmatter. Use wiki_get when you already know the \
-                        exact page name (e.g. from a previous wiki_list or wiki_search result). \
+                        and parsed frontmatter. Use wiki.get when you already know the \
+                        exact page name (e.g. from a previous wiki.list or wiki.search result). \
                         Page names use forward slashes for subdirectories.",
         "inputSchema": {
             "type": "object",
@@ -1040,10 +1042,10 @@ pub fn schema_wiki_get() -> Value {
 
 pub fn schema_wiki_search() -> Value {
     json!({
-        "name": "wiki_search",
+        "name": "wiki.search",
         "description": "Search wiki pages by keyword when you don't know the exact page \
                         name. Returns up to max_results matching pages with a 200-char \
-                        snippet each. Use wiki_get when you know the exact page name.",
+                        snippet each. Use wiki.get when you know the exact page name.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1064,7 +1066,7 @@ pub fn schema_wiki_search() -> Value {
 
 pub fn schema_wiki_write() -> Value {
     json!({
-        "name": "wiki_write",
+        "name": "wiki.write",
         "description": "Write or overwrite a wiki page. Content is markdown, optionally \
                         with TOML frontmatter. Auto-commits to git on success. Size limit: \
                         1 MiB default. Path must not contain '..' or absolute paths. Will \
@@ -1084,7 +1086,7 @@ pub fn schema_wiki_write() -> Value {
 
 pub fn schema_web_search() -> Value {
     json!({
-        "name": "web_search",
+        "name": "web.search",
         "description": "Search the web for information not in the wiki. Returns up to 10 \
                         results with title, URL, and snippet from Google, Bing, DuckDuckGo, \
                         and Brave via a self-hosted SearXNG proxy.",
@@ -1138,11 +1140,11 @@ impl KnowledgeServer {
         args: serde_json::Value,
     ) -> serde_json::Value {
         match name {
-            "wiki_list"   => self.call_wiki_list().await,
-            "wiki_get"    => self.call_wiki_get(args).await,
-            "wiki_search" => self.call_wiki_search(args).await,
-            "wiki_write"  => self.call_wiki_write(args).await,
-            "web_search" if self.web_search.is_some() => self.call_web_search(args).await,
+            "wiki.list"   => self.call_wiki_list().await,
+            "wiki.get"    => self.call_wiki_get(args).await,
+            "wiki.search" => self.call_wiki_search(args).await,
+            "wiki.write"  => self.call_wiki_write(args).await,
+            "web.search" if self.web_search.is_some() => self.call_web_search(args).await,
             _ => Self::tool_error_result("unknown tool"),
         }
     }
@@ -1176,10 +1178,9 @@ impl KnowledgeServer {
     /// Error text is generic — NEVER includes response body or serde error detail.
     fn search_error_to_tool_result(err: SearchError) -> serde_json::Value {
         let msg = match err {
-            SearchError::Http(_)  => "web search upstream HTTP error",
-            SearchError::Timeout  => "web search timed out",
-            SearchError::Parse(_) => "web search response parse failed",
-            SearchError::Config(_) => "web search not configured",
+            SearchError::Http(_)     => "web search upstream HTTP error",
+            SearchError::Parse(_)    => "web search response parse failed",
+            SearchError::Upstream(_) => "web search upstream error",
         };
         Self::tool_error_result(msg)
     }
@@ -1666,8 +1667,34 @@ proptest! {
 ```rust
 // tests/mcp_conformance.rs
 
-#[tokio::test] async fn tools_list_returns_four_tools_without_search() { /* ... */ }
-#[tokio::test] async fn tools_list_includes_web_search_when_configured() { /* ... */ }
+#[tokio::test]
+async fn tools_list_returns_four_tools_without_search() {
+    let fx = KnowledgeFixture::new_without_search().await;
+    let tools = fx.client.list_tools().await.unwrap();
+    let names: Vec<String> = tools["tools"]
+        .as_array().unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["wiki.list", "wiki.get", "wiki.search", "wiki.write"]
+    );
+}
+
+#[tokio::test]
+async fn tools_list_includes_web_search_when_configured() {
+    let fx = KnowledgeFixture::new_with_searxng_mock().await;
+    let tools = fx.client.list_tools().await.unwrap();
+    let names: Vec<String> = tools["tools"]
+        .as_array().unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names.len(), 5);
+    assert!(names.contains(&"web.search".to_string()));
+}
+
 #[tokio::test] async fn tools_list_is_idempotent() {
     let fx = KnowledgeFixture::new_without_search().await;
     let a = fx.client.list_tools().await.unwrap();
@@ -1675,13 +1702,48 @@ proptest! {
     assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
 }
 
-#[tokio::test] async fn wiki_get_returns_page_content() { /* ... */ }
-#[tokio::test] async fn wiki_get_path_traversal_returns_tool_error() { /* ... */ }
-#[tokio::test] async fn wiki_write_rejects_oversize() { /* ... */ }
+#[tokio::test]
+async fn wiki_get_returns_page_content() {
+    let fx = KnowledgeFixture::new_without_search().await;
+    fx.wiki_write_raw("greet", "# Hello\n\nBody line.").await;
+    let result = fx.client.call_tool("wiki.get", json!({ "name": "greet" })).await.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("# Hello"));
+    assert!(text.contains("Body line."));
+}
+
+#[tokio::test]
+async fn wiki_get_path_traversal_returns_tool_error() {
+    let fx = KnowledgeFixture::new_without_search().await;
+    let result = fx.client.call_tool(
+        "wiki.get",
+        json!({ "name": "../../etc/passwd" }),
+    ).await.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(result["content"][0]["text"]
+        .as_str().unwrap()
+        .contains("invalid page path"));
+}
+
+#[tokio::test]
+async fn wiki_write_rejects_oversize() {
+    let fx = KnowledgeFixture::new_without_search().await;
+    let body = "A".repeat(1_048_577); // 1 MiB + 1 byte over default cap
+    let result = fx.client.call_tool(
+        "wiki.write",
+        json!({ "name": "big", "content": body }),
+    ).await.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(result["content"][0]["text"]
+        .as_str().unwrap()
+        .contains("Page too large"));
+}
+
 #[tokio::test] async fn wiki_write_rejects_pem_private_key_block() {
     let fx = KnowledgeFixture::new_without_search().await;
     let body = "here is my key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...";
-    let result = fx.client.call_tool("wiki_write", json!({
+    let result = fx.client.call_tool("wiki.write", json!({
         "name": "leaked",
         "content": body,
     })).await.unwrap();
@@ -1697,13 +1759,13 @@ proptest! {
 
 #[tokio::test] async fn wiki_get_missing_required_field_returns_tool_error() {
     let fx = KnowledgeFixture::new_without_search().await;
-    let result = fx.client.call_tool("wiki_get", json!({})).await.unwrap();
+    let result = fx.client.call_tool("wiki.get", json!({})).await.unwrap();
     assert_eq!(result["isError"], true);
 }
 
 #[tokio::test] async fn wiki_get_wrong_argument_type_returns_tool_error() {
     let fx = KnowledgeFixture::new_without_search().await;
-    let result = fx.client.call_tool("wiki_get", json!({"name": 42})).await.unwrap();
+    let result = fx.client.call_tool("wiki.get", json!({"name": 42})).await.unwrap();
     assert_eq!(result["isError"], true);
 }
 
@@ -1714,12 +1776,12 @@ async fn tool_call_audit_log_does_not_contain_arguments() {
     // log contains the name but not the text.
     let fx = KnowledgeFixture::new_without_search().await;
     let audit_sink = fx.audit_sink();  // in-memory AuditWriter fake
-    fx.call_tool("wiki_get", json!({ "path": "secrets/my-api-key-is-sk-ant-12345.md" })).await;
+    fx.call_tool("wiki.get", json!({ "name": "secrets/my-api-key-is-sk-ant-12345" })).await;
     let entries = audit_sink.entries();
     // Find the kairos-dispatched entry
     let entry = entries.iter().find(|e| e.kairos_dispatched).expect("audit entry");
     // tools_called must contain the tool NAME
-    assert!(entry.tools_called.iter().any(|n| n == "wiki_get"));
+    assert!(entry.tools_called.iter().any(|n| n == "wiki.get"));
     // The sensitive arg text must NOT appear anywhere in the serialized entry
     let serialized = serde_json::to_string(&entry).unwrap();
     assert!(!serialized.contains("sk-ant-12345"),

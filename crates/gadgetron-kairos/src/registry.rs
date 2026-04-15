@@ -174,12 +174,16 @@ impl McpToolRegistry {
 }
 
 /// Determine whether a tool should appear in `--allowed-tools`.
+///
+/// Per ADR-P2A-06 §"Tier + Mode in P2A", `Ask` is treated as `Never` because
+/// the interactive approval flow is deferred to Phase 2B. Only `Auto` tools
+/// reach Claude Code's allowed-tools flag.
 fn tool_is_enabled(schema: &ToolSchema, cfg: &AgentConfig) -> bool {
     match schema.tier {
         Tier::Read => true,
         Tier::Write => {
             let mode = resolve_write_mode(&schema.name, cfg);
-            !matches!(mode, ToolMode::Never)
+            !matches!(mode, ToolMode::Never | ToolMode::Ask)
         }
         Tier::Destructive => cfg.tools.destructive.enabled,
     }
@@ -460,6 +464,34 @@ mod tests {
         let cfg = cfg_with_overrides(ToolMode::Auto, ToolMode::Never, ToolMode::Auto, false);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(!tools.contains(&"wiki.write".to_string()));
+    }
+
+    #[test]
+    fn ask_mode_tools_are_excluded_from_allowed_list() {
+        // ADR-P2A-06 §"Tier + Mode in P2A": "T2 `Write` — `Auto` or `Never`
+        // per subcategory. `Ask` is logged as a startup warning and treated
+        // as `Never` (no approval flow to resolve it)."
+        //
+        // The approval flow was deferred to Phase 2B. Any tool whose mode
+        // resolves to `Ask` MUST NOT appear in `--allowed-tools`, otherwise
+        // Claude Code sees it as an auto-runnable tool and invokes it without
+        // the approval card that P2A does not implement. This is the exact
+        // runtime correctness gap Codex flagged in the pre-Phase-5 review
+        // (`a304a359c467a6579`).
+        let reg = registry_with_full_set();
+        let cfg = cfg_with_overrides(ToolMode::Ask, ToolMode::Ask, ToolMode::Ask, false);
+        let tools = reg.build_allowed_tools(&cfg);
+        assert!(
+            !tools.contains(&"wiki.write".to_string()),
+            "wiki.write is Ask — must be excluded: {tools:?}"
+        );
+        assert!(
+            !tools.contains(&"infra.deploy_model".to_string()),
+            "infra.deploy_model is Ask — must be excluded: {tools:?}"
+        );
+        // Read-tier tools are unaffected (V1: read is always Auto).
+        assert!(tools.contains(&"wiki.read".to_string()));
+        assert!(tools.contains(&"web.search".to_string()));
     }
 
     #[test]
