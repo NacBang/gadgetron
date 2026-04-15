@@ -184,7 +184,10 @@ mod tests {
     use gadgetron_core::message::Message;
 
     fn empty_registry() -> Arc<McpToolRegistry> {
-        Arc::new(McpToolRegistryBuilder::new().freeze())
+        Arc::new(
+            McpToolRegistryBuilder::new()
+                .freeze(&gadgetron_core::agent::config::AgentConfig::default()),
+        )
     }
 
     fn test_request() -> ChatRequest {

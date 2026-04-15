@@ -332,7 +332,10 @@ mod tests {
     fn fresh_registry() -> Arc<McpToolRegistry> {
         let mut builder = crate::registry::McpToolRegistryBuilder::new();
         builder.register(Arc::new(FakeProvider)).unwrap();
-        Arc::new(builder.freeze())
+        // Default AgentConfig has wiki_write = Auto, so wiki.write (a
+        // Tier::Write tool in FakeProvider) passes the L3 gate and the
+        // existing `tools_call_*` tests still exercise dispatch.
+        Arc::new(builder.freeze(&gadgetron_core::agent::config::AgentConfig::default()))
     }
 
     fn request(method: &str, params: Value) -> RpcRequest {
