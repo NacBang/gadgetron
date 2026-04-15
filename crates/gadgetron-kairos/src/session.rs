@@ -181,12 +181,20 @@ async fn drive(
         buf
     });
 
-    // 5. Feed stdin (flattened message history) and close.
-    feed_stdin(stdin, request).await?;
-
-    // 6. Stream stdout line-by-line until EOF or timeout.
+    // 5. Compute the deadline BEFORE writing stdin — per ADR-P2A-06
+    //    Implementation status addendum item 5 (B-2 regression). The
+    //    `request_timeout_secs` contract in `02-kairos-agent.md §5` covers
+    //    the full subprocess span from spawn to `message_stop`; computing
+    //    the deadline after `feed_stdin` would let long chat histories or
+    //    slow OS pipe buffers consume seconds outside the timeout window.
+    //    Regression-locked by `deadline_covers_stdin_write_time`.
     let timeout_secs = config.request_timeout_secs;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    // 6. Feed stdin (flattened message history) and close.
+    feed_stdin(stdin, request).await?;
+
+    // 7. Stream stdout line-by-line until EOF or timeout.
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     let mut timed_out = false;
@@ -240,7 +248,16 @@ async fn drive(
 
     if timed_out {
         let _ = child.wait().await;
-        let _ = stderr_handle.await;
+        // H4 fix (ADR-P2A-06 addendum item 6): `stderr_handle.await` can
+        // hang indefinitely if Claude Code does not flush stderr on
+        // SIGTERM — the drive task would then never return and the session
+        // stream would never yield the Timeout error to the caller. Bound
+        // the wait at 2 seconds; on elapse the join handle is abandoned
+        // (the spawned drain task is dropped, its BufReader and stderr pipe
+        // are closed, and `kill_on_drop(true)` on the parent Child
+        // eventually SIGKILLs the subprocess as a final safety net).
+        // Regression-locked by `stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop`.
+        let _ = tokio::time::timeout(Duration::from_secs(2), stderr_handle).await;
         drop(mcp_tmp);
         return Err(GadgetronError::Kairos {
             kind: KairosErrorKind::Timeout {
@@ -405,4 +422,74 @@ mod tests {
 
     // Full happy-path + stream roundtrip via a fake claude binary is
     // Step 21 infrastructure (per 02 v4 §14.2 fake_claude). Not yet here.
+
+    // ---- B-2 regression lock (ADR-P2A-06 addendum item 5) ----
+
+    #[test]
+    fn deadline_covers_stdin_write_time() {
+        // Source-level witness that `let deadline = Instant::now() + timeout`
+        // is computed BEFORE `feed_stdin(stdin, request)` is called in the
+        // `drive` function. Otherwise stdin write time escapes
+        // `request_timeout_secs` — on long chat histories or a slow OS pipe
+        // buffer, `feed_stdin` can consume seconds that the contract says
+        // MUST be inside the deadline (see 02-kairos-agent.md §5 contract
+        // language: "caps the total time between subprocess spawn and
+        // `message_stop`"). A behavioral test would require a fake claude
+        // that blocks stdin reads; Step 21's `fake_claude` will add it, but
+        // this regression lock closes the door until then.
+        //
+        // The needles are split into two fragments per test fragment to
+        // avoid matching the test body itself via include_str! recursion.
+        const SOURCE: &str = include_str!("session.rs");
+        let deadline_needle = ["let dead", "line = tokio::time::Instant::now"].concat();
+        let feed_needle = ["feed_s", "tdin(stdin, request)"].concat();
+        let deadline_idx = SOURCE
+            .find(&deadline_needle)
+            .expect("`let deadline = tokio::time::Instant::now()` not found in session.rs");
+        let feed_idx = SOURCE
+            .find(&feed_needle)
+            .expect("`feed_stdin(stdin, request)` call not found in session.rs");
+        assert!(
+            deadline_idx < feed_idx,
+            "B-2 regression: `let deadline` (byte {deadline_idx}) must precede \
+             `feed_stdin(stdin, request)` (byte {feed_idx}) so stdin write time \
+             is included in request_timeout_secs. Per ADR-P2A-06 Implementation \
+             status addendum item 5 and 02-kairos-agent.md §5 contract."
+        );
+    }
+
+    // ---- H4 regression lock (ADR-P2A-06 addendum item 6) ----
+
+    #[test]
+    fn stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop() {
+        // Source-level witness that in the `timed_out` cleanup branch of
+        // `drive`, `stderr_handle.await` is wrapped in a bounded
+        // `tokio::time::timeout(Duration::from_secs(2), ...)`. Without the
+        // wrapper, the drive task can hang indefinitely waiting for stderr
+        // pipe EOF if Claude Code does not flush stderr on SIGTERM — only
+        // `kill_on_drop` at parent drop is the safety net, and the session
+        // stream never yields the Timeout error.
+        //
+        // A behavioral test would need a fake subprocess that ignores SIGTERM
+        // and holds stderr open; we do source-level here because the hang
+        // failure mode is nondeterministic under fake_claude's current
+        // design and the regression we need to prevent is a refactor
+        // accidentally removing the wrapper.
+        //
+        // Split-literal needle so the test body does not self-match.
+        const SOURCE: &str = include_str!("session.rs");
+        let needle = [
+            "tokio::time::timeout",
+            "(Duration::from_secs(2), stderr_handle)",
+        ]
+        .concat();
+        assert!(
+            SOURCE.contains(&needle),
+            "H4 regression: the timed_out cleanup path must wrap \
+             `stderr_handle.await` in `tokio::time::timeout(Duration::from_secs(2), \
+             stderr_handle).await`. Per ADR-P2A-06 Implementation status \
+             addendum item 6 — without the wrapper the drive task hangs on \
+             SIGTERM-noop subprocesses."
+        );
+    }
 }
