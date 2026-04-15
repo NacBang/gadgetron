@@ -22,8 +22,9 @@ serde_json = { workspace = true }
 
 thiserror = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 
 # subprocess management
 regex = { workspace = true }

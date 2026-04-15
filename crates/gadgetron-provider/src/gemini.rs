@@ -399,6 +399,7 @@ mod tests {
             tools: None,
             stream: false,
             stop: None,
+            conversation_id: None,
         };
 
         let gemini_req = GeminiProvider::to_gemini_request(&req);
