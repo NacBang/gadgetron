@@ -1038,8 +1038,18 @@ fn register_kairos_if_configured(
     // Register KairosProvider under the "kairos" model id in the
     // router map. The existing provider map already holds concrete
     // OpenAI/Anthropic/vLLM/etc entries; this adds one more.
+    //
+    // P2A PR A4 wires a `NoopToolAuditEventSink` as the audit sink —
+    // the real `ToolAuditEventWriter` lives in `gadgetron-xaas` and
+    // is connected to the DB writer loop there. The composition root
+    // for that wiring lands with the broader `AppState` audit plumbing;
+    // for now Kairos silently drops tool-call events when the DB is
+    // not configured, which preserves the previous tracing-only
+    // behavior.
     let agent_cfg = Arc::new(app_config.agent.clone());
-    gadgetron_kairos::register_with_router(agent_cfg, registry, providers);
+    let audit_sink: std::sync::Arc<dyn gadgetron_core::audit::ToolAuditEventSink> =
+        std::sync::Arc::new(gadgetron_core::audit::NoopToolAuditEventSink);
+    gadgetron_kairos::register_with_router(agent_cfg, registry, audit_sink, providers);
     tracing::info!(
         model = "kairos",
         "kairos: registered (KnowledgeToolProvider active; web.search = {})",
