@@ -49,12 +49,17 @@
 //! `"{Role}: {content}\n\n"` pairs, then stdin is closed to signal
 //! EOF.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
 use gadgetron_core::agent::config::AgentConfig;
+use gadgetron_core::audit::{
+    NoopToolAuditEventSink, ToolAuditEvent, ToolAuditEventSink, ToolCallOutcome, ToolMetadata,
+    ToolTier,
+};
 use gadgetron_core::error::{GadgetronError, KairosErrorKind, Result};
 use gadgetron_core::message::Role;
 use gadgetron_core::provider::{ChatChunk, ChatRequest};
@@ -67,7 +72,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::mcp_config::write_config_file;
 use crate::redact::redact_stderr;
 use crate::spawn::build_claude_command;
-use crate::stream::{event_to_chat_chunks, parse_event};
+use crate::stream::{event_to_chat_chunks, parse_event, StreamJsonEvent};
 
 /// Bound on the in-flight chunk channel. Small values are fine for
 /// P2A — Claude Code emits chunks faster than HTTP can drain them
@@ -79,15 +84,46 @@ pub struct ClaudeCodeSession {
     config: Arc<AgentConfig>,
     allowed_tools: Vec<String>,
     request: ChatRequest,
+    tool_metadata: Arc<HashMap<String, ToolMetadata>>,
+    audit_sink: Arc<dyn ToolAuditEventSink>,
 }
 
 impl ClaudeCodeSession {
-    pub fn new(config: Arc<AgentConfig>, allowed_tools: Vec<String>, request: ChatRequest) -> Self {
+    /// Construct a session with an explicit audit sink + tool metadata
+    /// snapshot. The metadata snapshot is taken from
+    /// `McpToolRegistry::tool_metadata_snapshot()` by the caller (the
+    /// `KairosProvider`). Tests that don't exercise audit can pass
+    /// `NoopToolAuditEventSink::new_arc()` and an empty HashMap.
+    pub fn new(
+        config: Arc<AgentConfig>,
+        allowed_tools: Vec<String>,
+        request: ChatRequest,
+        tool_metadata: Arc<HashMap<String, ToolMetadata>>,
+        audit_sink: Arc<dyn ToolAuditEventSink>,
+    ) -> Self {
         Self {
             config,
             allowed_tools,
             request,
+            tool_metadata,
+            audit_sink,
         }
+    }
+
+    /// Back-compat constructor for tests that do not care about audit.
+    /// Installs `NoopToolAuditEventSink` + empty metadata.
+    pub fn new_without_audit(
+        config: Arc<AgentConfig>,
+        allowed_tools: Vec<String>,
+        request: ChatRequest,
+    ) -> Self {
+        Self::new(
+            config,
+            allowed_tools,
+            request,
+            Arc::new(HashMap::new()),
+            Arc::new(NoopToolAuditEventSink),
+        )
     }
 
     /// Consume the session, spawn the driver task, and return a stream
@@ -109,15 +145,65 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         config,
         allowed_tools,
         request,
+        tool_metadata,
+        audit_sink,
     } = session;
 
-    match drive(&config, &allowed_tools, &request, &tx).await {
+    match drive(
+        &config,
+        &allowed_tools,
+        &request,
+        &tool_metadata,
+        audit_sink.as_ref(),
+        &tx,
+    )
+    .await
+    {
         Ok(()) => {}
         Err(e) => {
             // Ignore send failure — the receiver has already been dropped,
             // which is exactly the cleanup path we want.
             let _ = tx.send(Err(e)).await;
         }
+    }
+}
+
+/// Emit a `ToolCallCompleted` audit event for a single stream-json
+/// `ToolUse` boundary. Called BEFORE `event_to_chat_chunks` on the
+/// hot path so the audit write happens even if the caller fails to
+/// drain the chunk channel. Other event variants are ignored.
+///
+/// P2A (PR A4) does not yet populate `conversation_id` or
+/// `claude_session_uuid` (those land in A5-A7 via native session
+/// integration). `elapsed_ms` is 0 — precise `id`-based correlation
+/// requires `fake_claude` Step 21 infrastructure.
+fn emit_tool_audit_if_needed(
+    event: &StreamJsonEvent,
+    tool_metadata: &HashMap<String, ToolMetadata>,
+    audit_sink: &dyn ToolAuditEventSink,
+) {
+    if let StreamJsonEvent::ToolUse { name, .. } = event {
+        // Claude Code passes tools via `mcp__<server>__<tool>`. Strip
+        // the prefix so the audit record names match `ToolSchema.name`
+        // from the registry. For non-MCP built-ins (shouldn't happen
+        // in P2A because `--tools ""` is the default) fall through
+        // with the raw name.
+        let bare_name = name
+            .strip_prefix("mcp__knowledge__")
+            .unwrap_or(name.as_str());
+        let (tier, category) = match tool_metadata.get(bare_name) {
+            Some(meta) => (meta.tier, meta.category.clone()),
+            None => (ToolTier::Read, "unknown".to_string()),
+        };
+        audit_sink.send(ToolAuditEvent::ToolCallCompleted {
+            tool_name: bare_name.to_string(),
+            tier,
+            category,
+            outcome: ToolCallOutcome::Success,
+            elapsed_ms: 0,
+            conversation_id: None,
+            claude_session_uuid: None,
+        });
     }
 }
 
@@ -128,6 +214,8 @@ async fn drive(
     config: &AgentConfig,
     allowed_tools: &[String],
     request: &ChatRequest,
+    tool_metadata: &HashMap<String, ToolMetadata>,
+    audit_sink: &dyn ToolAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
 ) -> Result<()> {
     // 1. MCP config tempfile (M1 — mkstemp 0600 atomic).
@@ -215,6 +303,10 @@ async fn drive(
                 }
                 match parse_event(&line) {
                     Ok(Some(event)) => {
+                        // Emit the tool-call audit BEFORE building chunks.
+                        // Borrowing `event` is safe here — `event_to_chat_chunks`
+                        // consumes by value on the next line.
+                        emit_tool_audit_if_needed(&event, tool_metadata, audit_sink);
                         for chunk in event_to_chat_chunks(event, request) {
                             // Back-pressure: if the receiver is gone,
                             // stop driving — subprocess will be killed
@@ -222,7 +314,9 @@ async fn drive(
                             if tx.send(Ok(chunk)).await.is_err() {
                                 let _ = child.start_kill();
                                 let _ = child.wait().await;
-                                let _ = stderr_handle.await;
+                                let _ =
+                                    tokio::time::timeout(Duration::from_secs(2), stderr_handle)
+                                        .await;
                                 drop(mcp_tmp);
                                 return Ok(());
                             }
@@ -365,7 +459,7 @@ mod tests {
         let cfg = Arc::new(AgentConfig::default());
         let req = test_request();
         let tools = vec!["wiki.list".to_string()];
-        let session = ClaudeCodeSession::new(cfg.clone(), tools.clone(), req.clone());
+        let session = ClaudeCodeSession::new_without_audit(cfg.clone(), tools.clone(), req.clone());
         assert_eq!(session.config.binary, cfg.binary);
         assert_eq!(session.allowed_tools, tools);
         assert_eq!(session.request.messages.len(), 4);
@@ -403,7 +497,7 @@ mod tests {
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude_binary".into();
         let cfg = Arc::new(cfg);
-        let session = ClaudeCodeSession::new(cfg, vec![], test_request());
+        let session = ClaudeCodeSession::new_without_audit(cfg, vec![], test_request());
 
         let mut stream = session.run();
         use futures::StreamExt;
@@ -422,6 +516,146 @@ mod tests {
 
     // Full happy-path + stream roundtrip via a fake claude binary is
     // Step 21 infrastructure (per 02 v4 §14.2 fake_claude). Not yet here.
+
+    // ---- A4 regression lock (ADR-P2A-06 addendum item 1) ----
+    //
+    // `emit_tool_audit_if_needed` is the helper session::drive calls on
+    // every parsed stream-json event. It must emit a
+    // `ToolCallCompleted` event on `ToolUse` and pass through on every
+    // other variant. For ToolUse, it must look up (tier, category) via
+    // the metadata snapshot passed by the caller, stripping the
+    // `mcp__knowledge__` prefix that Claude Code wraps tool names in.
+
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct CaptureSink {
+        events: Mutex<Vec<ToolAuditEvent>>,
+    }
+
+    impl ToolAuditEventSink for CaptureSink {
+        fn send(&self, event: ToolAuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn metadata_with_wiki_write() -> HashMap<String, ToolMetadata> {
+        let mut m = HashMap::new();
+        m.insert(
+            "wiki.write".to_string(),
+            ToolMetadata {
+                tier: ToolTier::Write,
+                category: "knowledge".to_string(),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn kairos_emits_tool_call_completed_audit_entry() {
+        // TDD Red → Green for ADR-P2A-06 addendum item 1.
+        //
+        // Construct a ToolUse stream-json event with the Claude Code
+        // `mcp__knowledge__<tool>` wrapper. Call
+        // `emit_tool_audit_if_needed` with a `CaptureSink` and the
+        // metadata snapshot. Assert exactly one `ToolCallCompleted`
+        // event was captured with the expected fields.
+        let sink = CaptureSink::default();
+        let metadata = metadata_with_wiki_write();
+        let event = StreamJsonEvent::ToolUse {
+            id: "call_1".into(),
+            name: "mcp__knowledge__wiki.write".into(),
+            input: serde_json::json!({"name": "home", "content": "hi"}),
+        };
+
+        emit_tool_audit_if_needed(&event, &metadata, &sink);
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ToolAuditEvent::ToolCallCompleted {
+                tool_name,
+                tier,
+                category,
+                outcome,
+                elapsed_ms,
+                conversation_id,
+                claude_session_uuid,
+            } => {
+                assert_eq!(tool_name, "wiki.write");
+                assert_eq!(*tier, ToolTier::Write);
+                assert_eq!(category, "knowledge");
+                assert!(matches!(outcome, ToolCallOutcome::Success));
+                assert_eq!(*elapsed_ms, 0); // P2A: precise timing deferred
+                assert!(conversation_id.is_none()); // A5-A7 populates
+                assert!(claude_session_uuid.is_none()); // A6 populates
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("unexpected ToolAuditEvent variant"),
+        }
+    }
+
+    #[test]
+    fn emit_tool_audit_is_noop_for_non_tool_use_events() {
+        let sink = CaptureSink::default();
+        let metadata = metadata_with_wiki_write();
+        // Every non-ToolUse variant should produce zero events.
+        let delta = StreamJsonEvent::MessageDelta {
+            delta: crate::stream::MessageDelta {
+                text: Some("hi".into()),
+                stop_reason: None,
+            },
+        };
+        emit_tool_audit_if_needed(&delta, &metadata, &sink);
+
+        let result = StreamJsonEvent::ToolResult {
+            tool_use_id: "call_1".into(),
+            content: serde_json::json!({"ok": true}),
+            is_error: false,
+        };
+        emit_tool_audit_if_needed(&result, &metadata, &sink);
+
+        let stop = StreamJsonEvent::MessageStop {
+            stop_reason: "stop".into(),
+        };
+        emit_tool_audit_if_needed(&stop, &metadata, &sink);
+
+        assert_eq!(sink.events.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn emit_tool_audit_falls_back_to_unknown_metadata_for_unregistered_tools() {
+        // A `ToolUse` event whose name is not in the metadata snapshot
+        // still produces an event — with `ToolTier::Read` + category
+        // `"unknown"`. This covers the case where Claude Code
+        // references a tool the registry does not know about (e.g. a
+        // built-in that slipped through `--tools ""`).
+        let sink = CaptureSink::default();
+        let metadata = HashMap::new();
+        let event = StreamJsonEvent::ToolUse {
+            id: "call_2".into(),
+            name: "some.unknown.tool".into(),
+            input: serde_json::Value::Null,
+        };
+        emit_tool_audit_if_needed(&event, &metadata, &sink);
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ToolAuditEvent::ToolCallCompleted {
+                tool_name,
+                tier,
+                category,
+                ..
+            } => {
+                assert_eq!(tool_name, "some.unknown.tool");
+                assert_eq!(*tier, ToolTier::Read);
+                assert_eq!(category, "unknown");
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("unexpected ToolAuditEvent variant"),
+        }
+    }
 
     // ---- B-2 regression lock (ADR-P2A-06 addendum item 5) ----
 

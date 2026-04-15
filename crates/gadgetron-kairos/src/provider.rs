@@ -34,6 +34,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use gadgetron_core::agent::config::AgentConfig;
+use gadgetron_core::audit::{NoopToolAuditEventSink, ToolAuditEventSink};
 use gadgetron_core::error::{GadgetronError, KairosErrorKind, Result};
 use gadgetron_core::message::{Content, Message, Role};
 use gadgetron_core::provider::{
@@ -46,16 +47,38 @@ use crate::session::ClaudeCodeSession;
 /// The Kairos `LlmProvider`.
 ///
 /// Holds the operator-facing `AgentConfig` (binary path, brain mode,
-/// timeout) and a frozen `McpToolRegistry` from which every request
-/// derives its `--allowed-tools` list.
+/// timeout), a frozen `McpToolRegistry` from which every request
+/// derives its `--allowed-tools` list, and an `Arc<dyn ToolAuditEventSink>`
+/// that receives `ToolCallCompleted` events on each tool-use boundary
+/// (ADR-P2A-06 Implementation status addendum item 1).
 pub struct KairosProvider {
     config: Arc<AgentConfig>,
     registry: Arc<McpToolRegistry>,
+    audit_sink: Arc<dyn ToolAuditEventSink>,
 }
 
 impl KairosProvider {
-    pub fn new(config: Arc<AgentConfig>, registry: Arc<McpToolRegistry>) -> Self {
-        Self { config, registry }
+    /// Construct a provider with an explicit audit sink. The caller
+    /// (`gadgetron-cli::main` in production, tests in unit/integration
+    /// context) chooses whether to plug in a real writer
+    /// (`gadgetron_xaas::audit::tool_event_writer::ToolAuditEventWriter`)
+    /// or a noop/test sink.
+    pub fn new(
+        config: Arc<AgentConfig>,
+        registry: Arc<McpToolRegistry>,
+        audit_sink: Arc<dyn ToolAuditEventSink>,
+    ) -> Self {
+        Self {
+            config,
+            registry,
+            audit_sink,
+        }
+    }
+
+    /// Back-compat constructor — installs a `NoopToolAuditEventSink`.
+    /// Used in the unit tests that do not care about audit emission.
+    pub fn new_without_audit(config: Arc<AgentConfig>, registry: Arc<McpToolRegistry>) -> Self {
+        Self::new(config, registry, Arc::new(NoopToolAuditEventSink))
     }
 
     /// The model id this provider exposes via `/v1/models` and
@@ -120,7 +143,14 @@ impl LlmProvider for KairosProvider {
         req: ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
         let allowed_tools = self.registry.build_allowed_tools(self.config.as_ref());
-        let session = ClaudeCodeSession::new(self.config.clone(), allowed_tools, req);
+        let tool_metadata = self.registry.tool_metadata_snapshot();
+        let session = ClaudeCodeSession::new(
+            self.config.clone(),
+            allowed_tools,
+            req,
+            tool_metadata,
+            self.audit_sink.clone(),
+        );
         session.run()
     }
 
@@ -168,9 +198,10 @@ impl LlmProvider for KairosProvider {
 pub fn register_with_router(
     config: Arc<AgentConfig>,
     registry: Arc<McpToolRegistry>,
+    audit_sink: Arc<dyn ToolAuditEventSink>,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
 ) {
-    let provider = KairosProvider::new(config, registry);
+    let provider = KairosProvider::new(config, registry, audit_sink);
     providers.insert(
         KairosProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -211,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn models_returns_single_kairos_entry() {
         let cfg = Arc::new(AgentConfig::default());
-        let provider = KairosProvider::new(cfg, empty_registry());
+        let provider = KairosProvider::new_without_audit(cfg, empty_registry());
         let models = provider.models().await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "kairos");
@@ -222,15 +253,21 @@ mod tests {
     #[test]
     fn name_is_kairos() {
         let cfg = Arc::new(AgentConfig::default());
-        let provider = KairosProvider::new(cfg, empty_registry());
+        let provider = KairosProvider::new_without_audit(cfg, empty_registry());
         assert_eq!(provider.name(), "kairos");
+    }
+
+    // Helper that constructs a provider with explicit audit sink — used
+    // by the register_with_router regression test.
+    fn with_sink(cfg: Arc<AgentConfig>) -> KairosProvider {
+        KairosProvider::new(cfg, empty_registry(), Arc::new(NoopToolAuditEventSink))
     }
 
     #[tokio::test]
     async fn health_fails_on_missing_absolute_binary() {
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude".into();
-        let provider = KairosProvider::new(Arc::new(cfg), empty_registry());
+        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
         match provider.health().await {
             Err(GadgetronError::Kairos {
                 kind: KairosErrorKind::NotInstalled,
@@ -247,7 +284,7 @@ mod tests {
         // `KairosErrorKind::NotInstalled`.
         let mut cfg = AgentConfig::default();
         cfg.binary = "nonexistent-bare-claude-command-xyz".into();
-        let provider = KairosProvider::new(Arc::new(cfg), empty_registry());
+        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
         assert!(provider.health().await.is_ok());
     }
 
@@ -255,7 +292,7 @@ mod tests {
     async fn chat_stream_yields_error_when_binary_missing() {
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude".into();
-        let provider = KairosProvider::new(Arc::new(cfg), empty_registry());
+        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
         let mut stream = provider.chat_stream(test_request());
         let first = stream.next().await.expect("must yield one item");
         let err = first.expect_err("must be error");
@@ -276,7 +313,7 @@ mod tests {
         // asserting the call returns Err with NotInstalled.
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude".into();
-        let provider = KairosProvider::new(Arc::new(cfg), empty_registry());
+        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
         let result = provider.chat(test_request()).await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -292,11 +329,14 @@ mod tests {
     fn register_with_router_inserts_under_kairos_key() {
         let cfg = Arc::new(AgentConfig::default());
         let reg = empty_registry();
+        let sink: Arc<dyn ToolAuditEventSink> = Arc::new(NoopToolAuditEventSink);
         let mut map: std::collections::HashMap<String, Arc<dyn LlmProvider>> =
             std::collections::HashMap::new();
-        register_with_router(cfg, reg, &mut map);
+        register_with_router(cfg, reg, sink, &mut map);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("kairos"));
         assert_eq!(map.get("kairos").unwrap().name(), "kairos");
+        // also exercise the with_sink helper so it doesn't warn as unused
+        let _ = with_sink(Arc::new(AgentConfig::default()));
     }
 }

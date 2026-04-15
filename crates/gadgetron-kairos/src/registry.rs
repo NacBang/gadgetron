@@ -31,6 +31,7 @@ use gadgetron_core::agent::config::{AgentConfig, ToolMode};
 use gadgetron_core::agent::tools::{
     ensure_tool_name_allowed, McpError, McpToolProvider, Tier, ToolResult, ToolSchema,
 };
+use gadgetron_core::audit::ToolMetadata;
 
 /// Mutable builder. Lives in `main()` until all providers are registered.
 pub struct McpToolRegistryBuilder {
@@ -92,8 +93,20 @@ impl McpToolRegistryBuilder {
     pub fn freeze(self, cfg: &AgentConfig) -> McpToolRegistry {
         let mut by_tool_name: HashMap<String, Arc<dyn McpToolProvider>> = HashMap::new();
         let mut all_schemas: Vec<ToolSchema> = Vec::new();
+        // Denormalized (tier, category) per tool name so the Kairos
+        // audit emitter in session.rs can fire `ToolCallCompleted`
+        // events without another registry lookup on the hot path.
+        let mut tool_metadata: HashMap<String, ToolMetadata> = HashMap::new();
         for provider in self.providers.into_iter() {
+            let category = provider.category().to_string();
             for schema in provider.tool_schemas() {
+                tool_metadata.insert(
+                    schema.name.clone(),
+                    ToolMetadata {
+                        tier: schema.tier.into(),
+                        category: category.clone(),
+                    },
+                );
                 by_tool_name.insert(schema.name.clone(), provider.clone());
                 all_schemas.push(schema);
             }
@@ -112,6 +125,7 @@ impl McpToolRegistryBuilder {
             by_tool_name,
             all_schemas: Arc::from(all_schemas.into_boxed_slice()),
             allowed_names: Arc::new(allowed_names),
+            tool_metadata: Arc::new(tool_metadata),
         }
     }
 }
@@ -133,6 +147,11 @@ pub struct McpToolRegistry {
     /// are rejected with `McpError::Denied` before the provider is
     /// invoked.
     allowed_names: Arc<HashSet<String>>,
+    /// Denormalized `(tier, category)` per tool name. Used by the
+    /// Kairos audit emitter in `session.rs::drive` to fill
+    /// `ToolCallCompleted` events without walking the provider list
+    /// on the hot path.
+    tool_metadata: Arc<HashMap<String, ToolMetadata>>,
 }
 
 impl McpToolRegistry {
@@ -193,6 +212,13 @@ impl McpToolRegistry {
     /// passed to `freeze()`. Used by tests + the L3 gate in `dispatch`.
     pub fn is_tool_allowed(&self, name: &str) -> bool {
         self.allowed_names.contains(name)
+    }
+
+    /// Cheap `Arc` clone of the `(tool_name → ToolMetadata)` snapshot
+    /// used by `gadgetron-kairos::session::drive` + the stream-level
+    /// audit emitter to fill `ToolCallCompleted` events.
+    pub fn tool_metadata_snapshot(&self) -> Arc<HashMap<String, ToolMetadata>> {
+        self.tool_metadata.clone()
     }
 
     /// Dispatch a tool call to the provider that owns it.
