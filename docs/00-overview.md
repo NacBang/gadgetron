@@ -10,32 +10,46 @@
 
 ## 1. 제품 비전과 차별점
 
-### 1.1 비전 — 하방/상방 2층 구조
+### 1.1 비전 — 협업형 3 Plane 구조
 
-**Gadgetron의 궁극 제품: 지식 레이어 기반 개인 비서 플랫폼.** 개인에게 자신의 지식을 학습·저장하고 능동적으로 도와주는 AI 비서를 제공하는 것이 목적이며, 제공 형태는 로컬 / on-premise / 클라우드 세 가지입니다.
+**Gadgetron의 궁극 제품: 관리자·사용자·에이전트가 함께 일하는 agentic heterogeneous cluster collaboration platform.**
 
-이 제품은 두 개의 계층으로 구성됩니다:
+이 제품은 세 개의 plane 으로 구성됩니다:
 
-| 계층 | 이름 | 상태 | 역할 |
-|------|------|------|------|
-| **하방 (Lower)** | LLM 오케스트레이션 인프라 | **Phase 1 완료 (v0.1.0-phase1)** | GPU 클러스터 위에서 서브밀리초 P99 오버헤드로 다중 프로바이더 LLM을 라우팅·배포·모니터링 |
-| **상방 (Upper)** | 지식 레이어 기반 개인 비서 (Kairos) | **Phase 2 진행 중** | 하방 위에서 Claude Code를 에이전트로 삼아 개인 wiki·웹 검색·미디어를 도구로 활용해 사용자를 돕는 personal assistant |
+| Plane | 상태 | 역할 |
+|------|------|------|
+| **Assistant Plane** | **Phase 2 진행 중** | 일상 요청 처리, 대화형 질의응답, 지식 정리, 위임 창구 |
+| **Operations Plane** | **Phase 1 기반 완료 + 확장 예정** | 클러스터 모니터링, 장애 분석, 위험 경고, 설정 변경, 운영 리포트 |
+| **Execution Plane** | **Phase 1 기반 완료 + 확장 예정** | 라우팅, 배포, 스케줄링, 자원 최적화, 워크로드 실행, 결과 회수 |
 
-**하방 단독 가치**: Rust 네이티브 단일 바이너리 LLM 게이트웨이. LiteLLM/Portkey/OpenRouter 대비 P99 < 1ms, 로컬 GPU 1급, 단일 배포 단위. 독립된 SDK/API 소비자 대상 인프라로도 유효.
+세 개의 actor 가 이 plane 들을 가로질러 협업합니다:
 
-**상방의 결정적 디자인**: Claude Code (CLI) 가 에이전트 본체. Rust는 절차적 오케스트레이션을 작성하지 **않으며**, MCP 서버와 subprocess 관리자로만 기능. 사용자의 Claude Max 구독이 에이전트 두뇌를 담당하므로 API 과금·프롬프트 엔지니어링·에이전트 루프 재구현 모두 회피.
+| Actor | 역할 |
+|------|------|
+| **Administrator** | 정책 승인자, 파괴적 변경 최종 승인자, 인프라 소유자 |
+| **User** | 요청 생성자, 결과 소비자, 일부 self-service operator |
+| **Agent** | 비서이자 운영 조력자, 실행 조정자, 경험 축적 주체 |
 
-**상세 설계**: `docs/design/phase2/00-overview.md` (vision + STRIDE), `01-knowledge-layer.md` (`gadgetron-knowledge` crate), `02-kairos-agent.md` (`gadgetron-kairos` crate).
+현재 구현은 이 전체 비전의 일부를 이미 담고 있습니다.
+
+- **Operations + Execution substrate**: Rust 네이티브 단일 바이너리 gateway/scheduler/node stack. LiteLLM/Portkey/OpenRouter 대비 P99 < 1ms, 로컬 GPU 1급, 단일 배포 단위.
+- **Assistant entry point**: Claude Code (CLI) 기반 Kairos. Rust는 절차적 에이전트 루프를 재구현하지 않고 MCP 서버와 subprocess 관리자 역할에 집중.
+- **Future collaboration loop**: direct + delegate + shadow 학습. 에이전트는 사람의 요청, 승인, 트러블슈팅, 해결 과정을 구조화하여 더 적합한 협업 파트너로 진화.
+
+**상세 설계**: `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md` (vision + STRIDE), `01-knowledge-layer.md` (`gadgetron-knowledge` crate), `02-kairos-agent.md` (`gadgetron-kairos` crate).
 
 ### 1.2 미션
 
-1. **지식 레이어 기반 개인 비서** — wiki + 웹 검색 + (P2B+) SQLite/vector/media 를 Claude Code에 MCP 도구로 노출; 사용자가 자신의 지식을 축적하며 비서가 능동적으로 활용
-2. **레이턴시 제거** — GC pause, 직렬화 오버헤드, 네트워크 홉을 원천 차단하여 P99 < 1ms 오버헤드 달성 (하방)
-3. **GPU 자원 최적화** — NUMA 토폴로지, NVLink/NVSwitch 인터커넥트, 열/전력 예산을 고려한 스케줄링 (하방)
-4. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 하방 + 상방 전체 구동, 마이크로서비스 난비 지양
-5. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원 (하방)
-6. **오픈소스 최대 활용** — Claude Code / [assistant-ui](https://github.com/assistant-ui/assistant-ui) / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화 (상방). OpenWebUI 는 2026-04-14 D-20260414-02 로 drop — 2025-04 라이선스 변경 + 단일 바이너리 원칙 충돌.
-7. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (kairos는 Unix 전용으로 시작)
+1. **협업형 에이전트 경험** — 관리자와 사용자는 직접 작업하거나 에이전트에게 위임할 수 있고, 에이전트는 그 과정을 통해 더 적합한 협업 파트너로 진화
+2. **운영 제어면 확장** — 클러스터 모니터링, 장애 진단, 설정 변경, 위험 경고, 운영 리포트를 agent-friendly surface 로 제공
+3. **실행 최적화** — 라우팅, 스케줄링, 자원 관리, 워크로드 실행과 결과 회수를 하나의 plane 으로 통합
+4. **경험 축적** — 대화, incident, remediation, report 를 구조화해 runbook/knowledge/policy 로 승격
+5. **레이턴시 제거** — GC pause, 직렬화 오버헤드, 네트워크 홉을 원천 차단하여 P99 < 1ms 오버헤드 달성
+6. **GPU 자원 최적화** — NUMA 토폴로지, NVLink/NVSwitch 인터커넥트, 열/전력 예산을 고려한 스케줄링
+7. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 전체 스택 구동, 마이크로서비스 난비 지양
+8. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원
+9. **오픈소스 최대 활용** — Claude Code / [assistant-ui](https://github.com/assistant-ui/assistant-ui) / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화. OpenWebUI 는 2026-04-14 D-20260414-02 로 drop — 2025-04 라이선스 변경 + 단일 바이너리 원칙 충돌.
+10. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (kairos는 Unix 전용으로 시작)
 
 ### 1.3 경쟁 차별화
 
@@ -132,10 +146,11 @@ Gadgetron의 독보적 위치:
     testing     <- core, provider, gateway, xaas           (Phase 1 E2E harness)
     cli         <- core, provider, router, gateway, scheduler, node, tui, xaas
 
-  Phase 2 신규 (설계 완료, 구현 예정):
-    knowledge   <- core                                    (Phase 2: wiki + search + MCP server)
+  Phase 2 신규 (trunk 구현됨):
+    knowledge   <- core                                    (Phase 2: wiki + search + stdio MCP server)
     kairos      <- core, knowledge                         (Phase 2: LlmProvider impl → router 등록)
-    cli         <- +knowledge, kairos                      (mcp serve + kairos init 서브커맨드)
+    web         <- (embedded static UI crate, gateway가 feature `web-ui`로 mount)
+    cli         <- +knowledge, kairos                      (`mcp serve` 서브커맨드 + kairos/web wiring)
 ```
 
 ### 2.2 런타임 컴포넌트 다이어그램
@@ -773,9 +788,9 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 
 ---
 
-## 5. 로드맵 — 하방 (Phase 1) / 상방 (Phase 2) / 운영 하드닝 (Phase 3)
+## 5. 로드맵 — Foundation (Phase 1) / Assistant & Collaboration (Phase 2) / Cluster Ops Expansion (Phase 3)
 
-### Phase 1 — 하방: LLM 오케스트레이션 인프라 (v0.1.0-phase1, **완료**)
+### Phase 1 — Operations + Execution Substrate (v0.1.0-phase1, **완료**)
 
 **목표**: 단일 노드에서 OpenAI 호환 게이트웨이로 다중 프로바이더를 라우팅하고, 기본 XaaS (auth/quota/audit) 제공.
 
@@ -803,22 +818,23 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - Streaming audit `latency_ms=0` (dispatch-time only; 02-kairos-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
 - Audit `provider=None` (실제 라우팅된 provider 미기록)
 
-### Phase 2 — 상방: 지식 레이어 기반 개인 비서 플랫폼 (v0.2, **진행 중**)
+### Phase 2 — Assistant Plane + Collaboration Entry Point (v0.2, **진행 중**)
 
-**목표**: Phase 1 인프라 위에 Claude Code를 에이전트로 하는 개인 비서 플랫폼 구축. 단일 사용자 로컬 배포부터 시작해 멀티유저·미디어·클라우드 스토리지까지 확장.
+**목표**: Phase 1 substrate 위에 Claude Code 기반 Kairos를 assistant plane entry point 로 올리고, knowledge layer + web UI + approval/registry seam 을 통해 협업형 control plane 으로 확장할 기반을 구축.
 
 **핵심 아키텍처 결정**: Claude Code (CLI) 가 에이전트 본체. Rust는 MCP 서버와 subprocess 관리자만 제공. `gadgetron-kairos`는 `LlmProvider` trait를 구현해서 router에 `"kairos"` 이름으로 등록 — gateway dispatch 코드 변경 0.
 
-**신규 크레이트 (2개)**:
-- `gadgetron-knowledge` — wiki (md+git2+Obsidian `[[link]]`) / SearXNG 프록시 / rmcp stdio MCP 서버. 도메인 leaf 크레이트.
+**신규 크레이트 (3개)**:
+- `gadgetron-knowledge` — wiki (md+git2+Obsidian `[[link]]`) / SearXNG 프록시 / manual JSON-RPC 2.0 stdio MCP 서버. 도메인 leaf 크레이트.
 - `gadgetron-kairos` — `LlmProvider` 구현 / `ClaudeCodeSession` (owned consuming + `kill_on_drop(true)`) / stream-json → ChatChunk 번역기 / `tempfile` M1 / `redact_stderr` M2.
+- `gadgetron-web` — embedded assistant-ui Web UI (`/web`) + approval/report/assistant entry UX substrate.
 
 **Phase 2 서브-스프린트 (16주)**:
 
 | 서브-스프린트 | 기간 | 증명 목표 |
 |---|---|---|
 | **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
-| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `kairos` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
+| **P2A — Kairos MVP** | 4주 | desktop-first assistant plane entry point + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `kairos` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
 | **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
 | **P2C — Multi + Storage** | 4주 | `KairosManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
 | **P2D — Media & Polish** | 4주 | `whisper.cpp` 오디오 STT + CLIP ONNX 이미지 캡션 + 비디오 프레임 샘플링 + 운영 배포 docs/manual |
@@ -838,9 +854,9 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 2. **On-premise** — 팀/조직, 로컬 또는 NAS 스토리지 (P2C+)
 3. **Cloud** — SaaS형, S3/GCS, 멀티 테넌트 격리 (P2C+)
 
-### Phase 3 — 운영 하드닝 & XaaS 풀 스택 (v1.0)
+### Phase 3 — Cluster Ops Hardening & Rich Automation (v1.0)
 
-**목표**: Phase 2 상방을 프로덕션 운영 가능한 멀티 노드/멀티 테넌트 플랫폼으로 승격.
+**목표**: Phase 2 collaboration entry point 를 프로덕션급 멀티 노드/멀티 테넌트 cluster operations platform 으로 승격하고, infra/scheduler/cluster toolization 과 richer automation 으로 확장.
 
 | 항목 | 설명 | 관련 크레이트 |
 |------|------|-------------|

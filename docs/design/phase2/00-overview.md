@@ -1,15 +1,15 @@
-# Phase 2 Overview — Knowledge-Layer Personal Assistant Platform
+# Phase 2 Overview — Assistant Plane on Agentic Cluster Collaboration Platform
 
 > **Status**: Draft v3 (Round 2 review addressed — 4 reviewers, 2026-04-13) — **partial supersede 2026-04-14**
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13 (v3) · 2026-04-14 (partial supersede)
 > **Supersedes**: Draft v2 (addressed Round 0 chief-architect + Round 1.5 dx/security + Round 2 qa feedback)
 >
-> ⚠ **2026-04-14 partial supersede notice**: Sections referencing **OpenWebUI** are superseded by `docs/process/04-decision-log.md` **D-20260414-02**. Phase 2A now ships a built-in `gadgetron-web` crate (assistant-ui + Next.js, embedded via `include_dir!`) instead of bundling OpenWebUI as a sibling process. Threat model §8 row "OpenWebUI" and Appendix C docker-compose are **to be rewritten** in `docs/design/phase2/03-gadgetron-web.md`. DB profile strategy (local=SQLite / server=Postgres) is governed by **D-20260414-03**; §7 "Vector store" row stays but the containing profile must be read in conjunction with that decision.
+> ⚠ **2026-04-15 partial supersede notice**: The canonical product framing now lives in `docs/design/ops/agentic-cluster-collaboration.md`. This document should be read as the **Phase 2A assistant-plane scope document**, not the whole product definition. Sections still mentioning legacy `[kairos]`, `gadgetron kairos init`, `key create --no-db`, or `rmcp` are historical unless explicitly updated below. OpenWebUI-related content remains superseded by `docs/process/04-decision-log.md` **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md`.
 
 ## Table of Contents
 
-1. Purpose — 하방/상방 framing
+1. Purpose — Assistant / Operations / Execution framing
 2. Core Architectural Insight — Claude Code Is The Agent
 3. Phase 2A MVP Scope (4 weeks)
 4. Quick Start — First Run Walkthrough
@@ -28,16 +28,21 @@
 
 ---
 
-## 1. Purpose — 하방(Lower) / 상방(Upper) Framing
+## 1. Purpose — Assistant / Operations / Execution Framing
 
-Gadgetron is extending from a **lower-bound LLM infrastructure layer** (done in Phase 1) to an **upper-bound knowledge-layer personal assistant platform** (Phase 2). Both layers share a codebase and deployment artifact but serve different consumers.
+The canonical product framing is now:
 
-| Layer | Status | Purpose | Consumers |
+> **Gadgetron = assistant plane + operations plane + execution plane for heterogeneous cluster collaboration.**
+
+This document is narrower than that statement. It defines **Phase 2A's assistant-plane entry point** on top of the Phase 1 operations/execution substrate.
+
+| Plane | Status | Scope in this document | Primary consumers |
 |---|---|---|---|
-| **하방 (Lower)** | Done — Phase 1 | Multi-provider LLM gateway, routing, quota, audit, TUI | API clients, SDK users, operators |
-| **상방 (Upper)** | Phase 2 target | Per-user personal assistant on a rich knowledge layer; Claude Code as the reasoning agent | End users via Web UI chat |
+| **Operations Plane** | Done — Phase 1 substrate | existing gateway / quota / audit / scheduler / node capabilities that Kairos builds on | operators, API clients |
+| **Execution Plane** | Done — Phase 1 substrate | provider routing, deployment, scheduling, workload execution substrate | operators, SDK users |
+| **Assistant Plane** | Phase 2 target | Claude Code-backed Kairos runtime + knowledge layer + web UI chat + tool registry seam | administrators, users via Web UI chat |
 
-The upper layer is the **product** Gadgetron is ultimately becoming. The lower layer is the **infrastructure** that makes the upper layer possible; it remains useful as a standalone LLM gateway for external consumers.
+The assistant plane is **not** a separate product detached from infrastructure. It is the first human-facing entry point into the broader collaboration platform.
 
 **Delivery forms** — same codebase, storage swap:
 1. **Local** — single-user desktop, filesystem storage
@@ -125,15 +130,15 @@ Zero new dependencies in gateway. Zero new dispatch code. Kairos is just another
 
 ## 3. Phase 2A MVP Scope (4 weeks)
 
-Minimum viable personal assistant. Everything else deferred.
+Minimum viable assistant-plane entry point. Richer operations-plane toolization and cluster automation are deferred.
 
 ### In scope
 
 | Item | Detail |
 |---|---|
-| Single user | `tenant_id = default`; no per-user knowledge partition |
+| Desktop-first operator/user persona | single local human workflow; no per-user knowledge partition yet |
 | LLM Wiki | Markdown + git2 (libgit2) auto-commit; Obsidian-compat `[[link]]` parser |
-| Wiki MCP server | Uses `rmcp` (official Rust MCP SDK); stdio transport; 4 tools (list/get/search/write) |
+| Wiki MCP server | Manual JSON-RPC 2.0 stdio transport via `gadgetron mcp serve`; 4 wiki tools (list/get/search/write) + optional `web.search` |
 | Web search | SearXNG instance URL in config; single MCP tool `web_search` |
 | Claude Code subprocess | `claude -p --output-format=stream-json --mcp-config=<tmp>`; stdin = message history JSON |
 | Provider integration | `gadgetron-kairos` implements `LlmProvider`; registered in router as `"kairos"`. Gateway unchanged. |
@@ -178,7 +183,7 @@ Minimum viable personal assistant. Everything else deferred.
 
 ## 4. Quick Start — First Run Walkthrough
 
-> The goal: a new user goes from `git clone` to "chatting with their personal assistant that reads their wiki" in under 5 minutes.
+> The goal: a new user goes from `git clone` to "chatting with the assistant-plane runtime that can read and write their wiki" in under 5 minutes.
 
 Prerequisites:
 - Rust toolchain (Phase 1 quick-start in `docs/manual/installation.md` covers this)
@@ -196,33 +201,48 @@ Steps:
    ```
    Resolve any `FAIL` rows per `docs/manual/troubleshooting.md` before continuing.
 
-2. **Initialize Kairos workspace**
+2. **Prepare `gadgetron.toml` manually**
    ```sh
-   ./target/release/gadgetron kairos init
-   ```
-   This subcommand (new in P2A):
-   - Creates `~/.gadgetron/wiki/` as a git repo (runs `git init`)
-   - Reads your `git config user.name` and `git config user.email` to populate `[knowledge].wiki_git_author`
-   - Checks `claude --version` is available on PATH; prints a friendly error if not
-   - Writes a minimal `~/.gadgetron/gadgetron.toml` with `[knowledge]` and `[kairos]` sections pre-filled
-   - Creates a starter `wiki/README.md` page so the first search returns something
-   - Prints "Next: start Gadgetron and open /web" with exact copy-paste commands for step 4
+   mkdir -p .gadgetron
+   cat > gadgetron.toml <<'TOML'
+   [server]
+   bind = "127.0.0.1:8080"
 
-   **2b. (Optional — SearXNG only)** If you want the `web_search` MCP tool, start a local SearXNG instance (Docker or native) and set `[knowledge.search].searxng_url` in `~/.gadgetron/gadgetron.toml`. `gadgetron-web` itself is served in-process by `gadgetron serve` — no compose file needed for the Web UI.
+   [agent]
+   binary = "claude"
+   claude_code_min_version = "2.1.104"
+   request_timeout_secs = 300
+   max_concurrent_subprocesses = 4
+
+   [agent.brain]
+   mode = "claude_max"
+
+   [knowledge]
+   wiki_path = "./.gadgetron/wiki"
+   wiki_autocommit = true
+   wiki_max_page_bytes = 1048576
+
+   # [knowledge.search]
+   # searxng_url = "http://127.0.0.1:8888"
+   # timeout_secs = 10
+   # max_results = 10
+   TOML
+   ```
+   `gadgetron init` does not yet emit `[agent]` / `[knowledge]` for you, and trunk has no `gadgetron kairos init` subcommand. Phase 2A operators prepare the config file directly.
+
+   **2b. (Optional — SearXNG only)** If you want the `web.search` MCP tool, start a local SearXNG instance (Docker or native) and uncomment `[knowledge.search]`. `gadgetron-web` itself is served in-process by `gadgetron serve` — no compose file needed for the Web UI.
 
 3. **Generate an API key**
    ```sh
-   ./target/release/gadgetron key create --no-db
+   ./target/release/gadgetron key create
    ```
-   (Phase 1 command — creates a local key using the `inmemory` database profile. For a persistent key, pick `local` profile (SQLite) or `server` profile (Postgres) per **D-20260414-03** — see `docs/manual/configuration.md` once the profile selector lands. Copy the `gad_live_*` key — you paste it into `gadgetron-web` in step 5.)
+   (Phase 1 command — creates a local no-db key when `--tenant-id` is omitted. For a persistent key, create a tenant and pass `--tenant-id <uuid>`. Copy the `gad_live_*` key — you paste it into `gadgetron-web` in step 5.)
 
 4. **Start Gadgetron** (single process, single binary)
    ```sh
-   ./target/release/gadgetron serve --config ~/.gadgetron/gadgetron.toml
+   ./target/release/gadgetron serve --config gadgetron.toml --no-db
    ```
    This one command serves the OpenAI-compat API on `:8080/v1`, the `gadgetron-web` UI on `:8080/web`, and the kairos provider under the hood. No sibling containers required.
-
-   Tip: `kairos init`-generated config sets a kairos-only routing strategy. If you add other providers to `gadgetron.toml`, see `02-kairos-agent.md §11` for routing options — `round_robin` with kairos in the pool causes confusing failures.
 
 5. **Chat**
    - Browse to `http://localhost:8080/web`
@@ -254,7 +274,7 @@ gadgetron-knowledge/           ← leaf domain crate, no downstream deps
 │   │   ├── mod.rs       # WebSearch trait
 │   │   └── searxng.rs   # SearXNG JSON API client
 │   └── mcp/
-│       ├── mod.rs       # rmcp Server wiring + `pub fn serve(stdin, stdout)` entry point
+│       ├── mod.rs       # manual JSON-RPC 2.0 stdio server wiring + `pub fn serve(stdin, stdout)` entry point
 │       └── tools.rs     # MCP tool implementations (wiki_*, web_search)
 ```
 
@@ -290,8 +310,8 @@ gadgetron-web/                 ← Web UI crate, embedded static assets
 See D-20260414-02 and `docs/design/phase2/03-gadgetron-web.md` (upcoming) for Cargo.toml, build pipeline, XSS hardening, threat model, and the `web-ui` feature flag on `gadgetron-gateway`.
 
 ### Modified crates
-- `gadgetron-core` — `AppConfig` gains `[knowledge]` and `[kairos]` sections; `GadgetronError` gains 2 nested variants (see §12)
-- `gadgetron-cli` — gains `kairos init` subcommand AND `mcp serve` subcommand (stdio MCP server, delegates to `gadgetron-knowledge::mcp::serve`)
+- `gadgetron-core` — `AppConfig` gains `[knowledge]`, `[agent]`, and `[agent.brain]` sections; legacy `[kairos]` is accepted only as a migration input; `GadgetronError` gains 2 nested variants (see §12)
+- `gadgetron-cli` — gains `mcp serve` subcommand (stdio MCP server, delegates to `gadgetron-knowledge::mcp::serve`)
 - `gadgetron-router` — registers kairos provider by name from config (minimal wiring — same pattern as existing provider registration)
 - `gadgetron-gateway` — gains Cargo feature `web-ui` (default on). When enabled, mounts `gadgetron_web::service()` under `/web` via `router.nest_service`. No new dispatch paths on `/v1/*`.
 - Workspace `Cargo.toml` — **3 new members** (`gadgetron-knowledge`, `gadgetron-kairos`, `gadgetron-web`)
@@ -313,20 +333,19 @@ This is per-request, not a shared long-lived MCP server. Reason: stdio transport
 
 ## 6. Configuration Schema
 
-New sections in `gadgetron.toml`. All fields optional; sensible defaults apply. `gadgetron kairos init` bootstraps a valid file for you.
+New sections in `gadgetron.toml`. Canonical Phase 2A config uses `[agent]` + `[agent.brain]` + `[knowledge]`. Legacy `[kairos]` is accepted only via migration and is not the recommended authoring surface.
 
 ```toml
 [knowledge]
-# Wiki storage path. Created + git-initialized on first run.
+# Wiki storage path. The parent directory must already exist.
 # env: GADGETRON_KNOWLEDGE_WIKI_PATH
-wiki_path = "~/.gadgetron/wiki"
+wiki_path = "./.gadgetron/wiki"
 
 # Auto-commit on every write. If false, writes are staged but never committed.
 # env: GADGETRON_KNOWLEDGE_WIKI_AUTOCOMMIT
 wiki_autocommit = true
 
-# Git author for auto-commits. Default: auto-detected from user's `git config user.name/email`
-# at `gadgetron kairos init` time. Commented out here so `init` can write the detected value.
+# Git author for auto-commits. Default: auto-detected from user's `git config user.name/email`.
 # Fallback if git config is not set: "Kairos <kairos@gadgetron.local>" with a startup warning.
 # env: GADGETRON_KNOWLEDGE_WIKI_GIT_AUTHOR
 # wiki_git_author = "Your Name <you@example.com>"
@@ -345,42 +364,45 @@ searxng_url = "http://127.0.0.1:8888"
 # env: GADGETRON_KNOWLEDGE_SEARCH_TIMEOUT_SECS
 timeout_secs = 10
 
-# Max search results returned per query. Range [1, 50]. Default 5.
+# Max search results returned per query. Range [1, 100]. Default 10.
 # env: GADGETRON_KNOWLEDGE_SEARCH_MAX_RESULTS
-max_results = 5
+max_results = 10
 
-[kairos]
+[agent]
 # Claude Code binary. Resolved via $PATH if relative.
-# env: GADGETRON_KAIROS_CLAUDE_BINARY
-claude_binary = "claude"
+# env: GADGETRON_AGENT_BINARY
+binary = "claude"
 
-# Optional ANTHROPIC_BASE_URL override. When set, passed through to subprocess env.
-# Commented out by default. Leave unset to use the user's normal Claude Max session.
-# Rust type is Option<String>; None means absent, not empty string.
-# env: GADGETRON_KAIROS_CLAUDE_BASE_URL
-# claude_base_url = "http://127.0.0.1:4000"
+# Minimum supported Claude Code version.
+# env: GADGETRON_AGENT_CLAUDE_CODE_MIN_VERSION
+claude_code_min_version = "2.1.104"
 
-# Claude Code model override (--model flag). Commented out = Claude Code default.
-# env: GADGETRON_KAIROS_CLAUDE_MODEL
-# claude_model = "claude-3-5-sonnet-20241022"
-
-# Max subprocess wallclock per request. Overly generous default;
-# real upper bound is also gated by the request timeout at the gateway layer.
-# env: GADGETRON_KAIROS_REQUEST_TIMEOUT_SECS
+# Max subprocess wallclock per request.
+# env: GADGETRON_AGENT_REQUEST_TIMEOUT_SECS
 request_timeout_secs = 300
 
-# Max concurrent Claude Code subprocesses. Range [1, 32]. Default 4 (P2A desktop).
-# Exceeding triggers queuing or HTTP 503.
-# env: GADGETRON_KAIROS_MAX_CONCURRENT_SUBPROCESSES
+# Max concurrent Claude Code subprocesses. Range [1, 32]. Default 4.
+# env: GADGETRON_AGENT_MAX_CONCURRENT_SUBPROCESSES
 max_concurrent_subprocesses = 4
+
+[agent.brain]
+# Brain mode is operator-selected. Phase 2A canonical default uses the local
+# Claude Max / OAuth session from ~/.claude/.
+# env: GADGETRON_AGENT_BRAIN_MODE
+mode = "claude_max"
+
+# Optional when `mode = "external_anthropic"` or `"external_proxy"`.
+# env: GADGETRON_AGENT_BRAIN_EXTERNAL_BASE_URL
+# external_base_url = "http://127.0.0.1:4000"
 ```
 
 **Validation rules** (enforced at config load time):
-- `wiki_path` must be writable; if it does not exist, create it and run `git init`
+- `wiki_path` parent must already exist; the wiki repo itself is initialized at first run
 - `wiki_max_page_bytes` must be `> 0` and `<= 100 MiB`
 - `searxng_url` if set must be a valid URL
 - `request_timeout_secs` must be in `[10, 3600]`
-- `claude_base_url` if set must be a valid URL starting with `http://` or `https://`
+- `agent.max_concurrent_subprocesses` must be in `[1, 32]`
+- `agent.brain` must be a valid table; legacy `[kairos]` conflicts with `[agent.*]` are startup errors
 
 ---
 
@@ -397,7 +419,7 @@ Per "오픈소스 최대한 활용" directive. All versions must be pinned in `C
 | Full-text search (P2B+) | `tantivy` | Pure Rust Lucene-alike | — |
 | Web search aggregator | **SearXNG** (self-hosted Docker) | OSS meta-search; no API key; privacy-preserving | Docker image digest pinned, not `:latest` or `:main` |
 | HTTP client | `reqwest` | Already in workspace | — |
-| MCP SDK | `rmcp` (official Rust MCP SDK) | Official; matches Claude Code client | **Validate maturity before P2A impl** (risk in §14) |
+| MCP server transport | Manual JSON-RPC 2.0 stdio server (`gadgetron mcp serve`) | Matches current trunk implementation; no extra SDK dependency in P2A | SDK adoption, if any, is deferred to a later phase |
 | Subprocess | `tokio::process::Command` | Already in workspace | — |
 | Temp files | `tempfile` | Secure permission handling, process-owned dir | **Required** for MCP config tmpfile per §8 |
 | **Web UI chat** | **`gadgetron-web` crate (NEW, P2A)** — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT, shadcn + Radix headless components) + Next.js + Tailwind | MIT end-to-end; embedded in Rust binary via `include_dir!`; single-binary deployment; Gadgetron branding fully owned | See **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md` (upcoming) |
@@ -553,7 +575,7 @@ Per `docs/process/03-review-rubric.md §2` and qa-test-architect Round 2.
 |---|---|---|
 | Unit | `crates/gadgetron-knowledge/src/**/*.rs` `#[cfg(test)]` | Pure functions + in-process |
 | Unit | `crates/gadgetron-kairos/src/**/*.rs` `#[cfg(test)]` | Subprocess-free logic (stream parser, redact, mcp_config builder) |
-| **MCP protocol conformance** | `crates/gadgetron-knowledge/tests/mcp_conformance.rs` | **NEW** — in-process `rmcp` client talks to our server, round-trips `tools/list` and `tools/call` |
+| **MCP protocol conformance** | `crates/gadgetron-knowledge/tests/mcp_conformance.rs` | **NEW** — manual JSON-RPC 2.0 stdio peer talks to our server, round-trips `tools/list` and `tools/call` |
 | **OpenAI SSE shape conformance** | `crates/gadgetron-kairos/tests/sse_conformance.rs` | **NEW** — `insta` snapshot of byte-level SSE output for canned stream-json input |
 | Integration (no subprocess) | `crates/gadgetron-kairos/tests/` | Fake MCP server + fake-claude binary |
 | Integration (subprocess) | `crates/gadgetron-testing/tests/kairos_integration.rs` | Full provider registration + real router + fake-claude binary |
@@ -608,7 +630,7 @@ Per qa Round 2 A6. Subprocess tests are inherently racy (scheduler, OS buffering
 pub struct KairosE2EFixture {
     pub gw: GatewayHarness,         // existing Phase 1 harness, reused
     pub wiki_tmpdir: TempDir,       // ephemeral wiki for this test
-    pub fake_mcp_server: FakeMcpServer,  // in-process rmcp server, canned responses
+    pub fake_mcp_server: FakeMcpServer,  // in-process stdio MCP peer, canned responses
     pub claude_binary: PathBuf,     // points at target/debug/fake-claude
 }
 
@@ -619,7 +641,7 @@ impl KairosE2EFixture {
 }
 ```
 
-`FakeMcpServer` lives at `crates/gadgetron-testing/src/mocks/mcp/fake_mcp_server.rs`. It implements the same `rmcp::Server` interface as the real server but with a `HashMap<tool_name, canned_response>` injected by the test.
+`FakeMcpServer` lives at `crates/gadgetron-testing/src/mocks/mcp/fake_mcp_server.rs`. It implements the same tool surface and JSON-RPC wire contract as the real server but with a `HashMap<tool_name, canned_response>` injected by the test.
 
 ### Git repo corruption recovery tests
 
@@ -671,7 +693,7 @@ Per security-compliance-lead Round 1.5 SEC-8.
 - **CC6.1 (logical access)**: wiki write access is governed only by OS file permissions in P2A. Acceptable for single-user; a gap for P2C. Flagged.
 - **CC6.6 (logical access over infrastructure)**: MCP server runs as stdio child of Claude Code, no network exposure. Reduced attack surface vs. a network service. Documented as a control.
 - **CC7.2 (anomaly detection)**: audit log covers dispatch + tool call + subprocess duration. `wiki_write_secret_suspected` entries (M5) support anomaly triage.
-- **CC9.2 (Vendor risk mgmt)**: New dependencies (`git2` → libgit2 C library; `reqwest`; future `rmcp` at P2B+) assessed via `cargo audit` + `cargo deny` gate (existing Phase 1 CI). `git2` C library CVE feed monitored quarterly per security policy.
+- **CC9.2 (Vendor risk mgmt)**: New dependencies (`git2` → libgit2 C library; `reqwest`; any future MCP SDK adoption) assessed via `cargo audit` + `cargo deny` gate (existing Phase 1 CI). `git2` C library CVE feed monitored quarterly per security policy.
 
 ### User-facing disclosures (pre-merge manual requirements)
 

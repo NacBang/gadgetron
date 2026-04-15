@@ -53,12 +53,14 @@ Phase C에서 더 깊은 gap이 발견될 것이다.
 
 ### 1.1 Gadgetron 비전
 
-**"GPU 클러스터 위에서 동작하는, 서브밀리초 P99 레이턴시를 보장하는 AI 오케스트레이션 플랫폼"**
+**"관리자·사용자·에이전트가 함께 일하는 heterogeneous cluster collaboration platform"**
+
+이 문서는 그 전체 비전 중에서도 특히 **Operations Plane + Execution Plane substrate** 를 다룬다. Assistant Plane 과 collaboration UX 의 canonical 비전은 `docs/design/ops/agentic-cluster-collaboration.md` 를 따른다.
 
 세 가지 차별화:
 - **Rust-native**: GC pause 없음, 제로카피 스트리밍, lock-free DashMap
 - **GPU-first**: VRAM bin-packing, NUMA-aware 배치, MIG 정적 분할 [P1] → 동적 [P2]
-- **XaaS 계층**: 단일 플랫폼에서 GPUaaS → ModelaaS → AgentaaS [P2] 점진적 추상화
+- **Agent-aware control plane**: 단일 플랫폼에서 GPUaaS → ModelaaS → AgentaaS [P2] 점진적 추상화
 
 ### 1.2 핵심 설계 원칙 (불변)
 
@@ -77,6 +79,7 @@ docs/modules/*.md             ← 5개 모듈 (gateway-routing, model-serving,
 docs/design/core/             ← types-consolidation (Track 1 R3 Approved)
 docs/design/testing/          ← harness (Track 2 R3)
 docs/design/xaas/             ← phase1 (Track 3 R3)
+docs/design/ops/              ← agentic-cluster-collaboration (새 협업 비전)
 docs/architecture/platform-architecture.md  ← [본 문서] 통합 뷰
 ```
 

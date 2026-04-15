@@ -4,13 +4,13 @@
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
-> **Scope**: `gadgetron-knowledge` crate + `gadgetron-core::error::GadgetronError::Wiki` variant + `gadgetron-cli` `kairos init` and `mcp serve` subcommand stdout. `gadgetron-kairos` LlmProvider + subprocess is `02-kairos-agent.md`.
+> **Scope**: `gadgetron-knowledge` crate + `gadgetron-core::error::GadgetronError::Wiki` variant + `gadgetron-cli` `mcp serve` subcommand stdout. References below to `gadgetron kairos init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-kairos` LlmProvider + subprocess is `02-kairos-agent.md`.
 > **Implementation determinism**: per `feedback_implementation_determinism.md`, every type signature, config field, error code, and test name is explicit. No TBD.
 
 ## Table of Contents
 
 1. Scope & Non-Scope
-   1.1 `gadgetron kairos init` stdout contract
+   1.1 Bootstrap UX stdout contract (future)
 2. Crate layout & Cargo.toml
 3. Public API surface (`lib.rs`)
 4. Wiki subsystem
@@ -31,7 +31,7 @@
 - `gadgetron-knowledge` crate: wiki store, web search proxy, MCP server over stdio
 - **`gadgetron-core::error::GadgetronError::Wiki { kind: WikiErrorKind, message: String }` variant** (moved here from 02 per dx A6 and chief-architect B1)
 - `gadgetron-cli` gains `gadgetron mcp serve` subcommand (delegates to `gadgetron_knowledge::serve_stdio`)
-- `gadgetron-cli` gains `gadgetron kairos init` subcommand (bootstraps wiki + config + optional compose file)
+- future bootstrap UX fills the gap currently covered by manual `gadgetron.toml` authoring
 - Configuration schema `[knowledge]` and `[knowledge.search]` sections in `gadgetron.toml`
 
 ### Out of scope — deferred to `02-kairos-agent.md`
@@ -46,9 +46,9 @@
 - Security mitigations: M1 (tmpfile — 02), M2 (redact — 02), M3 (path traversal), M5 (size + pattern block/audit + git history), M6 (tools_called names), M7 (SearXNG + git permanence disclosures), M8 (P2A risk acceptance)
 - OSS stack: `git2`, `pulldown-cmark`, `gray_matter` + `toml`, `rmcp`, `reqwest`, `regex`, `once_cell`
 
-### 1.1 `gadgetron kairos init` stdout contract (dx A4 blocker)
+### 1.1 Bootstrap UX stdout contract (future, dx A4 blocker)
 
-The `gadgetron kairos init` subcommand MUST print the following literal output sequence. Any deviation is an implementation bug.
+A future bootstrap subcommand or equivalent guided init flow MUST print the following literal output sequence. Any deviation is an implementation bug.
 
 **Success path (all checks pass):**
 ```

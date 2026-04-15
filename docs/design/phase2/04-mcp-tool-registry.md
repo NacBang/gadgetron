@@ -735,7 +735,7 @@ All async tests MUST use `tokio::time::pause()` + `tokio::time::advance()` for c
 
 | Finding | Disposition in v2 |
 |---|---|
-| **DX-MCP-B1** — `kairos init` emits `[agent]` | **STILL LIVE** — patch `gadgetron kairos init` to emit full `[agent]` section; tracked in task |
+| **DX-MCP-B1** — bootstrap UX emits `[agent]` | **STILL LIVE** — close the current manual-config gap with a real bootstrap path that emits full `[agent]` + `[knowledge]`; tracked in task |
 | **DX-MCP-B2** — migration undefined | **RESOLVED** — §11.1 field mapping table + loader pre-deserialize step |
 | **DX-MCP-B3** — ADR ref in error | **RESOLVED** — V4 is moot (no field); §5 error messages reviewed for actionable phrasing |
 | **DX-MCP-B4** — headless path | **OBSOLETE** — no approval flow → no headless gap |
@@ -781,7 +781,7 @@ All async tests MUST use `tokio::time::pause()` + `tokio::time::advance()` for c
 | **Cross-doc D1/D4** — ADR-P2A-01 Part 3 | **DEFERRED** — the slow-MCP-tool-response tolerance question matters for P2B approval flow but not P2A (no tool pauses 60s in P2A — all tools return promptly). Reopen with P2B. |
 
 **Live tasks from v1 findings still needing doc/code work before P2A impl**:
-1. `gadgetron kairos init` patch to emit `[agent]` section (DX-MCP-B1)
+1. bootstrap UX patch to emit `[agent]` + `[knowledge]` section and remove the current manual-config gap (DX-MCP-B1)
 2. `McpToolRegistryBuilder` + `McpToolRegistry` + TDD tests (CA-MCP-B2 impl)
 3. `AgentConfig` new fields `request_timeout_secs`, `max_concurrent_subprocesses` (§11.1 migration targets)
 4. `KairosErrorKind` 6 new variants + `From<McpError> for GadgetronError` (§10.1)
