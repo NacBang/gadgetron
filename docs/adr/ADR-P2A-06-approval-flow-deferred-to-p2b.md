@@ -182,7 +182,7 @@ Each item gets a fresh design draft + Round 1.5/2/3 review.
 4. Workspace `Cargo.toml` lists `gadgetron-kairos` as a member and a `[workspace.dependencies]` entry
 5. `docs/design/phase2/04-mcp-tool-registry.md` header says "Draft v2 — Path 1 scope cut"
 6. `docs/design/phase2/02-kairos-agent.md` §10 cross-references `04 v2 §4` for the canonical `[agent]` schema
-7. `docs/adr/ADR-P2A-05.md` header has a deferral pointer to this ADR
+7. `docs/adr/ADR-P2A-05-agent-centric-control-plane.md` header has a deferral pointer to this ADR
 8. `docs/design/phase2/00-overview.md §15` TDD order does not reference `ApprovalRegistry`, `PendingApproval`, or `POST /v1/approvals/{id}`
 9. A grep for `ApprovalRegistry` in `crates/` returns no hits (no P2A code depends on it)
 10. A grep for `Scope::AgentApproval` in `crates/` returns no hits (variant not yet added)
@@ -198,3 +198,125 @@ Each item gets a fresh design draft + Round 1.5/2/3 review.
 - D-20260414-04 (decision log entry — agent-centric pivot)
 - 00-overview.md §3 (original Phase 2A scope — personal assistant MVP, single user, no interactive approvals originally)
 - User decision 2026-04-14 (Path 1 selection after synthesis review)
+
+---
+
+## Implementation status addendum (2026-04-15)
+
+A five-agent Round 3 pre-CLI-wiring review (inference-engine, qa, security, dx, codex independent) verified the 21/29 TDD steps landed in PR #18 (Phases 1–4) and flagged four runtime-correctness gaps that MUST close before the Phase 5 CLI wiring steps (Steps 22–23 per `00-overview.md §15`, post-reorder) start. Three additional items were added after a follow-on Codex chief-advisor consultation (agentId `a1c78d0fc151cb260`, `af7a60ddb9eda2d3b`) and empirical CC 2.1.109 verification on 2026-04-15: the session-continuity architecture decision. These seven items are tracked as the "Phase 2A stabilization sprint" (scope package **γ+**) preceding the CLI wiring. They are **not** new scope — items 1–4 enforce ADR commitments or fix code/doc contradictions; items 5–6 close timeout contract violations on the request-lifecycle critical path; item 7 replaces an unverified behavioral bet (`-p` flattened-transcript interpretation) with a verified native-session integration whose empirical test results are summarized below.
+
+### Stabilization items — scope package γ+ (P2A, enforce existing commitments + hardening)
+
+1. **`ToolCallCompleted` persistent audit event.** §"Phase 2A still ships" item 10 of this ADR commits to "Audit event `ToolCallCompleted` (single variant; approval events deferred)." Current code in `crates/gadgetron-kairos/src/stream.rs` emits only `tracing::info!(target: "kairos_audit", …)` on the tool-call boundary; there is no persisted row in `gadgetron-xaas::audit`. The stabilization sprint will:
+   - Add `ToolAuditEvent::ToolCallCompleted { tool_name, tier, category, outcome, elapsed_ms, conversation_id: Option<String>, claude_session_uuid: Option<String> }` to `crates/gadgetron-xaas/src/audit/event.rs` (new enum co-located with existing `AuditEntry`). The `conversation_id` and `claude_session_uuid` fields are **required fields at the schema definition** (not future P2B additions) per Codex chief-advisor review `a957d8d6cebf4ee5a` finding 1, so that item 7 (native session integration) lands on a schema that already accommodates it — no migration rework, no `ALTER TABLE` in the same sprint. For turns without a conversation_id (stateless fallback), both fields serialize as `NULL`.
+   - Wire the event emission from `gadgetron-kairos::stream::event_to_chat_chunks` to a `ToolAuditEventSink` injected via `KairosProvider` construction (no cross-crate cycle — sink is a trait in `gadgetron-core`). The sink receives `conversation_id` + `claude_session_uuid` from the `ClaudeCodeSession` context active during tool dispatch.
+   - Add migration `crates/gadgetron-xaas/migrations/NNNN_tool_audit_events.sql` per `04 v2 §10` spec, with `conversation_id TEXT NULL` + `claude_session_uuid TEXT NULL` columns declared from day one.
+   - Add integration test `kairos_emits_tool_call_completed_audit_entry` in `gadgetron-testing/tests/` (blocking for Step 27). Test matrix covers (a) stateless turn → both session fields NULL, (b) native first turn → `conversation_id = Some(_)`, `claude_session_uuid = Some(_)`, (c) native resume turn → both fields `Some(_)` with the same UUIDs as the first turn.
+
+2. **`Ask` mode enforcement in `build_allowed_tools()`.** §"Tier + Mode in P2A" of this ADR explicitly states "T2 `Write` — `Auto` or `Never` per subcategory. `Ask` is logged as a startup warning and treated as `Never` (no approval flow to resolve it)." Current code in `crates/gadgetron-kairos/src/registry.rs` at `fn tool_is_enabled` only excludes `ToolMode::Never`, allowing `ToolMode::Ask` tools to leak into the `--allowed-tools` argv that Claude Code sees. Fix: change the write-tier arm to `!matches!(mode, ToolMode::Never | ToolMode::Ask)`. Add unit test `ask_mode_tools_are_excluded_from_allowed_list`.
+
+3. **L3 MCP server gate (defense-in-depth re-check).** `04-mcp-tool-registry.md §6 L3` specifies that `gadgetron mcp serve` re-checks tier × mode on every `dispatch()` call so a Claude Code bypass cannot reach a `Never`-mode tool. Current code in `crates/gadgetron-kairos/src/mcp_server.rs::handle_request` calls `registry.dispatch(name, arguments)` directly, and `McpToolRegistry::dispatch` itself has no mode re-check. Fix: thread `Arc<AgentConfig>` (or a cheap `Arc<AllowedToolNames>`) into `McpToolRegistry` at freeze time, and in `dispatch` reject tools whose mode is `Never` with `McpError::Denied { reason: "tool disabled by operator config" }`. Add integration test `mcp_server_rejects_never_mode_tool_even_when_dispatched_directly`.
+
+4. **`kill_on_drop` witness test.** `crates/gadgetron-kairos/src/spawn.rs` has a load-bearing doc comment referring to a `spawned_command_has_kill_on_drop` test that does not exist. SEC-B3 boundary is currently enforced only by code reading, not by a regression test. Fix: add the missing unit test as a peer to the `spawn.rs::tests` module, using `Command` introspection (or tokio's `ChildFake`).
+
+5. **`session.rs` deadline position fix (B-2).** `crates/gadgetron-kairos/src/session.rs:184-190` computes the request deadline **after** `feed_stdin` completes, so stdin write time escapes `request_timeout_secs`. Long chat histories or slow OS pipe buffers can spend seconds flushing stdin before the clock even starts, violating the `02-kairos-agent.md §5` contract that states the timeout covers the whole subprocess span from spawn to `message_stop`. Fix: set `deadline = Instant::now() + timeout` **before** calling `feed_stdin`, not after. Add regression test `deadline_covers_stdin_write_time`.
+
+6. **`session.rs` stderr_handle timeout wrapper (H4).** In the timeout-kill path at `crates/gadgetron-kairos/src/session.rs` around lines 241-245, after `child.start_kill()` the drive task does `child.wait().await` followed by `stderr_handle.await` without any bound. If Claude Code does not flush stderr on SIGTERM, `stderr_handle` stays pending waiting for pipe EOF, so the drive task hangs until the parent future drops (which then triggers `kill_on_drop` as the ultimate safety net). Fix: wrap `stderr_handle.await` in `tokio::time::timeout(Duration::from_secs(2), ...)` and fall through with a best-effort empty stderr on elapse. Add regression test `stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop`.
+
+7. **Claude Code native session integration (Hybrid B+A).** Current design (`02-kairos-agent.md §5`, code at `session.rs:292-319` and `spawn.rs:191-200`) spawns a fresh `claude -p` per `/v1/chat/completions` call and flattens the full OpenAI message history to stdin on every turn. This forces an O(n²) token growth per turn, destroys Claude Code's in-session scratchpad / tool-call state at every turn boundary, and depends on Claude Code correctly inferring that a flattened transcript is "continue this conversation" rather than "analyze this log" — an unverified behavioral bet that no regression test currently covers.
+
+   PM ran empirical verification on 2026-04-15 against `claude 2.1.109` (host `/Users/junghopark/.local/bin/claude`) and confirmed the following CLI contract:
+   - `--session-id <new-uuid>` is create-only (fails with "Session ID is already in use" on collision)
+   - `--resume <uuid>` continues an existing session; context is correctly restored (seed "Remember TOKEN-42" → `--tools "" --resume` retrieval test returned exactly `"TOKEN-42"`)
+   - Tool scope is **re-enforced per invocation**, not inherited from the seeding call: `--tools ""` on resume correctly blocked Bash; `--tools "Bash"` on the same resumed session unblocked Bash. This means the existing `--allowed-tools` discipline in `spawn.rs` carries over unchanged — resume does not create a tool-escalation path.
+   - Session files live at `~/.claude/projects/<cwd-hash>/<session-uuid>.jsonl`, mode `0600`, cwd-scoped. First-turn cache creation ≈ 16k tokens; subsequent turns hit ≈ 15k tokens of cache read (empirical ~92% cost reduction on resumes vs. full-history re-ship).
+
+   Fix: implement Hybrid B+A per Codex chief-advisor recommendation (`a1c78d0fc151cb260`, `af7a60ddb9eda2d3b`):
+   - Add `ChatRequest.conversation_id: Option<String>` in `gadgetron-core::provider` (backward compatible, default `None`).
+   - Add a `SessionStore` in `gadgetron-kairos` — `DashMap<ConversationId, SessionEntry>` with per-entry `tokio::sync::Mutex` concurrency guard, LRU eviction by `last_used`, TTL purge.
+   - Branch in `ClaudeCodeSession::run`: `conversation_id.is_some() && first turn` → `spawn --session-id <new-uuid>`; `conversation_id.is_some() && resume turn` → acquire per-session Mutex, `spawn --resume <uuid>`; `conversation_id.is_none()` → fall back to existing stateless history-reship (Option A).
+   - Stdin in native-session mode contains **only the new user turn** (not the flattened history). `feed_stdin` grows a second entry point for this.
+   - `ToolCallCompleted` audit (item 1) adds `conversation_id: Option<String>` + `claude_session_uuid: Option<String>` fields at schema definition time so the A-sprint does not ship a schema that needs immediate migration.
+   - `AgentConfig` gains `session_mode: SessionMode { NativeWithFallback (default), NativeOnly, StatelessOnly }`, `session_ttl_secs: u64` (default `86_400`), `session_store_max_entries: usize` (default `10_000`).
+   - New `KairosErrorKind` variants: `SessionNotFound`, `SessionConcurrent` (HTTP 429), `SessionCorrupted`.
+   - Detailed spec: `docs/design/phase2/02-kairos-agent.md §5.3` (to be written before implementation starts; blocking Step 22).
+   - ADR-P2A-01 Part 2 amendment: document that `--session-id` + `--resume` are part of the verified flag surface as of 2026-04-15.
+
+### Scope discipline
+
+Items 1–4 above do **not** reopen P2A scope. Item 1 enforces a commitment this ADR already made. Items 2–4 fix code/doc contradictions where the design is correct and the code is wrong. Items 5–6 close timeout contract violations on the request-lifecycle critical path that Step 22's CLI assembly will exercise immediately — deferring them would ship a sprint with a known-broken timeout story. Item 7 replaces an unverified behavioral bet with a verified integration and is load-bearing for the P2A "personal assistant MVP" persona; without it, the primary MVP UX ("remember the last 5 turns of our conversation") does not work. The 13-item Phase 2B list below this section is unchanged.
+
+### Explicitly deferred to P2A-post patch (not blocking Step 22)
+
+- **`AgentConfig.binary` / `external_base_url` / `external_anthropic_api_key_env` flag-injection validation** (Round 1.5 SEC-V15). Real issue (`binary = "-helo"` passes; URL scheme not checked; env var name pattern not validated), but is startup hardening on a single-user desktop trust boundary and does not sit on the Step 22 critical path. Add `validate` rules + tests in a follow-up patch during the P2A window, after the CLI wiring lands.
+- **`wiki/secrets.rs` ReDoS quantifier caps** on `anthropic_api_key` `{40,}`, `bearer_token` `{32,}`, `generic_secret` `{20,}`. Replace with `{40,1048576}` / `{32,1048576}` / `{20,1048576}` and add a 50KB adversarial-input test mirroring the `redact.rs::adversarial_long_input_completes_quickly` pattern. Independent from the 7 stabilization items — zero rework if deferred. Target P2A-post patch.
+- **`DX-doctor` Phase 2A health checks, `gadgetron init` `[agent]` template emission, `SpawnFailed` `reason` interpolation** — DX gaps flagged by dx-product-lead; treated as documentation/UX work that can land with or after Steps 22–24.
+
+### A-sprint TDD order (8 PRs, ~6 days)
+
+TDD discipline per PR: failing test first (Red), minimal code to green (Green), refactor (Refactor). Each PR compiles independently and passes its own tests. Dependency order is rigid — a later PR cannot merge until its prerequisites are on `main`. Total estimate: ~6 working days inside the P2A 4-week budget.
+
+**PR A1 — Tool-scope hardening (items 2 + 4)** — ~0.5 day
+- Item 2: `Ask` mode exclusion in `crates/gadgetron-kairos/src/registry.rs::tool_is_enabled` — change write-tier arm to `!matches!(mode, ToolMode::Never | ToolMode::Ask)`. Red: `ask_mode_tools_are_excluded_from_allowed_list` test (fails on current code). Green: the one-line match change.
+- Item 4: `spawned_command_has_kill_on_drop` unit test in `crates/gadgetron-kairos/src/spawn.rs::tests`. Red: new test inspecting `build_claude_command` output (via `FakeEnv`) and asserting `kill_on_drop(true)` was set. Green: verify the existing `cmd.kill_on_drop(true)` call at `spawn.rs:206` is preserved.
+- Touches: `registry.rs`, `spawn.rs`. No cross-crate impact.
+
+**PR A2 — Session lifecycle hardening (items 5 + 6)** — ~0.5 day
+- Item 5 (B-2): move `deadline = Instant::now() + timeout` to BEFORE `feed_stdin` call in `session.rs`. Red: `deadline_covers_stdin_write_time` test with a fake stdin that sleeps 2s + config `request_timeout_secs = 1` asserts the call returns `KairosErrorKind::Timeout` within ~1s. Green: the line move.
+- Item 6 (H4): wrap `stderr_handle.await` in `session.rs` timeout-kill path with `tokio::time::timeout(Duration::from_secs(2), ...)`. Red: `stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop` test with a fake child that holds stderr open after SIGTERM asserts the drive task completes within 3s. Green: the wrap.
+- Touches: `session.rs`. **This PR is the prerequisite for PR A6-A8** — session.rs is about to get heavily refactored for item 7, and these two fixes must merge first so the refactor has a correct baseline.
+
+**PR A3 — L3 defense-in-depth (item 3)** — ~0.5 day
+- Thread `Arc<AgentConfig>` (or a pre-computed `Arc<HashSet<String>>` of denied names) into `McpToolRegistry` at `freeze()` time. In `dispatch()`, reject any tool whose mode resolves to `Never` with `McpError::Denied { reason: "tool disabled by operator config" }`. Red: `mcp_server_rejects_never_mode_tool_even_when_dispatched_directly` integration test sends a `tools/call` for a `Never`-mode tool via stdio and asserts `isError: true` + "tool disabled". Green: the dispatch mode-check.
+- Touches: `registry.rs`, `mcp_server.rs`.
+
+**PR A4 — ToolCallCompleted persistent audit (item 1)** — ~1 day
+- Add `ToolAuditEvent::ToolCallCompleted { tool_name, tier, category, outcome, elapsed_ms, conversation_id: Option<String>, claude_session_uuid: Option<String> }` in `crates/gadgetron-xaas/src/audit/event.rs`.
+- Add migration `crates/gadgetron-xaas/migrations/NNNN_tool_audit_events.sql` with `conversation_id TEXT NULL` + `claude_session_uuid TEXT NULL` columns.
+- Add `ToolAuditEventSink` trait in `gadgetron-core`.
+- Wire emission in `gadgetron-kairos::stream::event_to_chat_chunks` through a sink injected via `KairosProvider` construction.
+- Red: `kairos_emits_tool_call_completed_audit_entry` integration test asserts a DB row with `tool_name = "wiki.list"` appears after a fake-claude tool-use event. Session fields are `NULL` in this PR (pre-item-7 state).
+- Touches: `gadgetron-xaas`, `gadgetron-kairos`, `gadgetron-core`. Cross-crate but confined to additive changes.
+
+**PR A5 — `ChatRequest` extension + `SessionStore` module (item 7.1-7.2)** — ~0.5 day
+- Add `conversation_id: Option<String>` field to `ChatRequest` in `crates/gadgetron-core/src/provider.rs`. Backward compatible.
+- Add `crates/gadgetron-kairos/src/session_store.rs` module with `SessionStore::get_or_create`, `touch`, `sweep_expired`, LRU eviction, TTL purge bounded to `min(max/10, 256)`.
+- Red: 3 store-only tests from §5.2.10: item 7 (`session_store_eviction_respects_lru`), item 8 (`session_store_ttl_cleanup_purges_stale_entries`), item 16 (`session_store_get_or_create_is_atomic_under_concurrent_first_turns`).
+- Touches: `gadgetron-core`, `gadgetron-kairos`. SessionStore not yet wired to session.rs.
+
+**PR A6 — `AgentConfig` fields + `spawn.rs` cwd pin (item 7.3-7.4)** — ~0.75 day
+- Add `SessionMode` enum, `session_mode`, `session_ttl_secs`, `session_store_max_entries`, `session_store_path: Option<PathBuf>` fields to `AgentConfig`. Validation rules V15-V18.
+- Add `ClaudeSessionMode` enum to `spawn.rs`. Add session-mode parameter to `build_claude_command`. Call `cmd.current_dir(session_root)` — resolve `session_root` from `AgentConfig.session_store_path` or startup-captured cwd.
+- Add 2 tests: `spawn_uses_consistent_cwd_across_first_and_resume` (test 14), `cwd_pin_survives_parent_chdir` (test 15).
+- Touches: `gadgetron-core`, `gadgetron-kairos`. Existing spawn tests updated to pass `ClaudeSessionMode::Stateless` explicitly.
+
+**PR A7 — `feed_stdin` helpers + `KairosErrorKind` + driver branching (item 7.5-7.7)** — ~1.5 days
+- Add `feed_stdin_first_turn`, `feed_stdin_new_user_turn_only` helpers in `session.rs`.
+- Add `KairosErrorKind::{SessionNotFound, SessionConcurrent, SessionCorrupted}` variants + HTTP status + error code mapping in `gadgetron-core::error`.
+- Replace `ClaudeCodeSession::drive` with `SpawnMode`-branched logic: stateless / first-turn / resume-turn, using atomic `get_or_create` + `tokio::time::timeout(lock_owned)` with Mutex guard held inside `SpawnMode::{FirstTurn, ResumeTurn}`.
+- Red: tests 1, 2, 3, 4 (concurrent barrier), 5, 6, 9, 10, 11, 13 from §5.2.10.
+- Touches: `gadgetron-kairos::session`, `gadgetron-core::error`. The largest PR in the sprint.
+
+**PR A8 — Gateway wiring + E2E + ADR-P2A-01 amendment (item 7.8-7.10)** — ~0.75 day
+- `gadgetron-gateway`: parse `X-Gadgetron-Conversation-Id` header + `metadata.conversation_id` fallback; validate (UTF-8, ≤256 bytes, no NUL/CR/LF), return `400 Bad Request` on violation. Route into `ChatRequest`.
+- E2E test 12: `tool_scope_is_reenforced_per_turn_on_resume` behind `GADGETRON_E2E_CLAUDE=1` env gate.
+- ADR-P2A-01 amendment paragraph documenting `--session-id`, `--resume`, `--no-session-persistence`, `--fork-session` verification as of 2026-04-15.
+- Touches: `gadgetron-gateway`, `gadgetron-testing`, `docs/adr/ADR-P2A-01-allowed-tools-enforcement.md`.
+
+### Sprint gate — completion criteria
+
+A-sprint is "done" and ready to enter Step 22 (Phase 5 CLI wiring) when ALL of the following hold:
+
+1. All 8 PRs merged to `main`. Each PR's own tests green.
+2. `cargo test --workspace` fully green (including all 16 §5.2.10 tests and the 4 new audit/session fields integration tests).
+3. `cargo clippy --workspace --all-targets -- -D warnings` clean.
+4. ADR-P2A-06 Implementation status addendum marked "Stabilization sprint: COMPLETE (2026-xx-xx)" with commit SHAs of each PR.
+5. Manual reflected: `docs/manual/kairos.md` has a new "Session continuity" subsection covering `X-Gadgetron-Conversation-Id` header, session TTL, and the fallback behavior when no conversation_id is sent.
+6. No regressions in the existing 74+ unit tests in `gadgetron-kairos`.
+
+### Provenance
+
+- Five-agent pre-Phase-5 review on 2026-04-15: inference-engine-lead, qa-test-architect, security-compliance-lead, dx-product-lead, codex independent second opinion (agentIds `a01e97c3629839dfa`, `a93103b91cfc12ba4`, `ab6eeee7a70be90cd`, `a816423d3d2849e21`, `a304a359c467a6579`)
+- Codex chief-advisor consultations on 2026-04-15: A-sprint scope (`a1c78d0fc151cb260`) → session-continuity architecture (`af7a60ddb9eda2d3b`) → §5.2 design cross-review passes 1/2/3 (`a957d8d6cebf4ee5a`, `a5427d2cd04f30919`, `a42ac35ff51a853d3`)
+- Empirical CC 2.1.109 verification on 2026-04-15: 6-test suite covering `--session-id` create-only semantics, `--resume` retrieval, tool-scope re-enforcement on resume, new-session creation, session file storage layout; all tests passed against the native session flags
+- User decisions 2026-04-15: (a) Option A selected — enforce the ADR commitment in the stabilization sprint rather than amending scope to defer `ToolCallCompleted` to P2B; (b) scope package γ+ selected — 7 stabilization items before Step 22, SEC-V15 and ReDoS caps explicitly deferred to P2A-post patch; (c) A-sprint TDD order confirmed — 8 PRs with item 2/4 (tool scope hardening) first and item 7.5-7.7 (driver branching) as the largest PR.

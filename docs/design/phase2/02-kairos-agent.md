@@ -7,7 +7,7 @@
 > **Parent**: `docs/design/phase2/00-overview.md` v3, `04-mcp-tool-registry.md` v2 (new source of truth for `[agent]` config)
 > **Sibling**: `docs/design/phase2/01-knowledge-layer.md` v3, `03-gadgetron-web.md` v2.1, `04-mcp-tool-registry.md` v2
 > **Scope (v4)**: `gadgetron-kairos` crate + `gadgetron-core::error::GadgetronError::Kairos` variant + subprocess spawn discipline. Agent-centric control plane types (`McpToolProvider`, `AgentConfig`) live in `gadgetron-core::agent::*` per `04 v2`. Approval flow (`ApprovalRegistry`, SSE emit, `POST /v1/approvals/{id}`) is **deferred to Phase 2B per ADR-P2A-06**.
-> **Implementation determinism**: per `feedback_implementation_determinism.md`, every type, function, error, and test is explicit.
+> **Implementation determinism**: every type, function, error, and test is explicit. No TBD, no hand-waving — any competent contributor must be able to produce the same code from this doc.
 > **Provenance**:
 > - v2 → v3: Round 2 review (chief-architect CA-B1/B2/B3/DET1, security SEC-B1/B3/B4, dx DX-B3, qa QA-NB2/DET1/DET2/DET3/NIT4, gap GAP-3) addressed 2026-04-13
 > - v3 → v4: Agent-centric pivot alignment (D-20260414-04, ADR-P2A-05, ADR-P2A-06). Config namespace `[kairos]` is now **legacy** — the canonical P2A schema is `[agent]` + `[agent.brain]` in `04 v2 §4`. This doc's §10 retains the v3 `KairosConfig` as an **internal struct** fed from `[agent.brain]` via the loader; the legacy `[kairos]` TOML example is retained for migration reference only (see `04 v2 §11.1`).
@@ -495,13 +495,502 @@ pub fn build_claude_command(config: &KairosConfig, mcp_config_path: &Path) -> Co
 }
 
 const ALLOWED_TOOLS: &str = concat!(
-    "mcp__knowledge__wiki_list,",
-    "mcp__knowledge__wiki_get,",
-    "mcp__knowledge__wiki_search,",
-    "mcp__knowledge__wiki_write,",
-    "mcp__knowledge__web_search"
+    "mcp__knowledge__wiki.list,",
+    "mcp__knowledge__wiki.get,",
+    "mcp__knowledge__wiki.search,",
+    "mcp__knowledge__wiki.write,",
+    "mcp__knowledge__web.search"
 );
 ```
+
+---
+
+### 5.2 Native Claude Code session integration (Hybrid B+A)
+
+> **Status**: new in v4.1 (2026-04-15). Added after empirical verification of `claude 2.1.109` session flags and Codex chief-advisor consultation (`a1c78d0fc151cb260` → `af7a60ddb9eda2d3b`). Replaces the unverified "flattened transcript on stdin every turn" behavioral bet documented in §5 lines 412-427 with a verified two-path design. Tracked in ADR-P2A-06 Implementation status addendum item 7.
+
+#### 5.2.1 Motivation
+
+The v4 design in §5 assumed `claude -p` consuming a flattened OpenAI transcript on stdin would correctly interpret it as "continue this conversation". This was an LLM-inference bet, not a verified protocol contract. It has three concrete failure modes:
+
+1. **O(n²) token growth per turn** — every call re-ships the full history. A 20-turn chat pays 1+2+…+20 = 210× the raw per-turn tokens against context + usage quota.
+2. **In-session state destruction** — TodoWrite scratchpad, in-progress tool-call chains, and reasoning traces are discarded at each subprocess exit. Only wiki writes survive.
+3. **Semantic role ambiguity** — `-p` reads stdin as one prompt. `"System: x\n\nUser: y\n\nAssistant: z\n\nUser: w"` is a single text blob; whether the model treats it as a transcript to continue or a log to analyze depends on LLM inference, with no regression test.
+
+#### 5.2.2 Empirical verification summary (2026-04-15, CC 2.1.109)
+
+PM ran a 6-test suite against `/Users/junghopark/.local/bin/claude` version 2.1.109. The following contract is now confirmed:
+
+| Test | Command shape | Outcome |
+|---|---|---|
+| 1 | `printf 'Remember TOKEN-42. Reply only OK.' \| claude -p --session-id <new-uuid> --tools ""` | ✅ Creates session, returns `"OK"`, writes `~/.claude/projects/<cwd-hash>/<uuid>.jsonl` (mode 0600), cost ≈ $0.10 (16k tokens cache creation) |
+| 2 | Same UUID reused via `--session-id` | ❌ `Session ID … is already in use` — `--session-id` is **create-only** |
+| 3 | Same UUID via `--resume` + "what token?" | ✅ Returns exactly `"TOKEN-42"`, cost ≈ $0.008 (15k tokens cache hit, 92% reduction) |
+| 4 | `--tools "" --resume <uuid>` + "use Bash" | ✅ Agent refuses with "I don't have a Bash/shell execution tool available in this session" |
+| 5 | `--tools "Bash" --resume <uuid>` + "use Bash" | ⚠️ Agent executes Bash — tool scope is **re-enforced per invocation**, not inherited from the seeding call |
+| 6 | New `--session-id <new-uuid>` | ✅ Creates a second session, reuses 14k tokens of project-level cache |
+
+**Contract**:
+- `--session-id <uuid>` — creates a session with that exact UUID; errors if UUID already exists. Use on turn 1 only. CC 2.1.109 creates the `~/.claude/projects/<cwd-hash>/` directory on first session creation if it doesn't yet exist (observed empirically — the test cwd `-Users-junghopark-dev-gadgetron` was pre-existing from prior user sessions, but the jsonl file was written cleanly). Gadgetron does NOT need to `mkdir` the project directory itself.
+- `--resume <uuid>` — continues an existing session by UUID. Use on turns 2+.
+- `--allowed-tools` / `--tools` — the CURRENT invocation's flag set defines the tool surface. No inheritance from seeding call. Security corollary: gadgetron must pass `--allowed-tools` on every invocation (already does; `spawn.rs:198-201`).
+- Session files are stored in `~/.claude/projects/<cwd-hash>/<session-uuid>.jsonl` with mode `0600` (owner rw only). The `<cwd-hash>` directory is derived from the subprocess's current working directory.
+
+**`<cwd-hash>` pinning contract (load-bearing, closes Codex review `a957d8d6cebf4ee5a` finding 4)**: gadgetron MUST spawn every `claude -p` invocation from an IDENTICAL cwd per conversation — otherwise a resume-turn call from a different cwd will look up a different `<cwd-hash>` directory and not find the session. The contract:
+
+1. `spawn.rs::build_claude_command` sets `cmd.current_dir(session_root)` where `session_root` is resolved at `KairosProvider` construction time from `AgentConfig.session_store_path: Option<PathBuf>` (new field, §5.2.8). If `session_store_path.is_some()`, use it verbatim; otherwise capture `std::env::current_dir()` ONCE at startup and store on the provider — do NOT re-read per request (a cwd change mid-process must not shift active sessions).
+2. The captured path is an `Arc<PathBuf>` on `KairosProvider`; `ClaudeCodeSession::new` takes it as a constructor argument so the session-per-request object also observes the same root.
+3. Test `spawn_uses_consistent_cwd_across_first_and_resume` (item 14 in §5.2.10) asserts two invocations for the same `conversation_id` produce identical `cmd.current_dir()` values.
+4. Test `cwd_pin_survives_parent_chdir` asserts that calling `std::env::set_current_dir()` on the parent process BETWEEN the first and resume call does NOT change the cwd passed to the subprocess.
+
+This pin closes the regression path where a user starts a conversation in `~/foo`, `cd`s to `~/bar`, sends turn 2, and the resume silently misses because CC looked in `~/.claude/projects/-Users-junghopark-bar/` instead of `-Users-junghopark-foo/`.
+- Cache mechanics: ≈ 16k tokens of project-level cache is created on the first call in a cwd and shared across sessions in that cwd. Per-session deltas (messages) are small and additive.
+
+Source: empirical test run log in PM session 2026-04-15, test UUIDs `426d3a52-85f5-4a3e-b4dc-71cee9966eb9` and `633054a7-5d09-469d-b73a-09d3ac307723`. To be re-verified by QA before merge.
+
+#### 5.2.3 `ChatRequest` extension (`gadgetron-core`)
+
+Add a new optional field at `crates/gadgetron-core/src/provider.rs` (currently lines 8-24):
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+
+    /// Conversation identifier for multi-turn native session continuity.
+    /// When `Some`, `gadgetron-kairos::KairosProvider` routes the request
+    /// through `SessionStore` and spawns Claude Code with `--session-id`
+    /// (first turn) or `--resume` (subsequent turns). When `None`, the
+    /// provider falls back to stateless history re-ship (the pre-2026-04-15
+    /// behavior), which is the correct mode for generic OpenAI clients
+    /// that have no concept of a conversation key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+}
+```
+
+**Source resolution in `gadgetron-gateway`**: the gateway populates `conversation_id` from the first present of:
+
+1. HTTP header `X-Gadgetron-Conversation-Id` — first-party clients (`gadgetron-web`) SHOULD use this.
+2. Request body field `metadata.conversation_id` — OpenAI-compatible `metadata` map, opt-in for clients that can't set custom headers.
+3. Neither present → `conversation_id = None` → stateless fallback.
+
+If both are present and differ, the header wins; log a `tracing::warn!(target: "gadgetron_gateway::kairos", ?header_id, ?body_id, "conversation_id mismatch; using header")`.
+
+`conversation_id` format: arbitrary UTF-8, maximum 256 bytes, must not contain NUL, `\r`, or `\n`. The gateway validates this at request-receipt time and returns `400 Bad Request` with `error.code = "invalid_conversation_id"` on violation. The SessionStore does NOT re-validate.
+
+#### 5.2.4 `SessionStore` (`gadgetron-kairos::session_store`)
+
+New module `crates/gadgetron-kairos/src/session_store.rs`:
+
+```rust
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+/// Gadgetron-side conversation identifier (opaque to Claude Code).
+pub type ConversationId = String;
+
+/// Per-conversation bookkeeping.
+pub struct SessionEntry {
+    /// UUID passed to Claude Code via `--session-id` on the first turn
+    /// and `--resume` on subsequent turns. **Generated as `Uuid::new_v4()`**
+    /// inside `SessionStore::get_or_create` at insertion time. We commit
+    /// to v4 (random) for this MVP — v1 (time-based) leaks spawn time,
+    /// and v3/v5 (hash-based) would require a stable namespace we don't have.
+    /// Empirical 2026-04-15 test confirmed CC 2.1.109 accepts any valid
+    /// RFC 4122 UUID string via `--session-id`, so other versions would
+    /// work, but we standardize on v4 for simplicity and privacy.
+    pub claude_session_uuid: Uuid,
+    pub created_at: Instant,
+    pub last_used: Instant,
+    pub turn_count: u32,
+    /// Held for the duration of a single spawn-and-drive cycle.
+    /// Prevents two concurrent resume requests from corrupting the jsonl.
+    pub mutex: Arc<Mutex<()>>,
+}
+
+pub struct SessionStore {
+    entries: DashMap<ConversationId, Arc<SessionEntry>>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+impl SessionStore {
+    pub fn new(ttl_secs: u64, max_entries: usize) -> Self { /* … */ }
+
+    /// Atomic get-or-insert: returns `(Arc<SessionEntry>, FirstTurn)` where
+    /// `FirstTurn == true` if this call inserted a new entry (no prior
+    /// conversation), `false` if an existing entry was returned. Implemented
+    /// with `DashMap::entry(...).or_insert_with(...)` to close the race where
+    /// two concurrent first turns for the same `conversation_id` would otherwise
+    /// create two Claude Code sessions and corrupt store state.
+    ///
+    /// On insertion, triggers eviction if `self.entries.len() > self.max_entries`
+    /// (LRU by `last_used`) and runs a bounded `sweep_expired` scan.
+    ///
+    /// This is the ONLY API callers use on the first-lookup path — there is no
+    /// separate `get` + `insert_new` sequence. A plain `get(id)` exists only for
+    /// read-only introspection (tests, metrics) and never drives session lifecycle.
+    pub fn get_or_create(&self, id: ConversationId) -> (Arc<SessionEntry>, bool) { /* … */ }
+
+    /// Read-only lookup. Used by tests + metrics. MUST NOT be used on the
+    /// session-driver path — use `get_or_create` to avoid the race described
+    /// above.
+    pub fn get(&self, id: &str) -> Option<Arc<SessionEntry>> { /* … */ }
+
+    /// Update `last_used` and `turn_count` after a successful turn.
+    pub fn touch(&self, id: &str) { /* … */ }
+
+    /// Remove entries older than `self.ttl`. Called lazily on `get_or_create`
+    /// (piggyback sweep, no background task). Bounded to
+    /// `min(self.max_entries / 10, 256)` entries scanned per call — the
+    /// constant hard cap is load-bearing: at `max_entries = 1_000_000` (the
+    /// V16 upper bound), a `max_entries / 10 = 100_000` scan per request would
+    /// pin a core for hundreds of milliseconds. The 256 cap keeps worst-case
+    /// per-request sweep cost O(256) regardless of configured store size.
+    /// Stale entries beyond the cap carry over to subsequent calls.
+    pub fn sweep_expired(&self) { /* … */ }
+}
+```
+
+**Eviction policy**: LRU by `last_used`. When the store is full, the entry with the oldest `last_used` is removed. The Claude Code jsonl file is NOT deleted from disk — Claude Code's own cleanup policy (if any) handles that. A follow-up P2A-post patch may add an explicit `tokio::fs::remove_file` for evicted sessions; in P2A, we trust the user or CC to manage `~/.claude/projects/` disk usage.
+
+**TTL default**: 24 hours (`86_400` seconds). Rationale: a personal-assistant MVP user closes the chat overnight; the next morning the 24h-old session is stale and a new conversation starts. Configurable via `AgentConfig.session_ttl_secs`.
+
+**Concurrency**: each `SessionEntry` carries an `Arc<Mutex<()>>`. The session driver acquires it for the duration of a single spawn-and-drive cycle, releases it after EOF or kill. A second concurrent request for the same `conversation_id` **blocks on the Mutex** until the first completes. If the Mutex wait exceeds `AgentConfig.request_timeout_secs`, the second request returns `KairosErrorKind::SessionConcurrent` (HTTP 429) rather than timing out silently.
+
+#### 5.2.5 Session lifecycle branches (`session.rs`)
+
+`ClaudeCodeSession` (currently at `crates/gadgetron-kairos/src/session.rs:77-82`) gains a private helper on its driver:
+
+```rust
+enum SpawnMode {
+    /// No conversation_id — flatten full history to stdin, no --session-id/--resume.
+    Stateless,
+    /// First turn of a native session — spawn with `--session-id <new_uuid>`.
+    /// stdin contains only the current user turn (plus optional system prefix).
+    /// Holds the per-session Mutex guard for the duration of the spawn-and-drive
+    /// cycle so that a second concurrent first-turn request for the same
+    /// conversation_id (atomically serialized by `get_or_create`) blocks here.
+    FirstTurn {
+        claude_session_uuid: Uuid,
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+    /// Subsequent turn of a native session — spawn with `--resume <uuid>`.
+    /// stdin contains only the NEW user turn (history is stored in ~/.claude/projects).
+    ResumeTurn {
+        claude_session_uuid: Uuid,
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+}
+```
+
+The driver decides as follows:
+
+```text
+let mode = match request.conversation_id.as_deref() {
+    None => SpawnMode::Stateless,
+    Some(id) => {
+        // Atomic get-or-create closes the two-concurrent-first-turns race.
+        let (entry, first_turn) = session_store.get_or_create(id.to_string());
+
+        // Acquire the per-session mutex with a bounded wait. On contention,
+        // a second request for the same conversation_id blocks here until the
+        // first releases the guard or the request timeout fires.
+        let guard = tokio::time::timeout(
+            config.request_timeout,
+            entry.mutex.clone().lock_owned(),
+        )
+        .await
+        .map_err(|_| GadgetronError::Kairos {
+            kind: KairosErrorKind::SessionConcurrent { conversation_id: id.to_string() },
+            message: "concurrent request on same conversation_id timed out waiting".into(),
+        })?;
+
+        if first_turn {
+            SpawnMode::FirstTurn {
+                claude_session_uuid: entry.claude_session_uuid,
+                _guard: guard,
+            }
+        } else {
+            SpawnMode::ResumeTurn {
+                claude_session_uuid: entry.claude_session_uuid,
+                _guard: guard,
+            }
+        }
+    }
+};
+```
+
+After a successful drive (stream completes without error), call `session_store.touch(&id)` to bump `last_used` and `turn_count`. On error or future drop, the Mutex is released automatically via `OwnedMutexGuard`'s `Drop` impl — which also covers task cancellation (the drop runs even if the future is aborted mid-await, closing the loophole Codex chief advisor flagged in review `a957d8d6cebf4ee5a`).
+
+#### 5.2.6 `feed_stdin` — two modes
+
+Current `feed_stdin` (`session.rs:290-319`) flattens the entire OpenAI history. In native-session mode, we only want the **new user turn** on stdin; Claude Code already has the history in its jsonl file.
+
+Replace with a dispatching wrapper:
+
+```rust
+async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest, mode: &SpawnMode) -> Result<()> {
+    match mode {
+        SpawnMode::Stateless => feed_stdin_flatten_history(stdin, req).await,
+        SpawnMode::FirstTurn { .. } => feed_stdin_first_turn(stdin, req).await,
+        SpawnMode::ResumeTurn { .. } => feed_stdin_new_user_turn_only(stdin, req).await,
+    }
+}
+
+async fn feed_stdin_flatten_history(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
+    // Existing v4 implementation, unchanged. Lines 292-319.
+}
+
+async fn feed_stdin_first_turn(mut stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
+    // Claude Code sees this as the user's opening prompt. If messages[0] is a
+    // system message, prepend it as a framing paragraph. If messages contains
+    // a prior assistant turn despite the caller claiming "first turn", it's a
+    // caller bug — we still write only the LAST user message to stdin and log
+    // a warning so QA can catch it.
+    let user_msg = req.messages.iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::User))
+        .ok_or(KairosErrorKind::InvalidRequest)?;
+
+    let mut buf = String::new();
+    if let Some(sys) = req.messages.iter().find(|m| matches!(m.role, Role::System)) {
+        buf.push_str(sys.content.text().unwrap_or(""));
+        buf.push_str("\n\n");
+    }
+    if req.messages.iter().any(|m| matches!(m.role, Role::Assistant)) {
+        tracing::warn!(
+            target: "gadgetron_kairos::session",
+            "first turn called with existing assistant messages; writing only last user turn"
+        );
+    }
+    buf.push_str(user_msg.content.text().unwrap_or(""));
+    stdin.write_all(buf.as_bytes()).await?;
+    stdin.flush().await.ok();
+    drop(stdin);
+    Ok(())
+}
+
+async fn feed_stdin_new_user_turn_only(mut stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
+    // On resume, write only the MOST RECENT user message — Claude Code already
+    // has all prior turns in its jsonl. The caller (gateway) is responsible
+    // for ensuring req.messages.last() is the new user turn.
+    let last = req.messages.last()
+        .ok_or(KairosErrorKind::InvalidRequest)?;
+    if !matches!(last.role, Role::User) {
+        return Err(GadgetronError::Kairos {
+            kind: KairosErrorKind::InvalidRequest,
+            message: "resume-turn expected messages.last().role == User".into(),
+        });
+    }
+    stdin.write_all(last.content.text().unwrap_or("").as_bytes()).await?;
+    stdin.flush().await.ok();
+    drop(stdin);
+    Ok(())
+}
+```
+
+#### 5.2.7 `spawn.rs` — `ClaudeSessionMode` parameter
+
+`build_claude_command` (`crates/gadgetron-kairos/src/spawn.rs:115-209`) gains an additional parameter:
+
+```rust
+pub enum ClaudeSessionMode {
+    /// No --session-id/--resume flag inserted.
+    Stateless,
+    /// Insert `--session-id <uuid>`. Claude Code creates a new session.
+    First { session_uuid: Uuid },
+    /// Insert `--resume <uuid>`. Claude Code continues an existing session.
+    Resume { session_uuid: Uuid },
+}
+
+pub fn build_claude_command(
+    config: &AgentConfig,
+    mcp_config_path: &Path,
+    allowed_tools: &[String],
+    session_mode: ClaudeSessionMode,
+) -> Result<Command, SpawnError> {
+    // … existing body …
+    match session_mode {
+        ClaudeSessionMode::Stateless => { /* no extra flag */ }
+        ClaudeSessionMode::First { session_uuid } => {
+            cmd.arg("--session-id").arg(session_uuid.to_string());
+        }
+        ClaudeSessionMode::Resume { session_uuid } => {
+            cmd.arg("--resume").arg(session_uuid.to_string());
+        }
+    }
+    // --allowed-tools, --mcp-config, --strict-mcp-config, --dangerously-skip-permissions
+    // remain unchanged and are inserted on every invocation regardless of session_mode.
+    // This is load-bearing: empirical test 4/5 on 2026-04-15 confirmed tool scope is
+    // re-enforced per invocation, not inherited from the seeding call.
+}
+```
+
+Callers update:
+- `session.rs::drive` passes `ClaudeSessionMode::Stateless` / `First` / `Resume` derived from `SpawnMode`.
+- `spawn.rs` tests update: new tests per §5.2.10 below.
+
+#### 5.2.8 `AgentConfig` new fields + validation
+
+Add to `crates/gadgetron-core/src/agent/config.rs`:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Use native session when conversation_id is present; fall back to
+    /// stateless history re-ship when absent. Safe default.
+    #[default]
+    NativeWithFallback,
+    /// Native session only. Requests without conversation_id are rejected
+    /// with HTTP 400 and error.code = "missing_conversation_id".
+    NativeOnly,
+    /// Stateless history re-ship only. Ignores conversation_id even when
+    /// present. Pre-2026-04-15 behavior. Used for regression lock testing.
+    StatelessOnly,
+}
+
+pub struct AgentConfig {
+    // … existing fields …
+    pub session_mode: SessionMode,
+    pub session_ttl_secs: u64,
+    pub session_store_max_entries: usize,
+    /// Root directory gadgetron-kairos spawns Claude Code from. Load-bearing
+    /// for native session continuity: Claude Code derives its session-file
+    /// directory (`~/.claude/projects/<cwd-hash>/`) from the subprocess's
+    /// current working directory, so a resume from a different cwd silently
+    /// misses the jsonl file.
+    ///
+    /// Resolution at `KairosProvider` construction time:
+    /// - `Some(path)` → `spawn.rs::build_claude_command` sets
+    ///   `cmd.current_dir(path)` on every invocation.
+    /// - `None` → capture `std::env::current_dir()` **once** at construction,
+    ///   store it on the provider, and use it unchanged for the lifetime of
+    ///   the process. A subsequent `std::env::set_current_dir()` on the
+    ///   parent MUST NOT shift active sessions (locked by test 15).
+    pub session_store_path: Option<PathBuf>,
+}
+```
+
+Defaults: `session_mode = NativeWithFallback`, `session_ttl_secs = 86_400`, `session_store_max_entries = 10_000`, `session_store_path = None` (capture-at-startup fallback).
+
+**Validation rules** (append to existing V1-V14 list — these are V15, V16, V17, V18 at the `AgentConfig::validate_with_env` layer, NOT to be confused with the earlier-flagged SEC-V15 which refers to the separate flag-injection validation for `binary`/`external_base_url` — that one is deferred to P2A-post patch per ADR-P2A-06 Implementation status addendum):
+
+- **V15 (session TTL range)**: `session_ttl_secs` must be in `[60, 7 * 86_400]`. Below 60 seconds, entries expire before a user can finish typing. Above 7 days, the jsonl files on disk will accumulate unboundedly.
+- **V16 (session store max)**: `session_store_max_entries` must be in `[1, 1_000_000]`. Zero is a misconfiguration that disables native session without the explicit `StatelessOnly` mode.
+- **V17 (native-only requires conversation_id)**: when `session_mode = NativeOnly`, the gateway must reject requests without `conversation_id` at receipt time. This is enforced in `gadgetron-gateway`, not in `AgentConfig::validate` — `validate` only checks the config is internally consistent.
+- **V18 (session_store_path validation)**: when `session_store_path = Some(path)`, the path must exist, be a directory, and be writable by the current effective UID. Validation uses `std::fs::metadata` + `std::fs::File::create` on a test file `.gadgetron_probe` inside the directory (delete after probe). When `session_store_path = None`, no validation — the startup-captured cwd is trusted by construction.
+
+#### 5.2.9 `KairosErrorKind` new variants
+
+Add to `crates/gadgetron-core/src/error.rs`:
+
+```rust
+#[non_exhaustive]
+pub enum KairosErrorKind {
+    // … existing variants …
+
+    /// `conversation_id` was provided but the store has no entry and
+    /// `session_mode = NativeOnly`. Client must start a new conversation.
+    /// HTTP 404, error.code = "kairos_session_not_found".
+    SessionNotFound { conversation_id: String },
+
+    /// Two concurrent requests for the same `conversation_id`; the second
+    /// request timed out waiting for the per-session mutex. Client should
+    /// retry after the first request completes.
+    /// HTTP 429, error.code = "kairos_session_concurrent".
+    SessionConcurrent { conversation_id: String },
+
+    /// Claude Code returned an error indicating the jsonl file is corrupted
+    /// or the session UUID is not recognized by CC (e.g., the user manually
+    /// deleted the jsonl file). The store entry is removed; the client is
+    /// expected to retry with the same `conversation_id`, which will then
+    /// hit the first-turn branch.
+    /// HTTP 500, error.code = "kairos_session_corrupted".
+    SessionCorrupted { conversation_id: String, reason: String },
+}
+```
+
+Add matching rows to the `04-mcp-tool-registry.md §10.1` conversion table (though these are not `McpError` derivatives — they originate in the session driver).
+
+#### 5.2.10 Test plan — deterministic, no placeholders
+
+All tests live in `crates/gadgetron-kairos/tests/` unless marked `[inline]`.
+
+1. **`native_session_first_turn_uses_session_id_flag`** — fake `AgentConfig` + `SessionStore::new(60, 10)`. Construct `ChatRequest { conversation_id: Some("c1"), messages: [User("hi")] }`. Invoke driver with `SpawnMode::FirstTurn` captured via a `FakeSpawn` injected via `build_claude_command_with_env`. Assert the captured `Command` argv contains `--session-id <uuid>` and NOT `--resume`. Assert the `session_store.get("c1").is_some()` after the call.
+
+2. **`native_session_resume_turn_uses_resume_flag`** — pre-seed store with `let (entry, first) = store.get_or_create("c1".to_string()); assert!(first); store.touch("c1");` to force an existing entry. Invoke driver with `ChatRequest { conversation_id: Some("c1"), … }`. Assert captured argv contains `--resume <same-uuid as entry.claude_session_uuid>` and NOT `--session-id`. Assert `turn_count == 2` (pre-seed touch = 1, resume turn = 2).
+
+3. **`native_session_stateless_fallback_when_no_conversation_id`** — `ChatRequest { conversation_id: None, messages: […] }`. Assert captured argv contains NEITHER `--session-id` NOR `--resume`, AND that `feed_stdin` received the full flattened history (compare against `feed_stdin_flatten_history` golden output).
+
+4. **`concurrent_resume_on_same_conversation_serialized_by_mutex`** — `tokio::test` with `tokio::time::pause()`. Pre-seed store with `c1`. Construct TWO oneshot-gated fake spawns: the first fake blocks until the test sends on a `tokio::sync::oneshot` channel, the second is a plain fake. Spawn both concurrent driver invocations for `c1`. **Barrier discipline (closes the race Codex flagged in review `a957d8d6cebf4ee5a`)**: before calling `tokio::time::advance()`, the test `await`s a second barrier that the driver signals inside the `lock_owned` call site — specifically, the test instruments the `SessionStore` under test with a `tokio::sync::Notify` that fires the instant a `lock_owned()` call begins waiting. Only after receiving both "first fake is blocked" and "second driver is in lock_owned.await" does the test call `advance(config.request_timeout + 1s)`. Assert: (a) second driver returns `KairosErrorKind::SessionConcurrent { conversation_id: "c1" }`; (b) first driver completes normally after oneshot release; (c) `turn_count == 1` (only the first call incremented). This test guarantees deterministic ordering without wall-clock dependency.
+
+5. **`session_not_found_falls_back_to_stateless_with_warning`** — `session_mode = NativeWithFallback`, `ChatRequest { conversation_id: Some("ghost") }`. Pre-seed store is empty. Assert the call resolves to first-turn mode (new UUID inserted into store) AND a `tracing::warn!` was emitted with target `gadgetron_kairos::session`. Use `tracing-subscriber::fmt::test::writer` to capture.
+
+6. **`session_not_found_errors_in_native_only_mode`** — same as 5 but with `session_mode = NativeOnly`. Assert the call returns `KairosErrorKind::SessionNotFound { conversation_id: "ghost" }`.
+
+7. **`session_store_eviction_respects_lru`** — `SessionStore::new(60, 3)`. Insert c1, c2, c3. Touch c1. Insert c4. Assert c2 is evicted (oldest `last_used`), c1/c3/c4 remain.
+
+8. **`session_store_ttl_cleanup_purges_stale_entries`** — `tokio::test` with `tokio::time::pause()`. `SessionStore::new(60, 10)`. Call `store.get_or_create("c1".to_string())` at t=0. Advance to t=61. Call `store.get_or_create("c2".to_string())` — `get_or_create` is the API that triggers piggyback sweep per §5.2.4. Assert `store.get("c1").is_none()` (c1 was purged) and `store.get("c2").is_some()` (c2 is newly inserted).
+
+9. **`first_turn_stdin_contains_only_new_user_message`** — call `feed_stdin_first_turn` with `messages: [System("be helpful"), User("hi")]`. Capture stdin bytes. Assert bytes == `"be helpful\n\nhi"` (system prefix + current user, no `"User: "` / `"Assistant: "` labels, no flattened history).
+
+10. **`resume_turn_stdin_contains_only_last_user_message`** — call `feed_stdin_new_user_turn_only` with `messages: [User("hi"), Assistant("hello"), User("what time is it")]`. Capture stdin bytes. Assert bytes == `"what time is it"` exactly, no history, no labels.
+
+11. **`resume_turn_rejects_non_user_last_message`** — call `feed_stdin_new_user_turn_only` with `messages: [User("hi"), Assistant("hello")]` (last is assistant). Assert returns `KairosErrorKind::InvalidRequest` with message containing "expected messages.last().role == User".
+
+12. **`tool_scope_is_reenforced_per_turn_on_resume`** (regression lock) — E2E test gated by `GADGETRON_E2E_CLAUDE=1`. Seed session with `--tools ""`, assert seed returns "OK". Resume the same session with `--tools ""` and request Bash use; assert agent refuses. Resume AGAIN with `--tools "Bash"` and request Bash; assert agent executes. This locks the empirical verification result from 2026-04-15 in regression.
+
+13. **`kill_on_drop_cleans_up_session_entry_on_cancellation`** — start a resume-turn request, drop the future before completion. Assert the subprocess is killed (existing `kill_on_drop` test) AND the per-session mutex is released AND `turn_count` was NOT incremented (because the turn didn't complete).
+
+14. **`spawn_uses_consistent_cwd_across_first_and_resume`** — construct a `KairosProvider` with `session_store_path = Some(/tmp/test-session-root)`. Invoke two turns for the same `conversation_id`: one first-turn, one resume-turn. Capture the `Command::current_dir` on each via `build_claude_command_with_env` + `FakeEnv`. Assert both equal `/tmp/test-session-root`, identical byte-for-byte. Closes Codex review `a957d8d6cebf4ee5a` finding 4.
+
+15. **`cwd_pin_survives_parent_chdir`** — construct a `KairosProvider` with `session_store_path = None` while the current process is in `/tmp/initial-cwd`. The provider captures the startup cwd. In the test, invoke a first-turn call (cwd captured inside the provider). Then call `std::env::set_current_dir("/tmp/changed-cwd")`. Invoke a resume-turn for the same conversation_id. Capture `Command::current_dir` on the second spawn and assert it equals `/tmp/initial-cwd` (the startup capture, NOT the current process cwd). This locks the "startup-captured cwd does not shift" invariant against future refactoring that might accidentally re-read cwd per request.
+
+16. **`session_store_get_or_create_is_atomic_under_concurrent_first_turns`** — `tokio::test`. `SessionStore::new(60, 10)`. Launch 10 concurrent `tokio::spawn` tasks each calling `store.get_or_create("c1")`. After all join, assert `store.len() == 1` (exactly one entry), and exactly one of the 10 tasks observed `first_turn == true` while the other 9 observed `first_turn == false`. Closes Codex review `a957d8d6cebf4ee5a` finding 7 (the atomic get-or-insert race).
+
+#### 5.2.11 ADR-P2A-01 Part 2 amendment
+
+ADR-P2A-01 currently documents `--allowed-tools` enforcement verification. Part 2 (the stdin contract) needs an amendment documenting that as of 2026-04-15, the verified flag surface additionally includes `--session-id <uuid>` (create-only semantics), `--resume <uuid>` (retrieval), `--no-session-persistence` (disable save), and `--fork-session` (not used in P2A but documented for P2B). The amendment is a one-paragraph addition at the end of ADR-P2A-01 with a pointer to ADR-P2A-06 Implementation status addendum item 7 and to this §5.2 for the consuming design.
+
+#### 5.2.12 Migration from current v4 code
+
+**Prerequisites — must land BEFORE step 1**: items 5 (B-2 deadline position fix) and 6 (H4 stderr_handle timeout wrapper) from ADR-P2A-06 Implementation status addendum MUST merge first. `session.rs::drive` is the single most heavily refactored function in this migration, and landing native session on top of a driver that still starts the deadline after `feed_stdin` or hangs on `stderr_handle.await` would both (a) break the per-session Mutex hold-time contract (contention behavior becomes nondeterministic) and (b) force an immediate rewrite of the freshly-written branching code. Order discipline: B-2/H4 → step 1 below → … → step 10.
+
+Step-by-step migration checklist (for the implementer, once cross-review passes and B-2/H4 are merged):
+
+1. Land `ChatRequest.conversation_id` field first (single file, backward compatible). Gateway change to read the header/metadata, still always passes `None` in the initial PR.
+2. Land `SessionStore` module with the store-only subset of §5.2.10 (tests 7, 8, 16 — eviction, TTL cleanup, and the atomic `get_or_create` concurrency test). Not yet wired to `session.rs`. `cargo test -p gadgetron-kairos session_store` passes.
+3. Land `AgentConfig` new fields + validation V15-V18 at the core layer, including `session_store_path: Option<PathBuf>` with the V18 probe-file existence/writability check. (Moved before step 4 per Codex review `a957d8d6cebf4ee5a` — `build_claude_command` specs against `AgentConfig`, so the config types must exist first for the spawn signature change to compile.)
+4. Land `ClaudeSessionMode` enum + `build_claude_command` parameter + `current_dir` pin resolution. Existing spawn tests pass with `ClaudeSessionMode::Stateless` explicitly; new test `spawn_uses_consistent_cwd_across_first_and_resume` added.
+5. Land `feed_stdin_first_turn` and `feed_stdin_new_user_turn_only` helpers with tests 9/10/11.
+6. Land `KairosErrorKind::{SessionNotFound, SessionConcurrent, SessionCorrupted}` with HTTP status + error code mapping. (Moved before step 7 per Codex review `a957d8d6cebf4ee5a` — driver branching tests require `SessionConcurrent` and `SessionNotFound` variants to compile their assertions.)
+7. Land `SpawnMode` + driver branching in `session.rs`. Tests 1/2/3/4/5/6/13/14 pass.
+8. Land gateway wiring: header/metadata parsing, 400 response on malformed, routing `conversation_id` into `ChatRequest`.
+9. Land E2E test 12 behind `GADGETRON_E2E_CLAUDE=1` gate.
+10. ADR-P2A-01 amendment lands in the same PR as step 9.
+
+No step above depends on the CLI wiring (Steps 22-23). All 16 tests can be green before Step 22 starts; the CLI composition just wires `SessionStore` into the same registry assembly as `KairosProvider`.
 
 ---
 

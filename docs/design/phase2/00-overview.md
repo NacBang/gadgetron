@@ -120,8 +120,8 @@ Zero new dependencies in gateway. Zero new dispatch code. Kairos is just another
 │  `gadgetron mcp serve` subprocess (NEW subcommand)            │
 │  Per-request stdio MCP server (exits with Claude Code)        │
 │  Delegates to gadgetron-knowledge::mcp                        │
-│  Tools: wiki_list / wiki_get / wiki_search / wiki_write       │
-│         web_search (SearXNG proxy)                            │
+│  Tools: wiki.list / wiki.get / wiki.search / wiki.write       │
+│         web.search (SearXNG proxy)                            │
 │  (P2B+) sqlite_query / vector_search / media_ingest           │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -139,7 +139,7 @@ Minimum viable assistant-plane entry point. Richer operations-plane toolization 
 | Desktop-first operator/user persona | single local human workflow; no per-user knowledge partition yet |
 | LLM Wiki | Markdown + git2 (libgit2) auto-commit; Obsidian-compat `[[link]]` parser |
 | Wiki MCP server | Manual JSON-RPC 2.0 stdio transport via `gadgetron mcp serve`; 4 wiki tools (list/get/search/write) + optional `web.search` |
-| Web search | SearXNG instance URL in config; single MCP tool `web_search` |
+| Web search | SearXNG instance URL in config; single MCP tool `web.search` |
 | Claude Code subprocess | `claude -p --output-format=stream-json --mcp-config=<tmp>`; stdin = message history JSON |
 | Provider integration | `gadgetron-kairos` implements `LlmProvider`; registered in router as `"kairos"`. Gateway unchanged. |
 | Web UI | **`gadgetron-web` crate** (NEW, P2A) — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT) + Next.js + Tailwind, built to `web/dist/`, embedded in the Rust binary via `include_dir!`, mounted at `/web` by `gadgetron-gateway` under feature `web-ui`. BYOK auth: user pastes Gadgetron API key into the UI's settings page. **Supersedes prior OpenWebUI sibling-process plan (D-20260414-02).** |
@@ -173,7 +173,7 @@ Minimum viable assistant-plane entry point. Richer operations-plane toolization 
 1. User opens `http://localhost:8080/web` (served by `gadgetron-web`), pastes Gadgetron API key in the settings page
 2. User selects "kairos" model in the `gadgetron-web` model dropdown (populated from `/v1/models`)
 3. User sends a Korean or English message
-4. Kairos spawns `claude -p`, which uses wiki and web_search MCP tools as needed
+4. Kairos spawns `claude -p`, which uses wiki and `web.search` MCP tools as needed
 5. Streaming response appears in `gadgetron-web` chat within 2s TTFB
 6. User can create new wiki pages via a conversational request ("이 내용을 wiki에 저장해")
 7. Wiki directory is a valid git repo with timestamped auto-commits
@@ -249,7 +249,7 @@ Steps:
    - Open Settings, paste the Gadgetron API key from step 3
    - Model dropdown → pick **`kairos`**
    - Type: "wiki에서 README를 찾아서 요약해"
-   - Response streams in; the assistant reads the starter page via `wiki_get` MCP tool and returns a summary
+   - Response streams in; the assistant reads the starter page via `wiki.get` MCP tool and returns a summary
 
 If any step fails, `docs/manual/troubleshooting.md` (Phase 2 section, added pre-P2A merge) contains runbook entries for each error code in §12.
 
@@ -275,7 +275,7 @@ gadgetron-knowledge/           ← leaf domain crate, no downstream deps
 │   │   └── searxng.rs   # SearXNG JSON API client
 │   └── mcp/
 │       ├── mod.rs       # manual JSON-RPC 2.0 stdio server wiring + `pub fn serve(stdin, stdout)` entry point
-│       └── tools.rs     # MCP tool implementations (wiki_*, web_search)
+│       └── tools.rs     # MCP tool implementations (wiki.*, web.search)
 ```
 
 ```
@@ -356,7 +356,7 @@ wiki_autocommit = true
 wiki_max_page_bytes = 1_048_576
 
 [knowledge.search]
-# SearXNG instance URL. If unset, web_search MCP tool is NOT exposed to Claude Code.
+# SearXNG instance URL. If unset, web.search MCP tool is NOT exposed to Claude Code.
 # env: GADGETRON_KNOWLEDGE_SEARXNG_URL
 searxng_url = "http://127.0.0.1:8888"
 
@@ -469,8 +469,8 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 |---|---|---|---|---|---|---|---|
 | `gadgetron-kairos` (subprocess mgr) | Low — inherits gateway auth | Medium — MCP config tmpfile TOCTOU (see M1) | Low | **High** — stderr may contain sensitive content (see M2) | Low | Low | stderr leak into audit/HTTP response |
 | `gadgetron-knowledge` (wiki MCP) | Low | Medium — path traversal (mitigated by M3) | Low | Medium — wiki content permanent in git | Low | Low | Symlink race or unicode normalization bypass |
-| Claude Code subprocess | N/A | **High** — prompt injection via wiki/SearXNG can cause arbitrary `wiki_write` calls | Low | **High** — model reasons over potentially hostile content | Low — SIGTERM on timeout | **High** — `--dangerously-skip-permissions` bypasses interactive confirmation | `--allowed-tools` enforcement level (see M4) |
-| SearXNG | Low | Low | Low | **High** — query history in SearXNG logs; user has no control | Medium — unavailability blocks web_search | Low | Query log exposure at SearXNG host |
+| Claude Code subprocess | N/A | **High** — prompt injection via wiki/SearXNG can cause arbitrary `wiki.write` calls | Low | **High** — model reasons over potentially hostile content | Low — SIGTERM on timeout | **High** — `--dangerously-skip-permissions` bypasses interactive confirmation | `--allowed-tools` enforcement level (see M4) |
+| SearXNG | Low | Low | Low | **High** — query history in SearXNG logs; user has no control | Medium — unavailability blocks `web.search` | Low | Query log exposure at SearXNG host |
 | `gadgetron-web` (assistant-ui) | **To be (re)assessed in `03-gadgetron-web.md`** — same-origin reduces CSRF exposure; API key in localStorage is XSS-sensitive; no separate auth layer (Gadgetron owns it). Threat model row to be rewritten post D-20260414-02. | | | | | | API key XSS exfiltration if UI renders untrusted content without sanitization |
 
 ### Mitigations (M1-M8)
@@ -491,7 +491,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 - **HTTP response policy**: the HTTP 500 response body contains a generic message only; `stderr_redacted` is written to audit log but NEVER echoed to the client. Unit test enforces this.
 
 **M3 — Wiki path traversal**
-- **Risk**: `wiki_write("../../../etc/passwd", ...)` or symlink target outside wiki root.
+- **Risk**: `wiki.write("../../../etc/passwd", ...)` or symlink target outside wiki root.
 - **Mitigation**:
   - `wiki::fs::resolve_path(wiki_root, user_input)` uses `std::fs::canonicalize(wiki_root.join(user_input))` then prefix-checks against `canonicalize(wiki_root)`.
   - Reject `..`, absolute paths, `~`, null bytes, control chars BEFORE canonicalize.
@@ -509,13 +509,13 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 - **Mitigation**: **BEFORE implementation starts**, verify via Claude Code docs and a behavioral test that `--allowed-tools` is enforced at tool-invocation time (i.e., the binary rejects non-whitelisted tool calls regardless of what the model outputs). This verification result must be cited in `02-kairos-agent.md` with a link to the docs and/or the test that confirmed it.
 - **If enforcement cannot be confirmed**: the design adds a process-level sandbox as the actual enforcement layer — seccomp/AppArmor profile denying network egress outside allow-listed endpoints, filesystem writes restricted to `wiki_path`. This adds non-trivial Linux-only work; flag as a P2A blocker if so.
 
-**M5 — `wiki_write` content policy**
+**M5 — `wiki.write` content policy**
 - **Max size**: `wiki_max_page_bytes` config enforces upper bound. Write above the limit returns `WikiErrorKind::PageTooLarge` → 413.
-- **Credential pattern check**: `wiki_write` applies the same redaction pattern list as M2. If a match is found, the write **still proceeds** (to avoid false positives blocking legitimate use) but a `wiki_write_secret_suspected` entry is added to audit log with the pattern name. This is defense-in-depth, not a primary control.
+- **Credential pattern check**: `wiki.write` applies the same redaction pattern list as M2. If a match is found, the write **still proceeds** (to avoid false positives blocking legitimate use) but a `wiki_write_secret_suspected` entry is added to audit log with the pattern name. This is defense-in-depth, not a primary control.
 - **Git commit message policy**: auto-commit messages are abstract — `"auto-commit: <page-name> <ISO8601 timestamp>"`. No request IDs, no user query content, no response content.
 
 **M6 — `tools_called` audit policy**
-- Audit field `tools_called: Vec<String>` records tool **names only** (`wiki_search`, `wiki_write`, `web_search`), never arguments. Arguments can contain wiki content, search queries, or PII. Detail spec (`02-kairos-agent.md`) enforces this at the struct level — `tools_called` is `Vec<String>`, not `Vec<(String, serde_json::Value)>`.
+- Audit field `tools_called: Vec<String>` records tool **names only** (`wiki.search`, `wiki.write`, `web.search`), never arguments. Arguments can contain wiki content, search queries, or PII. Detail spec (`02-kairos-agent.md`) enforces this at the struct level — `tools_called` is `Vec<String>`, not `Vec<(String, serde_json::Value)>`.
 
 **M7 — SearXNG risk acceptance**
 - SearXNG proxies queries to Google/Bing/DDG/Brave. The external search engines receive the queries (though SearXNG anonymizes headers). User queries are not persisted by Gadgetron; they are persisted by SearXNG according to its own logging config.
@@ -524,7 +524,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 
 **M8 — P2A single-user risk acceptance statement**
 - The P2A security posture accepts the following risks explicitly, bounded to single-user local deployment:
-  - Prompt injection from SearXNG results or malicious wiki pages can cause `wiki_write` calls that corrupt or pollute the wiki. Worst case = wiki data integrity loss, not credential exfiltration (provided M4 holds).
+  - Prompt injection from SearXNG results or malicious wiki pages can cause `wiki.write` calls that corrupt or pollute the wiki. Worst case = wiki data integrity loss, not credential exfiltration (provided M4 holds).
   - `--dangerously-skip-permissions` removes interactive confirmation; acceptable because the user is the operator and has consented via config.
   - Audit logs stay on local filesystem; no remote log aggregation in P2A.
 - This risk acceptance is **explicitly scoped to P2A single-user**. P2C multi-user deployments MUST re-evaluate — the P2A trust model does not transfer. A `[P2C-SECURITY-REOPEN]` tag in `02-kairos-agent.md` marks each assumption that breaks for multi-user.
@@ -593,7 +593,7 @@ Per qa Round 2 A3 (blocker). Shell script fails on Windows CI and cannot reprodu
 - **Usage**: tests set `kairos.claude_binary` config field to the built binary path
 - **Supported scenarios** (each via command-line flag):
   - `--scenario=simple_text` — emits a fixed stream-json sequence ending in `message_stop`
-  - `--scenario=tool_use` — emits a `tool_use` event for `wiki_get`, waits for stdin tool result, continues with more text, ends
+  - `--scenario=tool_use` — emits a `tool_use` event for `wiki.get`, waits for stdin tool result, continues with more text, ends
   - `--scenario=error_exit` — exits with code 42 and known stderr
   - `--scenario=timeout` — sleeps forever (for timeout test)
 - Deterministic — no wall clock, no randomness
@@ -707,7 +707,7 @@ Per security-compliance-lead Round 1.5 SEC-8.
 
 #### Disclosure 2 — Web search is proxied through SearXNG to external engines
 
-> **Privacy note**: Web search via Kairos proxies your queries through SearXNG to Google, Bing, DuckDuckGo, and Brave (depending on SearXNG configuration). Queries are anonymized at the SearXNG layer, but the search engines receive the query text. SearXNG may log queries depending on its own configuration. Gadgetron itself does not store your search queries. If you need stricter privacy, disable `web_search` by leaving `searxng_url` unset in your config.
+> **Privacy note**: Web search via Kairos proxies your queries through SearXNG to Google, Bing, DuckDuckGo, and Brave (depending on SearXNG configuration). Queries are anonymized at the SearXNG layer, but the search engines receive the query text. SearXNG may log queries depending on its own configuration. Gadgetron itself does not store your search queries. If you need stricter privacy, disable `web.search` by leaving `searxng_url` unset in your config.
 
 Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-kairos` code PR merges to `main` without these paragraphs present in `docs/manual/kairos.md` (Korean and English versions).
 
@@ -869,8 +869,11 @@ TDD Red → Green → Refactor. Each step is a PR; cross-crate PRs are fine but 
 21. `gadgetron-kairos::tests::sse_conformance` + `subprocess_determinism` + `redact_stderr` + `mcp_config_tmpfile` per 02 v4 §14
 
 **Phase 5 — CLI + gateway wiring**
-22. `gadgetron-cli::bin::gadgetron` — compose `McpToolRegistryBuilder` + all providers in `main()`, pass frozen registry to `KairosProvider`
-23. `gadgetron-cli::mcp_serve` — new `gadgetron mcp serve` subcommand (stdio MCP server dispatching via `McpToolRegistry`)
+
+> **Ordering note (2026-04-15)**: Step 22 previously preceded Step 23, but `mcp_config.rs` hardcodes `["mcp", "serve"]` as the argv it writes into the tempfile for Claude Code to invoke. Without Step 23 in place, the assembled CLI from Step 22 would spawn a `gadgetron mcp serve` subcommand that does not exist. Step 23 is therefore implemented **first**; Step 22 then composes the main registry and binds `KairosProvider` on top of a CLI that already exposes the subcommand.
+
+22. `gadgetron-cli::mcp_serve` — new `gadgetron mcp serve` subcommand (stdio MCP server dispatching via `McpToolRegistry`). Standalone test: invoke the binary with `mcp serve`, pipe a `tools/list` JSON-RPC request on stdin, assert the registered tool names on stdout.
+23. `gadgetron-cli::bin::gadgetron` — compose `McpToolRegistryBuilder` + all providers in `main()`, pass frozen registry to `KairosProvider`, register `KairosProvider` with the router. Depends on Step 22 so that `mcp_config.rs` can assume `gadgetron mcp serve` is a valid argv.
 24. `gadgetron-cli::kairos_init` — patch to emit full `[agent]` section (DX-MCP-B1)
 25. `gadgetron-cli::features` — declare `web-ui`, `agent-read`, `agent-write`, `agent-destructive`, `infra-tools`, `scheduler-tools`, `slurm`, `k8s` per `04 v2 §6.1` + `headless_build_strips_write_tools` test
 26. `gadgetron-gateway` — no new handlers on `/v1/*` beyond existing. `/v1/approvals/{id}` is **NOT** in P2A.
@@ -928,8 +931,8 @@ claude \
   -p \
   --output-format stream-json \
   --mcp-config <tempfile-path> \
-  --allowedTools mcp__knowledge__wiki_list,mcp__knowledge__wiki_get,\
-mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_search \
+  --allowedTools mcp__knowledge__wiki.list,mcp__knowledge__wiki.get,\
+mcp__knowledge__wiki.search,mcp__knowledge__wiki.write,mcp__knowledge__web.search \
   --strict-mcp-config \
   --dangerously-skip-permissions \
   [--model $claude_model]
@@ -974,7 +977,7 @@ mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_searc
 - `:8080/v1/*` — existing OpenAI-compat API (Phase 1)
 - `:8080/web/*` — `gadgetron-web` (assistant-ui) static assets embedded via `include_dir!`, served by `gadgetron-gateway` under Cargo feature `web-ui` (on by default)
 
-**Optional SearXNG sidecar** (for the `web_search` MCP tool):
+**Optional SearXNG sidecar** (for the `web.search` MCP tool):
 ```yaml
 services:
   searxng:
