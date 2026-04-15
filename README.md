@@ -47,7 +47,10 @@ Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway over
 # 1. Build
 cargo build --release
 
-# 2. Minimal `gadgetron.toml` for the personal-assistant profile
+# 2. Create a local workspace for the wiki
+mkdir -p .gadgetron
+
+# 3. Minimal `gadgetron.toml` for the personal-assistant profile
 cat > gadgetron.toml <<'TOML'
 [server]
 bind = "127.0.0.1:8080"
@@ -62,20 +65,23 @@ max_concurrent_subprocesses = 4
 mode = "claude_max"   # uses ~/.claude/ OAuth
 
 [knowledge]
-wiki_path = "~/.gadgetron/wiki"
+wiki_path = "./.gadgetron/wiki"
 wiki_autocommit = true
 wiki_max_page_bytes = 1048576
 
 # [knowledge.search]   # optional — uncomment to enable web.search tool
 # searxng_url = "http://127.0.0.1:8888"
 # timeout_secs = 10
-# max_results = 5
+# max_results = 10
 TOML
 
-# 3. Run the server (no-db mode)
+# 4. Create a local API key for no-db mode
+./target/release/gadgetron key create
+
+# 5. Run the server (no-db mode)
 ./target/release/gadgetron serve --no-db
 
-# 4. Chat with Kairos
+# 6. Chat with Kairos
 curl -sN http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer gad_live_<your_key>" \
   -H "Content-Type: application/json" \
@@ -193,7 +199,7 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 ### Phase 1 — Infrastructure
 | Document | Status |
 |----------|--------|
-| [Platform Architecture](docs/architecture/platform-architecture.md) | Approved (v1, 7300+ lines, 4 rounds) |
+| [Platform Architecture](docs/architecture/platform-architecture.md) | Draft (Phase C review pending) |
 | [XaaS Phase 1](docs/design/xaas/phase1.md) | Approved (4 rounds, 23 fixes) |
 | [Gateway Wire-up](docs/design/gateway/wire-up.md) | Draft |
 | [Core Types](docs/design/core/types-consolidation.md) | Round 3 Approved |
@@ -207,6 +213,8 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 | [02 — Kairos Agent](docs/design/phase2/02-kairos-agent.md) | v4 (Path 1 aligned) |
 | [03 — gadgetron-web](docs/design/phase2/03-gadgetron-web.md) | v2.1 approved |
 | [04 — MCP Tool Registry](docs/design/phase2/04-mcp-tool-registry.md) | **v2 (Path 1 scope cut)** |
+
+`docs/manual/*` tracks the operator-facing surface on trunk: the stable Phase 1 gateway plus the currently shipped Phase 2A Kairos/Web runtime. `docs/design/*` continues to track approved and in-progress implementation work.
 
 ### Phase 2A ADRs
 | ADR | Title |
@@ -232,6 +240,8 @@ Tracked in [`docs/design/phase2/00-overview.md §15`](docs/design/phase2/00-over
 | **6 Integration + E2E** | 27-29 | 🔲 fake_claude + real Claude E2E + gadgetron-web smoke |
 
 **Test matrix** (Rust 1.94 / Ubuntu 22.04 Docker): ~500 tests pass across the workspace, 0 failures excluding `gadgetron-testing` e2e (which requires live PostgreSQL).
+
+Current workspace state is larger than the historical sprint table above: the repository has 200+ tests today, and full E2E coverage requires PostgreSQL to be available.
 
 ## Team
 

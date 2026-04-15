@@ -284,7 +284,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
 
     if !config_path.exists() {
         anyhow::bail!(
-            "config file not found: {}. Run `gadgetron kairos init` first, or pass --config.",
+            "config file not found: {}. Create a gadgetron.toml with a `[knowledge]` section, or pass --config.",
             config_path.display()
         );
     }
@@ -822,8 +822,8 @@ async fn serve(
     // KnowledgeToolProvider in an McpToolRegistry, and register
     // KairosProvider as the `"kairos"` entry in the router map.
     //
-    // Silent skip when `[knowledge]` is absent — operators who haven't
-    // run `gadgetron kairos init` get a normal non-Kairos server.
+    // Silent skip when `[knowledge]` is absent — operators who have not
+    // configured the knowledge layer get a normal non-Kairos server.
     register_kairos_if_configured(&config_path, &config, &mut providers_for_router);
 
     // Step 10: Build the LLM router.

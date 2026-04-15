@@ -108,51 +108,47 @@ The recommended way to create tenants and keys is the CLI. The CLI handles key g
 
 The raw key (the `key:` line) is printed exactly once. Copy it now — it cannot be recovered from the database, because Gadgetron stores only the SHA-256 hash.
 
-Optional flags for `key create`:
+Current `key create` flags:
 
 | Flag | Description |
 |------|-------------|
-| `--name <name>` | Human-readable label for the key (default: `default`) |
-| `--scope <scope>` | Scope to assign (repeatable; default: `OpenAiCompat`) |
-| `--kind live\|test` | Key kind (default: `live`) |
+| `--tenant-id <uuid>` | Required for PostgreSQL-backed key creation; omit it in no-db mode |
+| `--scope <scope>` | Scope string stored with the key (default: `OpenAiCompat`) |
 
-Example — create a management key with two scopes:
+Example — create a management key:
 
 ```sh
-./target/release/gadgetron key create \
-  --tenant-id <uuid> \
-  --name "ops-key" \
-  --scope OpenAiCompat \
-  --scope Management
+./target/release/gadgetron key create --tenant-id <uuid> --scope Management
 ```
 
 ### No-database mode
 
-For local development without PostgreSQL, skip tenant creation and use `--no-db`:
+For local development without PostgreSQL, skip tenant creation and omit `--tenant-id`:
 
 ```sh
-./target/release/gadgetron key create --no-db
-# Output: key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+./target/release/gadgetron key create
+# Output includes a generated gad_live_* key
 ```
 
-The key is held in memory only. It is valid for the lifetime of the running server process and is lost on restart. Do not use `--no-db` in production.
+The generated key is not stored anywhere. In no-db mode, the built-in validator accepts any syntactically valid `gad_live_*` or `gad_test_*` key and returns a synthetic identity with all scopes. This mode is intended for local development only; do not use it in production.
 
 ---
 
-## Revoking API keys
+## Listing and revoking API keys
 
-To revoke a key, set its `revoked_at` timestamp in the database:
+List active keys for a tenant:
 
-```sql
-UPDATE api_keys
-SET revoked_at = NOW()
-WHERE prefix = 'gad_live'
-  AND key_hash = 'your-64-char-sha256-hash-here';
+```sh
+./target/release/gadgetron key list --tenant-id <uuid>
 ```
 
-The validator checks `revoked_at IS NULL` in its query. A revoked key will no longer validate. However, due to the 10-minute cache TTL, a revoked key may continue to work for up to 10 minutes after revocation until its cache entry expires.
+Revoke a key by its UUID:
 
-To force immediate invalidation, the `KeyValidator.invalidate` method exists but is not yet exposed via a CLI or API endpoint. It would need to be called programmatically.
+```sh
+./target/release/gadgetron key revoke --key-id <key-uuid>
+```
+
+Revocation sets `revoked_at = NOW()` for the key. The validator checks `revoked_at IS NULL`, so new lookups fail immediately. Due to the 10-minute validator cache TTL, a revoked key may continue to work for up to 10 minutes after revocation until its cache entry expires.
 
 ---
 
@@ -160,4 +156,4 @@ To force immediate invalidation, the `KeyValidator.invalidate` method exists but
 
 - The server never logs raw API key values. The `GADGETRON_DATABASE_URL` is wrapped in a `Secret<String>` type and is never emitted to logs.
 - The `api_keys.key_hash` column stores only the SHA-256 hash. Even with direct database access, the original key cannot be recovered from the hash.
-- Auth failures (401) are audited to the structured audit channel. In Sprint 1-3, audit entries are written to tracing logs. PostgreSQL persistence is Sprint 2+.
+- Auth failures (401) are audited to the structured audit channel. In the current implementation, audit entries are written to tracing logs; PostgreSQL persistence remains future work.

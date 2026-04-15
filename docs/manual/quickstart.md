@@ -129,16 +129,17 @@ Substitute the UUID printed by `tenant create` into the `key create` command. Th
 
 ### No-database path (`--no-db` mode)
 
-If you are evaluating Gadgetron without a PostgreSQL instance, create a key without a tenant:
+If you are evaluating Gadgetron without a PostgreSQL instance, omit `--tenant-id`:
 
 ```sh
-./target/release/gadgetron key create --no-db
+./target/release/gadgetron key create
 # Example output:
-#   key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
-#   (stored in memory only — valid for this server process lifetime)
+#   API Key Created
+#   ...
+#   Key:     gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
 ```
 
-In `--no-db` mode the key is held in memory. It is lost when the server restarts. This mode is intended for local development and testing only.
+In no-db mode, Gadgetron does not persist or validate key hashes against PostgreSQL. The generated key is a convenience value; the built-in validator accepts any syntactically valid `gad_live_*` or `gad_test_*` key while the server is running without a database. Start the server in this mode by leaving `GADGETRON_DATABASE_URL` unset or by passing `gadgetron serve --no-db`.
 
 ---
 

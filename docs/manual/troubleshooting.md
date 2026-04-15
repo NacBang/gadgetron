@@ -42,24 +42,24 @@ The API key secret is masked as `***` in all `doctor` output. The `GADGETRON_DAT
 
 ## Server startup errors
 
-### "GADGETRON_DATABASE_URL environment variable is required"
+### "GADGETRON_DATABASE_URL is not set"
 
-**What happened:** The server process started but exited immediately with this message.
+**What happened:** A PostgreSQL-backed CLI command such as `gadgetron tenant create`, `gadgetron key list`, `gadgetron key revoke`, or `gadgetron key create --tenant-id ...` exited with this message.
 
-**Why:** `GADGETRON_DATABASE_URL` is a required environment variable. The server does not start without a valid PostgreSQL connection string.
+**Why:** Those commands require a live PostgreSQL database. `gadgetron serve` itself can still run without PostgreSQL in no-db mode.
 
 **Fix:**
 
 ```sh
 export GADGETRON_DATABASE_URL="postgres://user:password@localhost:5432/gadgetron"
-./target/release/gadgetron
+./target/release/gadgetron tenant create --name "my-team"
 ```
 
-If you are using a `.env` file or systemd unit, verify the variable is actually present in the process environment:
+If you intended to run only the gateway locally, use the no-db flow instead:
 
 ```sh
-# Check the running environment before starting
-printenv GADGETRON_DATABASE_URL
+./target/release/gadgetron key create
+./target/release/gadgetron serve --no-db
 ```
 
 ---
@@ -120,13 +120,30 @@ psql -U postgres -c "CREATE DATABASE gadgetron OWNER gadgetron_user;"
 
 ---
 
-### "unsupported provider type in Phase 1: gemini" (or vllm, sglang)
+### `kairos`가 `/v1/models`에 나타나지 않음
 
-**What happened:** The server exited during startup.
+**What happened:** 서버는 기동됐지만 `GET /v1/models` 응답에 `kairos`가 없습니다.
 
-**Why:** `gadgetron.toml` contains a provider with `type = "gemini"`, `type = "vllm"`, or `type = "sglang"`. These are not implemented in Sprint 1-3.
+**Why:** Kairos는 일반 provider와 다르게 `gadgetron.toml`의 `[knowledge]` 섹션이 유효할 때만 런타임에 등록됩니다. `[knowledge]`가 없거나, `wiki_path` 부모 디렉터리가 없거나, 설정 검증에 실패하면 서버는 계속 뜨지만 Kairos 등록만 건너뜁니다.
 
-**Fix:** Remove or comment out the unsupported provider block from `gadgetron.toml`. Only `openai`, `anthropic`, and `ollama` are supported in Sprint 1-3.
+**Fix — 설정 확인:**
+
+```toml
+[knowledge]
+wiki_path = "./.gadgetron/wiki"
+wiki_autocommit = true
+wiki_max_page_bytes = 1048576
+```
+
+그리고 부모 디렉터리를 미리 만드십시오:
+
+```sh
+mkdir -p .gadgetron
+```
+
+**Fix — 로그 확인:**
+
+정상 경로에서는 startup log에 `kairos: registered`가 남습니다. 실패 경로에서는 `kairos: [knowledge] validation failed; skipping` 또는 `kairos: KnowledgeToolProvider::new failed; skipping` 같은 로그가 남습니다.
 
 ---
 
@@ -293,7 +310,7 @@ After updating, the next request will use the new scopes (cache TTL is 10 minute
 }
 ```
 
-**Why:** The tenant's `daily_limit_cents` has been reached. The quota enforcer in Sprint 1-3 is in-memory (`InMemoryQuotaEnforcer`). It checks the `daily_used_cents` value from the `quota_configs` table against the `daily_limit_cents`. If `daily_limit_cents - daily_used_cents <= 0`, requests are rejected.
+**Why:** The tenant's `daily_limit_cents` has been reached. The current quota enforcer is in-memory (`InMemoryQuotaEnforcer`). It checks the `daily_used_cents` value from the `quota_configs` table against the `daily_limit_cents`. If `daily_limit_cents - daily_used_cents <= 0`, requests are rejected.
 
 **Fix — increase the daily limit:**
 
@@ -311,7 +328,7 @@ SET daily_used_cents = 0
 WHERE tenant_id = 'your-tenant-uuid-here';
 ```
 
-**Note:** In Sprint 1-3, `InMemoryQuotaEnforcer` does not actually write back to the database when usage is recorded — `record_post` only marks the in-memory token as used. The `daily_used_cents` column in the database is not incremented by the Sprint 1-3 implementation. PostgreSQL-backed quota enforcement is Sprint 2. Until then, 429 is triggered only when `daily_limit_cents - daily_used_cents <= 0` at request time (based on whatever value is in the database when the tenant context is loaded).
+**Note:** `InMemoryQuotaEnforcer` does not currently write usage back to PostgreSQL — `record_post` only marks the in-memory token as used. The `daily_used_cents` column in the database is not incremented by the current implementation. Until PostgreSQL-backed quota enforcement lands, 429 is triggered only when `daily_limit_cents - daily_used_cents <= 0` at request time (based on whatever value is already in the database when the tenant context is loaded).
 
 ---
 
