@@ -5,7 +5,7 @@ Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway over
 ## Features
 
 - **OpenAI-compatible API** — drop-in `/v1/chat/completions` with SSE streaming
-- **6 LLM providers** — OpenAI, Anthropic, Ollama, vLLM, SGLang (Gemini: Sprint 7+)
+- **6 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, vLLM, SGLang
 - **6 routing strategies** — RoundRobin, CostOptimal, LatencyOptimal, QualityOptimal, Fallback, Weighted
 - **GPU-aware scheduling** — VRAM bin-packing, NUMA topology, MIG support
 - **Multi-tenant platform** — API key auth, per-tenant quota (i64 cents), audit logging
@@ -26,25 +26,13 @@ export OPENAI_API_KEY="sk-your-key"
 export GADGETRON_DATABASE_URL="postgresql://gadgetron:gadgetron@localhost:5432/gadgetron"
 cargo run -- serve
 
-# 3. Create tenant + API key via SQL
-# Note: CLI key management (`gadgetron key create`) is coming in a future sprint.
-# For now, insert directly into PostgreSQL. See docs/manual/quickstart.md Step 4
-# for the full instructions including key hashing.
-docker exec -i gadgetron-db psql -U gadgetron -d gadgetron <<'SQL'
-INSERT INTO tenants (id, name, status)
-VALUES ('00000000-0000-0000-0000-000000000001', 'dev-team', 'Active');
+# 3. Create tenant + API key
+cargo run -- tenant create --name dev-team
+# Copy the printed tenant UUID into:
+cargo run -- key create --tenant-id <tenant-uuid>
 
--- Replace key_hash with: echo -n 'gad_live_YOUR_SECRET' | sha256sum | cut -d' ' -f1
-INSERT INTO api_keys (tenant_id, prefix, key_hash, kind, scopes, name)
-VALUES (
-  '00000000-0000-0000-0000-000000000001',
-  'gad_live',
-  'PASTE_YOUR_64_CHAR_SHA256_HASH_HERE',
-  'live',
-  ARRAY['OpenAiCompat'],
-  'dev-key'
-);
-SQL
+# Optional: local development without PostgreSQL-backed auth
+# cargo run -- key create
 
 # 4. Send first request
 curl http://localhost:8080/v1/chat/completions \
@@ -88,11 +76,13 @@ cargo deny check licenses bans advisories
 
 | Document | Status |
 |----------|--------|
-| [Platform Architecture](docs/architecture/platform-architecture.md) | Approved (v1, 7300+ lines, 4 rounds) |
+| [Platform Architecture](docs/architecture/platform-architecture.md) | Draft (Phase C review pending) |
 | [XaaS Phase 1](docs/design/xaas/phase1.md) | Approved (4 rounds, 23 fixes) |
 | [Gateway Wire-up](docs/design/gateway/wire-up.md) | Draft (Round 0 self-check; Round 1+ pending) |
 | [Core Types](docs/design/core/types-consolidation.md) | Round 3 Approved |
 | [Testing Harness](docs/design/testing/harness.md) | Round 2 retry |
+
+`docs/manual/*` documents the current Phase 1 binary. `docs/design/phase2/*` documents planned Kairos work and is not implemented yet.
 
 ## Sprint Progress
 
@@ -105,6 +95,8 @@ cargo deny check licenses bans advisories
 | 5 | E2E harness, criterion benchmarks, TUI wiring | included above |
 | 6 | TUI live hardening (broadcast channel, /ready PG check, graceful shutdown) | included above |
 | **Total** | | **~100 passed** |
+
+Current workspace state is larger than the historical sprint table above: the repository has 200+ tests today, and full E2E coverage requires PostgreSQL to be available.
 
 ## Team
 

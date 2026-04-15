@@ -2,7 +2,7 @@
 
 Gadgetron is a Rust-native API gateway that presents an OpenAI-compatible HTTP interface in front of one or more LLM providers (OpenAI, Anthropic, Ollama, vLLM, SGLang). It handles authentication, per-tenant quota enforcement, request routing, and audit logging. It is designed to be self-hosted.
 
-This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust edition 2021, `rust-version = "1.80"`).
+This manual primarily covers the current Phase 1 implementation state (Gadgetron v0.1.0, Rust edition 2021, `rust-version = "1.80"`). `kairos.md` is a Phase 2 design preview and is not available in the current binary.
 
 ---
 
@@ -17,7 +17,7 @@ This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust e
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |
 | [auth.md](auth.md) | API key format, how auth works, scope system |
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
-| [kairos.md](kairos.md) | **Phase 2A**: Kairos 개인 비서 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
+| [kairos.md](kairos.md) | **Phase 2A preview**: Kairos 개인 비서 설계 프리뷰 — 현재 바이너리에는 아직 포함되지 않음 |
 
 ---
 
@@ -33,10 +33,17 @@ This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust e
 - In-memory quota enforcement (daily ceiling check)
 - Structured audit log (written to tracing; PostgreSQL batch-insert is Sprint 2+)
 - Automatic PostgreSQL schema migrations on startup
+- Gemini provider — request/response adaptation implemented
 - vLLM provider — tested end-to-end against a live vLLM instance
 - SGLang provider — tested end-to-end; supports `reasoning_content` field for reasoning models (e.g. GLM-5.1)
 - TUI dashboard (`gadgetron serve --tui`) — 3-column layout (Nodes/Models/Requests), live gateway data via broadcast channel, `metrics_middleware` request forwarding, graceful shutdown with 5-second audit drain
-- CLI flags: `--config`, `--bind`, `--tui` (priority: CLI > env > config file > built-in default)
+- CLI flags: `--config`, `--bind`, `--tui`, `--no-db`, `--provider` (priority: CLI > env > config file > built-in default)
+- `gadgetron tenant create --name <name>` and `gadgetron tenant list`
+- `gadgetron key create --tenant-id <uuid>` for persistent keys
+- `gadgetron key create` for no-db/local development convenience
+- `gadgetron key list --tenant-id <uuid>` and `gadgetron key revoke --key-id <uuid>`
+- `gadgetron init` — generate an annotated `gadgetron.toml`
+- `gadgetron doctor` — check configuration, database connectivity, provider reachability, and `/health`
 - `gadgetron-testing` crate — `FakeLlmProvider` and `FailingProvider` for use in unit and integration tests
 
 **Stubbed (HTTP 501):**
@@ -47,18 +54,10 @@ This manual covers the Sprint 1-7 implementation state (Gadgetron v0.1.0, Rust e
 - `GET /api/v1/usage`
 - `GET /api/v1/costs`
 
-**Added in Sprint 7:**
-- `gadgetron tenant create --name <name>` — create a tenant, returns UUID
-- `gadgetron key create --tenant-id <uuid>` — create an API key for a tenant, prints raw key once
-- `gadgetron key create --no-db` — create an in-memory key without a tenant (local development)
-- `gadgetron init` — generate an annotated `gadgetron.toml` in the current directory
-- `gadgetron init --provider <name>` — quick-start mode: pre-fill a specific provider block
-- `gadgetron doctor` — check configuration, database connectivity, and provider reachability
-
 **Not yet implemented:**
 - Node management CLI subcommands
 - PostgreSQL-backed quota enforcement (Sprint 2)
 - Audit log PostgreSQL persistence (Sprint 2+)
 - TUI keyboard navigation and scrolling
 - Docker image (future)
-- Gemini provider (Phase 1 Week 6+)
+- Kairos runtime (`gadgetron kairos`, `gadgetron mcp serve`, `kairos` model)

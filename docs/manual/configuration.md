@@ -50,61 +50,61 @@ No equivalent environment variable or `gadgetron.toml` field. This flag is only 
 
 ---
 
+### `--no-db`
+
+Force no-db mode even when `GADGETRON_DATABASE_URL` is set.
+
+- Default: off
+- Example: `gadgetron serve --no-db`
+
+In this mode, Gadgetron skips PostgreSQL, accepts format-valid API keys without database lookup, and disables quota persistence. This is useful for local development and quick evaluation, but not for production.
+
+---
+
+### `--provider <URL>`
+
+Quick-start mode for a single vLLM-compatible endpoint.
+
+- Example: `gadgetron serve --provider http://10.100.1.5:8100`
+- Equivalent environment variable: `GADGETRON_PROVIDER`
+
+When set, Gadgetron skips config file loading, injects one synthetic provider named `provider`, and implies no-db mode. This is the fastest path for testing against a single local or remote vLLM server.
+
+---
+
 ## `gadgetron init` — generate an annotated config file
 
 `gadgetron init` writes a fully-annotated `gadgetron.toml` to the current directory. Every field is present with its default value and a comment explaining what it does and which environment variable overrides it. This is the recommended starting point for any new deployment.
 
 ```sh
 ./target/release/gadgetron init
-# Writes gadgetron.toml to ./gadgetron.toml
-# Exits with an error if the file already exists (use --force to overwrite)
+./target/release/gadgetron init --output /etc/gadgetron/gadgetron.toml
+./target/release/gadgetron init --yes
 ```
 
-If the file already exists, the command exits with a non-zero status and prints:
+If the target file already exists and `--yes` is not passed, the command prompts before overwriting it. In non-interactive mode without `--yes`, it leaves the existing file unchanged and exits successfully.
 
-```
-error: gadgetron.toml already exists — use --force to overwrite
-```
-
-### Quick-start mode with `--provider`
-
-The `--provider` flag pre-fills a specific provider block and removes all other provider examples, so the generated file is ready to use with minimal editing:
-
-```sh
-# Generate a config pre-filled for OpenAI
-./target/release/gadgetron init --provider openai
-
-# Generate a config pre-filled for a self-hosted vLLM instance
-./target/release/gadgetron init --provider vllm
-
-# Supported values: openai, anthropic, ollama, vllm, sglang
-```
-
-With `--provider openai` the generated file contains a `[providers.openai]` block with placeholder values and a comment pointing to where you set `OPENAI_API_KEY`. With `--provider vllm` the block contains an `endpoint` field pre-filled with `http://localhost:8100` and a comment to replace it with your vLLM host.
-
-After running `gadgetron init`, open the generated file and follow the inline comments. The file is valid TOML before any edits; the server will start using it immediately with the built-in defaults.
+After running `gadgetron init`, open the generated file and follow the inline comments. If you want a zero-config single-provider test instead, use `gadgetron serve --provider <URL>`.
 
 ---
 
 ## Environment variables
 
-### Required
-
 #### `GADGETRON_DATABASE_URL`
 
-**Required.** PostgreSQL connection URL. The server refuses to start if this variable is absent.
+PostgreSQL connection URL for full database-backed mode.
 
 ```
 GADGETRON_DATABASE_URL=postgres://user:password@localhost:5432/gadgetron
 ```
 
-This value is treated as a secret internally (`Secret<String>`). It is never written to logs or tracing spans.
+When this variable is set, `gadgetron serve` connects to PostgreSQL, runs migrations, and enables persistent tenant/key validation. When it is unset or empty, the server starts in no-db mode instead. The variable is required for PostgreSQL-backed commands such as `gadgetron tenant create`, `gadgetron key list`, and `gadgetron key revoke`.
 
 Standard PostgreSQL connection string format. For connection pool tuning, the server creates a pool with a maximum of 20 connections and a 5-second acquire timeout (these are not yet configurable via environment variable).
 
----
+This value is treated as a secret internally (`Secret<String>`). It is never written to logs or tracing spans.
 
-### Optional
+---
 
 #### `GADGETRON_BIND`
 
