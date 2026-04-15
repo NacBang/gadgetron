@@ -101,6 +101,26 @@ pub enum KairosErrorKind {
     /// Tool execution failed at the provider level (wiki write I/O failure,
     /// SearXNG HTTP error, etc.). HTTP 500.
     ToolExecution { reason: String },
+
+    // ---- Native session kinds (ADR-P2A-06 addendum item 7 / §5.2.9) ----
+    /// Client requested `conversation_id` but the `SessionStore` has no
+    /// entry under `session_mode = NativeOnly`. Client must start a new
+    /// conversation with a fresh id. HTTP 404, `kairos_session_not_found`.
+    SessionNotFound { conversation_id: String },
+    /// Two concurrent requests for the same `conversation_id`; the second
+    /// request timed out waiting for the per-session mutex. Client should
+    /// retry after the first request completes. HTTP 429,
+    /// `kairos_session_concurrent`.
+    SessionConcurrent { conversation_id: String },
+    /// Claude Code reported that the session UUID is unrecognized (for
+    /// example after a manual jsonl delete), or the jsonl file is
+    /// corrupted. The store entry is removed; the next request with the
+    /// same `conversation_id` falls through the first-turn branch and
+    /// creates a fresh session. HTTP 500, `kairos_session_corrupted`.
+    SessionCorrupted {
+        conversation_id: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for KairosErrorKind {
@@ -116,6 +136,9 @@ impl fmt::Display for KairosErrorKind {
             Self::ToolApprovalTimeout { .. } => write!(f, "tool_approval_timeout"),
             Self::ToolInvalidArgs { .. } => write!(f, "tool_invalid_args"),
             Self::ToolExecution { .. } => write!(f, "tool_execution"),
+            Self::SessionNotFound { .. } => write!(f, "session_not_found"),
+            Self::SessionConcurrent { .. } => write!(f, "session_concurrent"),
+            Self::SessionCorrupted { .. } => write!(f, "session_corrupted"),
         }
     }
 }
@@ -260,6 +283,9 @@ impl GadgetronError {
                 KairosErrorKind::ToolApprovalTimeout { .. } => "kairos_tool_approval_timeout",
                 KairosErrorKind::ToolInvalidArgs { .. } => "kairos_tool_invalid_args",
                 KairosErrorKind::ToolExecution { .. } => "kairos_tool_execution",
+                KairosErrorKind::SessionNotFound { .. } => "kairos_session_not_found",
+                KairosErrorKind::SessionConcurrent { .. } => "kairos_session_concurrent",
+                KairosErrorKind::SessionCorrupted { .. } => "kairos_session_corrupted",
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => "wiki_invalid_path",
@@ -319,6 +345,12 @@ impl GadgetronError {
                     format!("The agent passed invalid arguments to a tool: {reason}. This is an agent-side bug; try rephrasing your request."),
                 KairosErrorKind::ToolExecution { reason } =>
                     format!("A tool failed to execute: {reason}. Check server logs for details."),
+                KairosErrorKind::SessionNotFound { conversation_id } =>
+                    format!("Conversation {conversation_id:?} is not known to this server. The conversation may have expired or been evicted from the session store. Start a new conversation without a conversation_id, or with a fresh id."),
+                KairosErrorKind::SessionConcurrent { conversation_id } =>
+                    format!("Conversation {conversation_id:?} is already serving another request. Wait for the current turn to finish, then retry."),
+                KairosErrorKind::SessionCorrupted { conversation_id, .. } =>
+                    format!("Conversation {conversation_id:?} session state is unreadable. The session has been discarded; retry with the same conversation_id to start a fresh session."),
             },
             // Wiki variants — always safe to surface to clients
             // (path/bytes/limit are user-provided values, not secrets).
@@ -402,6 +434,9 @@ impl GadgetronError {
                 KairosErrorKind::ToolApprovalTimeout { .. } => 504,
                 KairosErrorKind::ToolInvalidArgs { .. } => 400,
                 KairosErrorKind::ToolExecution { .. } => 500,
+                KairosErrorKind::SessionNotFound { .. } => 404,
+                KairosErrorKind::SessionConcurrent { .. } => 429,
+                KairosErrorKind::SessionCorrupted { .. } => 500,
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => 400,
