@@ -21,6 +21,17 @@ pub struct ChatRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
+    /// Gadgetron-side conversation identifier. When `Some`,
+    /// `KairosProvider` routes the request through `SessionStore` and
+    /// spawns Claude Code with `--session-id` (first turn) or
+    /// `--resume` (subsequent turns). When `None`, falls back to
+    /// stateless history re-ship. Max 256 bytes, no NUL/CR/LF.
+    /// Populated by the gateway from either the
+    /// `X-Gadgetron-Conversation-Id` header or an optional
+    /// `metadata.conversation_id` body field. See
+    /// `02-kairos-agent.md §5.2.3`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

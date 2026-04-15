@@ -253,6 +253,7 @@ mod tests {
             tools: None,
             stream: false,
             stop: None,
+            conversation_id: None,
         }
     }
 

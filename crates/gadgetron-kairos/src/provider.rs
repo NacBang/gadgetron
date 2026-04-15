@@ -231,6 +231,7 @@ mod tests {
             tools: None,
             stream: true,
             stop: None,
+            conversation_id: None,
         }
     }
 
