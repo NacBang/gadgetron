@@ -514,4 +514,44 @@ mod tests {
         let envs = envs_of(&cmd);
         assert!(!envs.iter().any(|(k, _)| k == "SECRET_KEY_SHOULD_NOT_LEAK"));
     }
+
+    // ---- SEC-B3 witness test ----
+
+    #[test]
+    fn spawned_command_has_kill_on_drop() {
+        // Source-level regression lock per ADR-P2A-06 Implementation status
+        // addendum item 4. The module doc comment at lines 45-47 references
+        // this test by name; the pre-existing `cmd.kill_on_drop(true)` call
+        // at the end of `build_claude_command_with_env` is load-bearing for
+        // SEC-B3: without it, the subprocess outlives `Child` drop on client
+        // disconnect, orphaning `~/.claude/` session state and leaking a slot
+        // in `max_concurrent_subprocesses`.
+        //
+        // Why source-level and not behavioral: `tokio::process::Command` does
+        // not expose a public getter for the kill_on_drop setting, and the
+        // behavioral alternative (spawn a long-running subprocess, drop, then
+        // probe `kill -0 $pid`) is flaky under CI load and platform-specific.
+        // A source-level assertion matches the regression we actually care
+        // about — someone deleting the line during refactor — and is
+        // deterministic + fast.
+        //
+        // The needle `"cmd.kill_on_drop(true);"` (with trailing semicolon)
+        // is specific enough to avoid matching doc comments — Rustdoc inline
+        // code samples typically omit the semicolon — while still matching
+        // the exact production statement at build_claude_command.
+        //
+        // Split-literal construction prevents the needle itself from matching
+        // this test body via `include_str!` recursion: the two string
+        // fragments below never appear concatenated anywhere else in this
+        // file.
+        const SOURCE: &str = include_str!("spawn.rs");
+        let needle = ["cmd.kill_on_d", "rop(true);"].concat();
+        assert!(
+            SOURCE.contains(&needle),
+            "build_claude_command missing the production `kill_on_drop(true)` \
+             call — SEC-B3 regression. The subprocess must be SIGKILLed on \
+             client disconnect; removing this call breaks request cleanup. \
+             See the module doc comment at spawn.rs:36-47."
+        );
+    }
 }
