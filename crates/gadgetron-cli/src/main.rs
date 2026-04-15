@@ -306,6 +306,17 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
         .validate()
         .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
 
+    // Also load the `[agent]` section from the same TOML so the
+    // registry can enforce L3 defense-in-depth (ADR-P2A-06 addendum
+    // item 3). The stdio MCP server is a grandchild process that does
+    // not go through the gateway's `AppConfig::load` path, so we parse
+    // the full AppConfig here and pick out `.agent`. A missing
+    // section is tolerated because `AgentConfig` implements
+    // `#[serde(default)]` at the AppConfig level.
+    let agent_cfg = gadgetron_core::config::AppConfig::load(&config_path.to_string_lossy())
+        .map(|app| app.agent)
+        .unwrap_or_default();
+
     let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
         .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
 
@@ -313,7 +324,10 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     builder
         .register(Arc::new(provider))
         .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
-    let registry = Arc::new(builder.freeze());
+    // Freeze against the operator's [agent] config so `dispatch()` can
+    // enforce L3 defense-in-depth on any tool call that reaches this
+    // stdio server (ADR-P2A-06 Implementation status addendum item 3).
+    let registry = Arc::new(builder.freeze(&agent_cfg));
 
     // Drive the stdio loop until EOF.
     gadgetron_kairos::serve_stdio(registry)
@@ -1011,13 +1025,15 @@ fn register_kairos_if_configured(
         }
     };
 
-    // Freeze the registry with the single P2A provider.
+    // Freeze the registry with the single P2A provider. The `[agent]`
+    // config is captured at freeze time so `dispatch()` can enforce L3
+    // defense-in-depth (ADR-P2A-06 Implementation status addendum item 3).
     let mut builder = gadgetron_kairos::McpToolRegistryBuilder::new();
     if let Err(e) = builder.register(Arc::new(provider)) {
         tracing::error!(error = ?e, "kairos: registry.register failed; skipping");
         return;
     }
-    let registry = Arc::new(builder.freeze());
+    let registry = Arc::new(builder.freeze(&app_config.agent));
 
     // Register KairosProvider under the "kairos" model id in the
     // router map. The existing provider map already holds concrete

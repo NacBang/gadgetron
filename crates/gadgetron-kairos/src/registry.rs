@@ -24,7 +24,7 @@
 //!   `registry.register(...)` because that method doesn't exist on the
 //!   frozen type.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gadgetron_core::agent::config::{AgentConfig, ToolMode};
@@ -73,12 +73,23 @@ impl McpToolRegistryBuilder {
     /// Builds the `by_tool_name` HashMap from every provider's schemas
     /// and the flattened `all_schemas` Vec used by `build_allowed_tools`.
     ///
+    /// The `cfg` argument is captured at freeze time to precompute the
+    /// `allowed_names` set used by `dispatch()` for L3 defense-in-depth
+    /// (per `04-mcp-tool-registry.md §6 L3` and ADR-P2A-06 Implementation
+    /// status addendum item 3). A caller that bypasses
+    /// `build_allowed_tools` — for example a direct `gadgetron mcp serve`
+    /// consumer — cannot reach a `Never`/`Ask`-mode tool because
+    /// `dispatch()` checks the precomputed set before routing to the
+    /// provider. The registry becomes stale if `cfg` changes at runtime;
+    /// this is acceptable in P2A (no hot-reload), and P2B's approval
+    /// flow will thread a live `Arc<AgentConfig>` through the registry.
+    ///
     /// If two providers register tools with the same namespaced name,
     /// the later-registered one wins in the dispatch map — but the
     /// `all_schemas` vec retains both entries so operators see the
     /// duplicate in `/v1/tools` (future P2B endpoint). The test
     /// `duplicate_tool_name_last_wins_in_dispatch` locks this in.
-    pub fn freeze(self) -> McpToolRegistry {
+    pub fn freeze(self, cfg: &AgentConfig) -> McpToolRegistry {
         let mut by_tool_name: HashMap<String, Arc<dyn McpToolProvider>> = HashMap::new();
         let mut all_schemas: Vec<ToolSchema> = Vec::new();
         for provider in self.providers.into_iter() {
@@ -87,9 +98,20 @@ impl McpToolRegistryBuilder {
                 all_schemas.push(schema);
             }
         }
+        // Precompute the allowed-names set. A tool is in the set iff
+        // `tool_is_enabled(schema, cfg)` — same predicate as
+        // `build_allowed_tools`, so the L2 (Claude Code argv filter)
+        // and L3 (dispatch re-check) gates share a single source of
+        // truth for "what is operator-allowed".
+        let allowed_names: HashSet<String> = all_schemas
+            .iter()
+            .filter(|schema| tool_is_enabled(schema, cfg))
+            .map(|schema| schema.name.clone())
+            .collect();
         McpToolRegistry {
             by_tool_name,
             all_schemas: Arc::from(all_schemas.into_boxed_slice()),
+            allowed_names: Arc::new(allowed_names),
         }
     }
 }
@@ -105,6 +127,12 @@ impl Default for McpToolRegistryBuilder {
 pub struct McpToolRegistry {
     by_tool_name: HashMap<String, Arc<dyn McpToolProvider>>,
     all_schemas: Arc<[ToolSchema]>,
+    /// Precomputed set of tool names whose tier × mode resolves to
+    /// "operator-allowed" under the config passed to `freeze()`. Used
+    /// by `dispatch()` for L3 defense-in-depth. Tools NOT in this set
+    /// are rejected with `McpError::Denied` before the provider is
+    /// invoked.
+    allowed_names: Arc<HashSet<String>>,
 }
 
 impl McpToolRegistry {
@@ -154,7 +182,35 @@ impl McpToolRegistry {
         out
     }
 
+    /// Number of distinct tool names that survived the operator-config
+    /// gate at freeze time. Tests + metrics use this to introspect the
+    /// L3 allowed-set without exposing the internal `HashSet`.
+    pub fn allowed_names_len(&self) -> usize {
+        self.allowed_names.len()
+    }
+
+    /// True if the tool name is operator-allowed under the config
+    /// passed to `freeze()`. Used by tests + the L3 gate in `dispatch`.
+    pub fn is_tool_allowed(&self, name: &str) -> bool {
+        self.allowed_names.contains(name)
+    }
+
     /// Dispatch a tool call to the provider that owns it.
+    ///
+    /// **L3 gate (defense-in-depth)**: per `04-mcp-tool-registry.md §6 L3`
+    /// and ADR-P2A-06 Implementation status addendum item 3, this method
+    /// re-checks the operator config even though `build_allowed_tools`
+    /// already filtered the names Claude Code sees in `--allowed-tools`.
+    /// A caller that bypasses that flag — for example a direct
+    /// `gadgetron mcp serve` stdio consumer, or a Claude Code
+    /// `--dangerously-skip-permissions` bypass — cannot reach a
+    /// `Never`/`Ask`-mode tool because the precomputed `allowed_names`
+    /// set is consulted BEFORE the provider is invoked.
+    ///
+    /// Error ordering matters: if the tool is both unknown AND not
+    /// allowed, the caller receives `UnknownTool` first so the denial
+    /// reason does not leak the existence of a disabled tool to a
+    /// probing caller.
     ///
     /// The returned `Result` is the raw MCP surface; callers that need
     /// an HTTP response use `GadgetronError::from(err)` via the
@@ -165,6 +221,19 @@ impl McpToolRegistry {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, McpError> {
+        // L3 gate: reject disabled tools before provider lookup.
+        if !self.allowed_names.contains(name) {
+            // Preserve UnknownTool semantics: if the tool is not
+            // registered at all, emit UnknownTool so the existing
+            // `dispatch_unknown_tool_returns_unknown_tool_error` test
+            // (and callers that rely on the distinction) still pass.
+            if !self.by_tool_name.contains_key(name) {
+                return Err(McpError::UnknownTool(name.to_string()));
+            }
+            return Err(McpError::Denied {
+                reason: format!("tool '{name}' disabled by operator config"),
+            });
+        }
         let provider = self
             .by_tool_name
             .get(name)
@@ -296,6 +365,15 @@ mod tests {
 
     // ---- register + freeze ----
 
+    /// Shared default-config helper for tests that don't care about
+    /// which tools are allowed by the L3 gate — they just need a valid
+    /// `AgentConfig` to pass to `freeze()`. Relies on
+    /// `AgentConfig::default()` having `wiki_write = Auto` (per
+    /// `01-knowledge-layer.md` tests/registry.rs:76).
+    fn default_cfg() -> AgentConfig {
+        AgentConfig::default()
+    }
+
     #[test]
     fn register_then_freeze_produces_dispatch_map() {
         let mut builder = McpToolRegistryBuilder::new();
@@ -307,14 +385,14 @@ mod tests {
         builder.register(provider).expect("register");
         assert_eq!(builder.provider_count(), 1);
 
-        let registry = builder.freeze();
+        let registry = builder.freeze(&default_cfg());
         assert_eq!(registry.len(), 2);
         assert_eq!(registry.all_schemas().len(), 2);
     }
 
     #[test]
     fn register_empty_builder_produces_empty_registry() {
-        let registry = McpToolRegistryBuilder::new().freeze();
+        let registry = McpToolRegistryBuilder::new().freeze(&default_cfg());
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
     }
@@ -329,7 +407,7 @@ mod tests {
         );
         builder.register(provider).expect("register ok (skipped)");
         assert_eq!(builder.provider_count(), 0);
-        assert!(builder.freeze().is_empty());
+        assert!(builder.freeze(&default_cfg()).is_empty());
     }
 
     #[test]
@@ -359,7 +437,7 @@ mod tests {
                 TestProvider::new("knowledge").with_tool("wiki.read", Tier::Read),
             ))
             .unwrap();
-        let registry = builder.freeze();
+        let registry = builder.freeze(&default_cfg());
         let result = registry
             .dispatch("wiki.read", json!({"name": "home"}))
             .await
@@ -369,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_unknown_tool_error() {
-        let registry = McpToolRegistryBuilder::new().freeze();
+        let registry = McpToolRegistryBuilder::new().freeze(&default_cfg());
         let err = registry
             .dispatch("ghost.tool", json!({}))
             .await
@@ -394,10 +472,108 @@ mod tests {
                 TestProvider::new("custom").with_tool("wiki.read", Tier::Read),
             ))
             .unwrap();
-        let registry = builder.freeze();
+        let registry = builder.freeze(&default_cfg());
         // Dispatch map has 1 unique name; flat schema vec has 2.
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.all_schemas().len(), 2);
+    }
+
+    // ---- L3 defense-in-depth (ADR-P2A-06 addendum item 3) ----
+
+    #[tokio::test]
+    async fn mcp_server_rejects_never_mode_tool_even_when_dispatched_directly() {
+        // A provider registers `wiki.write` as a Tier::Write tool whose
+        // `call()` returns `Ok` unconditionally. The registry is frozen
+        // against an `AgentConfig` where `wiki_write = Never`. A direct
+        // `dispatch("wiki.write")` MUST return `McpError::Denied` — the
+        // L3 gate rejects the call before the provider's `call` runs.
+        //
+        // Without the L3 gate the provider's `Ok` return leaks through,
+        // and a caller that bypassed `build_allowed_tools` (e.g. a
+        // direct `gadgetron mcp serve` stdio consumer or a Claude Code
+        // `--dangerously-skip-permissions` abuse) could reach a
+        // Never-mode tool. Regression-locked here at the dispatch
+        // layer; mcp_server.rs `handle_request` routes through
+        // `registry.dispatch` so the L3 check also covers stdio
+        // requests without a separate integration test.
+        let mut builder = McpToolRegistryBuilder::new();
+        builder
+            .register(Arc::new(
+                TestProvider::new("knowledge").with_tool("wiki.write", Tier::Write),
+            ))
+            .unwrap();
+        let cfg = cfg_with_overrides(
+            ToolMode::Auto,  // default_mode (irrelevant for wiki.*)
+            ToolMode::Never, // wiki_write — the one under test
+            ToolMode::Auto,  // infra_write
+            false,
+        );
+        let registry = builder.freeze(&cfg);
+        // The tool exists in the dispatch map …
+        assert_eq!(registry.len(), 1);
+        // … but is NOT in allowed_names because of Never-mode.
+        assert!(!registry.is_tool_allowed("wiki.write"));
+        // … and dispatch rejects it with Denied (not UnknownTool).
+        let err = registry
+            .dispatch("wiki.write", json!({"name": "home", "content": "hi"}))
+            .await
+            .expect_err("dispatch must reject Never-mode tool");
+        match err {
+            McpError::Denied { reason } => {
+                assert!(
+                    reason.contains("wiki.write"),
+                    "denial reason should mention the tool name: {reason}"
+                );
+                assert!(
+                    reason.contains("operator config"),
+                    "denial reason should cite operator config: {reason}"
+                );
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_takes_precedence_over_denied() {
+        // If a tool is BOTH unknown (not in by_tool_name) AND not in
+        // allowed_names, the caller must see UnknownTool — not Denied.
+        // This prevents a probing caller from learning whether a
+        // specific disabled tool exists by comparing error variants.
+        let registry = McpToolRegistryBuilder::new().freeze(&default_cfg());
+        let err = registry
+            .dispatch("ghost.never.seen", json!({}))
+            .await
+            .expect_err("must error");
+        assert!(
+            matches!(err, McpError::UnknownTool(_)),
+            "unknown tool must beat Denied: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_ask_mode_tool_is_also_denied() {
+        // ADR-P2A-06: Ask === Never in P2A. The L2 build_allowed_tools
+        // filter already excludes Ask; the L3 gate must match so the
+        // two sources of truth can never drift.
+        let mut builder = McpToolRegistryBuilder::new();
+        builder
+            .register(Arc::new(
+                TestProvider::new("knowledge").with_tool("wiki.write", Tier::Write),
+            ))
+            .unwrap();
+        let cfg = cfg_with_overrides(
+            ToolMode::Auto,
+            ToolMode::Ask, // wiki_write in Ask mode
+            ToolMode::Auto,
+            false,
+        );
+        let registry = builder.freeze(&cfg);
+        assert!(!registry.is_tool_allowed("wiki.write"));
+        let err = registry
+            .dispatch("wiki.write", json!({}))
+            .await
+            .expect_err("Ask must be denied");
+        assert!(matches!(err, McpError::Denied { .. }));
     }
 
     // ---- build_allowed_tools ----
@@ -416,7 +592,11 @@ mod tests {
         cfg
     }
 
-    fn registry_with_full_set() -> McpToolRegistry {
+    /// Helper that builds a full-spectrum registry. The `cfg` argument
+    /// controls the L3 gate inside `freeze`. Tests that care about
+    /// `all_schemas` (not dispatch) pass a permissive `AgentConfig`
+    /// via `cfg_with_overrides` or `default_cfg`.
+    fn registry_with_full_set_cfg(cfg: &AgentConfig) -> McpToolRegistry {
         let mut builder = McpToolRegistryBuilder::new();
         builder
             .register(Arc::new(
@@ -434,7 +614,19 @@ mod tests {
                     .with_tool("infra.deploy_model", Tier::Write),
             ))
             .unwrap();
-        builder.freeze()
+        builder.freeze(cfg)
+    }
+
+    /// Back-compat helper: freezes with a permissive config that
+    /// enables every Write subcategory. Previously this was the only
+    /// helper because freeze didn't take cfg.
+    fn registry_with_full_set() -> McpToolRegistry {
+        registry_with_full_set_cfg(&cfg_with_overrides(
+            ToolMode::Auto,
+            ToolMode::Auto,
+            ToolMode::Auto,
+            true, // destructive enabled so the T3 filter tests still see wiki.delete
+        ))
     }
 
     #[test]

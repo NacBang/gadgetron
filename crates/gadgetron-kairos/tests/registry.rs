@@ -39,7 +39,9 @@ fn register_knowledge(provider: KnowledgeToolProvider) -> McpToolRegistry {
     builder
         .register(Arc::new(provider))
         .expect("register knowledge provider");
-    builder.freeze()
+    // Default AgentConfig permits wiki.write (Auto); other Write tools
+    // would be filtered by the L3 gate if present.
+    builder.freeze(&AgentConfig::default())
 }
 
 #[test]
