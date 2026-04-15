@@ -61,6 +61,29 @@ impl EnvResolver for FakeEnv {
 // Top-level AgentConfig
 // ---------------------------------------------------------------------------
 
+/// Native Claude Code session mode. Selects how `KairosProvider`
+/// handles `ChatRequest.conversation_id`.
+///
+/// Per ADR-P2A-06 Implementation status addendum item 7 /
+/// `02-kairos-agent.md §5.2.8`:
+/// - `NativeWithFallback` (default) — when `conversation_id` is
+///   present, use `--session-id` / `--resume`; when absent, fall
+///   back to stateless history re-ship. Safe default for P2A.
+/// - `NativeOnly` — require `conversation_id`. Requests without one
+///   are rejected at the gateway with HTTP 400 (enforced in
+///   `gadgetron-gateway`, not here).
+/// - `StatelessOnly` — ignore `conversation_id` and always use the
+///   pre-2026-04-15 history-reship path. Used for regression
+///   testing and escape-hatch rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    #[default]
+    NativeWithFallback,
+    NativeOnly,
+    StatelessOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Which agent binary powers Kairos. P2A: only `"claude"` (Claude Code CLI).
@@ -91,6 +114,34 @@ pub struct AgentConfig {
     /// Tool permission model. 3-tier × 3-mode.
     #[serde(default)]
     pub tools: ToolsConfig,
+
+    /// Native Claude Code session policy. See `SessionMode`.
+    #[serde(default)]
+    pub session_mode: SessionMode,
+
+    /// TTL (seconds) for per-conversation `SessionEntry` records in
+    /// `SessionStore`. Range [60, 7 * 86_400] (V15). Default 86_400
+    /// (24h) — a personal-assistant user closes the chat overnight;
+    /// the next morning a stale session is replaced with a fresh one.
+    #[serde(default = "default_session_ttl_secs")]
+    pub session_ttl_secs: u64,
+
+    /// Max number of entries held by `SessionStore` before LRU
+    /// eviction kicks in. Range [1, 1_000_000] (V16). Default
+    /// 10_000 — safely above a single-user desktop's working set.
+    #[serde(default = "default_session_store_max_entries")]
+    pub session_store_max_entries: usize,
+
+    /// Optional override for the Claude Code project directory
+    /// (`~/.claude/projects/<cwd-hash>/`). When `Some(path)`, every
+    /// `claude -p` invocation is spawned with `current_dir(path)` so
+    /// resume turns can find the session jsonl. When `None`, the
+    /// startup-captured cwd of `gadgetron serve` is used and MUST NOT
+    /// shift mid-process (locked by test `cwd_pin_survives_parent_chdir`).
+    /// V18 validates the path exists, is a directory, and is
+    /// writable by the current effective UID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_store_path: Option<std::path::PathBuf>,
 }
 
 fn default_agent_binary() -> String {
@@ -105,6 +156,12 @@ fn default_request_timeout_secs() -> u64 {
 fn default_max_concurrent_subprocesses() -> usize {
     4
 }
+fn default_session_ttl_secs() -> u64 {
+    86_400
+}
+fn default_session_store_max_entries() -> usize {
+    10_000
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -115,6 +172,10 @@ impl Default for AgentConfig {
             max_concurrent_subprocesses: default_max_concurrent_subprocesses(),
             brain: BrainConfig::default(),
             tools: ToolsConfig::default(),
+            session_mode: SessionMode::default(),
+            session_ttl_secs: default_session_ttl_secs(),
+            session_store_max_entries: default_session_store_max_entries(),
+            session_store_path: None,
         }
     }
 }
@@ -155,6 +216,49 @@ impl AgentConfig {
         }
         self.tools.validate()?;
         self.brain.validate_with_env(providers, env)?;
+
+        // V15: session_ttl_secs ∈ [60, 7 * 86_400]
+        if !(60..=7 * 86_400).contains(&self.session_ttl_secs) {
+            return Err(GadgetronError::Config(format!(
+                "agent.session_ttl_secs must be in [60, {}]; got {}",
+                7 * 86_400,
+                self.session_ttl_secs
+            )));
+        }
+        // V16: session_store_max_entries ∈ [1, 1_000_000]
+        if !(1..=1_000_000).contains(&self.session_store_max_entries) {
+            return Err(GadgetronError::Config(format!(
+                "agent.session_store_max_entries must be in [1, 1_000_000]; got {}",
+                self.session_store_max_entries
+            )));
+        }
+        // V18: session_store_path must exist + be a writable directory
+        //      (only when Some). V17 — "native_only requires
+        //      conversation_id" — is enforced at the gateway, not here.
+        if let Some(path) = self.session_store_path.as_ref() {
+            let meta = std::fs::metadata(path).map_err(|e| {
+                GadgetronError::Config(format!(
+                    "agent.session_store_path {path:?} stat failed: {e}"
+                ))
+            })?;
+            if !meta.is_dir() {
+                return Err(GadgetronError::Config(format!(
+                    "agent.session_store_path {path:?} is not a directory"
+                )));
+            }
+            // Writable probe — create + delete a sentinel file.
+            let probe = path.join(".gadgetron_probe");
+            match std::fs::File::create(&probe) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&probe);
+                }
+                Err(e) => {
+                    return Err(GadgetronError::Config(format!(
+                        "agent.session_store_path {path:?} is not writable: {e}"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
