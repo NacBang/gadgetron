@@ -106,19 +106,75 @@ pub enum SpawnError {
     GadgetronLocalNotFunctional,
 }
 
-/// Build the `claude -p` command. The caller then adds stdin and spawns.
+/// Native Claude Code session-mode selector used by
+/// `build_claude_command` to decide whether to emit the
+/// `--session-id <uuid>` (first turn), `--resume <uuid>` (subsequent
+/// turns), or neither flag (stateless fallback).
 ///
-/// Uses `StdEnv` for env lookups. Tests call `build_claude_command_with_env`
-/// directly with a `FakeEnv`.
+/// Spec: `02-kairos-agent.md §5.2.7` + ADR-P2A-06 Implementation
+/// status addendum item 7.
+#[derive(Debug, Clone, Copy)]
+pub enum ClaudeSessionMode {
+    /// No `--session-id` / `--resume` flag. History is flattened to
+    /// stdin via `feed_stdin`'s legacy path. Pre-A5 behavior.
+    Stateless,
+    /// Insert `--session-id <uuid>`. Claude Code creates a new
+    /// session keyed by the UUID.
+    First { session_uuid: uuid::Uuid },
+    /// Insert `--resume <uuid>`. Claude Code continues the existing
+    /// session keyed by the UUID.
+    Resume { session_uuid: uuid::Uuid },
+}
+
+/// Build the `claude -p` command with the pre-A5 stateless session
+/// mode. Back-compat shim that forwards to
+/// `build_claude_command_with_session` — existing callers that do
+/// not care about native session continuity keep working with one
+/// fewer parameter.
 pub fn build_claude_command(
     config: &AgentConfig,
     mcp_config_path: &Path,
     allowed_tools: &[String],
 ) -> Result<Command, SpawnError> {
-    build_claude_command_with_env(config, mcp_config_path, allowed_tools, &StdEnv)
+    build_claude_command_with_session(
+        config,
+        mcp_config_path,
+        allowed_tools,
+        ClaudeSessionMode::Stateless,
+        &StdEnv,
+    )
 }
 
-/// Env-injectable variant of `build_claude_command` for tests.
+/// Build the `claude -p` command with an explicit session mode.
+/// Production callers (`session::drive`) use this directly to pass
+/// `ClaudeSessionMode::{First, Resume}`. `--allowed-tools` and all
+/// other flags remain unchanged — tool-scope is re-enforced on every
+/// invocation (empirically verified 2026-04-15, see `02 §5.2.2`).
+pub fn build_claude_command_with_session(
+    config: &AgentConfig,
+    mcp_config_path: &Path,
+    allowed_tools: &[String],
+    session_mode: ClaudeSessionMode,
+    env: &dyn EnvResolver,
+) -> Result<Command, SpawnError> {
+    let mut cmd = build_claude_command_with_env(config, mcp_config_path, allowed_tools, env)?;
+    match session_mode {
+        ClaudeSessionMode::Stateless => {
+            // no extra flag
+        }
+        ClaudeSessionMode::First { session_uuid } => {
+            cmd.arg("--session-id").arg(session_uuid.to_string());
+        }
+        ClaudeSessionMode::Resume { session_uuid } => {
+            cmd.arg("--resume").arg(session_uuid.to_string());
+        }
+    }
+    Ok(cmd)
+}
+
+/// Env-injectable variant of `build_claude_command` for tests. Does
+/// NOT add `--session-id` / `--resume`; callers that need native
+/// session continuity go through `build_claude_command_with_session`.
 pub fn build_claude_command_with_env(
     config: &AgentConfig,
     mcp_config_path: &Path,
@@ -198,6 +254,17 @@ pub fn build_claude_command_with_env(
     let allowed = format_allowed_tools(allowed_tools);
     if !allowed.is_empty() {
         cmd.arg("--allowed-tools").arg(allowed);
+    }
+
+    // `current_dir` pin for native-session continuity (ADR-P2A-06
+    // addendum item 7 / §5.2.2 load-bearing): Claude Code derives the
+    // session jsonl directory from the subprocess's cwd, so resumes
+    // from a different cwd silently miss the session file. When the
+    // operator has explicitly set `agent.session_store_path`, spawn
+    // every `claude -p` from there; otherwise inherit the parent's
+    // cwd (captured once at `KairosProvider` construction in PR A7).
+    if let Some(session_root) = config.session_store_path.as_ref() {
+        cmd.current_dir(session_root);
     }
 
     // SEC-B3 + M8 — SIGTERM the child when the Stream future drops.
@@ -552,6 +619,118 @@ mod tests {
              call — SEC-B3 regression. The subprocess must be SIGKILLed on \
              client disconnect; removing this call breaks request cleanup. \
              See the module doc comment at spawn.rs:36-47."
+        );
+    }
+
+    // ---- A6: native-session flag + cwd pin (ADR-P2A-06 addendum
+    // ----      item 7, design §5.2.7 + §5.2.2 pinning contract)
+
+    #[test]
+    fn build_with_session_first_inserts_session_id_flag() {
+        let env = FakeEnv::new().with("HOME", "/h");
+        let uuid = uuid::Uuid::new_v4();
+        let cmd = build_claude_command_with_session(
+            &default_cfg(),
+            &mcp_path(),
+            &[],
+            ClaudeSessionMode::First { session_uuid: uuid },
+            &env,
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let pos = args.iter().position(|a| a == "--session-id");
+        let pos = pos.expect("--session-id must appear under First");
+        assert_eq!(args[pos + 1], uuid.to_string());
+        assert!(
+            !args.iter().any(|a| a == "--resume"),
+            "--resume must NOT appear under First"
+        );
+    }
+
+    #[test]
+    fn build_with_session_resume_inserts_resume_flag() {
+        let env = FakeEnv::new().with("HOME", "/h");
+        let uuid = uuid::Uuid::new_v4();
+        let cmd = build_claude_command_with_session(
+            &default_cfg(),
+            &mcp_path(),
+            &[],
+            ClaudeSessionMode::Resume { session_uuid: uuid },
+            &env,
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let pos = args.iter().position(|a| a == "--resume");
+        let pos = pos.expect("--resume must appear under Resume");
+        assert_eq!(args[pos + 1], uuid.to_string());
+        assert!(
+            !args.iter().any(|a| a == "--session-id"),
+            "--session-id must NOT appear under Resume"
+        );
+    }
+
+    #[test]
+    fn build_with_session_stateless_inserts_neither_flag() {
+        let env = FakeEnv::new().with("HOME", "/h");
+        let cmd = build_claude_command_with_session(
+            &default_cfg(),
+            &mcp_path(),
+            &[],
+            ClaudeSessionMode::Stateless,
+            &env,
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        assert!(!args.iter().any(|a| a == "--session-id"));
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn spawn_uses_consistent_cwd_across_first_and_resume() {
+        // Item 14 from §5.2.10. When operators set
+        // `agent.session_store_path = Some(/tmp/test-session-root)`,
+        // both the First and Resume invocations MUST spawn from the
+        // exact same cwd so Claude Code's `<cwd-hash>` lookup lands in
+        // the same `~/.claude/projects/...` directory.
+        //
+        // Source-level witness: the only line in spawn.rs that calls
+        // `cmd.current_dir(session_root)` is the shared build path —
+        // both First and Resume go through the same code, so they
+        // inherit the same cwd by construction. Lock it with a
+        // source scan so a future refactor that splits the paths
+        // fails loudly.
+        const SOURCE: &str = include_str!("spawn.rs");
+        // Split literal to avoid matching the test body.
+        let needle = ["cmd.curr", "ent_dir(session_root)"].concat();
+        assert!(
+            SOURCE.contains(&needle),
+            "spawn.rs must pin `cmd.current_dir(session_root)` in the \
+             shared `build_claude_command_with_env` path so First and \
+             Resume invocations inherit the same cwd. See §5.2.2 cwd \
+             pinning contract."
+        );
+    }
+
+    #[test]
+    fn cwd_pin_survives_parent_chdir() {
+        // Item 15 from §5.2.10. The cwd pin must NOT re-read the
+        // parent process's current directory on every build — that
+        // would let a mid-process set-current-dir call shift active
+        // sessions. Since `config.session_store_path` is the ONLY
+        // cwd source in the spawn module, this test is a source-level
+        // regression lock that the spawn module never reaches for the
+        // process cwd.
+        //
+        // Split-literal needle so the panic message (which quotes the
+        // forbidden symbol) cannot self-match via include_str! recursion.
+        const SOURCE: &str = include_str!("spawn.rs");
+        let forbidden = ["std::env::curr", "ent_dir"].concat();
+        assert!(
+            !SOURCE.contains(&forbidden),
+            "build_claude_command must not read the process's current \
+             directory at spawn time — session cwd pinning lives on \
+             `AgentConfig.session_store_path` or on the startup-captured \
+             cwd held by KairosProvider (PR A7)."
         );
     }
 }
