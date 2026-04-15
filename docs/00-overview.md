@@ -1,6 +1,6 @@
 # Gadgetron — 전체 설계 개요
 
-> **버전**: 0.1.0-phase1 (Phase 1 tagged) → Phase 2 진행 중
+> **버전**: `0.2.0` (Phase 2 진행 중) · 이전 tag `v0.1.0-phase1` · 버저닝 정책 `docs/process/06-versioning-policy.md`
 > **에디션**: 2021
 > **라이선스**: MIT
 > **최소 Rust**: 1.80
@@ -34,7 +34,7 @@
 3. **GPU 자원 최적화** — NUMA 토폴로지, NVLink/NVSwitch 인터커넥트, 열/전력 예산을 고려한 스케줄링 (하방)
 4. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 하방 + 상방 전체 구동, 마이크로서비스 난비 지양
 5. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원 (하방)
-6. **오픈소스 최대 활용** — Claude Code / OpenWebUI / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화 (상방)
+6. **오픈소스 최대 활용** — Claude Code / [assistant-ui](https://github.com/assistant-ui/assistant-ui) / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화 (상방). OpenWebUI 는 2026-04-14 D-20260414-02 로 drop — 2025-04 라이선스 변경 + 단일 바이너리 원칙 충돌.
 7. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (kairos는 Unix 전용으로 시작)
 
 ### 1.3 경쟁 차별화
@@ -818,7 +818,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 | 서브-스프린트 | 기간 | 증명 목표 |
 |---|---|---|
 | **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
-| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + OpenWebUI. Acceptance: 사용자가 OpenWebUI 모델 드롭다운에서 `kairos` 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 |
+| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `kairos` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
 | **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
 | **P2C — Multi + Storage** | 4주 | `KairosManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
 | **P2D — Media & Polish** | 4주 | `whisper.cpp` 오디오 STT + CLIP ONNX 이미지 캡션 + 비디오 프레임 샘플링 + 운영 배포 docs/manual |

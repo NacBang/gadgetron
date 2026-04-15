@@ -64,18 +64,18 @@ Gadgetron Kairos init — bootstrapping personal assistant workspace
 
 Next steps:
 
-  1. (Optional) Start OpenWebUI + SearXNG via Docker compose:
-     gadgetron kairos init --docker > docker-compose.yml
-     docker compose up -d
+  1. (Optional) Start a local SearXNG instance for web_search:
+     Run SearXNG via Docker or native install, then set
+     [knowledge.search].searxng_url in gadgetron.toml.
 
-  2. Create an API key for OpenWebUI:
+  2. Create a Gadgetron API key:
      gadgetron key create --scope open_ai_compat
 
-  3. Start Gadgetron:
+  3. Start Gadgetron (single binary — serves /v1 API and /web UI):
      gadgetron serve --config ~/.gadgetron/gadgetron.toml
 
-  4. Browse to http://localhost:3000, paste the API key in OpenWebUI
-     Settings > Connections > OpenAI API, pick model "kairos", start chatting.
+  4. Browse to http://localhost:8080/web (gadgetron-web — assistant-ui)
+     Open Settings, paste the API key, pick model "kairos", start chatting.
 
 Done.
 ```
@@ -114,7 +114,19 @@ Fix: choose a different path with `gadgetron kairos init --wiki-path <PATH>`,
 or ensure the target directory is writable by the current user.
 ```
 
-**`--docker` flag output**: prints the `docker-compose.yml` content from `00-overview.md` Appendix C to stdout (no banner, no "Next steps" — just the YAML so the user can pipe it to a file). No file is written by `--docker` itself.
+**`--docker` flag**: **Deferred to P2B per D-20260414-02 + ADR-P2A-04 (DX-W-B3 resolution Option C)**. In P2A, `kairos init --docker` prints the following warning to stderr, exits 0, and does not write any file:
+
+```
+[WARN] --docker is not supported in P2A.
+       OpenWebUI sibling process was removed (D-20260414-02); the Web UI is now
+       embedded in the gadgetron binary and served at http://localhost:8080/web.
+       SearXNG (if you want web_search) should be started manually:
+           docker run -d --rm --name searxng -p 127.0.0.1:8888:8080 searxng/searxng
+       Then set [knowledge.search].searxng_url in ~/.gadgetron/gadgetron.toml.
+       --docker will be re-introduced in P2B as SearXNG-only mode if needed.
+```
+
+Exit code is **0** (graceful deprecation, not an error). A next-session coder writing a test for `kairos init --docker` asserts the exact stderr content above and exit code 0.
 
 **`--wiki-path <PATH>` flag**
 

@@ -158,7 +158,7 @@ bind = "0.0.0.0:8080"
 request_timeout_ms = 30000
 ```
 
-`server.api_key` is parsed by the config loader but is not used by the server in Sprint 1-3. Leave it absent.
+`server.api_key` is still parsed by the config loader but is not currently used by the gateway runtime. Leave it absent.
 
 ---
 
@@ -188,9 +188,7 @@ default_strategy = {type = "round_robin"}
 
 Each key under `[providers]` is a provider name you choose (used in routing and model listing). The `type` field selects the provider adapter.
 
-**Supported provider types as of Sprint 4:** `openai`, `anthropic`, `ollama`, `vllm`, `sglang`
-
-**Not yet supported (will fail at startup):** `gemini`
+**Supported provider types on trunk:** `openai`, `anthropic`, `gemini`, `ollama`, `vllm`, `sglang`
 
 #### OpenAI
 
@@ -274,6 +272,82 @@ models = ["glm-4-9b-chat"]
 ```
 
 SGLang does not require an API key by default. For reasoning models such as GLM-5.1, Gadgetron forwards the `reasoning_content` field in the response if the model returns it. See [api-reference.md](api-reference.md) for the field description.
+
+---
+
+### `[web]`
+
+Controls the embedded Web UI served under `/web/*`.
+
+```toml
+[web]
+enabled = true
+api_base_path = "/v1"
+```
+
+- `enabled`: `false`면 `/web/*` subtree 자체를 mount하지 않습니다.
+- `api_base_path`: 브라우저가 호출할 API prefix. 기본값은 `/v1`이며, reverse proxy가 경로를 재작성할 때만 변경하십시오.
+
+---
+
+### `[agent]`
+
+Kairos subprocess runtime의 상위 설정입니다.
+
+```toml
+[agent]
+binary = "claude"
+claude_code_min_version = "2.1.104"
+request_timeout_secs = 300
+max_concurrent_subprocesses = 4
+```
+
+- `binary`: Claude Code CLI 경로 또는 basename
+- `claude_code_min_version`: 허용되는 최소 Claude Code 버전
+- `request_timeout_secs`: 단일 Kairos 요청 제한 시간
+- `max_concurrent_subprocesses`: 동시 Claude Code subprocess 상한
+
+### `[agent.brain]`
+
+```toml
+[agent.brain]
+mode = "claude_max"
+```
+
+지원 모드:
+- `claude_max`
+- `external_anthropic`
+- `external_proxy`
+
+`gadgetron_local`은 설정 타입에는 남아 있지만 Phase 2A에서는 동작하지 않으며 startup error입니다.
+
+---
+
+### `[knowledge]`
+
+이 섹션이 있어야 `gadgetron serve`가 `kairos` 모델을 등록합니다. 현재 `gadgetron init`은 이 블록을 자동으로 생성하지 않습니다.
+
+```toml
+[knowledge]
+wiki_path = "./.gadgetron/wiki"
+wiki_autocommit = true
+wiki_max_page_bytes = 1048576
+```
+
+- `wiki_path`: 위키 저장소 루트. 부모 디렉터리는 미리 존재해야 합니다
+- `wiki_autocommit`: 쓰기마다 자동 git commit 수행 여부
+- `wiki_max_page_bytes`: 페이지 최대 크기
+
+### `[knowledge.search]`
+
+```toml
+[knowledge.search]
+searxng_url = "http://127.0.0.1:8888"
+timeout_secs = 10
+max_results = 10
+```
+
+이 블록이 없으면 `web.search` MCP 도구는 노출되지 않습니다.
 
 ---
 

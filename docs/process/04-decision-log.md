@@ -757,4 +757,390 @@ pub(crate) fn sqlx_to_gadgetron(e: sqlx::Error) -> GadgetronError {
 
 ---
 
+## D-20260414-01: Phase-aligned 워크스페이스 버저닝 정책
+
+**날짜**: 2026-04-14
+**유형**: Process / Release (사용자 직접 지시)
+**상태**: 🟢 승인
+
+### 배경
+
+프로젝트는 `0.1.0` 워크스페이스 버전으로 시작했으나 명시적 버저닝 정책이 없었다. Phase 1 은 완료되어 `v0.1.0-phase1` 태그가 존재하고 Phase 2 가 진행 중인데, 어느 시점에 어떤 버전으로 bump 할지 규칙이 없어 혼선이 발생한다. `CHANGELOG.md`, `VERSION` 파일, 릴리스 태그 규칙도 모두 공백 상태였다.
+
+### 결정
+
+**Phase N 동안 워크스페이스 버전은 `0.N.X` 라인을 유지한다.** 정식 출시(public launch) 직전에만 `1.0.0` 으로 bump 한다.
+
+- Phase 1 = `0.1.X` (완료, tag `v0.1.0-phase1`)
+- Phase 2 = `0.2.X` (현재)
+- Phase 3 = `0.3.X` (예정)
+- … = `0.N.X`
+- 정식 출시 = `1.0.0`
+
+모든 크레이트는 `version.workspace = true` 로 lockstep 버저닝을 유지한다. 0.x 구간에서는 SemVer 호환성 약속을 하지 않으며, phase 전환 시 breaking change 가 허용된다.
+
+### 근거
+
+- 사용자 지시: "phase1 = 0.1.X, phase2 = 0.2.X, ... 으로 관리하고 진짜 출시전에 1.0.0으로 명시합시다."
+- 크레이트 경계(D-12) 가 고정되어 있지만 내부 타입 흐름이 밀접 → 독립 버저닝의 이득 없음
+- Phase 자체가 이미 사실상의 major milestone 역할을 하고 있어 phase 번호와 minor version 을 일치시키면 릴리스 계획·태그·커밋·문서의 버전 참조가 모두 단일 축으로 정렬됨
+
+### 즉시 적용 변경
+
+1. `Cargo.toml:17` — `version = "0.1.0"` → `version = "0.2.0"` (Phase 2 진행 중)
+2. `docs/00-overview.md:3` — 버전 헤더 갱신 + 정책 문서 링크
+3. `docs/process/06-versioning-policy.md` — 정책 문서 신설
+
+### 영향 받는 문서/크레이트
+
+- `Cargo.toml` (workspace version)
+- `docs/00-overview.md`
+- `docs/process/06-versioning-policy.md` (신설)
+- 10개 워크스페이스 크레이트 (version.workspace 상속으로 자동 반영)
+
+---
+
+## D-20260414-02: OpenWebUI 제거 → `gadgetron-web` 크레이트 자체 빌드 (assistant-ui 기반)
+
+**날짜**: 2026-04-14
+**유형**: Architecture / Phase 2A scope change (사용자 직접 지시)
+**상태**: 🟢 승인
+**Supersedes (부분)**: `docs/design/phase2/00-overview.md §7` "Chat UI comparison (OpenWebUI chosen)", 00-overview.md Q1 (2026-04-13)
+**블록 해제 조건**: `docs/design/phase2/03-gadgetron-web.md` 설계 문서 작성 + Round 1.5/2 리뷰 통과
+
+### 배경
+
+2026-04-13 시점 결정 당시에는 OpenWebUI 를 "가장 성숙한 OSS 채팅 UI, BSD-3" 로 간주해 P2A sibling 프로세스로 채택했다. 이후 확인된 사실:
+
+1. **라이선스 변경 (2025-04, v0.6.6 이후)**: OpenWebUI 는 BSD-3 에서 "Open WebUI License" (CLA 기반 custom license) 로 전환. 브랜딩(이름·로고·UI 식별자) 변경 금지 조항 도입. 예외는 ①30-day 롤링 ≤50 유저, ②머지된 substantive 기여자, ③유료 Enterprise 라이선스.
+2. **Gadgetron 제품 철학과 충돌**: 단일 바이너리 + 자체 브랜드 제품 전략(`docs/00-overview.md §1.2`) 과 정면 충돌. on-prem/cloud 배포에서 "Open WebUI" 브랜딩을 보존해야 한다는 조항은 Kairos 제품 동선을 깬다.
+3. **DB 중복**: OpenWebUI 는 자체 사용자/세션 DB (SQLite 또는 Postgres) 를 보유 → Gadgetron 의 `tenants` / `api_keys` 모델과 완전 중복. "2 SQL DB" 문제를 가중.
+4. **스택 무게**: Python FastAPI + Svelte 별도 프로세스 → 단일 바이너리 원칙과 배치.
+
+### 결정
+
+**(a) OpenWebUI 를 Phase 2 스택에서 완전히 제거한다.** sibling 프로세스 번들·docker-compose 서비스·appendix 모두 삭제.
+
+**(b) `gadgetron-web` 크레이트를 P2A 스코프 안으로 승격하여 자체 Web UI 를 직접 빌드한다.** 기술 스택:
+- **Frontend**: [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT, shadcn + Radix 기반 headless React 컴포넌트 라이브러리) + Next.js + Tailwind
+- **Backend embed**: `include_dir!` 매크로로 `web/dist/` 정적 자산을 Rust 바이너리에 컴파일 타임 embed (`platform-architecture.md §2.C.10` 에 이미 예약된 패턴)
+- **Mount**: `gadgetron-gateway` 의 feature flag `web-ui` 활성화 시 `router.nest_service("/web", gadgetron_web::service())` 로 axum 에 마운트 (gateway 본체 dispatch 는 여전히 unchanged)
+- **빌드 시퀀스**: `cargo xtask build-web` (또는 `build.rs` 안 `npm run build`) → 산출물 `crates/gadgetron-web/web/dist/` → `include_dir!` → 단일 바이너리
+
+**(c) 인증 모델**: OpenAI-compat 표준 그대로. 사용자가 `/web` UI 에서 Gadgetron API key 를 세팅 화면에 붙여넣고, 프론트엔드는 `fetch('/v1/chat/completions', { headers: { Authorization: 'Bearer …' } })` 로 호출. P2A 는 BYOK 방식 (멀티유저 OAuth 는 P2C 재개방 주제).
+
+**(d) Acceptance criteria 변경**: 기존 8개 중 OpenWebUI 관련 항목들을 `gadgetron-web` 으로 대체. "사용자가 OpenWebUI 드롭다운에서 `kairos` 선택" → "사용자가 `http://localhost:8080/web` 에 접속해 API key 입력 후 `kairos` 모델 선택".
+
+### 근거
+
+- 사용자 지시 2026-04-14: "assistant-ui 사용합시다"
+- 라이선스 리스크 회피 (상업 배포·브랜딩 보존)
+- 단일 바이너리 철학 완전 복원 (별도 프로세스 0, 별도 DB 0)
+- `gadgetron-web` 크레이트는 이미 `platform-architecture.md §2.C.10` 에 Phase 2 예약 슬롯으로 존재 → 구조 변경 최소
+- assistant-ui 는 "bring your own backend" headless 라이브러리 → 라이선스·데이터 모델 양쪽 모두 Gadgetron 소유
+
+### Trade-offs
+
+| 측면 | 획득 | 비용 |
+|---|---|---|
+| 라이선스 | 순수 MIT 스택 (Gadgetron 자체 브랜딩 100%) | 프론트엔드 직접 유지보수 |
+| 배포 | 단일 바이너리 (docker-compose 제거) | Next.js 빌드 체인 (`npm`) CI 에 추가 |
+| 기능 | UI 기능 스코프를 Gadgetron 이 직접 통제 | 초기 UX 풍부도는 OpenWebUI < assistant-ui 기본값 < 장기 커스텀 |
+| Phase 2A 타임라인 | 별도 외부 의존성 없음 → 통합 테스트 단순 | UI 컴포넌트 직접 빌드 공수 추가 (주 단위) |
+
+### 즉시 적용 변경 (이 세션)
+
+- `docs/design/phase2/00-overview.md` — §3, §4, §5, §7, §10 (OpenWebUI API key handling), §13, §15, Appendix C, Threat model 내 OpenWebUI 참조, Q1 해결 이력
+- `docs/design/phase2/01-knowledge-layer.md` — §1.1 `kairos init` 출력 contract 의 "Next steps" (OpenWebUI → gadgetron-web)
+- `docs/design/phase2/02-kairos-agent.md` — §고위험 자산 표
+- `docs/manual/kairos.md` — §2 Docker, §5 첫 대화, §Troubleshooting
+- `docs/00-overview.md` — §1.2 "오픈소스 최대 활용" 리스트, §Roadmap Phase 2A row
+- `docs/reviews/phase2/round2-dx-product-lead.md` — 과거 리뷰이므로 수정하지 않음 (히스토리컬)
+- **NEW**: `docs/adr/ADR-P2A-04-chat-ui-selection.md` stub (assistant-ui 선택 근거)
+
+### 후속 작업 (다음 세션)
+
+1. `docs/design/phase2/03-gadgetron-web.md` — `gadgetron-web` 크레이트 상세 설계 (ux-interface-lead 주도)
+2. Round 1.5/2 리뷰 — dx-product-lead + security-compliance-lead + qa-test-architect + chief-architect 가 신규 크레이트 + 변경된 threat model 을 재검토
+3. `docs/design/phase2/00-overview.md §8` STRIDE 업데이트 — OpenWebUI 행 제거 및 `gadgetron-web` 행 추가 (same-origin XSS, API key storage 등 재평가)
+4. `build.rs` / `cargo xtask` 빌드 통합 구현 방식 확정 (ADR-P2A-04 에서)
+
+### 영향 받는 문서/크레이트
+
+- `docs/design/phase2/*.md`, `docs/manual/kairos.md`, `docs/00-overview.md`, `docs/adr/ADR-P2A-04-*.md` (신설)
+- **NEW crate**: `crates/gadgetron-web/` (P2A 스코프)
+- `gadgetron-gateway` — feature flag `web-ui` 추가 (Cargo feature 게이트)
+- Workspace `Cargo.toml` — `gadgetron-web` 멤버 추가, `include_dir = "0.7"`, `tower-serve-static = "0.1"` dependencies 추가
+
+---
+
+## D-20260414-03: 단일 배포 프로파일당 단일 SQL DB — `DatabaseBackend` trait 도입
+
+**날짜**: 2026-04-14
+**유형**: Architecture / DB backend strategy (사용자 직접 지시)
+**상태**: 🟢 승인
+**관련**: D-20260411-04 (Phase 1 GPU), D-20260411-12 (PgKeyValidator LRU), D-20260411-13 (GadgetronError::Database)
+**블록 해제 조건**: `docs/design/database/backend-trait.md` 설계 문서 작성 + chief-architect + qa-test-architect + security-compliance-lead Round 리뷰 통과
+
+### 배경
+
+현재 Gadgetron 의 DB 사용 상태:
+
+| 역할 | 엔진 | Phase | 상태 |
+|---|---|---|---|
+| 인증/테넌시/쿼터/감사 | PostgreSQL (sqlx, `--no-db` 인메모리 fallback) | Phase 1 | **구현 완료, 하드코드** |
+| 지식 벡터 저장 | SQLite + sqlite-vec | P2B | 설계만 (`00-overview.md §7`) |
+| Kairos 지식 (P2A) | filesystem + git2 | P2A | 설계 완료, DB 미사용 |
+
+**문제**: 로컬 단일유저가 Phase 1 인증 스택을 쓰려면 PostgreSQL 를 떠야 함 (또는 `--no-db` 인메모리 모드 — 영속성 없음). P2B 진입 시 `SQLite + sqlite-vec` 까지 추가되면 운영자는 **두 SQL DB 엔진**을 동시에 학습·백업·모니터링해야 함. Gadgetron 의 "가볍게" 원칙(`docs/00-overview.md §1.2`) 과 "단일 바이너리 + TOML 설정" 약속과 충돌.
+
+### 결정
+
+**핵심 원칙**: "한 배포 프로파일은 최대 한 종류의 SQL DB 만 본다."
+
+**(a) `DatabaseBackend` trait 을 `gadgetron-core` 에 도입하여 Phase 1 의 auth/billing/audit 를 DB 엔진에 대해 추상화한다.** trait 은 다음 operation 을 노출 (잠정):
+```rust
+#[async_trait]
+pub trait DatabaseBackend: Send + Sync + 'static {
+    async fn validate_key(&self, hash: &[u8; 32]) -> Result<Option<KeyRecord>, GadgetronError>;
+    async fn record_usage(&self, req: UsageEvent) -> Result<(), GadgetronError>;
+    async fn insert_audit(&self, entry: AuditEntry) -> Result<(), GadgetronError>;
+    async fn check_quota(&self, tenant: TenantId) -> Result<QuotaSnapshot, GadgetronError>;
+    // ... 정확한 signature 는 설계 문서에서 확정
+}
+```
+
+구현체: `PostgresBackend` (현재 Phase 1 코드 재배치), `SqliteBackend` (신규), `InMemoryBackend` (현재 `--no-db` 재배치).
+
+**(b) 배포 프로파일 정의 (`gadgetron.toml [database].profile`)**:
+
+| 프로파일 | Auth/Billing | Vector (P2B+) | 대상 유저 |
+|---|---|---|---|
+| `local` | **SQLite** (단일 파일 `~/.gadgetron/gadgetron.db`) | SQLite + sqlite-vec (같은 파일 또는 sidecar) | 단일유저 데스크톱, P2A Kairos MVP |
+| `server` | **PostgreSQL** | SQLite + sqlite-vec (per-instance) 또는 pgvector (P2C 결정) | on-prem, cloud, multi-tenant |
+| `inmemory` | `InMemoryBackend` | 미지원 (벡터는 DB 필수) | CI/개발, 현재 `--no-db` 계승 |
+
+로컬 유저는 SQLite 파일 1개만 보고, 서버 유저는 Postgres 1개만 본다. P2B 벡터 저장이 추가돼도 **같은 프로파일 내에서는 DB 엔진 1종류**.
+
+**(c) Phase 1 코드 영향 범위**: 
+- 현재 sqlx 쿼리가 Postgres 전용 문법(JSONB, `RETURNING`, `ON CONFLICT DO UPDATE`)을 쓰는 부분 조사 필요
+- 조사 결과가 SQLite 포팅 난이도 결정 요소 (쉽게 호환 / 쿼리 재작성 필요 / SQLx Any 사용 / 전부 직접 구현)
+- 마이그레이션은 엔진별 파일 분리 (`migrations/postgres/*.sql`, `migrations/sqlite/*.sql`)
+
+**(d) 실행 순서**:
+1. **즉시 (이 세션)**: 본 결정 로그 엔트리 기록만. P2A Kairos MVP 는 DB 를 건드리지 않으므로 코드 변경 없음
+2. **단기 (P2A 구현 중)**: 영향 없음 — Kairos 진행
+3. **중기 (P2B 진입 전)**: `docs/design/database/backend-trait.md` 설계 PR → chief-architect + qa-test-architect + security-compliance-lead 리뷰 → Phase 1 SQLite 백포트 구현 → `local` 프로파일을 기본값으로 승격
+4. **장기 (P2C 멀티유저 재개방)**: `server` 프로파일 강제. 벡터 저장 엔진(SQLite per-tenant vs pgvector 통합) 은 별도 결정
+
+### 근거
+
+- 사용자 지시 2026-04-14: "DB는 단일 유저 SQLite로 시작해서 Postgres도 지원합시다"
+- 단일 바이너리 + 단일 DB 파일로 "5분 안에 첫 대화" acceptance criterion (`00-overview.md §1.2`) 달성
+- Postgres 를 운영 경험 없는 로컬 유저에게 강제하는 현재 구조의 onboarding 마찰 제거
+- `DatabaseBackend` 추상화는 테스트 용이성에도 기여 (in-memory fake 를 trait 구현체로 자연스럽게 표현)
+- P2B 벡터 엔진 선택을 `local` 프로파일 내에서 SQLite 하나로 일원화 → 운영자 멘탈 모델 단순
+
+### Trade-offs
+
+| 측면 | 획득 | 비용 |
+|---|---|---|
+| Onboarding | 로컬 단일 파일 → Postgres 설치 없이 사용 | trait 추상화 설계 1 회 공수 |
+| 쿼리 호환성 | 두 엔진에서 같은 로직 보장 | Postgres-specific 최적화 일부 포기 (JSONB 연산자 등) |
+| 성능 | SQLite 로컬 쓰기가 네트워크 Postgres 보다 빠름 (단일 프로세스) | 동시 쓰기 throughput 은 Postgres 가 우세 — `server` 프로파일이 해결 |
+| 마이그레이션 | 프로파일 교체 경로 명확 (`local` → `server`) | 엔진간 데이터 내보내기/불러오기 도구는 신규 개발 (P2B+) |
+
+### 즉시 적용 변경 (이 세션)
+
+이 결정은 **기록만** 수행. 코드 변경 없음. 설계 문서(`docs/design/database/backend-trait.md`) 작성은 다음 세션에서 chief-architect 가 주도한다.
+
+### 후속 작업
+
+1. **조사**: Phase 1 코드의 Postgres-specific SQL 사용처 인벤토리 (`crates/gadgetron-xaas/` + `crates/gadgetron-core/` sqlx 호출 grep). 결과가 난이도 결정
+2. **설계**: `docs/design/database/backend-trait.md` — trait signature 최종, 쿼리 매핑 표, 마이그레이션 전략, 테스트 fixture
+3. **구현 (P2B 진입 전)**: SQLite 백엔드 + `local`/`server`/`inmemory` 프로파일 게이트 + `gadgetron init` 이 `local` 기본값으로 설정
+4. **문서**: `docs/manual/configuration.md` + `docs/manual/installation.md` 업데이트 — 프로파일 선택 가이드
+
+### 영향 받는 문서/크레이트
+
+- `gadgetron-core` — `DatabaseBackend` trait 신설, `KeyRecord` / `AuditEntry` / `QuotaSnapshot` public export
+- `gadgetron-xaas` — 현재 Postgres 직결 코드를 `PostgresBackend` 구현체로 캡슐화
+- **NEW**: `gadgetron-xaas::sqlite` 모듈 또는 별도 `gadgetron-sqlite-backend` 서브크레이트 (결정 유보)
+- `gadgetron.toml` 스키마 — `[database] profile = "local"|"server"|"inmemory"` 필드 추가
+- `docs/design/database/backend-trait.md` (신설)
+- `docs/design/phase2/00-overview.md §7` — 벡터 저장 섹션에 "same-profile" 원칙 명시
+
+---
+
+## D-20260414-04: Agent-Centric Control Plane + MCP Tool Registry + Brain Model Selection
+
+**날짜**: 2026-04-14
+**유형**: Architecture / Platform direction (사용자 직접 지시)
+**상태**: 🟢 승인
+**Supersedes (부분)**: `docs/design/phase2/00-overview.md §1 + §2` (상방/하방 프레이밍 → Agent-Centric 으로 강화), §3 "Explicit non-goals" 의 Anthropic `/v1/messages` 비구현 항목 (local brain shim 으로 조건부 reopen)
+**관련 문서**: `docs/adr/ADR-P2A-05-agent-centric-control-plane.md` (신설), `docs/design/phase2/04-mcp-tool-registry.md` (신설)
+
+### 배경
+
+기존 Phase 2 설계는 Kairos 를 "wiki + 웹 검색 도구를 가진 personal assistant" 로 정의했다. `gadgetron-router` 의 provider map 에 `"kairos"` 이름으로 **다른 provider 와 병렬 등록**되며, 인프라(router / scheduler / node / GPU / cluster) 는 운영자가 TUI·HTTP API 로 **직접** 제어하는 별개 레이어였다.
+
+사용자가 2026-04-14 세션에서 방향 전환 지시:
+
+> 1. 에이전트(Claude Code CLI)는 이 플랫폼의 브레인이자 중추이다.
+> 2. 모든 입력은 에이전트에게로 전달 된다.
+> 3. 에이전트는 입력을 보고 하위에 여러 tools를 활용하여 지식을 관리하고, 정보를 얻고 제어한다.
+> 4. 에이전트 하위 레이어는 지식레이어와 인프라레이어가 있을 것이다.
+> 5. 인프라레이어는 라우팅, 프로바이더 제공, 자원 관리, 작업 스케줄러, 클러스터 관리(slurm/k8s) 등등을 할 수 있고
+> 6. 에이전트는 이걸 활용하여 모니터링 및 제어를 한다. 이렇게 확장될 수 있도록 합시다.
+
+추가로:
+- 편의성을 위해 에이전트 우회 경로 (특정 `model=X` 로 직접 호출) 유지
+- 에이전트의 브레인 모델도 운영자가 설정 가능; 자체 인프라의 로컬 모델일 수도 있음
+- 환경설정은 유저가 명시적으로; auto-detect 금지
+- 에이전트는 자기 브레인을 선택하지 않는다; 브레인 선택은 운영자 전용 권한
+
+### 결정
+
+#### (a) 플랫폼 비전 — Agent-Centric Control Plane
+
+Gadgetron 의 주요 UX 는 "에이전트(Claude Code)가 브레인이고, 지식 레이어와 인프라 레이어가 모두 에이전트의 도구 세트" 라는 단일 문장으로 요약된다. 인프라는 "하방 레이어" 가 아니라 "에이전트의 tool category" 로 재프레이밍.
+
+- `gadgetron-web` 의 기본 모델 = **`kairos`**. 모델 드롭다운에는 여전히 다른 모델(vllm/llama3, sglang/glm, openai/gpt-4o 등) 도 노출되어 API 우회 경로 편의성 유지
+- API SDK 소비자의 `POST /v1/chat/completions` 직접 호출은 기존처럼 `model=X` 라우팅 — 기존 OpenAI 호환 계약 불변
+- 그러나 "Gadgetron 의 상방 제품" 문서는 항상 **에이전트 경로** 를 기본으로 설명
+
+#### (b) MCP Tool Registry — 3-tier + 3-mode 권한 모델
+
+모든 MCP 도구는 stable `McpToolProvider` trait 을 통해 플러그인으로 등록된다. 확장 가능성을 P2A 에서부터 인터페이스 수준에서 보장:
+
+**Tier 분류** (도구 개발자가 `ToolSchema.tier` 로 선언):
+- **T1 Read**: 서버 상태를 관찰만 하는 순수 함수. 예) `wiki_list`, `wiki_get`, `wiki_search`, `web_search`, `list_nodes`, `get_gpu_util`, `list_models`. **항상 활성** (`mode = "auto"`, 변경 불가).
+- **T2 Write**: 서버 상태를 수정하지만 되돌릴 수 있음. 예) `wiki_write`, `deploy_model`, `hot_reload_config`, `set_routing_strategy`. **기본 `ask`**, 운영자가 서브카테고리별로 `auto` 또는 `never` 로 override.
+- **T3 Destructive**: 되돌릴 수 없음. 예) `kill_process`, `undeploy_model`, `slurm_cancel`, `kubectl_delete`, `wipe_wiki_page_history`. **기본 `enabled = false`**; 활성화해도 **mode 는 항상 `ask`** (config validation 이 `auto` 설정 시 시작 실패).
+
+**3-mode**:
+- `auto` — MCP server 가 즉시 실행, 감사 로그 기록, 사용자 개입 없음
+- `ask` — 실행 전 정지, SSE 스트림에 `gadgetron.approval_required` 이벤트 emit, 프론트엔드 승인 카드 표시, 사용자 Allow/Deny 결정 받아 진행
+- `never` — 항상 denial. 에이전트는 `tool_result { isError: true, reason: "disabled by policy" }` 수신
+
+**T3 Cardinal Rule**: T3 도구는 `mode = "auto"` 로 설정 불가. `gadgetron.toml` 의 `[agent.tools.destructive]` 가 `default_mode = "auto"` 를 지정하면 **시작 실패** with 명시적 에러 메시지.
+
+#### (c) 승인 카드 UX
+
+채팅 입력이 아닌 UI 카드. `gadgetron-web` 이 SSE `gadgetron.approval_required` 이벤트 수신 시 모달/인라인 `<ApprovalCard>` 렌더:
+
+| 요소 | T2 | T3 |
+|---|---|---|
+| 보더/색상 | 주황 | 빨강 |
+| 헤더 | "Kairos wants to run a tool" | "Kairos wants to run a DESTRUCTIVE tool" |
+| Tier 배지 | T2·Write | T3·Destruct |
+| 도구명 + 카테고리 | ✅ | ✅ |
+| 에이전트 rationale | ✅ | ✅ (자체 설명 강제) |
+| 인자 (sanitize) | ✅ | ✅ |
+| 되돌림 여부 문구 | "reversible" | "CANNOT be undone" |
+| Rate limit 잔여 | — | "3 remaining this hour" |
+| Allow once | ✅ | ✅ |
+| Allow always | ✅ (localStorage 기억) | **❌ 영구 금지** |
+| Deny | ✅ | ✅ |
+| Timeout | 60s auto-deny (config) | 60s auto-deny (config) |
+
+#### (d) 서버 측 approval 흐름
+
+1. MCP server 가 tool 요청을 받으면 mode 확인
+2. `ask` mode → `ApprovalRegistry::enqueue(pending)` → `(ApprovalId, oneshot::Receiver<Decision>)` 반환
+3. Kairos provider 가 메인 SSE 스트림에 `event: gadgetron.approval_required` emit (heartbeat 로 스트림 유지)
+4. `rx.await` 로 대기
+5. 프론트엔드 → `POST /v1/approvals/{id}` with `{decision: "allow"|"deny"}` (신규 엔드포인트)
+6. Gateway → `ApprovalRegistry::decide(id, decision)` → `tx.send(decision)` → `rx` unblock
+7. Allow → tool 실행; Deny → `tool_result { isError: true, content: "User denied" }`
+8. Timeout(60s, config) → auto-deny, rate limit counter 증가 안 함
+9. 각 단계별 감사 로그 엔트리 (`ToolApprovalRequested` / `Granted` / `Denied` / `Timeout` / `ToolCallCompleted`)
+
+#### (e) 브레인 모델 선택 — `[agent.brain]`
+
+에이전트(Claude Code CLI)의 추론에 사용되는 LLM 은 **운영자 전용 설정**이다. 4 가지 모드:
+
+- **`claude_max`** (기본값): 사용자의 `~/.claude/` OAuth (Claude Max 구독). Claude Code 가 Anthropic 클라우드 직결. Gadgetron 무관
+- **`external_anthropic`**: 명시적 Anthropic API key + 선택적 `base_url`. 엔터프라이즈 계정 등. Claude Code 가 외부 엔드포인트 직결
+- **`external_proxy`**: 사용자 운영 LiteLLM/프록시. `base_url` 로 지정. Gadgetron 무관
+- **`gadgetron_local`**: Gadgetron 이 자체 `/internal/agent-brain/v1/messages` Anthropic 호환 shim 을 제공. `local_model = "vllm/llama3"` 등 라우터 provider map 의 기존 엔트리 선택. shim 이 Anthropic ↔ OpenAI 프로토콜 번역 후 기존 `gadgetron-router` 로 디스패치
+
+**구현 방식 (옵션 D — 최소 내부 shim)**:
+- `/internal/agent-brain/v1/messages` 엔드포인트 (Gateway 내부 경로)
+- Rust 네이티브 번역기: `messages` / `system` / `tools` / 스트림 이벤트만 커버. 이미지 / PDF / cache_control 등 확장은 Phase 3
+- Loopback 바인딩 (`127.0.0.1`)
+- 시작 시 32바이트 랜덤 토큰 생성 → Claude Code subprocess 의 `ANTHROPIC_API_KEY` env 로 전달 → shim 이 헤더 비교. 토큰은 메모리에만, 로그·감사에 기록 금지, 재시작 시 rotation
+- **재귀 방지 3중 방어**:
+  1. Config validation: `local_model` 이 `kairos` 또는 Anthropic 계열이면 시작 실패
+  2. 요청 태그: shim 이 `router.chat_stream` 에 `internal_call = true` 로 호출; 라우터는 이 플래그 true 일 때 `KairosProvider` 를 dispatch 대상에서 완전 제외
+  3. Recursion depth 헤더: `X-Gadgetron-Recursion-Depth: 1` ≥ 2 이면 shim 이 거부
+- **쿼터·감사·빌링**:
+  - 사용자 쿼터는 **최상위** `/v1/chat/completions` 요청 단위로만 차감 (기존 Phase 1 동작)
+  - 브레인 호출은 **쿼터 차감 제외** — 한 요청이 수십 번 브레인을 불러도 사용자 쿼터는 한 번만
+  - 브레인 호출은 별도 audit 카테고리 `agent_brain` 로 기록, `parent_request_id` 로 상위 요청과 연결
+  - 토큰 사용량(input/output)은 상위 요청의 audit entry 에 집계
+
+#### (f) 명시적 scope boundary — 에이전트는 자기 브레인을 선택하지 않는다
+
+- MCP 도구 registry 에 `agent.set_brain`, `agent.list_brains`, `agent.switch_model` 같은 **브레인 제어 도구 영구 제외**
+- `[agent.brain]` 섹션은 **운영자 전용 config**. 에이전트가 `gadgetron.toml` 을 읽거나 수정하는 도구도 미제공
+- 이유:
+  - 프롬프트 인젝션 공격 벡터 차단 — "더 제약 없는 모델로 바꿔" 에 에이전트가 응답할 수 없게
+  - 감사 추적 단순화 — 브레인은 Gadgetron 시작 시점에 고정, 교체는 명시적 config 변경 + 재시작
+  - 권한 상승 차단 — 권한 설정 자체를 에이전트 스스로 바꿀 수 없음
+- 인프라 읽기 도구 (`list_providers`, `list_models`) 는 제공하지만, 결과에서 **브레인으로 선택된 모델** 은 플래그 표시하거나 숨김 처리 (optional, `04-mcp-tool-registry.md` 에서 결정)
+
+#### (g) 환경설정 — 유저 명시적
+
+- **Auto-detect 금지**: `gadgetron.toml` 이 유일한 진실 공급원
+- `kairos init` 은 대화형으로 운영자에게 브레인 모드를 물어봄 — 기본값 `claude_max`, `--brain-mode gadgetron_local --local-model vllm/llama3` 같은 CLI 플래그로 non-interactive 지원
+- 자동 탐지 로직 (`~/.claude/` 존재 여부로 mode 추정, Anthropic API key env var 우선순위 등) **금지**. 모호성은 설정 에러로 드러나야 함
+
+### 근거
+
+- 사용자 지시 2026-04-14 (3 차례 interaction)
+- 에이전트 중심 제어 평면은 "Claude Code 는 브레인, Rust 는 도구/하부 구조" 원칙의 자연스러운 확장
+- 우회 경로 유지는 API 호환성 + 운영 유연성 (디버깅·벤치마크·레거시 통합)
+- 브레인 모델 선택은 사용자의 모델 선호 / 비용 관리 / 에어갭 배포 수용을 위해 필수
+- 에이전트가 브레인을 선택할 수 없다는 경계는 보안 원칙: **권한 상승을 유발할 수 있는 메타-조작은 에이전트 외부에서만**
+
+### 구현 영향
+
+**즉시 landing (이 세션)**:
+- `docs/adr/ADR-P2A-05-agent-centric-control-plane.md` (신설, 아래 후속 커밋)
+- `docs/design/phase2/04-mcp-tool-registry.md` (신설)
+- `gadgetron-core::config::AgentConfig`, `ToolsConfig`, `BrainConfig` 타입 추가 + `AppConfig::agent` 필드
+- `gadgetron-core::context::Scope` 에 `AgentApproval` variant 추가 (`D-20260411-10` 확장)
+
+**P2A 구현 중 landing**:
+- `#10` (MCP server) 가 `McpToolProvider` trait 기반으로 재작성 — P2B/C 확장 seam
+- `#13`-`#15` (Kairos session/stream/provider) 가 `ApprovalRegistry` 통합
+- Gateway `POST /v1/approvals/{id}` 엔드포인트 (`#5` 후속 확장)
+- `gadgetron-web` `<ApprovalCard>` + `gadgetron.approval_required` SSE 파서 (`#4` 후속 확장)
+
+**P2C 로 유보**:
+- `/internal/agent-brain/v1/messages` shim 구현 (Anthropic ↔ OpenAI 번역기)
+- `InfraToolProvider` (T2 infra_write) + `list_nodes`, `deploy_model` 등
+- `gadgetron_local` 브레인 모드 활성화
+
+**P3 로 유보**:
+- `SchedulerToolProvider` (slurm, k8s)
+- `ClusterToolProvider`
+- Anthropic `/v1/messages` 완전 호환 확장 (Option C 경로)
+
+### 영향 받는 문서/크레이트
+
+- `docs/design/phase2/00-overview.md` §1 + §2 + §3 + §5 + §13 + §14 개정 (Agent-Centric 프레이밍)
+- `docs/design/phase2/03-gadgetron-web.md` §12 + §17 (승인 카드 + UX flow 반영)
+- `docs/adr/ADR-P2A-05-agent-centric-control-plane.md` (신설)
+- `docs/design/phase2/04-mcp-tool-registry.md` (신설)
+- `gadgetron-core::config` — 신규 타입
+- `gadgetron-core::context::Scope` — `AgentApproval` variant
+- `gadgetron-gateway` — `POST /v1/approvals/{id}` + SSE event emit
+- `gadgetron-kairos` — `ApprovalRegistry`
+- `gadgetron-knowledge` / (P2C) `gadgetron-infra` — `McpToolProvider` impl
+- `gadgetron-web` — `<ApprovalCard>` + SSE parser
+
+---
+
 _(다음 엔트리는 아래에 append)_

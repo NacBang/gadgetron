@@ -272,6 +272,27 @@ pub fn build_router(state: AppState) -> Router {
         .merge(public_routes)
 }
 
+/// Like [`build_router`], but also mounts the embedded Gadgetron Web UI at `/web`
+/// when the `web-ui` Cargo feature is enabled AND `web_cfg.enabled == true`.
+///
+/// This is the production entry point used by `gadgetron serve`. Tests that do not
+/// need the Web UI keep calling [`build_router`] directly.
+///
+/// Added by D-20260414-02 / `docs/design/phase2/03-gadgetron-web.md` §7.
+#[cfg(feature = "web-ui")]
+pub fn build_router_with_web(
+    state: AppState,
+    web_cfg: &gadgetron_core::config::WebConfig,
+) -> Router {
+    let base = build_router(state);
+    if !web_cfg.enabled {
+        return base;
+    }
+    let service_cfg = crate::web_csp::translate_config(web_cfg);
+    let web_router = crate::web_csp::apply_web_headers(gadgetron_web::service(&service_cfg));
+    base.nest("/web", web_router)
+}
+
 // ---------------------------------------------------------------------------
 // Tests — written before implementation (TDD red → green)
 // ---------------------------------------------------------------------------

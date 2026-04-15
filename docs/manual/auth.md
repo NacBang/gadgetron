@@ -156,4 +156,4 @@ Revocation sets `revoked_at = NOW()` for the key. The validator checks `revoked_
 
 - The server never logs raw API key values. The `GADGETRON_DATABASE_URL` is wrapped in a `Secret<String>` type and is never emitted to logs.
 - The `api_keys.key_hash` column stores only the SHA-256 hash. Even with direct database access, the original key cannot be recovered from the hash.
-- Auth failures (401) are audited to the structured audit channel. In Sprint 1-3, audit entries are written to tracing logs. PostgreSQL persistence is Sprint 2+.
+- Auth failures (401) are audited to the structured audit channel. In the current implementation, audit entries are written to tracing logs; PostgreSQL persistence remains future work.
