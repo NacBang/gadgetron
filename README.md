@@ -1,12 +1,20 @@
 # Gadgetron
 
-Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway overhead **plus a built-in personal assistant** (Kairos) backed by Claude Code + a git-versioned markdown wiki.
+Rust-native heterogeneous cluster collaboration platform with sub-millisecond P99 gateway overhead. Gadgetron combines an assistant plane for daily requests, an operations plane for cluster monitoring/control, and an execution plane for workload routing and optimization in a single binary.
 
-**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: personal assistant MVP per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md); interactive approval flow deferred to Phase 2B.
+**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: assistant-plane and collaboration-entry MVP on top of the existing operations/execution substrate. Interactive approval flow remains deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
+
+## Product Framing
+
+- **Assistant Plane** — daily requests, summaries, knowledge work, delegation UX
+- **Operations Plane** — cluster monitoring, diagnostics, risk reporting, configuration changes
+- **Execution Plane** — provider routing, scheduling, resource optimization, workload execution
+- **Direct + Delegate** — administrators and users can act directly or hand work to the agent
+- **Experience Loop** — the agent observes requests, approvals, troubleshooting, and resolutions to become a better collaborator over time
 
 ## Features
 
-### Infrastructure (Phase 1)
+### Operations & Execution Substrate (Phase 1)
 
 - **OpenAI-compatible API** — drop-in `/v1/chat/completions` with SSE streaming
 - **6 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, vLLM, SGLang
@@ -15,9 +23,9 @@ Rust-native GPU/LLM orchestration platform with sub-millisecond P99 gateway over
 - **Multi-tenant platform** — API key auth, per-tenant quota (i64 cents), audit logging
 - **Single binary** — `gadgetron serve` runs the full stack
 
-### Agent-Centric Control Plane (Phase 2A)
+### Assistant & Collaboration Entry Point (Phase 2A)
 
-- **Kairos personal assistant** — Claude Code CLI wrapped as an OpenAI-compatible provider (`model = "kairos"`). Per `02-kairos-agent.md v4`.
+- **Kairos assistant runtime** — Claude Code CLI wrapped as an OpenAI-compatible provider (`model = "kairos"`). Per `02-kairos-agent.md v4`.
 - **`McpToolProvider` trait** — stable plugin interface for MCP tool providers; `gadgetron-core::agent::tools`. P2A ships `KnowledgeToolProvider`; P2B/P2C extend with `InfraToolProvider`, `SchedulerToolProvider`, etc.
 - **`McpToolRegistry` builder/freeze** — `gadgetron-kairos::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
 - **3-tier × 3-mode permission model** — `Tier::{Read, Write, Destructive}` × `ToolMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
@@ -50,7 +58,7 @@ cargo build --release
 # 2. Create a local workspace for the wiki
 mkdir -p .gadgetron
 
-# 3. Minimal `gadgetron.toml` for the personal-assistant profile
+# 3. Minimal `gadgetron.toml` for the assistant profile
 cat > gadgetron.toml <<'TOML'
 [server]
 bind = "127.0.0.1:8080"
@@ -205,9 +213,12 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 | [Core Types](docs/design/core/types-consolidation.md) | Round 3 Approved |
 | [Testing Harness](docs/design/testing/harness.md) | Round 2 |
 
-### Phase 2A — Personal Assistant
+### Phase 2A — Assistant & Collaboration
 | Document | Status |
 |----------|--------|
+| [Agentic Cluster Collaboration Vision](docs/design/ops/agentic-cluster-collaboration.md) | Draft |
+| [Assistant Bootstrap UX](docs/design/usability/assistant-bootstrap-init.md) | Draft |
+| [Operations Tool Providers](docs/design/ops/operations-tool-providers.md) | Draft |
 | [Phase 2A Overview](docs/design/phase2/00-overview.md) | v3 approved |
 | [01 — Knowledge Layer](docs/design/phase2/01-knowledge-layer.md) | v3 approved |
 | [02 — Kairos Agent](docs/design/phase2/02-kairos-agent.md) | v4 (Path 1 aligned) |

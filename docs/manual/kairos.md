@@ -1,9 +1,9 @@
-# Kairos 개인 비서 (Phase 2A)
+# Kairos 협업 에이전트 런타임 (Phase 2A)
 
 > **상태**: trunk `0.2.0` 기준 구현됨.
 > **현재 CLI 계약**: `gadgetron kairos ...` 계열 서브커맨드는 없습니다. Kairos는 `gadgetron serve`가 `gadgetron.toml`의 `[knowledge]` 섹션을 읽어 등록하고, `gadgetron mcp serve`는 Claude Code가 호출하는 child-side stdio 서버입니다.
 
-Kairos는 Claude Code CLI를 Gadgetron의 `model = "kairos"` 뒤에 붙인 개인 비서 런타임입니다. 사용자가 Kairos로 채팅을 보내면 Gadgetron은 Claude Code를 서브프로세스로 띄우고, 로컬 markdown 위키와 선택적 SearXNG 검색을 MCP 도구로 제공합니다.
+Kairos는 Claude Code CLI를 Gadgetron의 `model = "kairos"` 뒤에 붙인 협업 에이전트 런타임입니다. 현재 trunk에서는 assistant plane entry point 역할을 하며, 사용자가 Kairos로 채팅을 보내면 Gadgetron은 Claude Code를 서브프로세스로 띄우고, 로컬 markdown 위키와 선택적 SearXNG 검색을 MCP 도구로 제공합니다. 향후 P2C/P3에서는 같은 런타임이 infra/scheduler/cluster 도구까지 확장되는 방향을 전제합니다.
 
 ---
 

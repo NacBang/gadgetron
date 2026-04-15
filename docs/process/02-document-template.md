@@ -21,7 +21,7 @@ docs/design/<domain>/<task>.md
 # <제목>
 
 > **담당**: @<서브에이전트 이름>
-> **상태**: Draft | Round 1 | Round 2 | Round 3 | Approved | Implemented
+> **상태**: Draft | Round 1 | Round 1.5 | Round 2 | Round 3 | Approved | Implemented
 > **작성일**: YYYY-MM-DD
 > **최종 업데이트**: YYYY-MM-DD
 > **관련 크레이트**: `gadgetron-<crate>`, …
@@ -58,6 +58,7 @@ TOML 섹션 예시 + 기본값 + 검증 규칙.
 ### 2.4 에러 & 로깅
 - `GadgetronError` variant 사용 (신규 variant 필요 시 명시)
 - `tracing` span 이름·레벨·필드
+- STRIDE threat model 요약 (자산 / 신뢰 경계 / 위협 / 완화)
 
 ### 2.5 의존성
 - 추가할 crate 목록 + 버전 + 정당화
@@ -119,6 +120,10 @@ TOML 섹션 예시 + 기본값 + 검증 규칙.
 - A1: …
 
 **다음 라운드 조건**: …
+
+### Round 1.5 — YYYY-MM-DD — @security-compliance-lead @dx-product-lead
+**결론**: …
+(`03-review-rubric.md §1.5` 기준)
 
 ### Round 2 — YYYY-MM-DD — @qa-test-architect
 **결론**: …

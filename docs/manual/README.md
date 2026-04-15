@@ -1,6 +1,6 @@
 # Gadgetron Operator Manual
 
-Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A assistant features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose the Kairos assistant runtime plus the embedded Web UI when configured.
+Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A assistant and collaboration features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose the Kairos assistant runtime plus the embedded Web UI when configured.
 
 This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning policy is documented in `docs/process/06-versioning-policy.md`.
 
@@ -17,7 +17,7 @@ This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |
 | [auth.md](auth.md) | API key format, how auth works, scope system |
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
-| [kairos.md](kairos.md) | **Phase 2A**: Kairos 개인 비서 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
+| [kairos.md](kairos.md) | **Phase 2A**: Kairos 협업 에이전트 런타임 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
 | [web.md](web.md) | **Phase 2A**: Gadgetron Web UI — `http://localhost:8080/web` 채팅 UI 설정, Origin 격리, 키 회전, 헤드리스 빌드 |
 
 ---

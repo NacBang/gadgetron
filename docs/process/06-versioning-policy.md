@@ -12,9 +12,9 @@
 
 | Phase | 버전 라인 | 상태 |
 |-------|-----------|------|
-| Phase 1 (하방: LLM 오케스트레이션 인프라) | `0.1.X` | 완료 (tag `v0.1.0-phase1`) |
-| Phase 2 (상방: 지식 레이어 + Kairos) | `0.2.X` | **진행 중** |
-| Phase 3 (후속 — 미정) | `0.3.X` | 미정 |
+| Phase 1 (Operations + Execution substrate) | `0.1.X` | 완료 (tag `v0.1.0-phase1`) |
+| Phase 2 (Assistant plane + collaboration entry point) | `0.2.X` | **진행 중** |
+| Phase 3 (Cluster ops expansion + richer automation) | `0.3.X` | 미정 |
 | … | `0.N.X` | … |
 | **정식 출시** | **`1.0.0`** | 공개 출시 시점에 명시적으로 bump |
 

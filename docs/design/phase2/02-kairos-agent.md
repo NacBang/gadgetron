@@ -11,6 +11,7 @@
 > **Provenance**:
 > - v2 → v3: Round 2 review (chief-architect CA-B1/B2/B3/DET1, security SEC-B1/B3/B4, dx DX-B3, qa QA-NB2/DET1/DET2/DET3/NIT4, gap GAP-3) addressed 2026-04-13
 > - v3 → v4: Agent-centric pivot alignment (D-20260414-04, ADR-P2A-05, ADR-P2A-06). Config namespace `[kairos]` is now **legacy** — the canonical P2A schema is `[agent]` + `[agent.brain]` in `04 v2 §4`. This doc's §10 retains the v3 `KairosConfig` as an **internal struct** fed from `[agent.brain]` via the loader; the legacy `[kairos]` TOML example is retained for migration reference only (see `04 v2 §11.1`).
+> **Current trunk note**: references below to `gadgetron kairos init` are design-history / bootstrap-UX debt, not the shipped CLI surface. Current trunk uses manual `[agent]` + `[agent.brain]` + `[knowledge]` authoring plus `gadgetron mcp serve`.
 
 ## Table of Contents
 
@@ -25,7 +26,7 @@
 9. `GadgetronError::Kairos` extension
 10. Configuration
 11. Provider registration in router
-12. `gadgetron mcp serve` / `kairos init` wiring
+12. `gadgetron mcp serve` / bootstrap wiring
 13. M4 `--allowed-tools` verification plan
 14. Testing strategy
 15. Security & Threat Model (STRIDE)
@@ -1048,7 +1049,7 @@ let llm_router = Arc::new(LlmRouter::new(providers_for_router, config.router.clo
 
 **Recommended configurations:**
 
-1. **Dedicated kairos mode** (single-user desktop — what `gadgetron kairos init` writes):
+1. **Dedicated kairos mode** (single-user desktop — what a future bootstrap UX should write):
    ```toml
    [router]
    default_strategy = { type = "fallback", chain = ["kairos"] }
@@ -1065,7 +1066,7 @@ let llm_router = Arc::new(LlmRouter::new(providers_for_router, config.router.clo
 
 ---
 
-## 12. `gadgetron mcp serve` / `kairos init` wiring
+## 12. `gadgetron mcp serve` / bootstrap wiring
 
 ```rust
 // crates/gadgetron-cli/src/main.rs — CLI enum additions
