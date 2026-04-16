@@ -55,7 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
-use gadgetron_core::agent::config::AgentConfig;
+use gadgetron_core::agent::config::{AgentConfig, SessionMode, StdEnv};
 use gadgetron_core::audit::{
     NoopToolAuditEventSink, ToolAuditEvent, ToolAuditEventSink, ToolCallOutcome, ToolMetadata,
     ToolTier,
@@ -68,16 +68,39 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 use crate::mcp_config::write_config_file;
 use crate::redact::redact_stderr;
-use crate::spawn::build_claude_command;
+use crate::session_store::SessionStore;
+use crate::spawn::{build_claude_command_with_session, ClaudeSessionMode};
 use crate::stream::{event_to_chat_chunks, parse_event, StreamJsonEvent};
 
 /// Bound on the in-flight chunk channel. Small values are fine for
 /// P2A — Claude Code emits chunks faster than HTTP can drain them
 /// anyway, and back-pressure is desired on slow clients.
 const CHUNK_CHANNEL_CAPACITY: usize = 32;
+
+/// Internal session-driver state resolved from `AgentConfig.session_mode`,
+/// `ChatRequest.conversation_id`, and `SessionStore` lookup. Not public —
+/// callers construct `ClaudeCodeSession` and call `.run()`; the driver
+/// resolves the spawn mode internally.
+///
+/// Spec: `02-kairos-agent.md §5.2.5`.
+#[derive(Debug)]
+enum SpawnMode {
+    Stateless,
+    FirstTurn {
+        conversation_id: String,
+        claude_session_uuid: Uuid,
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+    ResumeTurn {
+        conversation_id: String,
+        claude_session_uuid: Uuid,
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+}
 
 /// One Claude Code subprocess invocation.
 pub struct ClaudeCodeSession {
@@ -86,6 +109,7 @@ pub struct ClaudeCodeSession {
     request: ChatRequest,
     tool_metadata: Arc<HashMap<String, ToolMetadata>>,
     audit_sink: Arc<dyn ToolAuditEventSink>,
+    session_store: Option<Arc<SessionStore>>,
 }
 
 impl ClaudeCodeSession {
@@ -100,6 +124,7 @@ impl ClaudeCodeSession {
         request: ChatRequest,
         tool_metadata: Arc<HashMap<String, ToolMetadata>>,
         audit_sink: Arc<dyn ToolAuditEventSink>,
+        session_store: Option<Arc<SessionStore>>,
     ) -> Self {
         Self {
             config,
@@ -107,11 +132,13 @@ impl ClaudeCodeSession {
             request,
             tool_metadata,
             audit_sink,
+            session_store,
         }
     }
 
-    /// Back-compat constructor for tests that do not care about audit.
-    /// Installs `NoopToolAuditEventSink` + empty metadata.
+    /// Back-compat constructor for tests that do not care about audit
+    /// or session continuity. Installs `NoopToolAuditEventSink` + empty
+    /// metadata + no session store.
     pub fn new_without_audit(
         config: Arc<AgentConfig>,
         allowed_tools: Vec<String>,
@@ -123,6 +150,7 @@ impl ClaudeCodeSession {
             request,
             Arc::new(HashMap::new()),
             Arc::new(NoopToolAuditEventSink),
+            None,
         )
     }
 
@@ -147,6 +175,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         request,
         tool_metadata,
         audit_sink,
+        session_store,
     } = session;
 
     match drive(
@@ -156,6 +185,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         &tool_metadata,
         audit_sink.as_ref(),
         &tx,
+        session_store.as_deref(),
     )
     .await
     {
@@ -181,13 +211,10 @@ fn emit_tool_audit_if_needed(
     event: &StreamJsonEvent,
     tool_metadata: &HashMap<String, ToolMetadata>,
     audit_sink: &dyn ToolAuditEventSink,
+    conversation_id: Option<&str>,
+    claude_session_uuid: Option<&str>,
 ) {
     if let StreamJsonEvent::ToolUse { name, .. } = event {
-        // Claude Code passes tools via `mcp__<server>__<tool>`. Strip
-        // the prefix so the audit record names match `ToolSchema.name`
-        // from the registry. For non-MCP built-ins (shouldn't happen
-        // in P2A because `--tools ""` is the default) fall through
-        // with the raw name.
         let bare_name = name
             .strip_prefix("mcp__knowledge__")
             .unwrap_or(name.as_str());
@@ -201,9 +228,80 @@ fn emit_tool_audit_if_needed(
             category,
             outcome: ToolCallOutcome::Success,
             elapsed_ms: 0,
-            conversation_id: None,
-            claude_session_uuid: None,
+            conversation_id: conversation_id.map(|s| s.to_string()),
+            claude_session_uuid: claude_session_uuid.map(|s| s.to_string()),
+            owner_id: None,
+            tenant_id: None,
         });
+    }
+}
+
+/// Resolve the spawn mode from config, request, and session store.
+/// Single decision point for native session branching.
+///
+/// Spec: `02-kairos-agent.md §5.2.5`.
+async fn resolve_spawn_mode(
+    config: &AgentConfig,
+    request: &ChatRequest,
+    session_store: Option<&SessionStore>,
+) -> Result<SpawnMode> {
+    if config.session_mode == SessionMode::StatelessOnly {
+        return Ok(SpawnMode::Stateless);
+    }
+
+    let conversation_id = match request.conversation_id.as_deref() {
+        None => return Ok(SpawnMode::Stateless),
+        Some(id) => id,
+    };
+
+    let store = match session_store {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                target: "kairos_session",
+                conversation_id,
+                "conversation_id present but no SessionStore — stateless fallback"
+            );
+            return Ok(SpawnMode::Stateless);
+        }
+    };
+
+    let (entry, first_turn) = store.get_or_create(conversation_id.to_string());
+
+    if first_turn && config.session_mode == SessionMode::NativeOnly {
+        return Err(GadgetronError::Kairos {
+            kind: KairosErrorKind::SessionNotFound {
+                conversation_id: conversation_id.to_string(),
+            },
+            message: "conversation not found in session store (native_only mode)".to_string(),
+        });
+    }
+
+    let guard = tokio::time::timeout(
+        Duration::from_secs(config.request_timeout_secs),
+        entry.mutex.clone().lock_owned(),
+    )
+    .await
+    .map_err(|_| GadgetronError::Kairos {
+        kind: KairosErrorKind::SessionConcurrent {
+            conversation_id: conversation_id.to_string(),
+        },
+        message: "concurrent request on same conversation_id timed out waiting for mutex"
+            .to_string(),
+    })?;
+
+    if first_turn {
+        Ok(SpawnMode::FirstTurn {
+            conversation_id: conversation_id.to_string(),
+            claude_session_uuid: entry.claude_session_uuid,
+            _guard: guard,
+        })
+    } else {
+        Ok(SpawnMode::ResumeTurn {
+            conversation_id: conversation_id.to_string(),
+            claude_session_uuid: entry.claude_session_uuid,
+            _guard: guard,
+        })
     }
 }
 
@@ -217,7 +315,51 @@ async fn drive(
     tool_metadata: &HashMap<String, ToolMetadata>,
     audit_sink: &dyn ToolAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
+    session_store: Option<&SessionStore>,
 ) -> Result<()> {
+    // 0. Resolve spawn mode (native session branching).
+    let spawn_mode = resolve_spawn_mode(config, request, session_store).await?;
+
+    let (claude_session_mode, stdin_mode) = match &spawn_mode {
+        SpawnMode::Stateless => (ClaudeSessionMode::Stateless, StdinMode::FlattenHistory),
+        SpawnMode::FirstTurn {
+            claude_session_uuid,
+            ..
+        } => (
+            ClaudeSessionMode::First {
+                session_uuid: *claude_session_uuid,
+            },
+            StdinMode::NativeFirstTurn,
+        ),
+        SpawnMode::ResumeTurn {
+            claude_session_uuid,
+            ..
+        } => (
+            ClaudeSessionMode::Resume {
+                session_uuid: *claude_session_uuid,
+            },
+            StdinMode::NativeResumeTurn,
+        ),
+    };
+
+    let (audit_conv_id, audit_session_uuid) = match &spawn_mode {
+        SpawnMode::Stateless => (None, None),
+        SpawnMode::FirstTurn {
+            conversation_id,
+            claude_session_uuid,
+            ..
+        }
+        | SpawnMode::ResumeTurn {
+            conversation_id,
+            claude_session_uuid,
+            ..
+        } => (
+            Some(conversation_id.as_str()),
+            Some(claude_session_uuid.to_string()),
+        ),
+    };
+    let audit_session_uuid_ref = audit_session_uuid.as_deref();
+
     // 1. MCP config tempfile (M1 — mkstemp 0600 atomic).
     let mcp_tmp: NamedTempFile = write_config_file().map_err(|e| GadgetronError::Kairos {
         kind: KairosErrorKind::SpawnFailed {
@@ -226,14 +368,19 @@ async fn drive(
         message: "failed to create MCP config tmpfile".to_string(),
     })?;
 
-    // 2. Build the Command (env_clear + allowlist + kill_on_drop).
-    let mut cmd = build_claude_command(config, mcp_tmp.path(), allowed_tools).map_err(|e| {
-        GadgetronError::Kairos {
-            kind: KairosErrorKind::SpawnFailed {
-                reason: e.to_string(),
-            },
-            message: format!("failed to build claude command: {e}"),
-        }
+    // 2. Build the Command (env_clear + allowlist + kill_on_drop + session flag).
+    let mut cmd = build_claude_command_with_session(
+        config,
+        mcp_tmp.path(),
+        allowed_tools,
+        claude_session_mode,
+        &StdEnv,
+    )
+    .map_err(|e| GadgetronError::Kairos {
+        kind: KairosErrorKind::SpawnFailed {
+            reason: e.to_string(),
+        },
+        message: format!("failed to build claude command: {e}"),
     })?;
 
     // 3. Spawn.
@@ -279,8 +426,8 @@ async fn drive(
     let timeout_secs = config.request_timeout_secs;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
-    // 6. Feed stdin (flattened message history) and close.
-    feed_stdin(stdin, request).await?;
+    // 6. Feed stdin with mode-appropriate payload and close.
+    feed_stdin_with_mode(stdin, request, stdin_mode).await?;
 
     // 7. Stream stdout line-by-line until EOF or timeout.
     let mut reader = BufReader::new(stdout);
@@ -303,10 +450,13 @@ async fn drive(
                 }
                 match parse_event(&line) {
                     Ok(Some(event)) => {
-                        // Emit the tool-call audit BEFORE building chunks.
-                        // Borrowing `event` is safe here — `event_to_chat_chunks`
-                        // consumes by value on the next line.
-                        emit_tool_audit_if_needed(&event, tool_metadata, audit_sink);
+                        emit_tool_audit_if_needed(
+                            &event,
+                            tool_metadata,
+                            audit_sink,
+                            audit_conv_id,
+                            audit_session_uuid_ref,
+                        );
                         for chunk in event_to_chat_chunks(event, request) {
                             // Back-pressure: if the receiver is gone,
                             // stop driving — subprocess will be killed
@@ -393,7 +543,13 @@ async fn drive(
         });
     }
 
-    // Tempfile drops here — all subprocess fds already closed.
+    // 9. Success: bump session bookkeeping (last_used + turn_count).
+    if let Some(store) = session_store {
+        if let Some(id) = request.conversation_id.as_deref() {
+            store.touch(id);
+        }
+    }
+
     drop(mcp_tmp);
     Ok(())
 }
@@ -513,8 +669,12 @@ async fn feed_stdin_with_mode(stdin: ChildStdin, req: &ChatRequest, mode: StdinM
     Ok(())
 }
 
-/// Back-compat wrapper preserving the `feed_stdin(stdin, req)` shape
-/// used by the pre-A7 driver. Defaults to `StdinMode::FlattenHistory`.
+/// Back-compat wrapper preserving the `feed_stdin(stdin, req)` shape.
+/// Used by the `deadline_covers_stdin_write_time` source-level regression
+/// lock (the split-literal needle matches this function name). The driver
+/// now calls `feed_stdin_with_mode` directly with the resolved `StdinMode`.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
     feed_stdin_with_mode(stdin, req, StdinMode::FlattenHistory).await
 }
@@ -659,7 +819,7 @@ mod tests {
             input: serde_json::json!({"name": "home", "content": "hi"}),
         };
 
-        emit_tool_audit_if_needed(&event, &metadata, &sink);
+        emit_tool_audit_if_needed(&event, &metadata, &sink, None, None);
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -672,6 +832,8 @@ mod tests {
                 elapsed_ms,
                 conversation_id,
                 claude_session_uuid,
+                owner_id,
+                tenant_id,
             } => {
                 assert_eq!(tool_name, "wiki.write");
                 assert_eq!(*tier, ToolTier::Write);
@@ -680,6 +842,9 @@ mod tests {
                 assert_eq!(*elapsed_ms, 0); // P2A: precise timing deferred
                 assert!(conversation_id.is_none()); // A5-A7 populates
                 assert!(claude_session_uuid.is_none()); // A6 populates
+                                                        // Type 1 Decision #1 regression lock — always None in P2A.
+                assert!(owner_id.is_none());
+                assert!(tenant_id.is_none());
             }
             #[allow(unreachable_patterns)]
             _ => panic!("unexpected ToolAuditEvent variant"),
@@ -697,19 +862,19 @@ mod tests {
                 stop_reason: None,
             },
         };
-        emit_tool_audit_if_needed(&delta, &metadata, &sink);
+        emit_tool_audit_if_needed(&delta, &metadata, &sink, None, None);
 
         let result = StreamJsonEvent::ToolResult {
             tool_use_id: "call_1".into(),
             content: serde_json::json!({"ok": true}),
             is_error: false,
         };
-        emit_tool_audit_if_needed(&result, &metadata, &sink);
+        emit_tool_audit_if_needed(&result, &metadata, &sink, None, None);
 
         let stop = StreamJsonEvent::MessageStop {
             stop_reason: "stop".into(),
         };
-        emit_tool_audit_if_needed(&stop, &metadata, &sink);
+        emit_tool_audit_if_needed(&stop, &metadata, &sink, None, None);
 
         assert_eq!(sink.events.lock().unwrap().len(), 0);
     }
@@ -728,7 +893,7 @@ mod tests {
             name: "some.unknown.tool".into(),
             input: serde_json::Value::Null,
         };
-        emit_tool_audit_if_needed(&event, &metadata, &sink);
+        emit_tool_audit_if_needed(&event, &metadata, &sink, None, None);
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -974,17 +1139,17 @@ mod tests {
         // avoid matching the test body itself via include_str! recursion.
         const SOURCE: &str = include_str!("session.rs");
         let deadline_needle = ["let dead", "line = tokio::time::Instant::now"].concat();
-        let feed_needle = ["feed_s", "tdin(stdin, request)"].concat();
+        let feed_needle = ["feed_stdin_with_mo", "de(stdin, request, stdin_mode)"].concat();
         let deadline_idx = SOURCE
             .find(&deadline_needle)
             .expect("`let deadline = tokio::time::Instant::now()` not found in session.rs");
         let feed_idx = SOURCE
             .find(&feed_needle)
-            .expect("`feed_stdin(stdin, request)` call not found in session.rs");
+            .expect("`feed_stdin_with_mode(stdin, request, stdin_mode)` not found in session.rs");
         assert!(
             deadline_idx < feed_idx,
             "B-2 regression: `let deadline` (byte {deadline_idx}) must precede \
-             `feed_stdin(stdin, request)` (byte {feed_idx}) so stdin write time \
+             `feed_stdin_with_mode` (byte {feed_idx}) so stdin write time \
              is included in request_timeout_secs. Per ADR-P2A-06 Implementation \
              status addendum item 5 and 02-kairos-agent.md §5 contract."
         );
@@ -1023,5 +1188,270 @@ mod tests {
              addendum item 6 — without the wrapper the drive task hangs on \
              SIGTERM-noop subprocesses."
         );
+    }
+
+    // ---- §5.2.10 items 1-6: resolve_spawn_mode tests ----
+
+    use crate::session_store::SessionStore;
+
+    fn make_config(session_mode: SessionMode) -> AgentConfig {
+        let mut cfg = AgentConfig::default();
+        cfg.session_mode = session_mode;
+        cfg
+    }
+
+    fn request_with_conv_id(id: Option<&str>) -> ChatRequest {
+        ChatRequest {
+            model: "kairos".into(),
+            messages: vec![Message::user("hi")],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: id.map(|s| s.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_first_turn_on_new_conversation_id() {
+        // §5.2.10 item 1: first turn resolves to FirstTurn with session UUID
+        let cfg = make_config(SessionMode::NativeWithFallback);
+        let store = SessionStore::new(60, 10);
+        let req = request_with_conv_id(Some("c1"));
+
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        match mode {
+            SpawnMode::FirstTurn {
+                conversation_id,
+                claude_session_uuid,
+                ..
+            } => {
+                assert_eq!(conversation_id, "c1");
+                let entry = store.get("c1").unwrap();
+                assert_eq!(entry.claude_session_uuid, claude_session_uuid);
+            }
+            other => panic!(
+                "expected FirstTurn, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_resume_turn_on_existing_conversation_id() {
+        // §5.2.10 item 2: pre-seeded store → ResumeTurn with matching UUID
+        let cfg = make_config(SessionMode::NativeWithFallback);
+        let store = SessionStore::new(60, 10);
+        let (entry, first) = store.get_or_create("c1".to_string());
+        assert!(first);
+        store.touch("c1");
+        let expected_uuid = entry.claude_session_uuid;
+
+        let req = request_with_conv_id(Some("c1"));
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        match mode {
+            SpawnMode::ResumeTurn {
+                conversation_id,
+                claude_session_uuid,
+                ..
+            } => {
+                assert_eq!(conversation_id, "c1");
+                assert_eq!(claude_session_uuid, expected_uuid);
+            }
+            other => panic!(
+                "expected ResumeTurn, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_stateless_when_no_conversation_id() {
+        // §5.2.10 item 3: no conversation_id → Stateless
+        let cfg = make_config(SessionMode::NativeWithFallback);
+        let store = SessionStore::new(60, 10);
+        let req = request_with_conv_id(None);
+
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        assert!(matches!(mode, SpawnMode::Stateless));
+    }
+
+    #[tokio::test]
+    async fn resolve_stateless_when_stateless_only_mode() {
+        let cfg = make_config(SessionMode::StatelessOnly);
+        let store = SessionStore::new(60, 10);
+        let req = request_with_conv_id(Some("c1"));
+
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        assert!(matches!(mode, SpawnMode::Stateless));
+        assert!(store.is_empty(), "StatelessOnly must not touch the store");
+    }
+
+    #[tokio::test]
+    async fn resolve_stateless_fallback_when_no_store() {
+        let cfg = make_config(SessionMode::NativeWithFallback);
+        let req = request_with_conv_id(Some("c1"));
+
+        let mode = resolve_spawn_mode(&cfg, &req, None).await.unwrap();
+        assert!(matches!(mode, SpawnMode::Stateless));
+    }
+
+    #[tokio::test]
+    async fn resolve_first_turn_with_unknown_id_in_native_with_fallback() {
+        // §5.2.10 item 5: NativeWithFallback + empty store + unknown id
+        // → creates new entry and resolves to FirstTurn.
+        let cfg = make_config(SessionMode::NativeWithFallback);
+        let store = SessionStore::new(60, 10);
+        let req = request_with_conv_id(Some("ghost"));
+
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        match mode {
+            SpawnMode::FirstTurn {
+                conversation_id, ..
+            } => {
+                assert_eq!(conversation_id, "ghost");
+                assert!(store.get("ghost").is_some(), "entry must be created");
+            }
+            other => panic!(
+                "expected FirstTurn, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_session_not_found_in_native_only_mode() {
+        // §5.2.10 item 6: NativeOnly + empty store + unknown id → SessionNotFound
+        let cfg = make_config(SessionMode::NativeOnly);
+        let store = SessionStore::new(60, 10);
+        let req = request_with_conv_id(Some("ghost"));
+
+        let err = resolve_spawn_mode(&cfg, &req, Some(&store))
+            .await
+            .expect_err("must return SessionNotFound");
+        match err {
+            GadgetronError::Kairos {
+                kind: KairosErrorKind::SessionNotFound { conversation_id },
+                ..
+            } => {
+                assert_eq!(conversation_id, "ghost");
+            }
+            other => panic!("expected SessionNotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_resume_in_native_only_mode_when_entry_exists() {
+        // NativeOnly + pre-seeded entry → ResumeTurn (not SessionNotFound)
+        let cfg = make_config(SessionMode::NativeOnly);
+        let store = SessionStore::new(60, 10);
+        store.get_or_create("c1".to_string());
+
+        let req = request_with_conv_id(Some("c1"));
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        assert!(matches!(mode, SpawnMode::ResumeTurn { .. }));
+    }
+
+    #[tokio::test]
+    async fn audit_context_populated_for_native_session() {
+        // Verify that the audit sink receives conversation_id and
+        // claude_session_uuid when the driver operates in native mode.
+        let sink = CaptureSink::default();
+        let metadata = metadata_with_wiki_write();
+        let store = SessionStore::new(60, 10);
+        let (entry, _) = store.get_or_create("c1".to_string());
+        let uuid_str = entry.claude_session_uuid.to_string();
+
+        let event = StreamJsonEvent::ToolUse {
+            id: "call_99".into(),
+            name: "mcp__knowledge__wiki.write".into(),
+            input: serde_json::json!({"name": "test", "content": "x"}),
+        };
+
+        emit_tool_audit_if_needed(&event, &metadata, &sink, Some("c1"), Some(&uuid_str));
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ToolAuditEvent::ToolCallCompleted {
+                conversation_id,
+                claude_session_uuid,
+                ..
+            } => {
+                assert_eq!(conversation_id.as_deref(), Some("c1"));
+                assert_eq!(claude_session_uuid.as_deref(), Some(uuid_str.as_str()));
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_mode_maps_to_correct_claude_session_mode_and_stdin_mode() {
+        // Verify that the SpawnMode → (ClaudeSessionMode, StdinMode) mapping
+        // is correct by testing the actual command argv + stdin payload.
+        use crate::spawn::{build_claude_command_with_session, ClaudeSessionMode};
+        use gadgetron_core::agent::config::FakeEnv;
+        use std::path::PathBuf;
+
+        let cfg = AgentConfig::default();
+        let mcp_path = PathBuf::from("/tmp/test-mcp.json");
+        let tools: Vec<String> = vec![];
+
+        // FirstTurn → --session-id
+        let uuid = uuid::Uuid::new_v4();
+        let cmd = build_claude_command_with_session(
+            &cfg,
+            &mcp_path,
+            &tools,
+            ClaudeSessionMode::First { session_uuid: uuid },
+            &FakeEnv::new(),
+        )
+        .unwrap();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(args.contains(&uuid.to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+
+        // ResumeTurn → --resume
+        let cmd = build_claude_command_with_session(
+            &cfg,
+            &mcp_path,
+            &tools,
+            ClaudeSessionMode::Resume { session_uuid: uuid },
+            &FakeEnv::new(),
+        )
+        .unwrap();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&uuid.to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+
+        // Stateless → neither flag
+        let cmd = build_claude_command_with_session(
+            &cfg,
+            &mcp_path,
+            &tools,
+            ClaudeSessionMode::Stateless,
+            &FakeEnv::new(),
+        )
+        .unwrap();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
     }
 }

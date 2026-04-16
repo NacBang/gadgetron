@@ -67,6 +67,8 @@ mod tests {
             elapsed_ms: 42,
             conversation_id: None,
             claude_session_uuid: None,
+            owner_id: None,
+            tenant_id: None,
         }
     }
 

@@ -11,6 +11,14 @@
 //!   from day one so A5-A7 (native session integration) can populate them
 //!   without another schema migration. Turns without a conversation_id
 //!   (stateless fallback) serialize both fields as `None` / SQL `NULL`.
+//! - `owner_id` and `tenant_id` (added in PR A7.5 Type 1 Decision #1 per the
+//!   2026-04-16 office-hours design doc) are also `Option<String>` from day
+//!   one. P2A is single-user desktop and always writes `None` for both, but
+//!   the fields exist so multi-tenant rollout in P2B/P2C needs NO schema
+//!   migration — only a flip from `None` to `Some(x)` at the emit site.
+//!   Cost: 2 extra `None` literals per emit, one `NULL` column per row.
+//!   Savings: ~1 week of migration + backfill + semantic re-alignment when
+//!   the second principal arrives.
 //! - Dispatching is fire-and-forget via `send(&self, ...)`. Blocking /
 //!   async-aware writers can wrap the call in a spawn internally. Callers
 //!   MUST NOT `.await` or otherwise block the chat stream on an audit
@@ -55,6 +63,17 @@ pub enum ToolAuditEvent {
         /// populated by A6 (native session integration). `None` for
         /// stateless-mode turns and for all P2A PR A4 emissions.
         claude_session_uuid: Option<String>,
+        /// Owner identifier — the principal whose credentials drove the
+        /// request. `None` in P2A single-user mode. Flip to `Some(x)`
+        /// in P2B/P2C when multi-tenant arrives. Added via Type 1 Decision
+        /// #1 from the 2026-04-16 office-hours design doc.
+        owner_id: Option<String>,
+        /// Tenant identifier — the logical tenancy boundary under which
+        /// this call was made. `None` in P2A single-tenant mode. Flip to
+        /// `Some(x)` when a second tenant arrives. Held separate from
+        /// `owner_id` because a single tenant can have multiple owners
+        /// (e.g., a team account with member users).
+        tenant_id: Option<String>,
     },
 }
 
@@ -159,8 +178,39 @@ mod tests {
             elapsed_ms: 42,
             conversation_id: None,
             claude_session_uuid: None,
+            owner_id: None,
+            tenant_id: None,
         });
         // No panic, no side effect — success is defined by compile + run.
+    }
+
+    #[test]
+    fn tool_call_completed_has_multi_tenant_fields() {
+        // Type 1 Decision #1 regression lock — `owner_id` and `tenant_id`
+        // must exist as `Option<String>` fields so multi-tenant rollout
+        // needs no schema migration. This test fails if someone ever
+        // removes the fields or changes them to non-optional.
+        let evt = ToolAuditEvent::ToolCallCompleted {
+            tool_name: "wiki.read".into(),
+            tier: ToolTier::Read,
+            category: "knowledge".into(),
+            outcome: ToolCallOutcome::Success,
+            elapsed_ms: 0,
+            conversation_id: Some("c1".into()),
+            claude_session_uuid: Some("11111111-2222-3333-4444-555555555555".into()),
+            owner_id: Some("_self".into()),
+            tenant_id: Some("manycoresoft".into()),
+        };
+        match evt {
+            ToolAuditEvent::ToolCallCompleted {
+                owner_id,
+                tenant_id,
+                ..
+            } => {
+                assert_eq!(owner_id.as_deref(), Some("_self"));
+                assert_eq!(tenant_id.as_deref(), Some("manycoresoft"));
+            }
+        }
     }
 
     #[test]

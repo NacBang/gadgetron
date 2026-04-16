@@ -43,6 +43,7 @@ use gadgetron_core::provider::{
 
 use crate::registry::McpToolRegistry;
 use crate::session::ClaudeCodeSession;
+use crate::session_store::SessionStore;
 
 /// The Kairos `LlmProvider`.
 ///
@@ -55,6 +56,7 @@ pub struct KairosProvider {
     config: Arc<AgentConfig>,
     registry: Arc<McpToolRegistry>,
     audit_sink: Arc<dyn ToolAuditEventSink>,
+    session_store: Arc<SessionStore>,
 }
 
 impl KairosProvider {
@@ -67,18 +69,24 @@ impl KairosProvider {
         config: Arc<AgentConfig>,
         registry: Arc<McpToolRegistry>,
         audit_sink: Arc<dyn ToolAuditEventSink>,
+        session_store: Arc<SessionStore>,
     ) -> Self {
         Self {
             config,
             registry,
             audit_sink,
+            session_store,
         }
     }
 
-    /// Back-compat constructor — installs a `NoopToolAuditEventSink`.
-    /// Used in the unit tests that do not care about audit emission.
+    /// Back-compat constructor — installs a `NoopToolAuditEventSink`
+    /// and a default `SessionStore`. Used in unit tests.
     pub fn new_without_audit(config: Arc<AgentConfig>, registry: Arc<McpToolRegistry>) -> Self {
-        Self::new(config, registry, Arc::new(NoopToolAuditEventSink))
+        let store = Arc::new(SessionStore::new(
+            config.session_ttl_secs,
+            config.session_store_max_entries,
+        ));
+        Self::new(config, registry, Arc::new(NoopToolAuditEventSink), store)
     }
 
     /// The model id this provider exposes via `/v1/models` and
@@ -150,6 +158,7 @@ impl LlmProvider for KairosProvider {
             req,
             tool_metadata,
             self.audit_sink.clone(),
+            Some(self.session_store.clone()),
         );
         session.run()
     }
@@ -199,9 +208,10 @@ pub fn register_with_router(
     config: Arc<AgentConfig>,
     registry: Arc<McpToolRegistry>,
     audit_sink: Arc<dyn ToolAuditEventSink>,
+    session_store: Arc<SessionStore>,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
 ) {
-    let provider = KairosProvider::new(config, registry, audit_sink);
+    let provider = KairosProvider::new(config, registry, audit_sink, session_store);
     providers.insert(
         KairosProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -261,7 +271,13 @@ mod tests {
     // Helper that constructs a provider with explicit audit sink — used
     // by the register_with_router regression test.
     fn with_sink(cfg: Arc<AgentConfig>) -> KairosProvider {
-        KairosProvider::new(cfg, empty_registry(), Arc::new(NoopToolAuditEventSink))
+        let store = Arc::new(SessionStore::new(86_400, 10_000));
+        KairosProvider::new(
+            cfg,
+            empty_registry(),
+            Arc::new(NoopToolAuditEventSink),
+            store,
+        )
     }
 
     #[tokio::test]
@@ -331,9 +347,10 @@ mod tests {
         let cfg = Arc::new(AgentConfig::default());
         let reg = empty_registry();
         let sink: Arc<dyn ToolAuditEventSink> = Arc::new(NoopToolAuditEventSink);
+        let store = Arc::new(SessionStore::new(86_400, 10_000));
         let mut map: std::collections::HashMap<String, Arc<dyn LlmProvider>> =
             std::collections::HashMap::new();
-        register_with_router(cfg, reg, sink, &mut map);
+        register_with_router(cfg, reg, sink, store, &mut map);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("kairos"));
         assert_eq!(map.get("kairos").unwrap().name(), "kairos");
