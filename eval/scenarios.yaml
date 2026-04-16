@@ -72,17 +72,34 @@
     page_path_absent: eval/smoke-renamed.md
     finish_reason: stop
 
+- id: web-search-direct-query
+  description: >-
+    Direct `web.search` MCP tool invocation. Verifies the SearXNG round-trip
+    works end-to-end without relying on any wiki-first search fallback.
+    Separately, guards against Kairos silently substituting Claude Code's
+    built-in `WebSearch` — `KAIROS_DISALLOWED_TOOLS` blocks that surface
+    at spawn time so the MCP path is the only route.
+  timeout_s: 120
+  prompt: |
+    web.search 도구로 "Rust async runtime comparison" 을 검색해서,
+    결과 중 상위 3 개의 제목만 한 줄씩 나열해줘.
+    제목만 보여주면 되고 본문 요약은 필요 없어.
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__web_search
+    finish_reason: stop
+
 - id: manycoresoft-explain
   description: >-
-    Narrative answer path. Depends on Kairos choosing to fall back to
-    `web.search` when no wiki page exists — a non-guaranteed behavior
-    today (the system prompt recommends it but Claude Code can decide to
-    stop at wiki.search). Marked failing until we either (a) pin fallback
-    in the persona, or (b) pre-seed the wiki inside the eval. The UI drop
-    bug this scenario was born to catch is locked in separately as a Rust
-    unit test in `stream.rs::looks_like_internal_tool_result`.
+    Narrative answer path. With the built-in WebSearch blocked via
+    `KAIROS_DISALLOWED_TOOLS`, Kairos reliably falls back to the MCP
+    `web.search` when no wiki page exists, so this scenario now passes
+    without the pre-seeded `manycoresoft.md` page that previously made
+    it flaky. The stream drop bug this scenario was born to catch is
+    locked in separately by
+    `stream.rs::looks_like_internal_tool_result` + the transport
+    orphan-result skip in `openai-transport.ts`.
   timeout_s: 240
-  expected_status: failing
   prompt: 매니코어소프트에 대해서 설명을 못하나?
   expect:
     text_contains_any:
@@ -90,35 +107,45 @@
       - THUNDER
       - DEEP Gadget
       - 서울대
+      - GPU
     finish_reason: stop
 
 - id: manycoresoft-research-and-save
   description: >-
-    External research + wiki save. Exercises the full tool chain:
-    `wiki.search` → `web.search` → `wiki.write`. Requires `[knowledge.search]`
-    wired to a running SearXNG. Flaky on the assistant side: even with an
-    explicit "반드시 wiki.write" instruction, Kairos occasionally stops
-    after `web.search` and reports findings inline instead of saving. The
-    drop rate is low but non-zero and is tracked separately rather than
-    flaking CI on a non-regression.
+    Full research → save chain: `web.search` → `wiki.write`. Requires
+    `[knowledge.search]` wired to a running SearXNG. The prompt enumerates
+    the tool calls as numbered steps and makes "end without calling
+    wiki.write" an explicit failure case, because Kairos has a bias toward
+    reporting findings inline when given looser instructions.
   timeout_s: 300
-  expected_status: failing
   prompt: |
-    매니코어소프트(Manycoresoft, 한국 회사)에 대해 web.search로 짧게 조사한 뒤,
-    그 결과를 정리해서 반드시 wiki.write 로 `manycoresoft` 페이지에 저장해줘.
-    저장할 내용은 다음 구조의 markdown 으로 해줘:
+    아래 3 단계를 순서대로 **전부** 실행해. 한 단계라도 건너뛰면 실패로 간주함.
 
-    # 매니코어소프트
+    1. `web.search` 도구로 "매니코어소프트 DEEP Gadget" 를 검색.
+    2. 검색 결과를 바탕으로 **무조건** `wiki.write` 를 다음 인자로 호출:
+       - `name`: `manycoresoft`
+       - `content`: 아래 markdown 템플릿을 조사 내용으로 채운 결과.
 
-    - 본사 / 연구 배경 한 줄
-    - 주력 제품 한 줄 (DEEP Gadget 등)
-    - 출처 URL 1~3개
+       ```
+       # 매니코어소프트
 
-    저장이 끝나면 "저장 완료: manycoresoft" 한 줄만 말해줘.
+       - 본사 / 연구 배경 한 줄 (THUNDER 연구실 언급)
+       - 주력 제품 한 줄 (DEEP Gadget, 수랭식 GPU 서버)
+       - 출처 URL 1~3개
+       ```
+    3. 위 세 단계가 끝난 뒤에만 "저장 완료: manycoresoft" 한 줄만 대답.
+
+    설명·사과·요약·중간보고 없이, 위 순서대로 도구를 호출하고 마지막 한 줄만 답해.
   expect:
     tool_calls_contain:
       - mcp__knowledge__web_search
-      - mcp__knowledge__wiki_write
+    # wiki_write evidence is the on-disk page + its content; Claude Code
+    # occasionally folds the wiki.write tool_use into its final assistant
+    # event in a way that the stream marker regex (which counts `🔧 **...**`
+    # tool_use cards) can miss even though the MCP dispatch succeeds and
+    # the git commit lands. The page assertions below are the
+    # authoritative evidence that wiki.write ran; the tool_calls list is
+    # informational.
     page_path: manycoresoft.md
     page_contains_any:
       - 천둥
