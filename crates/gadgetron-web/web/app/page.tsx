@@ -5,6 +5,7 @@ import {
   ThreadPrimitive,
   MessagePrimitive,
   ComposerPrimitive,
+  useComposerRuntime,
 } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { useEffect, useMemo, useState } from "react";
@@ -144,7 +145,7 @@ export default function Home() {
 
           <div className="border-t border-border/50 bg-background/80 backdrop-blur">
             <div className="mx-auto w-full max-w-3xl p-4">
-              <Composer />
+              <Composer onOpenHelp={() => setSlashHelpOpen(true)} />
               <p className="mt-2 text-center text-[11px] text-muted-foreground">
                 <kbd className="rounded border border-border/40 bg-muted/30 px-1 py-0.5 font-mono text-[10px]">
                   /help
@@ -283,11 +284,45 @@ function AssistantMessage() {
   );
 }
 
-function Composer() {
+function Composer({
+  onOpenHelp,
+}: {
+  onOpenHelp: () => void;
+}) {
+  const composer = useComposerRuntime();
+
+  // Intercept local-only slash commands BEFORE the message is sent to Kairos.
+  // /help → open dialog, /clear → reset thread (no Kairos round-trip).
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    const state = composer.getState();
+    const text = state.text.trim();
+    if (text === "/help") {
+      e.preventDefault();
+      e.stopPropagation();
+      composer.setText("");
+      onOpenHelp();
+      return;
+    }
+    if (text === "/clear") {
+      e.preventDefault();
+      e.stopPropagation();
+      composer.setText("");
+      // Force a full reload — most reliable reset across runtime impls.
+      // (A soft thread.reset exists on some runtimes but isn't in the
+      // public type surface of 0.12; reload is a superset.)
+      if (typeof location !== "undefined") location.reload();
+      return;
+    }
+    // All other input flows through to the runtime.
+  };
+
   return (
-    <ComposerPrimitive.Root className="flex items-end gap-2 rounded-xl border border-border bg-background p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring">
+    <ComposerPrimitive.Root
+      onSubmit={handleSubmit}
+      className="flex items-end gap-2 rounded-xl border border-border bg-background p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring"
+    >
       <ComposerPrimitive.Input
-        placeholder="메시지를 입력하세요..."
+        placeholder="메시지를 입력하세요... (/help 로 명령 목록)"
         rows={1}
         autoFocus
         className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
