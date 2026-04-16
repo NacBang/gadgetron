@@ -1,0 +1,64 @@
+# Gadgetron configuration — example template.
+#
+# Copy this file to `gadgetron.toml` and adjust for your environment:
+#
+#   cp gadgetron.example.toml gadgetron.toml
+#
+# `gadgetron.toml` is gitignored so your local endpoints, API keys, and
+# absolute binary paths never leak into source control. This example stays
+# checked in as documentation for new operators.
+#
+# See docs/manual/configuration.md for all options.
+
+[server]
+# Bind address. Localhost-only by default for single-user demo.
+bind = "0.0.0.0:8080"
+
+# --- Phase 1: LLM providers ---------------------------------------------
+# Declare upstream LLM providers (vLLM, SGLang, OpenAI, Anthropic, Ollama...).
+# Uncomment and adjust for your environment.
+
+# [providers.gemma4]
+# type = "vllm"
+# endpoint = "http://10.100.1.5:8100"
+# models = ["cyankiwi/gemma-4-31B-it-AWQ-4bit"]
+
+[router.default_strategy]
+type = "round_robin"
+
+# --- Phase 2A: Kairos assistant plane ------------------------------------
+# Requires Claude Code CLI installed and `claude login` completed.
+# Without [agent] + [knowledge], Kairos is not registered (only raw
+# providers remain available at /v1/chat/completions).
+
+# [agent]
+# # Claude Code binary. Use an absolute path if the binary is not on the
+# # restricted subprocess PATH (/usr/local/bin:/usr/bin:/bin). Example:
+# #   binary = "/Users/<you>/.local/bin/claude"
+# binary = "claude"
+# request_timeout_secs = 300
+# max_concurrent_subprocesses = 4
+
+# [agent.brain]
+# # "claude_max" uses the operator's local ~/.claude/ OAuth session
+# # (the default). Set mode = "external_anthropic" + external_base_url
+# # to route through a custom Anthropic-compatible endpoint.
+# mode = "claude_max"
+
+# [knowledge]
+# wiki_path = "./.gadgetron/wiki"
+# wiki_autocommit = true
+# wiki_max_page_bytes = 1_048_576
+
+# [knowledge.search]
+# # Optional: enable the web.search MCP tool via a SearXNG instance.
+# searxng_url = "http://127.0.0.1:8888"
+# timeout_secs = 10
+# max_results = 10
+
+# --- Phase 2A: Web UI ----------------------------------------------------
+# `web-ui` Cargo feature must be on (default) for this to take effect.
+
+# [web]
+# enabled = true
+# api_base_path = "/v1"
