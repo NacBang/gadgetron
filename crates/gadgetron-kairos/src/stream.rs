@@ -214,6 +214,13 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
                             tool_call_id = %id,
                             "kairos_tool_called"
                         );
+                        // Hide Claude Code's internal scaffolding tools from
+                        // the UI — only MCP-registered tools represent real
+                        // user-visible work. ToolSearch (schema lookups),
+                        // TodoWrite, and a handful of built-ins are noise.
+                        if is_internal_tool(&name) {
+                            continue;
+                        }
                         // Show the tool call in the UI: name + compact input preview.
                         let mut preview = input.to_string();
                         if preview.len() > 120 {
@@ -238,6 +245,13 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
                 {
                     let text = tool_result_to_text(&content);
                     if text.is_empty() {
+                        continue;
+                    }
+                    // Hide tool_results that correspond to Claude Code's internal
+                    // tools (ToolSearch produces `<function>...</function>` XML
+                    // describing MCP tool schemas — plumbing, not user-visible
+                    // knowledge output).
+                    if looks_like_internal_tool_result(&text) {
                         continue;
                     }
                     let icon = if is_error { "❌" } else { "✓" };
@@ -293,6 +307,27 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
             Vec::new()
         }
     }
+}
+
+/// Claude Code ships built-in scaffolding tools that shouldn't be surfaced to
+/// the user — they're plumbing, not user-visible work. This list hides:
+///   - ToolSearch: schema fetcher Claude Code calls before every MCP tool
+///   - TodoWrite: agent-internal task tracking
+///   - Everything else not prefixed with `mcp__` (those are our real MCP tools)
+fn is_internal_tool(name: &str) -> bool {
+    !name.starts_with("mcp__")
+}
+
+/// Heuristic: looks like output from Claude Code's internal ToolSearch
+/// (returns an XML-ish `<function>{...}</function>` description of a tool
+/// schema) or TodoWrite acknowledgement. These are plumbing artifacts that
+/// confuse end users if surfaced as tool_result cards.
+fn looks_like_internal_tool_result(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("Tool loaded.")
+        || t.starts_with("<function>")
+        || t.starts_with("Todos have been modified")
+        || t.starts_with("Todos are being tracked")
 }
 
 /// Extract a best-effort text preview from a Claude Code tool_result `content` field.

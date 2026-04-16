@@ -93,6 +93,8 @@ export class OpenAIChatTransport<
     const textId = `${messageId}-text`;
     // Per-segment id counters so each thinking/tool block gets its own UI part.
     let segmentCounter = 0;
+    // The most recent tool_use segId, so the next tool_result can be bound to it.
+    let lastToolCallId: string | null = null;
     let activeTextStreaming = false;
     let finished = false;
     let buffer = "";
@@ -145,7 +147,13 @@ export class OpenAIChatTransport<
         activeTextStreaming = false;
       }
 
-      const segId = `${messageId}-seg-${segmentCounter++}`;
+      // For tool_result we REUSE the last tool_use's id so the UI can pair
+      // input and output into a single ToolCallMessagePart. For every other
+      // kind we mint a fresh id.
+      const segId =
+        seg.kind === "tool_result" && lastToolCallId
+          ? lastToolCallId
+          : `${messageId}-seg-${segmentCounter++}`;
 
       if (seg.kind === "thinking") {
         controller.enqueue({
@@ -165,6 +173,7 @@ export class OpenAIChatTransport<
       }
 
       if (seg.kind === "tool_use") {
+        lastToolCallId = segId;
         // Emit a synthetic tool-call frame so assistant-ui's ToolCallMessagePart
         // can render it. AI SDK v6's tool lifecycle is start/delta/end for
         // input and separate output frames; we collapse everything at once
@@ -191,9 +200,9 @@ export class OpenAIChatTransport<
       }
 
       if (seg.kind === "tool_result") {
-        // There's no hard binding between the tool_use and tool_result in our
-        // wire format (Kairos just emits them in order). Emit with a fresh
-        // tool-output chunk using segId; rendering correlates by ordering.
+        // Reuse the segId from the most recent tool_use so the UI can pair
+        // them into one card. After emitting, clear the pointer so the
+        // next tool_use can claim a fresh id.
         controller.enqueue({
           type: "tool-output-available",
           toolCallId: segId,
@@ -203,6 +212,7 @@ export class OpenAIChatTransport<
           },
           providerExecuted: true,
         } as unknown as UIMessageChunk);
+        lastToolCallId = null;
         return;
       }
     };
