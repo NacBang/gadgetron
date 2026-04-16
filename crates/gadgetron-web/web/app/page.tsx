@@ -8,12 +8,13 @@ import {
 } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { useEffect, useMemo, useState } from "react";
-import { SendHorizonal, Settings2, User } from "lucide-react";
+import { SendHorizonal, Settings2, User, CommandIcon } from "lucide-react";
 
 import { OpenAIChatTransport } from "./openai-transport";
 import { MarkdownText } from "./components/markdown-text";
 import { ReasoningPart } from "./components/reasoning-part";
 import { ToolPart } from "./components/tool-part";
+import { SlashHelpDialog } from "./components/slash-help-dialog";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { Card, CardContent } from "./components/ui/card";
@@ -41,6 +42,7 @@ export default function Home() {
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [slashHelpOpen, setSlashHelpOpen] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem("gadgetron_api_key");
@@ -115,12 +117,14 @@ export default function Home() {
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      <SlashHelpDialog open={slashHelpOpen} onOpenChange={setSlashHelpOpen} />
       <div className="flex h-screen flex-col bg-background text-foreground">
         <AppHeader
           onOpenSettings={() => setSettingsOpen(true)}
           settingsOpen={settingsOpen}
           setSettingsOpen={setSettingsOpen}
           onClearKey={clearKey}
+          onOpenHelp={() => setSlashHelpOpen(true)}
         />
 
         <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
@@ -141,6 +145,12 @@ export default function Home() {
           <div className="border-t border-border/50 bg-background/80 backdrop-blur">
             <div className="mx-auto w-full max-w-3xl p-4">
               <Composer />
+              <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                <kbd className="rounded border border-border/40 bg-muted/30 px-1 py-0.5 font-mono text-[10px]">
+                  /help
+                </kbd>{" "}
+                를 입력하면 슬래시 명령 목록이 열립니다. Enter로 보내기, Shift+Enter로 줄바꿈.
+              </p>
             </div>
           </div>
         </ThreadPrimitive.Root>
@@ -156,11 +166,13 @@ function AppHeader({
   settingsOpen,
   setSettingsOpen,
   onClearKey,
+  onOpenHelp,
 }: {
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
   setSettingsOpen?: (v: boolean) => void;
   onClearKey?: () => void;
+  onOpenHelp?: () => void;
 }) {
   const showSettings = !!onOpenSettings;
   return (
@@ -172,12 +184,19 @@ function AppHeader({
           · Gadgetron의 AI 에이전트
         </span>
       </div>
-      {showSettings && (
-        <>
-          <Button variant="ghost" size="sm" onClick={onOpenSettings}>
-            <Settings2 className="size-4" />
-            설정
+      <div className="flex items-center gap-1">
+        {onOpenHelp && (
+          <Button variant="ghost" size="sm" onClick={onOpenHelp}>
+            <CommandIcon className="size-4" />
+            명령
           </Button>
+        )}
+        {showSettings && (
+          <>
+            <Button variant="ghost" size="sm" onClick={onOpenSettings}>
+              <Settings2 className="size-4" />
+              설정
+            </Button>
           <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
             <DialogContent>
             <DialogHeader>
@@ -195,9 +214,10 @@ function AppHeader({
               </Button>
             </DialogFooter>
           </DialogContent>
-          </Dialog>
-        </>
-      )}
+            </Dialog>
+          </>
+        )}
+      </div>
     </header>
   );
 }
