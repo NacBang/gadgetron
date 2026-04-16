@@ -1,7 +1,7 @@
 # 서브에이전트 로스터
 
-> 업데이트: 2026-04-12
-> 편성: PM (메인 에이전트) + 서브에이전트 **10명**
+> 업데이트: 2026-04-16
+> 편성: PM (메인 에이전트) + 서브에이전트 **10명** + 총괄자문 **1명** (Codex)
 > 원칙: 단일 도메인 10년+ 경력. AGENTS.md 핵심 규칙 2·3에 따라 즉시 가감.
 
 ---
@@ -10,6 +10,8 @@
 
 ```
                                     PM (메인 에이전트)
+                                    │
+                              codex-chief-advisor ← 총괄자문 (외부 second opinion)
                                     │
    ┌──────┬──────┬──────┬──────┬────┴────┬──────┬──────┬──────┬──────┐
    │      │      │      │      │         │      │      │      │      │
@@ -245,6 +247,24 @@ arch    router-  engine sched- platform sre-    inter- test-  compli-   product-
 
 ---
 
+## 11. codex-chief-advisor (총괄자문)
+
+**도메인**: 독립 코드 리뷰 · 적대적 검증 · 아키텍처 자문
+
+**도구**: OpenAI Codex CLI (`codex-cli`) — ChatGPT Pro (o3/o4-mini)
+
+**핵심 책임**:
+- 팀 내부 리뷰(Round 1~3)와 독립적인 외부 관점의 구조적 코드 리뷰
+- 적대적 관점에서 엣지 케이스·보안 취약점·성능 병목 탐색
+- 설계 결정에 대한 second opinion (다른 모델 계열로 확인 편향 방지)
+- 자문 전용 — 직접 코드를 수정하지 않음. 발견사항을 PM에게 보고
+
+**운용 모드**: review (diff 리뷰) · challenge (적대적 분석) · consult (자유 자문)
+
+**호출**: `/codex` 스킬 또는 터미널에서 `codex --full-auto`
+
+---
+
 ## 공석 / 향후 분리 가능
 
 | 잠재 역할 | 현재 커버 | 분리 조건 |
@@ -278,3 +298,4 @@ arch    router-  engine sched- platform sre-    inter- test-  compli-   product-
 |------|------|------|
 | 2026-04-11 | 초기 8인 편성 | 프로젝트 킥오프 |
 | 2026-04-12 | 9. security-compliance-lead, 10. dx-product-lead 추가 → 10인 편성 | 사용자 지적: 보안 전담 부재 + 사용성 관점 부재. Round 1.5 (보안 + 사용성) 신설 |
+| 2026-04-16 | 11. codex-chief-advisor 추가 (총괄자문) → 10인 + 자문 1인 편성 | 외부 모델(OpenAI Codex)을 통한 독립 second opinion, 확인 편향 방지 |
