@@ -63,6 +63,12 @@ pub struct KairosProvider {
     /// `register_with_router` always supplies one so the cwd pins to
     /// `~/.gadgetron/kairos/work/`.
     kairos_home: Option<Arc<crate::home::KairosHome>>,
+    /// Absolute path to the `gadgetron.toml` used by `gadgetron serve`.
+    /// Passed into the MCP config JSON so the `gadgetron mcp serve`
+    /// grandchild Claude Code spawns can locate `[knowledge]` / `[agent]`
+    /// regardless of its cwd (see `mcp_config::build_config_json`).
+    /// `None` in tests / legacy constructors.
+    config_path: Option<std::path::PathBuf>,
 }
 
 impl KairosProvider {
@@ -89,12 +95,34 @@ impl KairosProvider {
         session_store: Arc<SessionStore>,
         kairos_home: Option<Arc<crate::home::KairosHome>>,
     ) -> Self {
+        Self::new_with_home_and_config_path(
+            config,
+            registry,
+            audit_sink,
+            session_store,
+            kairos_home,
+            None,
+        )
+    }
+
+    /// Full-fat constructor. Production wiring (`register_with_router`)
+    /// forwards the operator's `gadgetron.toml` path here so every spawned
+    /// MCP child can locate the same `[knowledge]` / `[agent]` block.
+    pub fn new_with_home_and_config_path(
+        config: Arc<AgentConfig>,
+        registry: Arc<McpToolRegistry>,
+        audit_sink: Arc<dyn ToolAuditEventSink>,
+        session_store: Arc<SessionStore>,
+        kairos_home: Option<Arc<crate::home::KairosHome>>,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Self {
         Self {
             config,
             registry,
             audit_sink,
             session_store,
             kairos_home,
+            config_path,
         }
     }
 
@@ -171,7 +199,7 @@ impl LlmProvider for KairosProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
         let allowed_tools = self.registry.build_allowed_tools(self.config.as_ref());
         let tool_metadata = self.registry.tool_metadata_snapshot();
-        let session = ClaudeCodeSession::new_with_home(
+        let session = ClaudeCodeSession::new_with_home_and_config_path(
             self.config.clone(),
             allowed_tools,
             req,
@@ -179,6 +207,7 @@ impl LlmProvider for KairosProvider {
             self.audit_sink.clone(),
             Some(self.session_store.clone()),
             self.kairos_home.clone(),
+            self.config_path.clone(),
         );
         session.run()
     }
@@ -238,6 +267,7 @@ pub fn register_with_router(
     audit_sink: Arc<dyn ToolAuditEventSink>,
     session_store: Arc<SessionStore>,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
+    config_path: Option<std::path::PathBuf>,
 ) {
     let kairos_home = match std::env::var("HOME") {
         Ok(real_home) => {
@@ -262,8 +292,14 @@ pub fn register_with_router(
             None
         }
     };
-    let provider =
-        KairosProvider::new_with_home(config, registry, audit_sink, session_store, kairos_home);
+    let provider = KairosProvider::new_with_home_and_config_path(
+        config,
+        registry,
+        audit_sink,
+        session_store,
+        kairos_home,
+        config_path,
+    );
     providers.insert(
         KairosProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -402,7 +438,7 @@ mod tests {
         let store = Arc::new(SessionStore::new(86_400, 10_000));
         let mut map: std::collections::HashMap<String, Arc<dyn LlmProvider>> =
             std::collections::HashMap::new();
-        register_with_router(cfg, reg, sink, store, &mut map);
+        register_with_router(cfg, reg, sink, store, &mut map, None);
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("kairos"));
         assert_eq!(map.get("kairos").unwrap().name(), "kairos");
