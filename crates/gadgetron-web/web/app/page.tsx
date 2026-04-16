@@ -12,6 +12,8 @@ import { SendHorizonal, Settings2, User } from "lucide-react";
 
 import { OpenAIChatTransport } from "./openai-transport";
 import { MarkdownText } from "./components/markdown-text";
+import { ReasoningPart } from "./components/reasoning-part";
+import { ToolPart } from "./components/tool-part";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { Card, CardContent } from "./components/ui/card";
@@ -248,6 +250,10 @@ function AssistantMessage() {
             <MessagePrimitive.Parts
               components={{
                 Text: MarkdownText,
+                Reasoning: ReasoningPart,
+                tools: {
+                  Fallback: ToolPart,
+                },
               }}
             />
           </CardContent>
