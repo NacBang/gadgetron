@@ -43,7 +43,7 @@
 
 | 문서 | 용도 |
 |------|------|
-| [`docs/agents/`](docs/agents/) | 10명 전문가 역할 상세 정의 (도구 독립적 마크다운) |
+| [`docs/agents/`](docs/agents/) | 10명 전문가 + 1명 총괄자문(Codex) 역할 상세 정의 (도구 독립적 마크다운) |
 | [`docs/process/00-agent-roster.md`](docs/process/00-agent-roster.md) | 팀 명단 개요 및 담당 책임 |
 | [`docs/process/01-workflow.md`](docs/process/01-workflow.md) | 설계 → 리뷰 → 구현 워크플로우 |
 | [`docs/process/02-document-template.md`](docs/process/02-document-template.md) | 설계 문서 필수 템플릿 |
