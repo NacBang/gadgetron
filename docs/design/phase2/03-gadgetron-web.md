@@ -1922,3 +1922,75 @@ v2 received **APPROVE WITH MINOR** from all four reviewers (dx / security / qa /
 **v2.1 disposition for v2 non-blockers/nits not addressed**: all remaining items from all four v1 + v2 reviews are tracked for the first code PR review. None block TDD start.
 
 *End of 03-gadgetron-web.md Draft v2.1. 2026-04-14. v1 (21 B + 8 DET) + v2 (10 mechanical fixes) addressed. All four Round 1.5/2/3 reviewers APPROVE WITH MINOR. Security Round 1.5 CLOSED. Ready for TDD scaffolding (tasks #3 → #6 → #7 → kairos track).*
+
+---
+
+## Appendix D — UI component library addendum (2026-04-16, Sprint A)
+
+### Decision: shadcn/ui
+
+Added during Sprint A (demo polish). Not a runtime dependency — `shadcn` is a CLI that **copies component source files into the project** (under `app/components/ui/`), so components become part of the codebase and can be customized freely.
+
+### Why shadcn over alternatives
+
+| Library | GitHub stars (2026-04) | Fit with our stack | Verdict |
+|---|---|---|---|
+| **shadcn/ui** | 112k | Tailwind 4 + Radix primitives — identical philosophy to assistant-ui | ✅ selected |
+| antd | 98k | Own CSS system, collides with Tailwind | rejected |
+| chakra-ui v3 | 40k | Emotion-based, duplicates Tailwind role | rejected |
+| mantine | 31k | Own CSS system | rejected |
+| heroui | 29k | Niche | rejected |
+| @radix-ui/themes | 8k | Low-level; shadcn wraps these | subsumed |
+
+Decision drivers:
+
+- shadcn is **10x** more popular than the next Tailwind-compatible peer.
+- assistant-ui 0.12 already builds on shadcn + Radix conventions (see §5 + §9). Component composition is natural.
+- Source-in-repo model means no version lock-in, easier theming per Gadgetron branding, no supply-chain risk beyond Radix (already vetted in §19.1).
+
+### Components installed (initial set)
+
+```
+app/components/ui/
+├── avatar.tsx         — user/assistant avatars
+├── badge.tsx          — tool tags, status pills
+├── button.tsx         — send, copy, retry
+├── card.tsx           — message containers
+├── collapsible.tsx    — thinking / tool-call collapse (Sprint A3)
+├── dialog.tsx         — settings modal, confirm delete
+├── dropdown-menu.tsx  — model picker, user menu
+├── input.tsx          — API key, quick inputs
+├── scroll-area.tsx    — message list viewport
+├── separator.tsx      — message group dividers
+├── textarea.tsx       — composer input
+└── tooltip.tsx        — action hints
+```
+
+Utility: `app/lib/utils.ts` exports `cn` (Tailwind class merger).
+
+### `components.json`
+
+- `style = "base-nova"` (shadcn 4.x default)
+- `baseColor = "neutral"` (dark-mode-friendly)
+- `cssVariables = true` (theme via CSS vars in `globals.css`)
+- `iconLibrary = "lucide"` (already a Radix-ecosystem vendor)
+- TypeScript, RSC-compatible
+
+### Supply-chain note
+
+shadcn adds these transitive deps (all MIT, already under Radix umbrella):
+
+- `@radix-ui/react-*` primitives per component
+- `class-variance-authority` — variant composition
+- `clsx` + `tailwind-merge` — class utilities
+- `lucide-react` — icon set
+
+Bundle impact to be verified on next `cargo build -p gadgetron-cli` (expect < 30 KB gzipped for the baseline chat page).
+
+### Sprint A follow-ups driven by this
+
+- **A2**: Replace hand-rolled `page.tsx` styles with shadcn primitives. `Card` for messages, `Collapsible` for thinking/tool-use, `ScrollArea` for viewport, `Dialog` for settings.
+- **A3**: Markdown renderer for assistant messages (`@assistant-ui/react-markdown` or direct `react-markdown` + `remark-gfm`).
+- **A4**: Slash-command palette via shadcn `Command` + `Dialog`.
+
+*Appendix D added 2026-04-16 during Sprint A (demo polish).*
