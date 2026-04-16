@@ -1141,8 +1141,10 @@ name = "gadgetron-knowledge"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "gadgetron-core",
  "git2",
+ "include_dir",
  "libc",
  "once_cell",
  "proptest",

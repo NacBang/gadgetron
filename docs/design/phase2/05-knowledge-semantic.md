@@ -156,10 +156,10 @@ confidence = "high"
 | `type` | `String` | `"incident"` \| `"runbook"` \| `"decision"` \| `"note"` \| 자유 | 도메인 자유 |
 | `created` | RFC 3339 datetime | 생성 시각 | 파서가 자동 설정 |
 | `updated` | RFC 3339 datetime | 마지막 수정 시각 | 파서가 자동 설정 |
-| `source` | `String` | `"user"` \| `"conversation"` \| `"reindex"` \| `"plugin_seed"` | 닫힌 enum 권장, 파서는 미지 값에 warn |
+| `source` | `String` | `"user"` \| `"conversation"` \| `"reindex"` \| `"seed"` | 닫힌 enum 권장, 파서는 미지 값에 warn. `"seed"`는 core 또는 플러그인이 주입한 시작 문서 |
 | `confidence` | `String` | `"high"` \| `"medium"` \| `"low"` | AI 추출은 "medium", 유저 직접은 "high" |
-| `plugin` | `String` (optional) | 예: `"ai-infra"`, `"cicd"` | 플러그인이 심은 지식의 출처 플러그인 이름. `source = "plugin_seed"`일 때 권장. uninstall/archive 시 `WHERE frontmatter->>'plugin' = '...'` 필터에 사용 |
-| `plugin_version` | `String` (optional) | 예: `"0.2.0"` | 동일 플러그인의 seed 버전. upgrade 시 재주입 판단에 사용 |
+| `plugin` | `String` (optional) | 예: `"gadgetron-core"`, `"ai-infra"`, `"cicd"` | seed 페이지의 소유자. `source = "seed"`일 때 필수. `"gadgetron-core"`는 바이너리에 embed된 기본 시드. 플러그인은 자기 이름(kebab-case). uninstall/archive 시 `WHERE frontmatter->>'plugin' = '...'` 필터 사용 |
+| `plugin_version` | `String` (optional) | 예: `"0.2.0"` | 해당 시드의 버전. upgrade 시 재주입 판단에 사용 |
 
 ### 파서 규약
 
