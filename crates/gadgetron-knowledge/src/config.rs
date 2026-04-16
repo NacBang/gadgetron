@@ -161,6 +161,48 @@ mod tests {
 pub struct KnowledgeConfig {
     /// Wiki storage root. Created + git-init'ed on first run if absent.
     /// Env: `GADGETRON_KNOWLEDGE_WIKI_PATH`
+    ///
+    /// # P2A shortcut — single-wiki shape
+    ///
+    /// P2A ships a single-user MVP, so `[knowledge]` declares exactly one
+    /// wiki root here. The office-hours design doc of 2026-04-16
+    /// (Type 1 Decision #3) records that this shape will grow into a
+    /// named registry in P2B+:
+    ///
+    /// ```toml
+    /// # Future shape (P2B+, NOT yet implemented):
+    /// [[knowledge.wiki_registry]]
+    /// name  = "private"
+    /// path  = "/srv/gadgetron/wiki/private"
+    /// scope = "private"    # WikiScope::Private — visible only to owner_id
+    ///
+    /// [[knowledge.wiki_registry]]
+    /// name  = "team"
+    /// path  = "/srv/gadgetron/wiki/team"
+    /// scope = "team"       # WikiScope::Team — visible to tenant_id members
+    ///
+    /// [[knowledge.wiki_registry]]
+    /// name  = "public"
+    /// path  = "/srv/gadgetron/wiki/public"
+    /// scope = "public"     # WikiScope::Public — visible to all tenants
+    /// ```
+    ///
+    /// ## Forward-compat guarantee
+    ///
+    /// When `wiki_registry` lands, the loader will treat `wiki_path` as
+    /// sugar for a single `WikiEntry { name: "default", path: wiki_path,
+    /// scope: WikiScope::Private }`. Operators whose `gadgetron.toml` only
+    /// sets `wiki_path` keep working with zero config churn — the upgrade
+    /// is a pure superset.
+    ///
+    /// ## Why this matters now
+    ///
+    /// The multi-tenant audit columns landed in PR A7.5 (`owner_id`,
+    /// `tenant_id` on `ToolAuditEvent::ToolCallCompleted`) specifically so
+    /// the audit trail can grow into this registry without a schema
+    /// migration. Wiki scoping is the matching write-side evolution — the
+    /// `WikiScope` enum is the piece that ties `owner_id`/`tenant_id` back
+    /// to which pages each principal can see.
     pub wiki_path: PathBuf,
 
     /// Auto-commit on every write. If false, writes are staged but

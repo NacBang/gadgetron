@@ -45,6 +45,8 @@ pub use provider::{register_with_router, KairosProvider};
 pub use redact::redact_stderr;
 pub use registry::{McpToolRegistry, McpToolRegistryBuilder};
 pub use session::ClaudeCodeSession;
-pub use session_store::{ConversationId, SessionEntry, SessionStore};
+pub use session_store::{
+    parse_conversation_id, ConversationId, SessionEntry, SessionStore, DEFAULT_OWNER_ID,
+};
 pub use spawn::{build_claude_command, format_allowed_tools, SpawnError};
 pub use stream::{event_to_chat_chunks, parse_event, MessageDelta, StreamJsonEvent};

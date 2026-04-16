@@ -1049,7 +1049,17 @@ fn register_kairos_if_configured(
     let agent_cfg = Arc::new(app_config.agent.clone());
     let audit_sink: std::sync::Arc<dyn gadgetron_core::audit::ToolAuditEventSink> =
         std::sync::Arc::new(gadgetron_core::audit::NoopToolAuditEventSink);
-    gadgetron_kairos::register_with_router(agent_cfg, registry, audit_sink, providers);
+    let session_store = std::sync::Arc::new(gadgetron_kairos::SessionStore::new(
+        agent_cfg.session_ttl_secs,
+        agent_cfg.session_store_max_entries,
+    ));
+    gadgetron_kairos::register_with_router(
+        agent_cfg,
+        registry,
+        audit_sink,
+        session_store,
+        providers,
+    );
     tracing::info!(
         model = "kairos",
         "kairos: registered (KnowledgeToolProvider active; web.search = {})",

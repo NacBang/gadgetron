@@ -52,7 +52,59 @@ const SWEEP_SCAN_HARD_CAP: usize = 256;
 /// (`X-Gadgetron-Conversation-Id` header or `metadata.conversation_id`
 /// body field). Validated for length + forbidden chars at the gateway
 /// boundary — the store never re-validates.
+///
+/// # Namespace convention (Type 1 Decision #2 — office-hours 2026-04-16)
+///
+/// The string MUST be of the form `"{owner_id}:{local_name}"` where
+/// `owner_id` identifies the principal whose credentials drove the
+/// conversation, and `local_name` is a caller-chosen short name
+/// (uuid, slug, incident id, whatever).
+///
+/// P2A single-user default: `owner_id = "_self"`. Every P2A
+/// conversation id therefore looks like `"_self:<something>"` or any
+/// string with a leading `"_self:"` prefix. Callers that pass a bare
+/// string without the colon separator are tolerated in P2A and
+/// interpreted as local names under the implicit `"_self"` owner —
+/// see [`parse_conversation_id`].
+///
+/// When multi-tenant arrives (P2B or P2C), the gateway authentication
+/// layer sets `owner_id` to the authenticated principal, and this
+/// namespace prefix makes cross-principal collisions impossible.
+///
+/// This is a convention documented in a helper function, not a new
+/// type, because PR A7.5 intentionally avoids refactoring every
+/// existing `String` signature. If/when the system moves to multi-
+/// tenant in earnest, upgrading `ConversationId` to a struct is a
+/// straightforward rename.
 pub type ConversationId = String;
+
+/// Default `owner_id` used by P2A single-user mode when no principal
+/// is attached to the request. Exported so tests and the driver can
+/// name it explicitly rather than sprinkling magic strings.
+pub const DEFAULT_OWNER_ID: &str = "_self";
+
+/// Parse a conversation id into its `(owner_id, local_name)` pair.
+///
+/// Rules (Type 1 Decision #2, PR A7.5):
+///
+/// - `"alice:incident-42"` → `("alice", "incident-42")`
+/// - `"_self:nightly-boot"` → `("_self", "nightly-boot")`
+/// - `"bare-local-name"` → `("_self", "bare-local-name")`  (P2A default)
+/// - `""` → `("_self", "")` (edge case — caller probably shouldn't
+///   pass empty, but we don't panic)
+/// - Multiple colons: first `:` is the separator. `"a:b:c"` →
+///   `("a", "b:c")`. This matters because URL-ish local names may
+///   contain their own colons.
+///
+/// Note this is a pure function with no allocation beyond the
+/// returned `&str` slices. Use `.to_string()` on the slices if
+/// ownership is required.
+pub fn parse_conversation_id(raw: &str) -> (&str, &str) {
+    match raw.split_once(':') {
+        Some((owner, local)) if !owner.is_empty() => (owner, local),
+        _ => (DEFAULT_OWNER_ID, raw),
+    }
+}
 
 /// Per-conversation bookkeeping. Cloning is `Arc`-cheap.
 #[derive(Debug)]
@@ -319,6 +371,48 @@ mod tests {
         let (_, _) = store.get_or_create("c2".to_string());
         assert!(store.get("c1").is_none(), "c1 must be purged by sweep");
         assert!(store.get("c2").is_some());
+    }
+
+    // ---- Type 1 Decision #2 (PR A7.5, office-hours 2026-04-16) ----
+
+    #[test]
+    fn parse_conversation_id_splits_on_first_colon() {
+        let (owner, local) = parse_conversation_id("alice:incident-42");
+        assert_eq!(owner, "alice");
+        assert_eq!(local, "incident-42");
+    }
+
+    #[test]
+    fn parse_conversation_id_uses_default_owner_for_bare_local_name() {
+        let (owner, local) = parse_conversation_id("bare-local-name");
+        assert_eq!(owner, DEFAULT_OWNER_ID);
+        assert_eq!(owner, "_self");
+        assert_eq!(local, "bare-local-name");
+    }
+
+    #[test]
+    fn parse_conversation_id_preserves_colons_in_local_name() {
+        // URL-ish local names can contain their own colons — only the
+        // first `:` is the namespace separator.
+        let (owner, local) = parse_conversation_id("alice:https://foo.bar:8080/x");
+        assert_eq!(owner, "alice");
+        assert_eq!(local, "https://foo.bar:8080/x");
+    }
+
+    #[test]
+    fn parse_conversation_id_leading_colon_falls_back_to_default_owner() {
+        // `":local"` has an empty owner, which is NOT a valid principal.
+        // Treat as bare local with default owner.
+        let (owner, local) = parse_conversation_id(":local");
+        assert_eq!(owner, DEFAULT_OWNER_ID);
+        assert_eq!(local, ":local");
+    }
+
+    #[test]
+    fn parse_conversation_id_empty_string() {
+        let (owner, local) = parse_conversation_id("");
+        assert_eq!(owner, DEFAULT_OWNER_ID);
+        assert_eq!(local, "");
     }
 
     #[tokio::test]
