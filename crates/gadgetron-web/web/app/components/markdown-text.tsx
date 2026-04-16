@@ -12,15 +12,18 @@ import remarkGfm from "remark-gfm";
  *
  * - **Empty + running** → bouncing 3-dot typing indicator (first-token gap).
  * - **Non-empty + running** → pulsing caret `▎` at the tail of the prose.
- * - **RAF-batched render**: while `text` keeps changing (chunk arrivals),
- *   we only push the latest buffer to ReactMarkdown on the next animation
- *   frame. This collapses N chunks-per-frame into one markdown parse, so
- *   long streams don't pin a CPU core on `remark-parse` work the user
- *   never sees anyway. Static/complete messages render synchronously.
- * - **Unclosed fence auto-close**: during streaming a user's half-written
- *   ` ``` ` fence would flash as "code block with everything after it as
- *   code" until the closing ``` arrived. We detect an odd fence count
- *   while `isRunning` and transparently append a trailing ``` so
+ * - **Typewriter reveal**: Claude Code's `stream-json` emits each assistant
+ *   message as ONE "assistant" event containing the full text, so without
+ *   client-side help the chat bubble just pops into existence. We expose
+ *   codepoints one animation frame at a time so the user actually watches
+ *   the answer being written, same UX as ChatGPT / Claude.
+ *   See `useTypewriterText` for the catch-up schedule (slow and relaxed
+ *   when the backlog is small, accelerating when the stream is already
+ *   ahead of the reveal).
+ * - **Unclosed fence auto-close**: while typing, a half-written ` ``` `
+ *   fence would flash as "code block with everything after it as code"
+ *   until the closing ``` arrived. We detect an odd fence count on the
+ *   currently-revealed prefix and transparently append a trailing ``` so
  *   react-markdown can render a stable code block that grows in place.
  */
 export function MarkdownText({
@@ -31,10 +34,11 @@ export function MarkdownText({
   isRunning?: boolean;
 }) {
   // Hooks first (React rules-of-hooks — no conditional hook calls).
-  const displayed = useRafBatchedText(text, !!isRunning);
+  const displayed = useTypewriterText(text, !!isRunning);
+  const isRevealing = isRunning || displayed.length < text.length;
   const safeForMarkdown = useMemo(
-    () => (isRunning ? autoCloseFences(displayed) : displayed),
-    [displayed, isRunning],
+    () => (isRevealing ? autoCloseFences(displayed) : displayed),
+    [displayed, isRevealing],
   );
 
   if (isRunning && !text) {
@@ -55,7 +59,7 @@ export function MarkdownText({
       <ReactMarkdown remarkPlugins={[remarkGfm]}>
         {safeForMarkdown}
       </ReactMarkdown>
-      {isRunning && (
+      {isRevealing && (
         <span
           aria-hidden
           className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] rounded-sm bg-foreground/70 align-middle animate-pulse"
@@ -66,43 +70,79 @@ export function MarkdownText({
 }
 
 /**
- * Throttle updates to one per animation frame while `running`. When the
- * stream is idle we flush synchronously so final-state renders never lag.
+ * Typewriter reveal of `text`. Exposes one animation frame's worth of
+ * codepoints at a time while the stream is active, then keeps revealing
+ * anything still unread after the stream closes (so the user sees the
+ * tail of the answer even if the server finished early).
+ *
+ * # Why
+ *
+ * Claude Code's `stream-json` wire format emits the assistant message as
+ * one or two large events, not token-by-token. Rendering those straight
+ * to the DOM causes the bubble to "teleport" into existence — technically
+ * streaming, perceptually static. Reveal-in-frame brings the UX back to
+ * the ChatGPT / Claude feel.
+ *
+ * # Reveal schedule
+ *
+ * Per animation frame (~60 Hz) we advance by a *step* proportional to
+ * the remaining backlog. The math:
+ *
+ * - `backlog = chars.length - shown`
+ * - `step = clamp(2, floor(backlog / 30), 60)`
+ *
+ * That gives ~120 codepoints/sec on a steady stream (2 cp × 60 fps),
+ * graceful acceleration when the server is already ahead (every 30
+ * unread codepoints adds 1 cp/frame), and a hard ceiling of 60 cp/frame
+ * so a very long backlog (e.g. resumed/replayed transcript) still
+ * flushes in under a second without freezing the thread.
+ *
+ * Codepoint-safe: we iterate `Array.from(text)` (USV iterator), not byte
+ * or UTF-16 code-unit slicing, so emoji and combined Korean syllables
+ * never get split mid-codepoint.
  */
-function useRafBatchedText(text: string, running: boolean): string {
-  const [displayed, setDisplayed] = useState(text);
-  const pending = useRef(text);
-  const raf = useRef<number | null>(null);
+function useTypewriterText(text: string, running: boolean): string {
+  const chars = useMemo(() => Array.from(text), [text]);
+  const [shown, setShown] = useState(() => chars.length);
+  const runningRef = useRef(running);
+  runningRef.current = running;
 
   useEffect(() => {
-    pending.current = text;
-
-    if (!running) {
-      // Stream done — flush immediately and cancel any in-flight tick.
-      if (raf.current !== null) {
-        cancelAnimationFrame(raf.current);
-        raf.current = null;
-      }
-      setDisplayed(text);
-      return;
+    // If `text` shrank (rare — new turn in same part, etc.) clamp shown.
+    if (shown > chars.length) {
+      setShown(chars.length);
     }
+  }, [chars.length, shown]);
 
-    if (raf.current !== null) return; // already scheduled
+  useEffect(() => {
+    // If we're already caught up, nothing to do.
+    if (shown >= chars.length) return;
 
-    raf.current = requestAnimationFrame(() => {
-      raf.current = null;
-      setDisplayed(pending.current);
-    });
-
-    return () => {
-      if (raf.current !== null) {
-        cancelAnimationFrame(raf.current);
-        raf.current = null;
-      }
+    let raf = 0;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      setShown((prev) => {
+        if (prev >= chars.length) return prev;
+        const backlog = chars.length - prev;
+        // Slower while actively streaming (keeps the cursor visible as a
+        // pacing element). Once the server signals done, fast-forward so
+        // we don't leave the user staring at a frozen partial answer.
+        const step = runningRef.current
+          ? Math.min(Math.max(2, Math.floor(backlog / 30)), 60)
+          : Math.min(Math.max(8, Math.floor(backlog / 6)), 200);
+        return Math.min(prev + step, chars.length);
+      });
+      raf = requestAnimationFrame(tick);
     };
-  }, [text, running]);
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [chars.length, shown]);
 
-  return displayed;
+  return useMemo(() => chars.slice(0, shown).join(""), [chars, shown]);
 }
 
 /**
