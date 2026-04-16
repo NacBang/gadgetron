@@ -40,6 +40,20 @@ impl Router {
             .cloned()
             .unwrap_or_default();
 
+        // Direct-match: if the model name exactly matches a registered
+        // provider name, route directly to that provider. This allows
+        // providers like "kairos" to be addressed by model name without
+        // the routing strategy sending the request to a random provider.
+        if self.providers.contains_key(model) {
+            return Ok(RoutingDecision {
+                provider: model.clone(),
+                model: model.clone(),
+                strategy: strategy.clone(),
+                estimated_cost_usd: self.estimate_cost(model),
+                fallback_chain,
+            });
+        }
+
         let (provider_name, estimated_cost) = match strategy {
             RoutingStrategy::RoundRobin => {
                 let available: Vec<&String> = self.providers.keys().collect();
