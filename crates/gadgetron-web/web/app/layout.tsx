@@ -16,7 +16,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="ko" className={cn("font-sans", geist.variable)}>
+    <html lang="ko" className={cn("dark font-sans", geist.variable)}>
       <head>
         <meta name="gadgetron-api-base" content="/v1" />
       </head>
