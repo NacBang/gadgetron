@@ -29,6 +29,7 @@
 // extensively. See the matching cfg_attr in gadgetron-core/src/lib.rs.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
+pub mod home;
 pub mod mcp_config;
 pub mod mcp_server;
 pub mod provider;
@@ -39,6 +40,7 @@ pub mod session_store;
 pub mod spawn;
 pub mod stream;
 
+pub use home::{prepare_kairos_home, HomeError, KairosHome};
 pub use mcp_config::{build_config_json, write_config_file};
 pub use mcp_server::serve_stdio;
 pub use provider::{register_with_router, KairosProvider};

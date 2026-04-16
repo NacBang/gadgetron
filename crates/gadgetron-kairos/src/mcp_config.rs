@@ -82,7 +82,18 @@ mod tests {
     fn build_config_json_shape() {
         let v = build_config_json();
         assert!(v.get("mcpServers").is_some());
-        assert_eq!(v["mcpServers"]["knowledge"]["command"], "gadgetron");
+        // `command` resolves via `current_exe()` — at test time that's the
+        // hashed test binary, in production it's the gadgetron release
+        // binary. Either way it must be a non-empty absolute path so
+        // Claude Code can spawn it without PATH lookup (see SEC-B1).
+        let command = v["mcpServers"]["knowledge"]["command"]
+            .as_str()
+            .expect("command must be a string");
+        assert!(!command.is_empty(), "command must be non-empty");
+        assert!(
+            command.starts_with('/') || command == "gadgetron",
+            "command must be absolute path (current_exe) or the bare fallback, got {command}"
+        );
         assert_eq!(v["mcpServers"]["knowledge"]["args"][0], "mcp");
         assert_eq!(v["mcpServers"]["knowledge"]["args"][1], "serve");
     }
