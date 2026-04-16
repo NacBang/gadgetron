@@ -340,6 +340,13 @@ async fn resolve_spawn_mode(
 /// Inner drive function returning `Result<(), GadgetronError>` so `?`
 /// works naturally throughout. Errors are forwarded to the channel by
 /// `run_driver`; successful yields are pushed inline via `tx.send`.
+///
+/// Arg count is intentionally high — every argument is a distinct
+/// subprocess-lifecycle concern (config, allowed tools, inbound request,
+/// tool metadata, audit sink, outbound channel, session store, kairos
+/// home). Bundling them into a struct just to satisfy a lint would
+/// obscure the ownership model (`&dyn`, `Option<&T>`) we need here.
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     config: &AgentConfig,
     allowed_tools: &[String],

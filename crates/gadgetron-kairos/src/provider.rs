@@ -262,13 +262,8 @@ pub fn register_with_router(
             None
         }
     };
-    let provider = KairosProvider::new_with_home(
-        config,
-        registry,
-        audit_sink,
-        session_store,
-        kairos_home,
-    );
+    let provider =
+        KairosProvider::new_with_home(config, registry, audit_sink, session_store, kairos_home);
     providers.insert(
         KairosProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,

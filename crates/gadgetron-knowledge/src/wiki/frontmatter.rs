@@ -44,11 +44,7 @@ const KNOWN_CONFIDENCE_VALUES: &[&str] = &["high", "medium", "low"];
 pub struct WikiFrontmatter {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    #[serde(
-        default,
-        rename = "type",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub page_type: Option<String>,
     #[serde(
         default,
@@ -155,16 +151,16 @@ pub fn serialize_page(fm: &WikiFrontmatter, body: &str) -> Result<String, WikiEr
     })?;
     // Ensure trailing newline on toml_str; toml-rs already emits one usually.
     let body_start = if body.starts_with('\n') { "" } else { "\n" };
-    Ok(format!(
-        "{FENCE}\n{toml_str}{FENCE}{body_start}{body}"
-    ))
+    Ok(format!("{FENCE}\n{toml_str}{FENCE}{body_start}{body}"))
 }
 
 /// Split raw text into `(frontmatter_source, body)` if a fence pair is
 /// present at the head. Returns `None` when there is no frontmatter.
 fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
     // Must start with "---\n" (or "---\r\n") as the very first bytes.
-    let after_open = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
+    let after_open = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))?;
 
     // Find the next fence line. A valid closing is a line containing exactly
     // "---" (trailing newline optional at EOF).
@@ -295,11 +291,19 @@ body
         let parsed = parse_page(raw).expect("parse");
         assert_eq!(parsed.frontmatter.extra.len(), 2);
         assert_eq!(
-            parsed.frontmatter.extra.get("unknown_field").and_then(|v| v.as_str()),
+            parsed
+                .frontmatter
+                .extra
+                .get("unknown_field")
+                .and_then(|v| v.as_str()),
             Some("foo")
         );
         assert_eq!(
-            parsed.frontmatter.extra.get("another_one").and_then(|v| v.as_integer()),
+            parsed
+                .frontmatter
+                .extra
+                .get("another_one")
+                .and_then(|v| v.as_integer()),
             Some(42)
         );
     }
