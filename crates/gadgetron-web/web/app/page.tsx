@@ -16,12 +16,11 @@ import { MarkdownText } from "./components/markdown-text";
 import { ReasoningPart } from "./components/reasoning-part";
 import { ToolPart } from "./components/tool-part";
 import { SlashHelpDialog } from "./components/slash-help-dialog";
+import { SlashAutocomplete } from "./components/slash-autocomplete";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { Card, CardContent } from "./components/ui/card";
-import { ScrollArea } from "./components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "./components/ui/avatar";
-import { Separator } from "./components/ui/separator";
 import {
   Dialog,
   DialogContent,
@@ -129,8 +128,8 @@ export default function Home() {
         />
 
         <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
-          <ScrollArea className="flex-1">
-            <ThreadPrimitive.Viewport className="mx-auto w-full max-w-3xl px-4 py-6">
+          <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
+            <div className="mx-auto w-full max-w-3xl px-4 py-6">
               <ThreadPrimitive.Empty>
                 <EmptyState />
               </ThreadPrimitive.Empty>
@@ -140,8 +139,8 @@ export default function Home() {
                   AssistantMessage,
                 }}
               />
-            </ThreadPrimitive.Viewport>
-          </ScrollArea>
+            </div>
+          </ThreadPrimitive.Viewport>
 
           <div className="border-t border-border/50 bg-background/80 backdrop-blur">
             <div className="mx-auto w-full max-w-3xl p-4">
@@ -316,13 +315,22 @@ function Composer({
     // All other input flows through to the runtime.
   };
 
+  const executeLocalCommand = (cmd: "/help" | "/clear") => {
+    if (cmd === "/help") {
+      onOpenHelp();
+    } else if (cmd === "/clear") {
+      if (typeof location !== "undefined") location.reload();
+    }
+  };
+
   return (
     <ComposerPrimitive.Root
       onSubmit={handleSubmit}
-      className="flex items-end gap-2 rounded-xl border border-border bg-background p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring"
+      className="relative flex items-end gap-2 rounded-xl border border-border bg-background p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring"
     >
+      <SlashAutocomplete onLocalExecute={executeLocalCommand} />
       <ComposerPrimitive.Input
-        placeholder="메시지를 입력하세요... (/help 로 명령 목록)"
+        placeholder="메시지를 입력하세요... (/ 로 명령 자동완성)"
         rows={1}
         autoFocus
         className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
