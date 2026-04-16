@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Geist } from "next/font/google";
+import { cn } from "@/lib/utils";
+
+const geist = Geist({subsets:['latin'],variable:'--font-sans'});
 
 export const metadata: Metadata = {
   title: "Gadgetron",
@@ -12,7 +16,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="ko">
+    <html lang="ko" className={cn("font-sans", geist.variable)}>
       <head>
         <meta name="gadgetron-api-base" content="/v1" />
       </head>
