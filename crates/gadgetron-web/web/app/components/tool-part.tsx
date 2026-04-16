@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChevronRight,
   Wrench,
@@ -41,6 +41,40 @@ export function ToolPart(props: {
   const isDone =
     props.status?.type === "complete" || props.result !== undefined;
   const success = isDone && !props.isError;
+
+  // Client-side wall-clock timing. Server doesn't currently thread
+  // tool_use_id/tool_result_id through the OpenAI SSE shape, so measuring
+  // on the client from the first `status === running` tick to the first
+  // `complete` transition gives us the best "how long did Kairos wait on
+  // this tool" number we have. 100 ms poll is plenty for human perception
+  // and costs ~10 setState per second per live tool call.
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
+  const startedAt = useRef<number | null>(null);
+  useEffect(() => {
+    if (isRunning) {
+      if (startedAt.current === null) startedAt.current = performance.now();
+      const tick = () => {
+        if (startedAt.current !== null) {
+          setElapsedMs(performance.now() - startedAt.current);
+        }
+      };
+      tick();
+      const iv = setInterval(tick, 100);
+      return () => clearInterval(iv);
+    }
+    // Final freeze on transition to done.
+    if (isDone && startedAt.current !== null) {
+      setElapsedMs(performance.now() - startedAt.current);
+      startedAt.current = null;
+    }
+  }, [isRunning, isDone]);
+
+  const elapsedLabel =
+    elapsedMs !== null
+      ? elapsedMs < 1000
+        ? `${Math.round(elapsedMs)}ms`
+        : `${(elapsedMs / 1000).toFixed(1)}s`
+      : null;
 
   const [open, setOpen] = useState(!!props.isError);
   const [userOverride, setUserOverride] = useState(false);
@@ -90,18 +124,29 @@ export function ToolPart(props: {
           className={`size-3 shrink-0 ${isRunning ? "motion-safe:animate-spin text-blue-400" : props.isError ? "text-red-400" : "text-blue-400"}`}
         />
         <code className="font-mono text-xs text-foreground">{displayName}</code>
-        {isRunning && (
-          <span className="ml-auto flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-400/70">
-            <span className="size-1 rounded-full bg-blue-400 animate-pulse" />
-            호출 중
-          </span>
-        )}
-        {success && (
-          <CheckCircle2 className="ml-auto size-3 shrink-0 text-green-500 motion-safe:animate-in motion-safe:fade-in duration-200" />
-        )}
-        {props.isError && (
-          <XCircle className="ml-auto size-3 shrink-0 text-red-500 motion-safe:animate-in motion-safe:fade-in duration-200" />
-        )}
+        <div className="ml-auto flex items-center gap-1.5">
+          {elapsedLabel && (
+            <span
+              className={`font-mono text-[10px] tabular-nums ${
+                isRunning ? "text-blue-400/70" : "text-muted-foreground/70"
+              }`}
+            >
+              {elapsedLabel}
+            </span>
+          )}
+          {isRunning && (
+            <span className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-400/70">
+              <span className="size-1 rounded-full bg-blue-400 animate-pulse" />
+              호출 중
+            </span>
+          )}
+          {success && (
+            <CheckCircle2 className="size-3 shrink-0 text-green-500 motion-safe:animate-in motion-safe:fade-in duration-200" />
+          )}
+          {props.isError && (
+            <XCircle className="size-3 shrink-0 text-red-500 motion-safe:animate-in motion-safe:fade-in duration-200" />
+          )}
+        </div>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="mt-1 space-y-1.5">

@@ -20,6 +20,7 @@ import {
   Copy as CopyIcon,
   Check as CheckIcon,
   Sparkles,
+  ChevronDown,
 } from "lucide-react";
 
 import { OpenAIChatTransport } from "./openai-transport";
@@ -143,23 +144,27 @@ export default function Home() {
           setSettingsOpen={setSettingsOpen}
           onClearKey={clearKey}
           onOpenHelp={() => setSlashHelpOpen(true)}
+          insideRuntime
         />
 
         <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
-          <ThreadPrimitive.Viewport className="kairos-scroll flex-1 overflow-y-auto">
-            <div className="mx-auto w-full max-w-3xl px-4 py-6">
-              <ThreadPrimitive.Empty>
-                <EmptyState />
-              </ThreadPrimitive.Empty>
-              <ThreadPrimitive.Messages
-                components={{
-                  UserMessage,
-                  AssistantMessage,
-                }}
-              />
-              <ThreadPendingIndicator />
-            </div>
-          </ThreadPrimitive.Viewport>
+          <div className="relative flex flex-1 flex-col overflow-hidden">
+            <ThreadPrimitive.Viewport className="kairos-scroll flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-3xl px-4 py-6">
+                <ThreadPrimitive.Empty>
+                  <EmptyState />
+                </ThreadPrimitive.Empty>
+                <ThreadPrimitive.Messages
+                  components={{
+                    UserMessage,
+                    AssistantMessage,
+                  }}
+                />
+                <ThreadPendingIndicator />
+              </div>
+            </ThreadPrimitive.Viewport>
+            <JumpToLatest />
+          </div>
 
           <div className="border-t border-border/50 bg-background/80 backdrop-blur">
             <div className="mx-auto w-full max-w-3xl p-4">
@@ -180,6 +185,25 @@ export default function Home() {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Live pulse shown in the header while the thread is streaming. Bridges
+ * the gap until we thread real tokens-per-second metrics through the
+ * stream (part of the C8 structured-stream refactor). Today it answers
+ * the simpler question of "is the agent actually working right now?"
+ * from anywhere in the viewport — no need to scroll back to see the
+ * per-message caret.
+ */
+function ActiveTaskIndicator() {
+  const isRunning = useThread((s) => s.isRunning);
+  if (!isRunning) return null;
+  return (
+    <span className="flex items-center gap-1.5 rounded-full border border-blue-400/30 bg-blue-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-blue-300 motion-safe:animate-in motion-safe:fade-in duration-200">
+      <span className="size-1.5 rounded-full bg-blue-400 motion-safe:animate-pulse" />
+      응답 중
+    </span>
+  );
+}
 
 function ServerStatus() {
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -226,12 +250,18 @@ function AppHeader({
   setSettingsOpen,
   onClearKey,
   onOpenHelp,
+  insideRuntime = false,
 }: {
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
   setSettingsOpen?: (v: boolean) => void;
   onClearKey?: () => void;
   onOpenHelp?: () => void;
+  /** True when this header is rendered inside an `AssistantRuntimeProvider`.
+   * Gates hooks like `useThread` that require the runtime to be present —
+   * the login screen renders the header OUTSIDE the provider for brand
+   * consistency and calling `useThread` there aborts SSG. */
+  insideRuntime?: boolean;
 }) {
   const showSettings = !!onOpenSettings;
   return (
@@ -244,6 +274,7 @@ function AppHeader({
         </span>
       </div>
       <div className="flex items-center gap-2">
+        {insideRuntime && <ActiveTaskIndicator />}
         <ServerStatus />
         {onOpenHelp && (
           <Button variant="ghost" size="sm" onClick={onOpenHelp}>
@@ -331,6 +362,27 @@ function EmptyState() {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * Floating "↓ 최신으로" button shown only when the user has scrolled
+ * away from the tail of the transcript. `ThreadPrimitive.ScrollToBottom`
+ * handles the "at bottom" detection + click wiring for us — we just
+ * style the host element and let the primitive decide whether to render.
+ */
+function JumpToLatest() {
+  return (
+    <ThreadPrimitive.ScrollToBottom asChild>
+      <button
+        type="button"
+        aria-label="최신 메시지로 이동"
+        className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/60 bg-background/85 px-3 py-1.5 text-xs font-medium text-foreground/90 shadow-lg backdrop-blur transition-all hover:bg-background hover:text-foreground motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 duration-200"
+      >
+        <ChevronDown className="size-3.5" />
+        최신으로
+      </button>
+    </ThreadPrimitive.ScrollToBottom>
   );
 }
 
@@ -430,7 +482,10 @@ function AssistantMessage() {
         </AvatarFallback>
       </Avatar>
       <div className="flex max-w-[85%] flex-col gap-1">
-        <span className="text-xs text-muted-foreground">Kairos</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Kairos</span>
+          <AssistantStatusBadge />
+        </div>
         <Card className="relative bg-card/70 ring-1 ring-border/60 shadow-sm transition-colors hover:bg-card/90">
           <CopyMessageButton />
           <CardContent className="px-4 py-2.5 text-sm">
@@ -447,6 +502,53 @@ function AssistantMessage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+/**
+ * Tiny label next to "Kairos" that calls out incomplete messages — a user
+ * who hits the Stop button mid-stream should see *why* the response is
+ * partial, not silent truncation. Also surfaces length/content-filter
+ * cutoffs if the underlying runtime ever reports them.
+ */
+function AssistantStatusBadge() {
+  const status = useMessage((s) => s.status);
+  if (!status || status.type !== "incomplete") return null;
+  const reason = status.reason;
+  const labelMap: Record<string, { text: string; tint: string }> = {
+    cancelled: {
+      text: "중지됨",
+      tint: "text-amber-300/90 border-amber-400/30 bg-amber-400/10",
+    },
+    length: {
+      text: "길이 제한",
+      tint: "text-sky-300/90 border-sky-400/30 bg-sky-400/10",
+    },
+    "content-filter": {
+      text: "필터 차단",
+      tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
+    },
+    "tool-calls": {
+      text: "도구 보류",
+      tint: "text-blue-300/90 border-blue-400/30 bg-blue-400/10",
+    },
+    error: {
+      text: "오류 종료",
+      tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
+    },
+    other: {
+      text: "조기 종료",
+      tint: "text-muted-foreground border-border/60 bg-muted/40",
+    },
+  };
+  const info = labelMap[reason] ?? labelMap.other;
+  return (
+    <span
+      className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider ${info.tint}`}
+      title={`message.status: incomplete (${reason})`}
+    >
+      {info.text}
+    </span>
   );
 }
 
