@@ -1,8 +1,8 @@
 # 01 — Knowledge Layer Detailed Implementation Spec (`gadgetron-knowledge`)
 
-> **Status**: Draft v3 (addressed chief-architect + dx + security + qa Round 1 feedback; Round 2 review addressed (4 reviewers cross-check))
+> **Status**: Draft v3 (addressed chief-architect + dx + security + qa Round 1 feedback; Round 2 review addressed (4 reviewers cross-check)) — **§4 search subsystem extended by `05-knowledge-semantic.md` (ADR-P2A-07) as of 2026-04-16**
 > **Author**: PM (Claude)
-> **Date**: 2026-04-13
+> **Date**: 2026-04-13 (v3), 2026-04-16 (§4 semantic extension pointer)
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
 > **Scope**: `gadgetron-knowledge` crate (`KnowledgeToolProvider` implementation) + `gadgetron-core::error::GadgetronError::Wiki` variant + reference-level documentation for the MCP protocol surface the knowledge provider exposes. The stdio MCP server transport is **hosted in `gadgetron-kairos::mcp_server`**, not in this crate — see `02-kairos-agent.md §5` and `04-mcp-tool-registry.md §2.1` for the authoritative transport implementation. References below to `gadgetron kairos init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-kairos` LlmProvider + subprocess is `02-kairos-agent.md`.
 > **Implementation determinism**: every type signature, config field, error code, and test name is explicit. No TBD.
@@ -298,6 +298,9 @@ Everything else crate-private.
 ---
 
 ## 4. Wiki subsystem
+
+> **Extended by `05-knowledge-semantic.md`** (ADR-P2A-07, 2026-04-16):
+> keyword-only inverted index search is superseded by hybrid semantic + ts_rank search (pgvector + embedding provider abstraction). TOML frontmatter, reindex job, and AI auto-extraction pipeline are added in P2A. This section's original search algorithm remains valid for historical context; the production implementation follows `05-knowledge-semantic.md §9` (Search path) going forward.
 
 ### 4.1 Core types
 
