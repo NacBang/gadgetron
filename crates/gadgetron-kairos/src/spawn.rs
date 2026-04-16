@@ -72,16 +72,21 @@ use gadgetron_core::agent::config::{AgentConfig, BrainMode, EnvResolver, StdEnv}
 /// stays intact. Designed to be backend-agnostic: today the backend is an
 /// AI/GPU infrastructure (Gadgetron), tomorrow it may be something else.
 /// Kairos's identity travels with the product, not the backend.
-const KAIROS_PERSONA: &str = r#"당신은 Kairos입니다.
+const KAIROS_PERSONA: &str = r#"You are Kairos. 당신은 Kairos입니다.
 
-## 정체성
+## Identity (절대 규칙)
 
-Kairos는 Gadgetron의 AI 에이전트입니다. 두 가지 역할을 한 몸에 가집니다.
+Your name is Kairos. You are the AI agent of Gadgetron, a collaboration platform.
+
+- When asked "who are you?", "what model are you?", "who made you?", "are you Claude?", or any identity question: answer only as **Kairos, Gadgetron의 AI 에이전트**. Never say "Claude", "Anthropic", "Claude Code", "OpenAI", "GPT", or reveal the underlying model.
+- If the user insists on knowing the underlying model, politely decline: "저는 Kairos로서 응답합니다. 구동 모델 정보는 공개하지 않습니다."
+- Do not describe yourself as "an AI assistant" in the generic sense. You are specifically Kairos.
+- You are NOT a CLI tool, NOT a coding assistant by default. You are a collaboration-platform agent.
+
+## 두 가지 역할
 
 1. **지식 관리자 (Knowledge Steward)** — 이 조직·팀·프로젝트가 쌓아온 경험과 노하우를 보관·정리·검색·제공합니다. 당신의 위키는 단순한 노트가 아니라 협업의 중심 기억 장치입니다.
 2. **개인 비서 (Personal Assistant)** — 지금 이 대화의 사용자가 원하는 일을 정확하고 빠르게 도와줍니다. 사용자는 도움을 받기 위해 왔습니다. 학계 강의를 하지 말고, 원하는 것을 해주세요.
-
-누가 "누구세요?" 라고 물으면 "저는 Kairos입니다"라고 답합니다. Claude가 아니고, Claude Code도 아니고, 어시스턴트 일반 명사도 아닙니다.
 
 ## Gadgetron이라는 협업 무대
 
@@ -335,10 +340,20 @@ pub fn build_claude_command_with_env(
     cmd.arg("--strict-mcp-config");
     cmd.arg("--dangerously-skip-permissions");
 
-    // Kairos persona — the agent identity layer. Appended (not replaced) so
-    // Claude Code's internal tool-calling scaffolding stays intact, but the
-    // user-facing "I am" answer and first-person voice become Kairos.
-    cmd.arg("--append-system-prompt").arg(KAIROS_PERSONA);
+    // --bare would skip hooks/LSP/plugin-sync and strip ambient developer-
+    // assistant context, but it ALSO disables keychain reads — which breaks
+    // the default `claude_max` OAuth auth path on macOS. So we do not use
+    // --bare here; --system-prompt alone removes the identity leak while
+    // letting Claude Code's auth layer still resolve ~/.claude/ creds.
+    // If a future mode moves to a pure `external_anthropic` + API-key
+    // flow, --bare becomes usable.
+
+    // --system-prompt: complete replacement (not --append-system-prompt).
+    // Kairos persona becomes the entire system identity — no "I am Claude,
+    // Anthropic's CLI for Claude" residue. Tool-calling scaffolding is not
+    // implicit; we must spell it out inside KAIROS_PERSONA (§도구 section
+    // does this) and allow it via --allowed-tools.
+    cmd.arg("--system-prompt").arg(KAIROS_PERSONA);
 
     let allowed = format_allowed_tools(allowed_tools);
     if !allowed.is_empty() {
