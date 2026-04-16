@@ -8,3 +8,6 @@
 *.key
 .gstack/
 /.gadgetron/
+
+# Local operator config — copy gadgetron.example.toml and customize.
+/gadgetron.toml

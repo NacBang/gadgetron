@@ -61,7 +61,7 @@
 
 - 멀티테넌트 tenant_id 필터링 (스키마는 P2A에서 `tenant_id TEXT NULL` 컬럼 준비)
 - GraphRAG 재검토
-- 다중 wiki registry (`wiki_registry: Vec<WikiEntry>` with `WikiScope::{Private, Team, Public}`)
+- 다중 wiki registry (`wiki_registry: Vec<WikiEntry>` with `WikiScope::{Private, Team, Public, Plugin { owner }}`) — `Plugin` variant는 플러그인별 격리 네임스페이스를 원할 때 사용. P2A/P2B 기본은 공유 wiki (JARVIS 스타일 크로스도메인 추론 선호). 설계 문서: `docs/design/phase2/06-backend-plugin-architecture.md`.
 
 ### Explicit non-goals
 
@@ -156,8 +156,10 @@ confidence = "high"
 | `type` | `String` | `"incident"` \| `"runbook"` \| `"decision"` \| `"note"` \| 자유 | 도메인 자유 |
 | `created` | RFC 3339 datetime | 생성 시각 | 파서가 자동 설정 |
 | `updated` | RFC 3339 datetime | 마지막 수정 시각 | 파서가 자동 설정 |
-| `source` | `String` | `"user"` \| `"conversation"` \| `"reindex"` | 닫힌 enum 권장, 파서는 미지 값에 warn |
+| `source` | `String` | `"user"` \| `"conversation"` \| `"reindex"` \| `"plugin_seed"` | 닫힌 enum 권장, 파서는 미지 값에 warn |
 | `confidence` | `String` | `"high"` \| `"medium"` \| `"low"` | AI 추출은 "medium", 유저 직접은 "high" |
+| `plugin` | `String` (optional) | 예: `"ai-infra"`, `"cicd"` | 플러그인이 심은 지식의 출처 플러그인 이름. `source = "plugin_seed"`일 때 권장. uninstall/archive 시 `WHERE frontmatter->>'plugin' = '...'` 필터에 사용 |
+| `plugin_version` | `String` (optional) | 예: `"0.2.0"` | 동일 플러그인의 seed 버전. upgrade 시 재주입 판단에 사용 |
 
 ### 파서 규약
 
@@ -189,6 +191,16 @@ pub struct WikiFrontmatter {
     pub source: Option<String>,
     #[serde(default)]
     pub confidence: Option<String>,
+    /// Plugin that seeded/owns this page (optional). When `source =
+    /// "plugin_seed"`, this SHOULD be set so uninstall / archive flows can
+    /// filter by plugin. Backend-plugin architecture: see
+    /// `docs/design/phase2/06-backend-plugin-architecture.md`.
+    #[serde(default)]
+    pub plugin: Option<String>,
+    /// Version of the plugin that seeded this page. Used by the plugin
+    /// `initialize()` hook to decide whether to re-inject updated seeds.
+    #[serde(default)]
+    pub plugin_version: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
