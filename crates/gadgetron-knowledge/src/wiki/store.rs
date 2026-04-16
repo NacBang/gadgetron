@@ -672,7 +672,10 @@ mod tests {
             v.sort();
             v
         };
-        assert_eq!(names, sorted_copy, "list() must return names in sorted order");
+        assert_eq!(
+            names, sorted_copy,
+            "list() must return names in sorted order"
+        );
         let apple_pos = names.iter().position(|&n| n == "apple").expect("apple");
         let mango_pos = names.iter().position(|&n| n == "mango").expect("mango");
         let zebra_pos = names.iter().position(|&n| n == "zebra").expect("zebra");

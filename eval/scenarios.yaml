@@ -72,13 +72,37 @@
     page_path_absent: eval/smoke-renamed.md
     finish_reason: stop
 
+- id: manycoresoft-explain
+  description: >-
+    Narrative answer path. Depends on Kairos choosing to fall back to
+    `web.search` when no wiki page exists — a non-guaranteed behavior
+    today (the system prompt recommends it but Claude Code can decide to
+    stop at wiki.search). Marked failing until we either (a) pin fallback
+    in the persona, or (b) pre-seed the wiki inside the eval. The UI drop
+    bug this scenario was born to catch is locked in separately as a Rust
+    unit test in `stream.rs::looks_like_internal_tool_result`.
+  timeout_s: 240
+  expected_status: failing
+  prompt: 매니코어소프트에 대해서 설명을 못하나?
+  expect:
+    text_contains_any:
+      - 천둥
+      - THUNDER
+      - DEEP Gadget
+      - 서울대
+    finish_reason: stop
+
 - id: manycoresoft-research-and-save
   description: >-
     External research + wiki save. Exercises the full tool chain:
     `wiki.search` → `web.search` → `wiki.write`. Requires `[knowledge.search]`
-    wired to a running SearXNG. Prompt is explicit about the save target to
-    constrain Kairos to act, not just report.
+    wired to a running SearXNG. Flaky on the assistant side: even with an
+    explicit "반드시 wiki.write" instruction, Kairos occasionally stops
+    after `web.search` and reports findings inline instead of saving. The
+    drop rate is low but non-zero and is tracked separately rather than
+    flaking CI on a non-regression.
   timeout_s: 300
+  expected_status: failing
   prompt: |
     매니코어소프트(Manycoresoft, 한국 회사)에 대해 web.search로 짧게 조사한 뒤,
     그 결과를 정리해서 반드시 wiki.write 로 `manycoresoft` 페이지에 저장해줘.

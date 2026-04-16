@@ -544,7 +544,10 @@ mod tests {
             "wiki.delete",
             "wiki.rename",
         ] {
-            assert!(names.contains(&expected), "missing {expected:?} in {names:?}");
+            assert!(
+                names.contains(&expected),
+                "missing {expected:?} in {names:?}"
+            );
         }
         assert!(!names.contains(&"web.search"));
     }

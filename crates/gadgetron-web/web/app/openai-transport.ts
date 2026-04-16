@@ -200,9 +200,17 @@ export class OpenAIChatTransport<
       }
 
       if (seg.kind === "tool_result") {
-        // Reuse the segId from the most recent tool_use so the UI can pair
-        // them into one card. After emitting, clear the pointer so the
-        // next tool_use can claim a fresh id.
+        // Orphan tool_result (no preceding tool_use in this stream) —
+        // almost always a Claude Code built-in tool's "Not connected" /
+        // "No matching deferred tools" chatter that slipped past the
+        // server-side `looks_like_internal_tool_result` suppression.
+        // Silently drop: emitting `tool-output-available` with a fresh
+        // segId appears in the UI as an unpaired card AND (observed in
+        // the 매니코어소프트 설명 case) causes assistant-ui to drop the
+        // assistant answer text that follows.
+        if (!lastToolCallId) {
+          return;
+        }
         controller.enqueue({
           type: "tool-output-available",
           toolCallId: segId,
