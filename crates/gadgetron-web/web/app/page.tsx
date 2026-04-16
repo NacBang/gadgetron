@@ -6,10 +6,21 @@ import {
   MessagePrimitive,
   ComposerPrimitive,
   useComposerRuntime,
+  useThread,
+  useMessage,
 } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
-import { useEffect, useMemo, useState } from "react";
-import { SendHorizonal, Settings2, User, CommandIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  SendHorizonal,
+  Settings2,
+  User,
+  CommandIcon,
+  Square,
+  Copy as CopyIcon,
+  Check as CheckIcon,
+  Sparkles,
+} from "lucide-react";
 
 import { OpenAIChatTransport } from "./openai-transport";
 import { MarkdownText } from "./components/markdown-text";
@@ -36,6 +47,13 @@ function getApiBase(): string {
     'meta[name="gadgetron-api-base"]',
   );
   return meta?.content || "/v1";
+}
+
+function getHealthPath(): string {
+  // `/health` is unauthenticated and lives at the gateway root — strip the
+  // `/v1` (or whatever the operator customized) suffix from the API base.
+  const base = getApiBase();
+  return base.replace(/\/v\d+$/, "") + "/health";
 }
 
 export default function Home() {
@@ -128,7 +146,7 @@ export default function Home() {
         />
 
         <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
-          <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
+          <ThreadPrimitive.Viewport className="kairos-scroll flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-3xl px-4 py-6">
               <ThreadPrimitive.Empty>
                 <EmptyState />
@@ -139,6 +157,7 @@ export default function Home() {
                   AssistantMessage,
                 }}
               />
+              <ThreadPendingIndicator />
             </div>
           </ThreadPrimitive.Viewport>
 
@@ -149,7 +168,8 @@ export default function Home() {
                 <kbd className="rounded border border-border/40 bg-muted/30 px-1 py-0.5 font-mono text-[10px]">
                   /help
                 </kbd>{" "}
-                를 입력하면 슬래시 명령 목록이 열립니다. Enter로 보내기, Shift+Enter로 줄바꿈.
+                를 입력하면 슬래시 명령 목록이 열립니다. Enter로 보내기,
+                Shift+Enter로 줄바꿈.
               </p>
             </div>
           </div>
@@ -160,6 +180,45 @@ export default function Home() {
 }
 
 // ---------------------------------------------------------------------------
+
+function ServerStatus() {
+  const [healthy, setHealthy] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const r = await fetch(getHealthPath(), { cache: "no-store" });
+        if (!cancelled) setHealthy(r.ok);
+      } catch {
+        if (!cancelled) setHealthy(false);
+      }
+    };
+    void check();
+    const iv = setInterval(check, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, []);
+
+  const color =
+    healthy === null
+      ? "bg-muted-foreground/50"
+      : healthy
+        ? "bg-emerald-500 motion-safe:animate-pulse"
+        : "bg-red-500";
+  const label =
+    healthy === null ? "확인 중" : healthy ? "연결됨" : "연결 끊김";
+  return (
+    <span
+      className="flex items-center gap-1.5 rounded-full border border-border/40 bg-muted/20 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground"
+      title={`게이트웨이 상태: ${label}`}
+    >
+      <span className={`size-1.5 rounded-full ${color}`} />
+      <span>{label}</span>
+    </span>
+  );
+}
 
 function AppHeader({
   onOpenSettings,
@@ -176,15 +235,16 @@ function AppHeader({
 }) {
   const showSettings = !!onOpenSettings;
   return (
-    <header className="flex h-14 items-center justify-between border-b border-border/50 bg-background/80 px-6 backdrop-blur">
+    <header className="flex h-14 shrink-0 items-center justify-between border-b border-border/50 bg-background/80 px-6 backdrop-blur">
       <div className="flex items-center gap-2">
-        <div className="size-6 rounded bg-gradient-to-br from-blue-500 to-purple-500" />
+        <div className="size-7 rounded-lg bg-gradient-to-br from-blue-500 to-purple-500 shadow-[0_0_20px_-6px_rgba(139,92,246,0.5)]" />
         <span className="font-semibold tracking-tight">Kairos</span>
         <span className="hidden text-xs text-muted-foreground md:inline">
           · Gadgetron의 AI 에이전트
         </span>
       </div>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-2">
+        <ServerStatus />
         {onOpenHelp && (
           <Button variant="ghost" size="sm" onClick={onOpenHelp}>
             <CommandIcon className="size-4" />
@@ -197,23 +257,23 @@ function AppHeader({
               <Settings2 className="size-4" />
               설정
             </Button>
-          <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-            <DialogContent>
-            <DialogHeader>
-              <DialogTitle>설정</DialogTitle>
-              <DialogDescription>
-                API 키는 브라우저의 localStorage에만 저장됩니다.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex flex-col gap-2 py-4">
-              <p className="text-sm">현재 세션: 로그인됨</p>
-            </div>
-            <DialogFooter>
-              <Button variant="destructive" onClick={onClearKey}>
-                API 키 지우기 (로그아웃)
-              </Button>
-            </DialogFooter>
-          </DialogContent>
+            <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>설정</DialogTitle>
+                  <DialogDescription>
+                    API 키는 브라우저의 localStorage에만 저장됩니다.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="flex flex-col gap-2 py-4">
+                  <p className="text-sm">현재 세션: 로그인됨</p>
+                </div>
+                <DialogFooter>
+                  <Button variant="destructive" onClick={onClearKey}>
+                    API 키 지우기 (로그아웃)
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
             </Dialog>
           </>
         )}
@@ -222,26 +282,132 @@ function AppHeader({
   );
 }
 
+const SUGGESTIONS = [
+  "매니코어소프트가 어떤 회사인지 조사해서 위키에 정리해줘",
+  "위키에 저장된 페이지 전체 목록을 보여줘",
+  "운영자가 참고할 troubleshooting 런북을 알려줘",
+];
+
 function EmptyState() {
+  const composer = useComposerRuntime();
+
+  const pick = useCallback(
+    (text: string) => {
+      composer.setText(text);
+      // Tiny delay lets the input update before we fire send() — avoids
+      // a race where send() reads a stale empty state.
+      setTimeout(() => composer.send(), 0);
+    },
+    [composer],
+  );
+
   return (
-    <div className="flex h-[60vh] flex-col items-center justify-center gap-3 text-center">
-      <div className="size-12 rounded-full bg-gradient-to-br from-blue-500 to-purple-500" />
-      <h1 className="text-xl font-semibold">무엇을 도와드릴까요?</h1>
-      <p className="max-w-md text-sm text-muted-foreground">
-        대화는 위키에 자동 기록됩니다. &quot;wiki에 저장해&quot;, &quot;지난 결정
-        찾아줘&quot; 같이 편하게 이야기하세요.
-      </p>
+    <div className="mx-auto flex h-[70vh] max-w-xl flex-col items-center justify-center gap-6 text-center">
+      <div className="relative">
+        <div className="size-14 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-500 shadow-[0_0_40px_-10px_rgba(139,92,246,0.6)]" />
+        <Sparkles className="absolute -right-2 -top-2 size-5 text-amber-300/90 motion-safe:animate-pulse" />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          무엇을 도와드릴까요?
+        </h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          저장·검색·조사는 모두 Kairos가 알아서 합니다. 대화는 내부 위키에
+          자동으로 커밋됩니다.
+        </p>
+      </div>
+      <div className="flex w-full flex-col gap-2 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s}
+            onClick={() => pick(s)}
+            className="group flex items-center gap-2 rounded-xl border border-border/50 bg-card/60 px-4 py-3 text-left text-sm transition-all hover:border-blue-500/40 hover:bg-card hover:shadow-[0_0_20px_-10px_rgba(59,130,246,0.4)]"
+          >
+            <span className="flex-1">{s}</span>
+            <span className="text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+              Enter ↵
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
+  );
+}
+
+function ThreadPendingIndicator() {
+  const isRunning = useThread((s) => s.isRunning);
+  // The Thread layer already renders a live assistant bubble while streaming,
+  // so this bubble only needs to bridge the gap between the user hitting
+  // Enter and the assistant's first `text-start` chunk. We gate on
+  // `isRunning` and the last message being from the user.
+  const lastIsUser = useThread(
+    (s) => s.messages[s.messages.length - 1]?.role === "user",
+  );
+  if (!isRunning || !lastIsUser) return null;
+  return (
+    <div className="mb-6 flex items-start gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 duration-200">
+      <Avatar className="size-8 shrink-0 ring-2 ring-blue-500/30 motion-safe:animate-pulse">
+        <AvatarFallback className="bg-gradient-to-br from-blue-500 to-purple-500 text-white text-xs font-bold">
+          K
+        </AvatarFallback>
+      </Avatar>
+      <Card className="bg-card/80">
+        <CardContent className="flex items-center gap-1.5 px-4 py-3">
+          <span className="size-1.5 rounded-full bg-muted-foreground/70 motion-safe:animate-bounce [animation-delay:-0.3s]" />
+          <span className="size-1.5 rounded-full bg-muted-foreground/70 motion-safe:animate-bounce [animation-delay:-0.15s]" />
+          <span className="size-1.5 rounded-full bg-muted-foreground/70 motion-safe:animate-bounce" />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function extractMessageText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const p of content as Array<{ type: string; text?: string }>) {
+    if (p?.type === "text" && typeof p.text === "string") parts.push(p.text);
+  }
+  return parts.join("");
+}
+
+function CopyMessageButton() {
+  const content = useMessage((s) => s.content);
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    const text = extractMessageText(content);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API blocked by insecure context or permissions — swallow.
+    }
+  };
+  return (
+    <button
+      type="button"
+      aria-label="메시지 복사"
+      onClick={onCopy}
+      className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-md border border-border/40 bg-background/80 text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground group-hover:opacity-100"
+    >
+      {copied ? (
+        <CheckIcon className="size-3.5 text-emerald-400" />
+      ) : (
+        <CopyIcon className="size-3.5" />
+      )}
+    </button>
   );
 }
 
 function UserMessage() {
   return (
-    <div className="mb-6 flex items-start gap-3 justify-end">
+    <div className="group mb-6 flex items-start justify-end gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300">
       <div className="flex max-w-[85%] flex-col items-end gap-1">
         <span className="text-xs text-muted-foreground">You</span>
-        <Card className="bg-primary text-primary-foreground">
-          <CardContent className="px-4 py-2.5 text-sm whitespace-pre-wrap">
+        <Card className="relative bg-primary text-primary-foreground shadow-sm">
+          <CardContent className="px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">
             <MessagePrimitive.Parts />
           </CardContent>
         </Card>
@@ -257,7 +423,7 @@ function UserMessage() {
 
 function AssistantMessage() {
   return (
-    <div className="mb-6 flex items-start gap-3">
+    <div className="group mb-6 flex items-start gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300">
       <Avatar className="size-8 shrink-0">
         <AvatarFallback className="bg-gradient-to-br from-blue-500 to-purple-500 text-white text-xs font-bold">
           K
@@ -265,7 +431,8 @@ function AssistantMessage() {
       </Avatar>
       <div className="flex max-w-[85%] flex-col gap-1">
         <span className="text-xs text-muted-foreground">Kairos</span>
-        <Card className="bg-card">
+        <Card className="relative bg-card/70 ring-1 ring-border/60 shadow-sm transition-colors hover:bg-card/90">
+          <CopyMessageButton />
           <CardContent className="px-4 py-2.5 text-sm">
             <MessagePrimitive.Parts
               components={{
@@ -283,15 +450,10 @@ function AssistantMessage() {
   );
 }
 
-function Composer({
-  onOpenHelp,
-}: {
-  onOpenHelp: () => void;
-}) {
+function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   const composer = useComposerRuntime();
+  const isRunning = useThread((s) => s.isRunning);
 
-  // Intercept local-only slash commands BEFORE the message is sent to Kairos.
-  // /help → open dialog, /clear → reset thread (no Kairos round-trip).
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     const state = composer.getState();
     const text = state.text.trim();
@@ -306,13 +468,9 @@ function Composer({
       e.preventDefault();
       e.stopPropagation();
       composer.setText("");
-      // Force a full reload — most reliable reset across runtime impls.
-      // (A soft thread.reset exists on some runtimes but isn't in the
-      // public type surface of 0.12; reload is a superset.)
       if (typeof location !== "undefined") location.reload();
       return;
     }
-    // All other input flows through to the runtime.
   };
 
   const executeLocalCommand = (cmd: "/help" | "/clear") => {
@@ -326,7 +484,7 @@ function Composer({
   return (
     <ComposerPrimitive.Root
       onSubmit={handleSubmit}
-      className="relative flex items-end gap-2 rounded-xl border border-border bg-background p-2 shadow-sm focus-within:ring-2 focus-within:ring-ring"
+      className="relative flex items-end gap-2 rounded-2xl border border-border/70 bg-card/60 p-2 shadow-sm transition-all focus-within:border-blue-500/50 focus-within:ring-2 focus-within:ring-blue-500/20"
     >
       <SlashAutocomplete onLocalExecute={executeLocalCommand} />
       <ComposerPrimitive.Input
@@ -335,11 +493,28 @@ function Composer({
         autoFocus
         className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
       />
-      <ComposerPrimitive.Send asChild>
-        <Button size="icon" className="size-9 shrink-0">
-          <SendHorizonal className="size-4" />
-        </Button>
-      </ComposerPrimitive.Send>
+      {isRunning ? (
+        <ComposerPrimitive.Cancel asChild>
+          <Button
+            size="icon"
+            variant="destructive"
+            className="size-9 shrink-0"
+            aria-label="생성 중지"
+          >
+            <Square className="size-3.5 fill-current" />
+          </Button>
+        </ComposerPrimitive.Cancel>
+      ) : (
+        <ComposerPrimitive.Send asChild>
+          <Button
+            size="icon"
+            className="size-9 shrink-0 bg-gradient-to-br from-blue-500 to-purple-500 text-white shadow-sm transition-transform hover:scale-[1.02] hover:shadow-[0_0_20px_-6px_rgba(139,92,246,0.6)]"
+            aria-label="전송"
+          >
+            <SendHorizonal className="size-4" />
+          </Button>
+        </ComposerPrimitive.Send>
+      )}
     </ComposerPrimitive.Root>
   );
 }
