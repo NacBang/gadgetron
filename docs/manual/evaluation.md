@@ -3,7 +3,7 @@
 운영자가 개입하지 않고도 Kairos의 주요 경로를 자동 검증할 수 있는 시나리오
 기반 평가 도구입니다. 저장소 루트의 [`eval/`](../../eval/) 디렉터리에 삽니다.
 
-Round 1 (2026-04) 기준 6개 시나리오를 추적합니다:
+Round 2 (2026-04) 기준 8개 시나리오를 추적합니다:
 
 | 시나리오 | 검증 |
 |---|---|
@@ -12,6 +12,8 @@ Round 1 (2026-04) 기준 6개 시나리오를 추적합니다:
 | `wiki-search-finds-seed` | `wiki.search` 키워드 히트 |
 | `wiki-rename-moves-page` | `wiki.rename` (원본 사라짐 + 새 경로 존재) |
 | `wiki-delete-archives-page` | `wiki.delete` 소프트 아카이브 |
+| `web-search-direct-query` | `web.search` MCP 도구 직접 호출 (SearXNG 라운드트립) |
+| `manycoresoft-explain` | `web.search` fallback으로 위키 외 주제 설명 |
 | `manycoresoft-research-and-save` | `web.search` → `wiki.write` 엔드투엔드 조사+저장 |
 
 ---

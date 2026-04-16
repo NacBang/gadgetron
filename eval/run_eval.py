@@ -96,26 +96,38 @@ def stream_chat(server: str, key: str, prompt: str, timeout_s: int) -> StreamRes
             url, json=payload, headers=headers, stream=True, timeout=timeout_s
         ) as r:
             r.raise_for_status()
-            for raw in r.iter_lines(decode_unicode=True):
-                if not raw or not raw.startswith("data: "):
+            # NOTE: `r.iter_lines()` silently short-reads SSE streams where a
+            # single logical frame spans several TCP packets — it was losing
+            # ~2/3 of long manycoresoft responses in practice. We consume raw
+            # bytes and split on `\n` ourselves to match the wire 1:1.
+            buffer = ""
+            for chunk in r.iter_content(chunk_size=None, decode_unicode=True):
+                if chunk is None:
                     continue
-                body = raw[6:]
-                if body.strip() == "[DONE]":
-                    break
-                try:
-                    evt = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                choice = (evt.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                content = delta.get("content") or ""
-                if content:
-                    result.text += content
-                    for m in TOOL_USE_RE.finditer(content):
-                        result.tool_calls.append(m.group(1))
-                fr = choice.get("finish_reason")
-                if fr:
-                    result.finish_reason = fr
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if not line.startswith("data: "):
+                        continue
+                    body = line[6:]
+                    if body.strip() == "[DONE]":
+                        buffer = ""  # stream closed — drop anything after.
+                        break
+                    try:
+                        evt = json.loads(body)
+                    except json.JSONDecodeError:
+                        continue
+                    choice = (evt.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content") or ""
+                    if content:
+                        result.text += content
+                        for m in TOOL_USE_RE.finditer(content):
+                            result.tool_calls.append(m.group(1))
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        result.finish_reason = fr
     except requests.RequestException as e:
         result.error = f"{type(e).__name__}: {e}"
     result.wall_seconds = round(time.time() - t0, 2)
