@@ -11,6 +11,7 @@
 //! is assembled once `search::searxng` lands and Phase 3 wires the
 //! `KnowledgeToolProvider` on top.
 
+pub mod frontmatter;
 pub mod fs;
 pub mod git;
 pub mod index;
@@ -18,6 +19,7 @@ pub mod link;
 pub mod secrets;
 pub mod store;
 
+pub use frontmatter::{parse_page, serialize_page, ParsedPage, WikiFrontmatter};
 pub use fs::resolve_path;
 pub use index::{tokenize, InvertedIndex, WikiSearchHit};
 pub use link::{parse_links, WikiLink};

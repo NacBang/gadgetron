@@ -430,6 +430,82 @@ This is **impossible** with namespaced-per-plugin wikis. The shared wiki is the 
 
 ---
 
+## 9.5. Kairos brain ↔ ai-infra provider seam (Sprint B1 prep)
+
+User-flagged gap (2026-04-16 session): 
+> Kairos의 endpoint와 ai-infra provider는 별개로 관리가 되어야 할 것 같은데, 맞나?
+
+### Current state
+
+Two parallel concepts in `gadgetron.toml` that don't yet cross-reference:
+
+| Concept | Where | What it controls |
+|---|---|---|
+| Kairos brain | `[agent.brain]` | Which LLM endpoint Claude Code reasons through |
+| LLM providers | `[providers.*]` | What raw models `/v1/chat/completions` exposes to callers |
+
+`BrainMode` today: `ClaudeMax | ExternalAnthropic | ExternalProxy | GadgetronLocal` — none of them reference `[providers.*]`. To point Kairos at a local vLLM, the operator currently has to run a separate LiteLLM-style proxy so the provider's OpenAI-compat endpoint is rewrapped as Anthropic-compat.
+
+### Proposed addition
+
+```rust
+pub enum BrainMode {
+    ClaudeMax,
+    ExternalAnthropic,
+    ExternalProxy,
+    GadgetronLocal,
+    UseProvider,  // NEW
+}
+
+pub struct BrainConfig {
+    pub mode: BrainMode,
+    pub provider: Option<String>,  // NEW — name of [providers.<name>] to use as brain
+    // ... existing fields ...
+}
+```
+
+Config usage:
+
+```toml
+[agent.brain]
+mode = "use_provider"
+provider = "anthropic-haiku"
+
+[providers.anthropic-haiku]
+type = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+models = ["claude-3-5-haiku-20241022"]
+```
+
+### Validation rules (to add)
+
+- **V23**: `brain.mode = "use_provider"` ⇒ `brain.provider` is Some.
+- **V24**: `brain.provider` name exists in `providers`.
+- **V25**: Referenced provider's `type` is `"anthropic"` (or future compatible types). Other types require `external_proxy` + an operator-run translation proxy.
+
+### Plugin-architecture implication
+
+When `ai-infra` becomes a plugin (P2B), LLM providers move into `plugin-ai-infra`. The core Kairos (still in the binary) resolves the `brain.provider` reference via the generic `LlmProvider` registry maintained by core. The plugin contributes entries; Kairos consumes one.
+
+This is the **core principle**: Kairos is core (identity travels with the product), ai-infra providers are plugin-scoped (domain-specific). The brain-provider seam is the bridge.
+
+### Why deferred
+
+Implementing this requires:
+- Provider config type discrimination (today only `anthropic` type could be a brain; `vllm`/`ollama`/`openai` need a translation layer).
+- Config validation wiring through `AppConfig::validate()`.
+- `spawn.rs` brain resolution: lookup provider → extract endpoint + auth → set `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` env.
+
+Estimated ~200 lines including tests. Scheduled for Sprint B3 after ADR-P2A-07 (semantic wiki + DB required) lands. Postgres dependency of B2 is the higher-priority unblock.
+
+### Acceptance criteria (when implemented)
+
+- `[agent.brain] mode = "use_provider", provider = "foo"` where `[providers.foo] type = "anthropic"` works end-to-end.
+- Non-anthropic provider types fail validation with a clear message pointing at `external_proxy`.
+- `docs/manual/kairos.md` gains a section "Using an ai-infra provider as Kairos's brain".
+
+---
+
 ## 10. Open questions
 
 1. **Dynamic vs static linking (P2B+ decision)** — static is simpler, dynamic enables third-party plugins. Defer to after second-plugin extraction.
