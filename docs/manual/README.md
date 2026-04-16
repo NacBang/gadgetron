@@ -19,6 +19,7 @@ This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
 | [kairos.md](kairos.md) | **Phase 2A**: Kairos 협업 에이전트 런타임 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
 | [web.md](web.md) | **Phase 2A**: Gadgetron Web UI — `http://localhost:8080/web` 채팅 UI 설정, Origin 격리, 키 회전, 헤드리스 빌드 |
+| [evaluation.md](evaluation.md) | **Phase 2A**: Kairos 평가 하네스 — 시나리오 기반 자동 검증 (`eval/run_eval.py`), SearXNG 설정, CI 게이트 연동 |
 
 ---
 

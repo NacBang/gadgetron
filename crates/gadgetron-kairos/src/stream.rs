@@ -216,11 +216,12 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
                             continue;
                         }
                         // Show the tool call in the UI: name + compact input preview.
-                        let mut preview = input.to_string();
-                        if preview.len() > 120 {
-                            preview.truncate(117);
-                            preview.push_str("...");
-                        }
+                        // Count in `char`s, not bytes — a byte-cut truncate panics
+                        // in the middle of multi-byte UTF-8 codepoints (hit by
+                        // Korean/CJK tool_result passed back into tool_use in a
+                        // chained call). 120 chars keeps the preview tight
+                        // without the possibility of a mid-codepoint split.
+                        let preview = truncate_chars(&input.to_string(), 120);
                         let formatted = format!("\n\n🔧 **{}** `{}`\n\n", name, preview);
                         chunks.push(build_chunk(req, Some(formatted), None));
                     }
@@ -249,11 +250,9 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
                         continue;
                     }
                     let icon = if is_error { "❌" } else { "✓" };
-                    let mut preview = text;
-                    if preview.len() > 300 {
-                        preview.truncate(297);
-                        preview.push_str("...");
-                    }
+                    // Char-count truncate (see `truncate_chars` docstring) — the
+                    // byte-based variant panics mid-codepoint on CJK tool output.
+                    let preview = truncate_chars(&text, 300);
                     let formatted = format!("{} _{}_ \n\n", icon, preview.replace('\n', " "));
                     chunks.push(build_chunk(req, Some(formatted), None));
                 }
@@ -312,16 +311,53 @@ fn is_internal_tool(name: &str) -> bool {
     !name.starts_with("mcp__")
 }
 
+/// Truncate `s` to at most `max_chars` USV-counted characters, appending "..."
+/// if anything was cut. Unlike `String::truncate` (which takes a byte index and
+/// panics on a non-char-boundary), this is safe for arbitrary UTF-8 input —
+/// CJK / emoji / combined-characters do not cause a mid-codepoint split.
+///
+/// Returns the truncated `String`; the original `s` is left untouched so this
+/// helper is easy to chain in formatting calls.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let byte_end = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len());
+    if byte_end == s.len() {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(byte_end + 3);
+    out.push_str(&s[..byte_end]);
+    out.push_str("...");
+    out
+}
+
 /// Heuristic: looks like output from Claude Code's internal ToolSearch
 /// (returns an XML-ish `<function>{...}</function>` description of a tool
 /// schema) or TodoWrite acknowledgement. These are plumbing artifacts that
 /// confuse end users if surfaced as tool_result cards.
+///
+/// Also filters a handful of short "no-content" failure messages Claude Code
+/// emits when a built-in tool could not complete (e.g. ToolSearch failed to
+/// load a deferred MCP schema, WebSearch not connected in the current
+/// environment). Surfacing these as `❌ _Not connected_` cards looks
+/// unprofessional AND breaks the web transport's `tool_use`↔`tool_result`
+/// pairing — the card appears with no matching `tool_use`, so the client
+/// treats the trailing answer text as orphaned and drops it from the UI
+/// (observed in the 매니코어소프트 설명 case, where Kairos produced a
+/// perfect 1.3 KB markdown answer that never reached the browser).
 fn looks_like_internal_tool_result(text: &str) -> bool {
-    let t = text.trim_start();
+    let t = text.trim();
     t.starts_with("Tool loaded.")
         || t.starts_with("<function>")
         || t.starts_with("Todos have been modified")
         || t.starts_with("Todos are being tracked")
+        // Claude Code built-in tool failure / not-available signals — these
+        // have no MCP correlate for the web transport to pair against.
+        || t == "Not connected"
+        || t.starts_with("No matching deferred tools")
+        || t.starts_with("No matching tools")
 }
 
 /// Extract a best-effort text preview from a Claude Code tool_result `content` field.
@@ -368,6 +404,71 @@ mod tests {
     use super::*;
     use gadgetron_core::message::Message;
     use serde_json::json;
+
+    #[test]
+    fn truncate_chars_handles_ascii() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        assert_eq!(truncate_chars("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn looks_like_internal_tool_result_suppresses_claude_code_builtins() {
+        // Regression lock for the 2026-04-16 매니코어소프트 UI drop bug:
+        // Claude Code emits `Not connected` / `No matching deferred tools`
+        // tool_results when its built-in ToolSearch/WebSearch fail to bind
+        // in the current session. If those slip past suppression the web
+        // transport treats them as orphan `❌` cards and drops the
+        // assistant answer that follows.
+        assert!(looks_like_internal_tool_result("Not connected"));
+        assert!(looks_like_internal_tool_result("  Not connected  "));
+        assert!(looks_like_internal_tool_result(
+            "No matching deferred tools found"
+        ));
+        assert!(looks_like_internal_tool_result(
+            "No matching tools available"
+        ));
+        // Still suppresses the older surfaces.
+        assert!(looks_like_internal_tool_result("Tool loaded."));
+        assert!(looks_like_internal_tool_result(
+            "<function>{\"description\":\"...\"}</function>"
+        ));
+        assert!(looks_like_internal_tool_result(
+            "Todos have been modified successfully"
+        ));
+        // Real MCP results must NOT be suppressed.
+        assert!(!looks_like_internal_tool_result(
+            r#"{"pages":["README","demo/smoke"]}"#
+        ));
+        assert!(!looks_like_internal_tool_result(
+            r##"{"content":"# Home","name":"home"}"##
+        ));
+        assert!(!looks_like_internal_tool_result(
+            "매니코어소프트는 서울대학교..."
+        ));
+    }
+
+    #[test]
+    fn truncate_chars_does_not_split_multibyte_codepoints() {
+        // Regression: `String::truncate` with a byte offset that lands inside
+        // a 3-byte Korean syllable (or 4-byte emoji) panics with "assertion
+        // failed: self.is_char_boundary(new_len)". The byte cap in the old
+        // `event_to_chat_chunks` tool_result preview code path panicked
+        // whenever Claude Code streamed back a CJK-heavy tool_result (e.g.
+        // SearXNG results for a Korean company). `truncate_chars` must count
+        // in chars, never in bytes.
+        let korean = "매니코어소프트".repeat(100); // 7 chars × 3 bytes × 100
+        let cut = truncate_chars(&korean, 120);
+        assert!(cut.ends_with("..."));
+        assert!(cut.chars().count() <= 123);
+        // And the result must remain valid UTF-8 (trivially true if we never
+        // panic, but assert the invariant explicitly).
+        assert!(cut.is_char_boundary(cut.len()));
+
+        let emoji = "🦀".repeat(50); // 4-byte codepoints
+        let cut = truncate_chars(&emoji, 10);
+        assert!(cut.starts_with("🦀"));
+        assert!(cut.ends_with("..."));
+    }
 
     fn req() -> ChatRequest {
         ChatRequest {

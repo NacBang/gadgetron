@@ -329,12 +329,19 @@ mode = "claude_max"
 
 ```toml
 [knowledge]
-wiki_path = "./.gadgetron/wiki"
+wiki_path = "/absolute/path/to/wiki"   # 절대 경로 권장 (아래 주의사항 참고)
 wiki_autocommit = true
 wiki_max_page_bytes = 1048576
 ```
 
-- `wiki_path`: 위키 저장소 루트. 부모 디렉터리는 미리 존재해야 합니다
+- `wiki_path`: 위키 저장소 루트. 부모 디렉터리는 미리 존재해야 합니다.
+  **절대 경로를 쓰는 것을 권장합니다.** Kairos는 Claude Code 서브프로세스를
+  `~/.gadgetron/kairos/work/` cwd에 pin 하므로 (auto-memory 누수 방지),
+  `gadgetron mcp serve`가 child process로 뜰 때의 cwd도 그 경로가 됩니다.
+  상대 경로 (`./.gadgetron/wiki`)를 쓰면 Kairos 요청 경로의 MCP child는
+  `~/.gadgetron/kairos/work/.gadgetron/wiki`를 찾으려다 실패합니다.
+  `gadgetron serve` 자체는 상대 경로여도 동작하지만 Kairos `wiki.*` 호출이
+  깨지므로 절대 경로를 쓰는 것이 안전합니다.
 - `wiki_autocommit`: 쓰기마다 자동 git commit 수행 여부
 - `wiki_max_page_bytes`: 페이지 최대 크기
 

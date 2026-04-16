@@ -1,0 +1,128 @@
+- id: wiki-roundtrip
+  description: Kairos writes a page, then reads it back verbatim.
+  timeout_s: 120
+  prompt: |
+    wiki.write 로 eval/smoke 페이지를 만들고, 내용은 다음 두 줄 그대로 해줘:
+    eval smoke OK
+    timestamp 2026-04-16
+
+    저장한 다음 wiki.get eval/smoke 으로 내용을 불러와서 그대로 보여줘.
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__wiki_write
+      - mcp__knowledge__wiki_get
+    page_path: eval/smoke.md
+    page_contains:
+      - eval smoke OK
+      - timestamp 2026-04-16
+    finish_reason: stop
+
+- id: slash-wiki-list
+  description: /wiki list returns the seed page set.
+  timeout_s: 90
+  prompt: /wiki list
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__wiki_list
+    text_contains_any:
+      - README
+      - operators
+      - runbooks
+    finish_reason: stop
+
+- id: wiki-search-finds-seed
+  description: wiki.search returns hits for a seeded topic.
+  timeout_s: 90
+  prompt: /wiki search troubleshooting
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__wiki_search
+    text_contains_any:
+      - operators/troubleshooting
+    finish_reason: stop
+
+- id: wiki-rename-moves-page
+  description: >-
+    wiki.rename moves eval/smoke → eval/smoke-renamed. Depends on
+    `wiki-roundtrip` having just populated eval/smoke.md.
+  timeout_s: 90
+  prompt: |
+    wiki.rename 으로 `eval/smoke` 페이지를 `eval/smoke-renamed` 로 이동해줘.
+    이동한 뒤 "이동 완료: eval/smoke-renamed" 한 줄만 말해줘.
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__wiki_rename
+    page_path: eval/smoke-renamed.md
+    page_contains:
+      - eval smoke OK
+    page_path_absent: eval/smoke.md
+    finish_reason: stop
+
+- id: wiki-delete-archives-page
+  description: >-
+    wiki.delete soft-archives eval/smoke-renamed. Depends on
+    `wiki-rename-moves-page` having just created it.
+  timeout_s: 90
+  prompt: |
+    wiki.delete 로 `eval/smoke-renamed` 페이지를 삭제해줘.
+    삭제한 뒤 "삭제 완료" 한 줄만 말해줘.
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__wiki_delete
+    page_path_absent: eval/smoke-renamed.md
+    finish_reason: stop
+
+- id: manycoresoft-explain
+  description: >-
+    Narrative answer path. Depends on Kairos choosing to fall back to
+    `web.search` when no wiki page exists — a non-guaranteed behavior
+    today (the system prompt recommends it but Claude Code can decide to
+    stop at wiki.search). Marked failing until we either (a) pin fallback
+    in the persona, or (b) pre-seed the wiki inside the eval. The UI drop
+    bug this scenario was born to catch is locked in separately as a Rust
+    unit test in `stream.rs::looks_like_internal_tool_result`.
+  timeout_s: 240
+  expected_status: failing
+  prompt: 매니코어소프트에 대해서 설명을 못하나?
+  expect:
+    text_contains_any:
+      - 천둥
+      - THUNDER
+      - DEEP Gadget
+      - 서울대
+    finish_reason: stop
+
+- id: manycoresoft-research-and-save
+  description: >-
+    External research + wiki save. Exercises the full tool chain:
+    `wiki.search` → `web.search` → `wiki.write`. Requires `[knowledge.search]`
+    wired to a running SearXNG. Flaky on the assistant side: even with an
+    explicit "반드시 wiki.write" instruction, Kairos occasionally stops
+    after `web.search` and reports findings inline instead of saving. The
+    drop rate is low but non-zero and is tracked separately rather than
+    flaking CI on a non-regression.
+  timeout_s: 300
+  expected_status: failing
+  prompt: |
+    매니코어소프트(Manycoresoft, 한국 회사)에 대해 web.search로 짧게 조사한 뒤,
+    그 결과를 정리해서 반드시 wiki.write 로 `manycoresoft` 페이지에 저장해줘.
+    저장할 내용은 다음 구조의 markdown 으로 해줘:
+
+    # 매니코어소프트
+
+    - 본사 / 연구 배경 한 줄
+    - 주력 제품 한 줄 (DEEP Gadget 등)
+    - 출처 URL 1~3개
+
+    저장이 끝나면 "저장 완료: manycoresoft" 한 줄만 말해줘.
+  expect:
+    tool_calls_contain:
+      - mcp__knowledge__web_search
+      - mcp__knowledge__wiki_write
+    page_path: manycoresoft.md
+    page_contains_any:
+      - 천둥
+      - DEEP Gadget
+      - GPU
+      - 서울대
+    finish_reason: stop

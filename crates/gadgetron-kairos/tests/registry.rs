@@ -49,10 +49,13 @@ fn registry_accepts_knowledge_provider() {
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     assert!(!registry.is_empty(), "registry must have tools registered");
+    // Knowledge provider exposes: wiki.{list,get,search,write,delete,rename}.
+    // `web.search` is only added when `[knowledge.search]` is configured, so
+    // the no-search provider built by `fresh_provider` stops at six.
     assert_eq!(
         registry.len(),
-        4,
-        "no-search knowledge provider exposes 4 tools (list/get/search/write)"
+        6,
+        "no-search knowledge provider exposes 6 tools (list/get/search/write/delete/rename)"
     );
 }
 
@@ -76,8 +79,9 @@ fn registry_all_schemas_contains_every_knowledge_tool() {
 #[test]
 fn build_allowed_tools_with_default_config_exposes_read_and_wiki_write() {
     // Default AgentConfig has wiki_write = Auto, other write subcats = Ask.
-    // With T1 reads always present and wiki_write in Auto, the filtered
-    // list should contain all 4 knowledge tools (wiki.* reads + wiki.write).
+    // With T1 reads always present and every wiki.* T2 tool (write/delete/
+    // rename) mapped to the `wiki_write` subcategory (Auto by default), the
+    // filtered list should contain all six knowledge tools.
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     let cfg = AgentConfig::default();
@@ -86,7 +90,9 @@ fn build_allowed_tools_with_default_config_exposes_read_and_wiki_write() {
     assert!(allowed.contains(&"wiki.get".to_string()));
     assert!(allowed.contains(&"wiki.search".to_string()));
     assert!(allowed.contains(&"wiki.write".to_string()));
-    assert_eq!(allowed.len(), 4);
+    assert!(allowed.contains(&"wiki.delete".to_string()));
+    assert!(allowed.contains(&"wiki.rename".to_string()));
+    assert_eq!(allowed.len(), 6);
 }
 
 #[test]
@@ -194,9 +200,23 @@ async fn dispatch_wiki_list_reflects_writes_through_registry() {
         .await
         .expect("list");
     let pages = result.content["pages"].as_array().unwrap();
-    assert_eq!(pages.len(), 3);
     let names: Vec<&str> = pages.iter().filter_map(|v| v.as_str()).collect();
-    assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    // `fresh_provider` ships the built-in seed pages (README, decisions/README,
+    // kairos/{conventions,usage}, operators/{getting-started,troubleshooting},
+    // runbooks/README) alongside the three pages we just wrote — the list must
+    // surface all of them. Assert containment, not equality, to avoid a brittle
+    // dependency on the seed page set.
+    for expected in ["alpha", "beta", "gamma"] {
+        assert!(
+            names.contains(&expected),
+            "expected {expected:?} in {names:?}"
+        );
+    }
+    assert!(
+        pages.len() >= 3,
+        "at least our 3 writes must appear ({} pages seen)",
+        pages.len()
+    );
 }
 
 #[tokio::test]

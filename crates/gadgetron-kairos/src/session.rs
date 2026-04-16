@@ -50,6 +50,7 @@
 //! EOF.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,6 +118,13 @@ pub struct ClaudeCodeSession {
     /// the server was started from. Production (`register_with_router`)
     /// always supplies one so the cwd pins to `~/.gadgetron/kairos/work/`.
     kairos_home: Option<Arc<KairosHome>>,
+    /// Absolute path to the `gadgetron.toml` the server was started with.
+    /// Forwarded into the MCP config JSON as `--config <abs>` so the
+    /// `gadgetron mcp serve` grandchild that Claude Code spawns can
+    /// locate `[knowledge]` / `[agent]` regardless of its cwd (which is
+    /// pinned to `~/.gadgetron/kairos/work/` for auto-memory isolation).
+    /// `None` in tests and legacy constructors.
+    config_path: Option<PathBuf>,
 }
 
 impl ClaudeCodeSession {
@@ -155,6 +163,32 @@ impl ClaudeCodeSession {
         session_store: Option<Arc<SessionStore>>,
         kairos_home: Option<Arc<KairosHome>>,
     ) -> Self {
+        Self::new_with_home_and_config_path(
+            config,
+            allowed_tools,
+            request,
+            tool_metadata,
+            audit_sink,
+            session_store,
+            kairos_home,
+            None,
+        )
+    }
+
+    /// Full-fat constructor that additionally captures the operator's
+    /// TOML path for MCP-child config lookup. Production wiring calls
+    /// this via `KairosProvider::chat_stream`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_home_and_config_path(
+        config: Arc<AgentConfig>,
+        allowed_tools: Vec<String>,
+        request: ChatRequest,
+        tool_metadata: Arc<HashMap<String, ToolMetadata>>,
+        audit_sink: Arc<dyn ToolAuditEventSink>,
+        session_store: Option<Arc<SessionStore>>,
+        kairos_home: Option<Arc<KairosHome>>,
+        config_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             config,
             allowed_tools,
@@ -163,6 +197,7 @@ impl ClaudeCodeSession {
             audit_sink,
             session_store,
             kairos_home,
+            config_path,
         }
     }
 
@@ -207,6 +242,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         audit_sink,
         session_store,
         kairos_home,
+        config_path,
     } = session;
 
     match drive(
@@ -218,6 +254,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         &tx,
         session_store.as_deref(),
         kairos_home.as_deref(),
+        config_path.as_deref(),
     )
     .await
     {
@@ -356,6 +393,7 @@ async fn drive(
     tx: &mpsc::Sender<Result<ChatChunk>>,
     session_store: Option<&SessionStore>,
     kairos_home: Option<&KairosHome>,
+    config_path: Option<&std::path::Path>,
 ) -> Result<()> {
     // 0. Resolve spawn mode (native session branching).
     let spawn_mode = resolve_spawn_mode(config, request, session_store).await?;
@@ -400,13 +438,17 @@ async fn drive(
     };
     let audit_session_uuid_ref = audit_session_uuid.as_deref();
 
-    // 1. MCP config tempfile (M1 — mkstemp 0600 atomic).
-    let mcp_tmp: NamedTempFile = write_config_file().map_err(|e| GadgetronError::Kairos {
-        kind: KairosErrorKind::SpawnFailed {
-            reason: format!("mcp tmpfile: {e}"),
-        },
-        message: "failed to create MCP config tmpfile".to_string(),
-    })?;
+    // 1. MCP config tempfile (M1 — mkstemp 0600 atomic). `config_path`
+    // is forwarded so the MCP grandchild spawned by Claude Code can find
+    // `[knowledge]` / `[agent]` even though its cwd is pinned to Kairos's
+    // neutral workdir (which contains no TOML).
+    let mcp_tmp: NamedTempFile =
+        write_config_file(config_path).map_err(|e| GadgetronError::Kairos {
+            kind: KairosErrorKind::SpawnFailed {
+                reason: format!("mcp tmpfile: {e}"),
+            },
+            message: "failed to create MCP config tmpfile".to_string(),
+        })?;
 
     // 2. Build the Command (env_clear + allowlist + kill_on_drop + session flag).
     let mut cmd = build_claude_command_with_session(

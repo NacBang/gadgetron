@@ -528,15 +528,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_schemas_no_search_has_four_tools() {
+    fn tool_schemas_no_search_has_six_tools() {
         let (_dir, p) = fresh_provider_no_search();
         let schemas = p.tool_schemas();
-        assert_eq!(schemas.len(), 4);
+        // list/get/search/write/delete/rename. The search subcat adds a
+        // seventh (`web.search`) only when `[knowledge.search]` is
+        // configured, which `fresh_provider_no_search` deliberately omits.
+        assert_eq!(schemas.len(), 6);
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"wiki.list"));
-        assert!(names.contains(&"wiki.get"));
-        assert!(names.contains(&"wiki.search"));
-        assert!(names.contains(&"wiki.write"));
+        for expected in [
+            "wiki.list",
+            "wiki.get",
+            "wiki.search",
+            "wiki.write",
+            "wiki.delete",
+            "wiki.rename",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "missing {expected:?} in {names:?}"
+            );
+        }
         assert!(!names.contains(&"web.search"));
     }
 
@@ -578,7 +590,13 @@ mod tests {
             .unwrap();
         let result = p.call("wiki.list", json!({})).await.unwrap();
         let pages = result.content["pages"].as_array().unwrap();
-        assert_eq!(pages.len(), 2);
+        let names: Vec<&str> = pages.iter().filter_map(|v| v.as_str()).collect();
+        // A fresh wiki is seeded with README / operator / runbook pages at
+        // `Wiki::open` time (see `seeds/`). Assert that our two writes appear
+        // in addition to the seeds rather than pinning an exact page count.
+        assert!(names.contains(&"a"), "expected 'a' in {names:?}");
+        assert!(names.contains(&"b"), "expected 'b' in {names:?}");
+        assert!(pages.len() >= 2);
     }
 
     #[tokio::test]

@@ -1060,12 +1060,21 @@ fn register_kairos_if_configured(
         agent_cfg.session_ttl_secs,
         agent_cfg.session_store_max_entries,
     ));
+    // Use the canonical absolute TOML path so the MCP-child's cwd doesn't
+    // influence config lookup. Fall back to the as-provided path if
+    // canonicalize fails (e.g. on a filesystem that doesn't support it);
+    // `gadgetron mcp serve --config` will then surface a clear error
+    // instead of silently running without the `[knowledge]` section.
+    let config_path_for_mcp = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf());
     gadgetron_kairos::register_with_router(
         agent_cfg,
         registry,
         audit_sink,
         session_store,
         providers,
+        Some(config_path_for_mcp),
     );
     tracing::info!(
         model = "kairos",
