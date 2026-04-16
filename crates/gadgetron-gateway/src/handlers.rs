@@ -7,6 +7,7 @@
 
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -41,8 +42,21 @@ use crate::sse::chat_chunk_to_sse;
 pub async fn chat_completions_handler(
     State(state): State<AppState>,
     Extension(ctx): Extension<TenantContext>,
-    Json(req): Json<ChatRequest>,
+    headers: HeaderMap,
+    Json(mut req): Json<ChatRequest>,
 ) -> Response {
+    // Inject conversation_id from header if not set in body.
+    // Frontend sends X-Gadgetron-Conversation-Id for session continuity.
+    if req.conversation_id.is_none() {
+        if let Some(val) = headers.get("x-gadgetron-conversation-id") {
+            if let Ok(s) = val.to_str() {
+                let s = s.trim();
+                if !s.is_empty() && s.len() <= 256 {
+                    req.conversation_id = Some(s.to_string());
+                }
+            }
+        }
+    }
     // 1. Resolve the LLM router — return 503 if not configured.
     let router = match &state.router {
         Some(r) => r.clone(),

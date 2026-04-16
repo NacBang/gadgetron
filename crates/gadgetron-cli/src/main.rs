@@ -9,7 +9,11 @@ use gadgetron_core::config::{AppConfig, ProviderConfig};
 use gadgetron_core::provider::LlmProvider;
 use gadgetron_core::secret::Secret;
 use gadgetron_core::ui::WsMessage;
-use gadgetron_gateway::server::{build_router, AppState};
+#[cfg(not(feature = "web-ui"))]
+use gadgetron_gateway::server::build_router;
+#[cfg(feature = "web-ui")]
+use gadgetron_gateway::server::build_router_with_web;
+use gadgetron_gateway::server::AppState;
 use gadgetron_router::{MetricsStore, Router as LlmRouter};
 use gadgetron_xaas::audit::writer::AuditWriter;
 use gadgetron_xaas::auth::validator::PgKeyValidator;
@@ -888,6 +892,9 @@ async fn serve(
     // Step 14: Build the axum Router (Tower middleware stack).
     // Print "Starting server..." progress line before binding (matches design §1.4 Stage 3-B).
     eprint!("  Starting server...");
+    #[cfg(feature = "web-ui")]
+    let app = build_router_with_web(state, &config.web);
+    #[cfg(not(feature = "web-ui"))]
     let app = build_router(state);
 
     // Step 15: Bind TCP listener.

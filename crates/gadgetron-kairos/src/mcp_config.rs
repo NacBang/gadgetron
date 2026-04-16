@@ -31,13 +31,22 @@ use tempfile::NamedTempFile;
 
 /// Build the JSON document that Claude Code consumes via `--mcp-config`.
 ///
+/// Uses `std::env::current_exe()` to resolve the absolute path of the
+/// running `gadgetron` binary, so Claude Code's subprocess can find
+/// `gadgetron mcp serve` even with the restricted SEC-B1 PATH.
+///
 /// Lifted out of the tempfile writer so tests can round-trip it without
 /// touching the filesystem.
 pub fn build_config_json() -> serde_json::Value {
+    let gadgetron_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "gadgetron".to_string());
     serde_json::json!({
         "mcpServers": {
             "knowledge": {
-                "command": "gadgetron",
+                "command": gadgetron_bin,
                 "args": ["mcp", "serve"]
             }
         }

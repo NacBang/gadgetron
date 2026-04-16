@@ -36,6 +36,35 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamJsonEvent {
+    // --- Claude Code ≥2.1 verbose stream-json events ---
+
+    /// `type: "assistant"` — carries the full or partial assistant response.
+    /// `message.content` is an array of `{type: "text", text: "..."}` blocks.
+    #[serde(rename = "assistant")]
+    Assistant {
+        message: AssistantMessage,
+    },
+
+    /// `type: "user"` — carries synthetic user messages, including tool_result
+    /// blocks that Claude Code injects after each tool call completes.
+    #[serde(rename = "user")]
+    User {
+        message: UserMessage,
+    },
+
+    /// `type: "result"` — session completion signal.
+    #[serde(rename = "result")]
+    Result {
+        #[serde(default)]
+        result: String,
+        #[serde(default)]
+        is_error: bool,
+        #[serde(default)]
+        stop_reason: Option<String>,
+    },
+
+    // --- Legacy event types (kept for forward-compat with older specs) ---
+
     #[serde(rename = "message_delta")]
     MessageDelta { delta: MessageDelta },
 
@@ -69,6 +98,57 @@ pub enum StreamJsonEvent {
         #[serde(default)]
         output_tokens: u32,
     },
+}
+
+/// The `message` field inside a `type: "assistant"` event.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssistantMessage {
+    #[serde(default)]
+    pub content: Vec<ContentBlock>,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+}
+
+/// The `message` field inside a `type: "user"` event (synthetic, for tool_result).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserMessage {
+    #[serde(default)]
+    pub content: Vec<UserContentBlock>,
+}
+
+/// User content block — typically `tool_result` wrapping the MCP tool output.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum UserContentBlock {
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+        #[serde(default)]
+        is_error: bool,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+/// A content block inside `assistant.message.content[]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +192,75 @@ pub fn parse_event(line: &str) -> Result<Option<StreamJsonEvent>, serde_json::Er
 /// - `MessageUsage` → 0 chunks (audit-only, no client surface in P2A)
 pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<ChatChunk> {
     match event {
+        // --- Claude Code ≥2.1 verbose events ---
+        StreamJsonEvent::Assistant { message } => {
+            let mut chunks = Vec::new();
+            for block in message.content {
+                match block {
+                    ContentBlock::Text { text } if !text.is_empty() => {
+                        chunks.push(build_chunk(req, Some(text), None));
+                    }
+                    ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
+                        // Surface reasoning to the UI as a quoted, italic block.
+                        // Markdown-safe formatting so the browser renders it
+                        // visually distinct from normal output.
+                        let formatted = format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "));
+                        chunks.push(build_chunk(req, Some(formatted), None));
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        tracing::info!(
+                            target: "kairos_audit",
+                            tool_name = %name,
+                            tool_call_id = %id,
+                            "kairos_tool_called"
+                        );
+                        // Show the tool call in the UI: name + compact input preview.
+                        let mut preview = input.to_string();
+                        if preview.len() > 120 {
+                            preview.truncate(117);
+                            preview.push_str("...");
+                        }
+                        let formatted = format!("\n\n🔧 **{}** `{}`\n\n", name, preview);
+                        chunks.push(build_chunk(req, Some(formatted), None));
+                    }
+                    _ => {}
+                }
+            }
+            chunks
+        }
+        StreamJsonEvent::User { message } => {
+            // Surface tool_result outputs so the user sees what the tool returned.
+            let mut chunks = Vec::new();
+            for block in message.content {
+                if let UserContentBlock::ToolResult {
+                    is_error, content, ..
+                } = block
+                {
+                    let text = tool_result_to_text(&content);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let icon = if is_error { "❌" } else { "✓" };
+                    let mut preview = text;
+                    if preview.len() > 300 {
+                        preview.truncate(297);
+                        preview.push_str("...");
+                    }
+                    let formatted = format!("{} _{}_ \n\n", icon, preview.replace('\n', " "));
+                    chunks.push(build_chunk(req, Some(formatted), None));
+                }
+            }
+            chunks
+        }
+        StreamJsonEvent::Result { is_error, .. } => {
+            if !is_error {
+                vec![build_chunk(req, None, Some("stop".to_string()))]
+            } else {
+                Vec::new()
+            }
+        }
+
+        // --- Legacy event types ---
         StreamJsonEvent::MessageDelta {
             delta: MessageDelta { text: Some(t), .. },
         } if !t.is_empty() => {
@@ -119,9 +268,6 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
         }
         StreamJsonEvent::MessageDelta { .. } => Vec::new(),
         StreamJsonEvent::ToolUse { name, id, .. } => {
-            // M6 enforcement — log tool NAME + call id ONLY, never `input`.
-            // `input` may contain wiki queries or user content that would
-            // violate audit privacy if it leaked into logs.
             tracing::info!(
                 target: "kairos_audit",
                 tool_name = %name,
@@ -147,6 +293,22 @@ pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<Ch
             Vec::new()
         }
     }
+}
+
+/// Extract a best-effort text preview from a Claude Code tool_result `content` field.
+/// The field can be a string, or an array of `{type: "text", text: "..."}` blocks.
+fn tool_result_to_text(content: &serde_json::Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        return arr
+            .iter()
+            .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    content.to_string()
 }
 
 fn build_chunk(
