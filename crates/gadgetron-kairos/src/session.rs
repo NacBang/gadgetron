@@ -70,6 +70,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::home::KairosHome;
 use crate::mcp_config::write_config_file;
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
@@ -110,6 +111,12 @@ pub struct ClaudeCodeSession {
     tool_metadata: Arc<HashMap<String, ToolMetadata>>,
     audit_sink: Arc<dyn ToolAuditEventSink>,
     session_store: Option<Arc<SessionStore>>,
+    /// Neutral cwd for Claude Code (see `crate::home`). When `None`,
+    /// spawn inherits the caller's cwd — acceptable for tests but means
+    /// Claude Code's per-project auto-memory keys to whatever directory
+    /// the server was started from. Production (`register_with_router`)
+    /// always supplies one so the cwd pins to `~/.gadgetron/kairos/work/`.
+    kairos_home: Option<Arc<KairosHome>>,
 }
 
 impl ClaudeCodeSession {
@@ -126,6 +133,28 @@ impl ClaudeCodeSession {
         audit_sink: Arc<dyn ToolAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
     ) -> Self {
+        Self::new_with_home(
+            config,
+            allowed_tools,
+            request,
+            tool_metadata,
+            audit_sink,
+            session_store,
+            None,
+        )
+    }
+
+    /// Variant that accepts an isolated Kairos home. Production wiring
+    /// (`register_with_router`) calls this.
+    pub fn new_with_home(
+        config: Arc<AgentConfig>,
+        allowed_tools: Vec<String>,
+        request: ChatRequest,
+        tool_metadata: Arc<HashMap<String, ToolMetadata>>,
+        audit_sink: Arc<dyn ToolAuditEventSink>,
+        session_store: Option<Arc<SessionStore>>,
+        kairos_home: Option<Arc<KairosHome>>,
+    ) -> Self {
         Self {
             config,
             allowed_tools,
@@ -133,6 +162,7 @@ impl ClaudeCodeSession {
             tool_metadata,
             audit_sink,
             session_store,
+            kairos_home,
         }
     }
 
@@ -176,6 +206,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         tool_metadata,
         audit_sink,
         session_store,
+        kairos_home,
     } = session;
 
     match drive(
@@ -186,6 +217,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         audit_sink.as_ref(),
         &tx,
         session_store.as_deref(),
+        kairos_home.as_deref(),
     )
     .await
     {
@@ -308,6 +340,13 @@ async fn resolve_spawn_mode(
 /// Inner drive function returning `Result<(), GadgetronError>` so `?`
 /// works naturally throughout. Errors are forwarded to the channel by
 /// `run_driver`; successful yields are pushed inline via `tx.send`.
+///
+/// Arg count is intentionally high — every argument is a distinct
+/// subprocess-lifecycle concern (config, allowed tools, inbound request,
+/// tool metadata, audit sink, outbound channel, session store, kairos
+/// home). Bundling them into a struct just to satisfy a lint would
+/// obscure the ownership model (`&dyn`, `Option<&T>`) we need here.
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     config: &AgentConfig,
     allowed_tools: &[String],
@@ -316,6 +355,7 @@ async fn drive(
     audit_sink: &dyn ToolAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
     session_store: Option<&SessionStore>,
+    kairos_home: Option<&KairosHome>,
 ) -> Result<()> {
     // 0. Resolve spawn mode (native session branching).
     let spawn_mode = resolve_spawn_mode(config, request, session_store).await?;
@@ -382,6 +422,17 @@ async fn drive(
         },
         message: format!("failed to build claude command: {e}"),
     })?;
+
+    // 2b. Kairos home isolation — CWD-only. We pin the subprocess cwd to
+    // Kairos's neutral workdir so Claude Code's per-project auto-memory
+    // key maps to a Kairos-scoped slug (never the operator's real repo).
+    // HOME stays real: Claude Max OAuth on macOS refuses to read the
+    // keychain when HOME ≠ os.homedir() (see `home.rs` docstring for the
+    // full finding). When `kairos_home` is None (tests, legacy
+    // constructors) we keep the cwd from `build_claude_command_with_session`.
+    if let Some(home) = kairos_home {
+        cmd.current_dir(home.workdir());
+    }
 
     // 3. Spawn.
     let mut child: Child = cmd

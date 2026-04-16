@@ -350,7 +350,9 @@ impl Wiki {
         }
         fs::rename(&from_canonical, &to_canonical).map_err(WikiError::Io)?;
 
-        let bytes = fs::metadata(&to_canonical).map(|m| m.len() as usize).unwrap_or(0);
+        let bytes = fs::metadata(&to_canonical)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
         let commit_oid = if self.config.autocommit {
             let repo = open_or_init(
                 &self.config.root,

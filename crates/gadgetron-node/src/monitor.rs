@@ -52,7 +52,6 @@ impl ResourceMonitor {
                                     total: 0,
                                     free: 0,
                                     used: 0,
-                                    available: 0,
                                 },
                             );
                             let util = device

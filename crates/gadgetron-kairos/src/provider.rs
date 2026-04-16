@@ -57,6 +57,12 @@ pub struct KairosProvider {
     registry: Arc<McpToolRegistry>,
     audit_sink: Arc<dyn ToolAuditEventSink>,
     session_store: Arc<SessionStore>,
+    /// Kairos workspace (see `crate::home`). When `None`, sessions spawn
+    /// with the caller's current working directory — which means Claude
+    /// Code's per-project auto-memory will key to that cwd. Production
+    /// `register_with_router` always supplies one so the cwd pins to
+    /// `~/.gadgetron/kairos/work/`.
+    kairos_home: Option<Arc<crate::home::KairosHome>>,
 }
 
 impl KairosProvider {
@@ -71,11 +77,24 @@ impl KairosProvider {
         audit_sink: Arc<dyn ToolAuditEventSink>,
         session_store: Arc<SessionStore>,
     ) -> Self {
+        Self::new_with_home(config, registry, audit_sink, session_store, None)
+    }
+
+    /// Variant that accepts an isolated Kairos home. Production wiring
+    /// (`register_with_router`) calls this.
+    pub fn new_with_home(
+        config: Arc<AgentConfig>,
+        registry: Arc<McpToolRegistry>,
+        audit_sink: Arc<dyn ToolAuditEventSink>,
+        session_store: Arc<SessionStore>,
+        kairos_home: Option<Arc<crate::home::KairosHome>>,
+    ) -> Self {
         Self {
             config,
             registry,
             audit_sink,
             session_store,
+            kairos_home,
         }
     }
 
@@ -152,13 +171,14 @@ impl LlmProvider for KairosProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
         let allowed_tools = self.registry.build_allowed_tools(self.config.as_ref());
         let tool_metadata = self.registry.tool_metadata_snapshot();
-        let session = ClaudeCodeSession::new(
+        let session = ClaudeCodeSession::new_with_home(
             self.config.clone(),
             allowed_tools,
             req,
             tool_metadata,
             self.audit_sink.clone(),
             Some(self.session_store.clone()),
+            self.kairos_home.clone(),
         );
         session.run()
     }
@@ -204,6 +224,14 @@ impl LlmProvider for KairosProvider {
 /// Register `KairosProvider` in a router provider map under the
 /// model id `"kairos"`. Called once at startup from `gadgetron-cli::main`
 /// after `AgentConfig` is loaded and the `McpToolRegistry` is frozen.
+///
+/// Prepares Kairos's persistent workspace at `~/.gadgetron/kairos/`
+/// (idempotent) as a side-effect — every subsequent chat request spawns
+/// Claude Code with its cwd pinned to `…/kairos/work/`, so auto-memory
+/// maps to a Kairos-scoped slug instead of whatever directory the server
+/// happens to be running from. A failure to prepare the workspace logs
+/// a warning and registers the provider anyway; sessions fall back to
+/// the server's current cwd (per-project memory may then replay).
 pub fn register_with_router(
     config: Arc<AgentConfig>,
     registry: Arc<McpToolRegistry>,
@@ -211,7 +239,31 @@ pub fn register_with_router(
     session_store: Arc<SessionStore>,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
 ) {
-    let provider = KairosProvider::new(config, registry, audit_sink, session_store);
+    let kairos_home = match std::env::var("HOME") {
+        Ok(real_home) => {
+            let root = crate::home::default_home_root(std::path::Path::new(&real_home));
+            match crate::home::prepare_kairos_home(&root) {
+                Ok(home) => Some(Arc::new(home)),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "kairos_home",
+                        error = ?e,
+                        "failed to prepare Kairos workspace — Claude Code will run with the operator's repo as cwd (per-project memory may replay)"
+                    );
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "kairos_home",
+                "HOME env var not set — cannot locate Kairos workspace"
+            );
+            None
+        }
+    };
+    let provider =
+        KairosProvider::new_with_home(config, registry, audit_sink, session_store, kairos_home);
     providers.insert(
         KairosProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,

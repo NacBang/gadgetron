@@ -37,20 +37,15 @@ use serde::Deserialize;
 #[serde(tag = "type")]
 pub enum StreamJsonEvent {
     // --- Claude Code ≥2.1 verbose stream-json events ---
-
     /// `type: "assistant"` — carries the full or partial assistant response.
     /// `message.content` is an array of `{type: "text", text: "..."}` blocks.
     #[serde(rename = "assistant")]
-    Assistant {
-        message: AssistantMessage,
-    },
+    Assistant { message: AssistantMessage },
 
     /// `type: "user"` — carries synthetic user messages, including tool_result
     /// blocks that Claude Code injects after each tool call completes.
     #[serde(rename = "user")]
-    User {
-        message: UserMessage,
-    },
+    User { message: UserMessage },
 
     /// `type: "result"` — session completion signal.
     #[serde(rename = "result")]
@@ -64,7 +59,6 @@ pub enum StreamJsonEvent {
     },
 
     // --- Legacy event types (kept for forward-compat with older specs) ---
-
     #[serde(rename = "message_delta")]
     MessageDelta { delta: MessageDelta },
 
