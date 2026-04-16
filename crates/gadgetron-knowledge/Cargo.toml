@@ -19,6 +19,8 @@ git2 = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 libc = { workspace = true }
+include_dir = { workspace = true }
+chrono = { workspace = true }
 
 # Web search subsystem (SearXNG client)
 async-trait = { workspace = true }

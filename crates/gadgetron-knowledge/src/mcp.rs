@@ -132,6 +132,8 @@ impl McpToolProvider for KnowledgeToolProvider {
             schema_wiki_get(),
             schema_wiki_search(),
             schema_wiki_write(),
+            schema_wiki_delete(),
+            schema_wiki_rename(),
         ];
         if self.web_search.is_some() {
             out.push(schema_web_search());
@@ -145,6 +147,8 @@ impl McpToolProvider for KnowledgeToolProvider {
             "wiki.get" => self.call_wiki_get(args),
             "wiki.search" => self.call_wiki_search(args),
             "wiki.write" => self.call_wiki_write(args),
+            "wiki.delete" => self.call_wiki_delete(args),
+            "wiki.rename" => self.call_wiki_rename(args),
             "web.search" => self.call_web_search(args).await,
             other => Err(McpError::UnknownTool(other.to_string())),
         }
@@ -242,6 +246,50 @@ fn schema_wiki_write() -> ToolSchema {
     }
 }
 
+fn schema_wiki_delete() -> ToolSchema {
+    ToolSchema {
+        name: "wiki.delete".into(),
+        tier: Tier::Write,
+        description: "Delete a wiki page. Soft delete by default: the page is \
+            moved to `_archived/<YYYY-MM-DD>/<name>.md` with a git commit. \
+            The operator can permanently remove archived pages later. Use \
+            when the user asks to remove stale or wrong information."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 256 }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        idempotent: Some(false),
+    }
+}
+
+fn schema_wiki_rename() -> ToolSchema {
+    ToolSchema {
+        name: "wiki.rename".into(),
+        tier: Tier::Write,
+        description: "Rename or move a wiki page. Both `from` and `to` are \
+            page names without the `.md` extension. Forward slashes are \
+            treated as subdirectories. Fails with a conflict error if the \
+            destination already exists. Use for reorganizing or correcting \
+            page paths."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "from": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "to":   { "type": "string", "minLength": 1, "maxLength": 256 }
+            },
+            "required": ["from", "to"],
+            "additionalProperties": false
+        }),
+        idempotent: Some(false),
+    }
+}
+
 fn schema_web_search() -> ToolSchema {
     ToolSchema {
         name: "web.search".into(),
@@ -326,6 +374,37 @@ impl KnowledgeToolProvider {
                 is_error: false,
             }),
             Err(e) => Err(map_wiki_err_write(e, &name)),
+        }
+    }
+
+    fn call_wiki_delete(&self, args: Value) -> Result<ToolResult, McpError> {
+        let name = required_string_arg(&args, "name")?;
+        match self.wiki.delete(&name) {
+            Ok(archive_path) => Ok(ToolResult {
+                content: json!({
+                    "name": name,
+                    "archived_to": archive_path,
+                    "message": "soft-deleted; archived copy preserved in _archived/",
+                }),
+                is_error: false,
+            }),
+            Err(e) => Err(map_wiki_err_read(e, &name)),
+        }
+    }
+
+    fn call_wiki_rename(&self, args: Value) -> Result<ToolResult, McpError> {
+        let from = required_string_arg(&args, "from")?;
+        let to = required_string_arg(&args, "to")?;
+        match self.wiki.rename(&from, &to) {
+            Ok(result) => Ok(ToolResult {
+                content: json!({
+                    "from": from,
+                    "to": result.name,
+                    "commit_oid": result.commit_oid,
+                }),
+                is_error: false,
+            }),
+            Err(e) => Err(map_wiki_err_write(e, &to)),
         }
     }
 

@@ -168,6 +168,8 @@ pub enum WikiErrorKind {
     GitCorruption { path: String, reason: String },
     /// Merge conflict during auto-commit. HTTP 409.
     Conflict { path: String },
+    /// Requested page does not exist (delete/rename/get on missing page). HTTP 404.
+    PageNotFound { path: String },
 }
 
 impl fmt::Display for WikiErrorKind {
@@ -178,6 +180,7 @@ impl fmt::Display for WikiErrorKind {
             Self::CredentialBlocked { .. } => write!(f, "credential_blocked"),
             Self::GitCorruption { .. } => write!(f, "git_corruption"),
             Self::Conflict { .. } => write!(f, "conflict"),
+            Self::PageNotFound { .. } => write!(f, "page_not_found"),
         }
     }
 }
@@ -293,6 +296,7 @@ impl GadgetronError {
                 WikiErrorKind::CredentialBlocked { .. } => "wiki_credential_blocked",
                 WikiErrorKind::GitCorruption { .. } => "wiki_git_corrupted",
                 WikiErrorKind::Conflict { .. } => "wiki_conflict",
+                WikiErrorKind::PageNotFound { .. } => "wiki_page_not_found",
             },
         }
     }
@@ -365,6 +369,8 @@ impl GadgetronError {
                     "The wiki git repository is in an inconsistent state. Run `git status` in the wiki directory and resolve manually.".to_string(),
                 WikiErrorKind::Conflict { path } =>
                     format!("A wiki page could not be saved because it was modified by another process (path: {path}). Resolve the git conflict in the wiki directory, then retry."),
+                WikiErrorKind::PageNotFound { path } =>
+                    format!("Wiki page not found: {path}. Check the page name; use `wiki.list` or `wiki.search` to find existing pages."),
             },
         }
     }
@@ -397,6 +403,7 @@ impl GadgetronError {
                 WikiErrorKind::PathEscape { .. } => "invalid_request_error",
                 WikiErrorKind::PageTooLarge { .. } => "invalid_request_error",
                 WikiErrorKind::CredentialBlocked { .. } => "invalid_request_error",
+                WikiErrorKind::PageNotFound { .. } => "invalid_request_error",
                 _ => "server_error",
             },
         }
@@ -444,6 +451,7 @@ impl GadgetronError {
                 WikiErrorKind::CredentialBlocked { .. } => 422,
                 WikiErrorKind::GitCorruption { .. } => 503,
                 WikiErrorKind::Conflict { .. } => 409,
+                WikiErrorKind::PageNotFound { .. } => 404,
             },
         }
     }

@@ -166,6 +166,79 @@ pub fn autocommit(
     Ok(oid)
 }
 
+/// Stage the removal of `old_rel` and the addition of `new_rel`, then
+/// commit both in a single commit. Used by `Wiki::delete` (soft-archive)
+/// and `Wiki::rename`. `old_rel` must no longer exist on disk; `new_rel`
+/// must exist on disk. Both paths are relative to the wiki root.
+pub fn commit_rename(
+    repo: &git2::Repository,
+    old_rel: &Path,
+    new_rel: &Path,
+    signature: &git2::Signature,
+) -> Result<git2::Oid, WikiError> {
+    let old_display = old_rel.to_string_lossy().into_owned();
+    let new_display = new_rel.to_string_lossy().into_owned();
+
+    let mut index = repo
+        .index()
+        .map_err(|e| map_git_error_for_path(e, &new_display))?;
+    index
+        .remove_path(old_rel)
+        .map_err(|e| map_git_error_for_path(e, &old_display))?;
+    index
+        .add_path(new_rel)
+        .map_err(|e| map_git_error_for_path(e, &new_display))?;
+    index
+        .write()
+        .map_err(|e| map_git_error_for_path(e, &new_display))?;
+
+    let tree_id = index
+        .write_tree()
+        .map_err(|e| map_git_error_for_path(e, &new_display))?;
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| map_git_error_for_path(e, &new_display))?;
+
+    let parent_commit = match repo.head() {
+        Ok(head_ref) => {
+            let oid = head_ref.target().ok_or_else(|| {
+                WikiError::kind_with_message(
+                    WikiErrorKind::GitCorruption {
+                        path: new_display.clone(),
+                        reason: "HEAD reference has no target".into(),
+                    },
+                    format!("wiki git HEAD corrupted at {new_display:?}"),
+                )
+            })?;
+            Some(
+                repo.find_commit(oid)
+                    .map_err(|e| map_git_error_for_path(e, &new_display))?,
+            )
+        }
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => None,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => None,
+        Err(e) => return Err(map_git_error_for_path(e, &new_display)),
+    };
+
+    let timestamp = chrono_like_iso8601_utc(&signature.when());
+    let message = format!("auto-commit: rename {old_display} -> {new_display} {timestamp}");
+
+    let parents: Vec<&git2::Commit> = parent_commit.as_ref().map(|c| vec![c]).unwrap_or_default();
+
+    let oid = repo
+        .commit(
+            Some("HEAD"),
+            signature,
+            signature,
+            &message,
+            &tree,
+            &parents,
+        )
+        .map_err(|e| map_git_error_for_path(e, &new_display))?;
+
+    Ok(oid)
+}
+
 /// Tiny ISO 8601 UTC formatter derived from a `git2::Time`. We avoid pulling
 /// in `chrono` just for this one string — `git2::Time::seconds` gives us a
 /// Unix timestamp and we format manually in `YYYY-MM-DDTHH:MM:SSZ`.

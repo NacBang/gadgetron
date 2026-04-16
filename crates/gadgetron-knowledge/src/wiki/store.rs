@@ -73,7 +73,19 @@ impl Wiki {
             &config.git_author_name,
             &config.git_author_email,
         )?;
-        Ok(Self { config })
+        let wiki = Self { config };
+        // Inject built-in seed pages on first open (empty wiki only).
+        // Best-effort: if injection fails we log and continue so the wiki
+        // still opens — the operator can `gadgetron reindex` or manually
+        // copy seeds later.
+        if let Err(e) = wiki.inject_seeds_if_empty() {
+            tracing::warn!(
+                target: "wiki_seed",
+                error = ?e,
+                "failed to inject seed pages on first open (non-fatal)"
+            );
+        }
+        Ok(wiki)
     }
 
     pub fn config(&self) -> &WikiConfig {
@@ -234,6 +246,224 @@ impl Wiki {
             }
         }
         Ok(idx.search(query, max_results))
+    }
+
+    /// Delete a wiki page. Soft delete by default: the page is moved to
+    /// `_archived/<YYYY-MM-DD>/<original-path>.md` with a commit. Operator
+    /// can permanently `rm` the file later if desired.
+    ///
+    /// Returns the archive path (relative to wiki root) on success.
+    pub fn delete(&self, name: &str) -> Result<String, WikiError> {
+        // Reuse the same M3 guard as `read`/`write`.
+        let canonical = super::fs::resolve_path(&self.config.root, name)?;
+        if !canonical.exists() {
+            return Err(WikiError::kind(WikiErrorKind::PageNotFound {
+                path: name.to_string(),
+            }));
+        }
+
+        // Compute archive path: _archived/<YYYY-MM-DD>/<name>.md
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let archive_rel = format!("_archived/{}/{}", date, name);
+        let canonical_root = fs::canonicalize(&self.config.root).map_err(WikiError::Io)?;
+        let archive_abs_without_ext = canonical_root.join(&archive_rel);
+        let archive_abs = if archive_abs_without_ext
+            .extension()
+            .map(|e| e == "md")
+            .unwrap_or(false)
+        {
+            archive_abs_without_ext
+        } else {
+            let mut p = archive_abs_without_ext.clone();
+            p.as_mut_os_string().push(MD_SUFFIX);
+            p
+        };
+
+        if let Some(parent) = archive_abs.parent() {
+            fs::create_dir_all(parent).map_err(WikiError::Io)?;
+        }
+
+        // Move the file (rename = atomic within the same filesystem).
+        fs::rename(&canonical, &archive_abs).map_err(WikiError::Io)?;
+
+        if self.config.autocommit {
+            let repo = open_or_init(
+                &self.config.root,
+                &self.config.git_author_name,
+                &self.config.git_author_email,
+            )?;
+            let sig = signature(&self.config.git_author_name, &self.config.git_author_email)?;
+            let rel_orig = canonical
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    WikiError::kind_with_message(
+                        WikiErrorKind::GitCorruption {
+                            path: name.to_string(),
+                            reason: "resolved path escapes wiki root during delete".into(),
+                        },
+                        format!("wiki_path escape during delete for {name:?}"),
+                    )
+                })?
+                .to_path_buf();
+            let rel_archive = archive_abs
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    WikiError::kind_with_message(
+                        WikiErrorKind::GitCorruption {
+                            path: name.to_string(),
+                            reason: "archive path escapes wiki root".into(),
+                        },
+                        format!("archive escape for {name:?}"),
+                    )
+                })?
+                .to_path_buf();
+            super::git::commit_rename(&repo, &rel_orig, &rel_archive, &sig)?;
+        }
+
+        let rel_str = archive_abs
+            .strip_prefix(&canonical_root)
+            .unwrap_or(&archive_abs)
+            .to_string_lossy()
+            .trim_end_matches(MD_SUFFIX)
+            .to_string();
+        Ok(rel_str)
+    }
+
+    /// Rename a wiki page. `from` and `to` are page names (no `.md`).
+    /// If `to` already exists, returns `WikiErrorKind::Conflict`.
+    pub fn rename(&self, from: &str, to: &str) -> Result<WriteResult, WikiError> {
+        let from_canonical = super::fs::resolve_path(&self.config.root, from)?;
+        if !from_canonical.exists() {
+            return Err(WikiError::kind(WikiErrorKind::PageNotFound {
+                path: from.to_string(),
+            }));
+        }
+        let to_canonical = super::fs::resolve_path(&self.config.root, to)?;
+        if to_canonical.exists() {
+            return Err(WikiError::kind(WikiErrorKind::Conflict {
+                path: to.to_string(),
+            }));
+        }
+
+        if let Some(parent) = to_canonical.parent() {
+            fs::create_dir_all(parent).map_err(WikiError::Io)?;
+        }
+        fs::rename(&from_canonical, &to_canonical).map_err(WikiError::Io)?;
+
+        let bytes = fs::metadata(&to_canonical).map(|m| m.len() as usize).unwrap_or(0);
+        let commit_oid = if self.config.autocommit {
+            let repo = open_or_init(
+                &self.config.root,
+                &self.config.git_author_name,
+                &self.config.git_author_email,
+            )?;
+            let sig = signature(&self.config.git_author_name, &self.config.git_author_email)?;
+            let canonical_root = fs::canonicalize(&self.config.root).map_err(WikiError::Io)?;
+            let rel_from = from_canonical
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    WikiError::kind_with_message(
+                        WikiErrorKind::GitCorruption {
+                            path: from.to_string(),
+                            reason: "resolved path escapes wiki root during rename".into(),
+                        },
+                        format!("wiki_path escape during rename for {from:?}"),
+                    )
+                })?
+                .to_path_buf();
+            let rel_to = to_canonical
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    WikiError::kind_with_message(
+                        WikiErrorKind::GitCorruption {
+                            path: to.to_string(),
+                            reason: "destination path escapes wiki root during rename".into(),
+                        },
+                        format!("wiki_path escape during rename dst for {to:?}"),
+                    )
+                })?
+                .to_path_buf();
+            Some(super::git::commit_rename(&repo, &rel_from, &rel_to, &sig)?.to_string())
+        } else {
+            None
+        };
+
+        Ok(WriteResult {
+            name: to.to_string(),
+            commit_oid,
+            bytes,
+        })
+    }
+
+    /// Inject the built-in seed pages on first init. Called exactly once by
+    /// `open()` when the wiki is empty (no user pages yet). Each seed file
+    /// embedded at compile-time via `include_dir!("seeds/")` is written
+    /// through `write()` so the same security pipeline + git commit applies.
+    ///
+    /// Safe to call multiple times — skips if any `.md` page exists (other
+    /// than seeds already injected). Exact duplicate detection is by
+    /// frontmatter `source = "seed"` + matching path.
+    fn inject_seeds_if_empty(&self) -> Result<(), WikiError> {
+        static SEEDS: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/seeds");
+
+        // Abort if any user content already exists.
+        let existing = self.list()?;
+        if !existing.is_empty() {
+            return Ok(());
+        }
+
+        fn inject_recursive(
+            wiki: &Wiki,
+            dir: &include_dir::Dir<'_>,
+            parent: &str,
+        ) -> Result<usize, WikiError> {
+            let mut injected = 0usize;
+            for f in dir.files() {
+                let path = f.path();
+                let name_os = match path.file_stem() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let name = name_os.to_string_lossy();
+                if path.extension().map(|e| e != "md").unwrap_or(true) {
+                    continue;
+                }
+                let rel = if parent.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}/{}", parent, name)
+                };
+                let content = match std::str::from_utf8(f.contents()) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                wiki.write(&rel, content)?;
+                injected += 1;
+            }
+            for sub in dir.dirs() {
+                let sub_name = sub
+                    .path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let new_parent = if parent.is_empty() {
+                    sub_name
+                } else {
+                    format!("{}/{}", parent, sub_name)
+                };
+                injected += inject_recursive(wiki, sub, &new_parent)?;
+            }
+            Ok(injected)
+        }
+
+        let n = inject_recursive(self, &SEEDS, "")?;
+        tracing::info!(
+            target: "wiki_seed",
+            count = n,
+            "injected {} seed pages into fresh wiki",
+            n,
+        );
+        Ok(())
     }
 }
 
