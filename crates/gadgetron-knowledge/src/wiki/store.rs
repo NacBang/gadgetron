@@ -637,9 +637,23 @@ mod tests {
     // ---- list ----
 
     #[test]
-    fn list_empty_wiki_is_empty() {
+    fn list_fresh_wiki_has_only_seed_pages() {
+        // `Wiki::open` materialises the built-in seed pages (README, decisions,
+        // operator/runbook starters) when the target is empty. The list call
+        // must surface exactly those and nothing else for a fresh tempdir.
         let (_dir, wiki) = fresh_wiki();
-        assert!(wiki.list().unwrap().is_empty());
+        let entries = wiki.list().unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.is_empty(),
+            "fresh wiki must surface its seed pages via list()"
+        );
+        for user_written in ["zebra", "apple", "mango"] {
+            assert!(
+                !names.contains(&user_written),
+                "unexpected user page {user_written:?} in fresh wiki: {names:?}"
+            );
+        }
     }
 
     #[test]
@@ -649,10 +663,20 @@ mod tests {
         wiki.write("apple", "a").unwrap();
         wiki.write("mango", "m").unwrap();
         let entries = wiki.list().unwrap();
-        assert_eq!(
-            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
-            vec!["apple", "mango", "zebra"]
-        );
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        // The fresh wiki is seeded, so the list is "seeds + our three writes"
+        // rather than exactly our writes. Assert ordering is lexicographic
+        // overall and that our writes land in sorted relative order.
+        let sorted_copy: Vec<&str> = {
+            let mut v = names.clone();
+            v.sort();
+            v
+        };
+        assert_eq!(names, sorted_copy, "list() must return names in sorted order");
+        let apple_pos = names.iter().position(|&n| n == "apple").expect("apple");
+        let mango_pos = names.iter().position(|&n| n == "mango").expect("mango");
+        let zebra_pos = names.iter().position(|&n| n == "zebra").expect("zebra");
+        assert!(apple_pos < mango_pos && mango_pos < zebra_pos);
     }
 
     #[test]
