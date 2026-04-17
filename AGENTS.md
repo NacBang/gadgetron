@@ -5,16 +5,16 @@
 
 > 이 프로젝트는 **AI 도구에 독립적**이다. Claude Code, Codex, OpenCode, Cursor 등 어떤 도구에서 열어도 이 `AGENTS.md`와 `docs/` 내 문서가 그대로 작업 규칙이 된다. 특정 도구의 네이티브 파일(`.claude/agents/`, `.cursor/rules`, 등)에 의존하지 않는다.
 
-## Penny vs. 이 파일의 "에이전트"
+## Penny vs. 이 파일
 
-"에이전트" 라는 단어는 Gadgetron 맥락에서 두 가지로 쓰인다. 혼동을 피하기 위해 명시한다:
+Gadgetron 에는 이름이 붙은 구성요소 **Penny** 와, 이 repo 를 개발하는 AI 코딩 세션 (= 이 파일의 대상) 이 따로 있다. 단어 "에이전트" 는 두 맥락에서 모두 쓰일 수 있어 한 번만 구분을 박아둔다:
 
-| 층위 | 누구/무엇 | 정의 위치 | 런타임 |
+| 층위 | 무엇 | 정의 위치 | 런타임 |
 |---|---|---|---|
-| **제품 에이전트** | **Penny** (Penny Brown) — 출시 바이너리에서 동작하며 사용자의 요청을 해결 | [`docs/design/phase2/02-penny-agent.md`](docs/design/phase2/02-penny-agent.md), [`docs/00-overview.md`](docs/00-overview.md) §1.2 | `gadgetron serve` 실행 시 내부 subprocess |
-| **개발 협업 에이전트** | PM(메인 AI 코딩 도구) + `docs/agents/` 전문가 역할 (chief-architect, gateway-router-lead, qa-test-architect 등) | 이 `AGENTS.md` + `docs/agents/*.md` | 개발 세션 중 Claude Code / Codex / Cursor 등 IDE 상에서 |
+| **제품** | **Penny** (Penny Brown) — 출시 바이너리에서 동작하며 사용자의 요청을 해결 | [`docs/design/phase2/02-penny-agent.md`](docs/design/phase2/02-penny-agent.md), [`docs/00-overview.md`](docs/00-overview.md) §1.2 | `gadgetron serve` 실행 시 내부 subprocess |
+| **개발 협업** | PM(메인 AI 코딩 세션) + `docs/agents/` 전문가 역할 (chief-architect, gateway-router-lead, qa-test-architect 등) | 이 `AGENTS.md` + `docs/agents/*.md` | 개발 세션 중 Claude Code / Codex / Cursor 등 IDE 상에서 |
 
-**이 문서(AGENTS.md) 가 지배하는 대상은 두 번째 (개발 협업 에이전트) 다.** Penny의 런타임 동작·권한·보안 정책은 `docs/design/phase2/` 와 ADR-P2A-* 에서 관리한다.
+**이 문서(AGENTS.md) 가 지배하는 대상은 두 번째 (개발 협업) 다.** Penny 의 런타임 동작·권한·보안 정책은 `docs/design/phase2/` 와 ADR-P2A-* 에서 관리한다.
 
 ---
 
