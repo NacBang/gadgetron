@@ -296,15 +296,23 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
 
-    let knowledge_cfg = gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
+    let mut knowledge_cfg =
+        gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
                  requires the knowledge layer to be configured.",
-                config_path.display()
-            )
-        })?;
+                    config_path.display()
+                )
+            })?;
+
+    // Resolve relative `wiki_path` against the config file's directory
+    // so the MCP grandchild process finds the wiki regardless of its
+    // inherited cwd (Claude Code pins cwd to Kairos's neutral workdir).
+    if let Some(config_dir) = config_path.parent() {
+        knowledge_cfg.resolve_relative_paths(config_dir);
+    }
 
     knowledge_cfg
         .validate()
@@ -1002,7 +1010,7 @@ fn register_kairos_if_configured(
         }
     };
 
-    let knowledge_cfg =
+    let mut knowledge_cfg =
         match gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw) {
             Ok(Some(cfg)) => cfg,
             Ok(None) => {
@@ -1017,6 +1025,13 @@ fn register_kairos_if_configured(
                 return;
             }
         };
+
+    // Resolve relative wiki_path against the config file's directory so
+    // the in-process knowledge provider uses the same path as the MCP
+    // grandchild (spawn.rs pins cwd to Kairos workdir).
+    if let Some(config_dir) = config_path.parent() {
+        knowledge_cfg.resolve_relative_paths(config_dir);
+    }
 
     if let Err(e) = knowledge_cfg.validate() {
         tracing::error!(error = %e, "kairos: [knowledge] validation failed; skipping");

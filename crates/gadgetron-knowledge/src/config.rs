@@ -256,6 +256,21 @@ impl KnowledgeConfig {
         Ok(Some(cfg))
     }
 
+    /// Rewrite relative `wiki_path` to an absolute path resolved against
+    /// `config_dir` (the directory containing `gadgetron.toml`). Absolute
+    /// paths are left untouched.
+    ///
+    /// Why: `gadgetron mcp serve` runs as a grandchild process spawned by
+    /// Claude Code with cwd pinned to `~/.gadgetron/kairos/work/`, so a
+    /// relative `wiki_path = "./.gadgetron/wiki"` in the operator's TOML
+    /// would resolve to the wrong directory. Resolving against the config
+    /// file's own directory makes the path cwd-independent.
+    pub fn resolve_relative_paths(&mut self, config_dir: &std::path::Path) {
+        if self.wiki_path.is_relative() {
+            self.wiki_path = config_dir.join(&self.wiki_path);
+        }
+    }
+
     /// Validates at load time. Rules:
     /// - `wiki_path` parent must exist (wiki_path itself may not —
     ///   `gadgetron kairos init` creates it on first start).
