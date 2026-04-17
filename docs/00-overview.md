@@ -8,101 +8,71 @@
 
 ---
 
-## 1. 제품 비전과 차별점
+## 1. Gadgetron이란
 
-### 1.1 비전 — 협업형 3 Plane 구조
+Gadgetron은 지식 협업 플랫폼이다. 사용자의 로컬 지식과 웹 정보를 **지식 레이어**에 쌓고, 에이전트가 그 레이어를 근거로 사용자의 요청을 해결한다. 기능은 **MCP 플러그인**으로 확장한다.
 
-**Gadgetron의 궁극 제품: 관리자·사용자·에이전트가 함께 일하는 agentic heterogeneous cluster collaboration platform.**
-
-이 제품은 세 개의 plane 으로 구성됩니다:
-
-| Plane | 상태 | 역할 |
-|------|------|------|
-| **Assistant Plane** | **Phase 2 진행 중** | 일상 요청 처리, 대화형 질의응답, 지식 정리, 위임 창구 |
-| **Operations Plane** | **Phase 1 기반 완료 + 확장 예정** | 클러스터 모니터링, 장애 분석, 위험 경고, 설정 변경, 운영 리포트 |
-| **Execution Plane** | **Phase 1 기반 완료 + 확장 예정** | 라우팅, 배포, 스케줄링, 자원 최적화, 워크로드 실행, 결과 회수 |
-
-세 개의 actor 가 이 plane 들을 가로질러 협업합니다:
-
-| Actor | 역할 |
-|------|------|
-| **Administrator** | 정책 승인자, 파괴적 변경 최종 승인자, 인프라 소유자 |
-| **User** | 요청 생성자, 결과 소비자, 일부 self-service operator |
-| **Agent** | 비서이자 운영 조력자, 실행 조정자, 경험 축적 주체 |
-
-현재 구현은 이 전체 비전의 일부를 이미 담고 있습니다.
-
-- **Operations + Execution substrate**: Rust 네이티브 단일 바이너리 gateway/scheduler/node stack. LiteLLM/Portkey/OpenRouter 대비 P99 < 1ms, 로컬 GPU 1급, 단일 배포 단위.
-- **Assistant entry point**: Claude Code (CLI) 기반 Penny. Rust는 절차적 에이전트 루프를 재구현하지 않고 MCP 서버와 subprocess 관리자 역할에 집중.
-- **Future collaboration loop**: direct + delegate + shadow 학습. 에이전트는 사람의 요청, 승인, 트러블슈팅, 해결 과정을 구조화하여 더 적합한 협업 파트너로 진화.
-
-**상세 설계**: `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md` (vision + STRIDE), `01-knowledge-layer.md` (`gadgetron-knowledge` crate), `02-penny-agent.md` (`gadgetron-penny` crate).
-
-### 1.2 미션
-
-1. **협업형 에이전트 경험** — 관리자와 사용자는 직접 작업하거나 에이전트에게 위임할 수 있고, 에이전트는 그 과정을 통해 더 적합한 협업 파트너로 진화
-2. **운영 제어면 확장** — 클러스터 모니터링, 장애 진단, 설정 변경, 위험 경고, 운영 리포트를 agent-friendly surface 로 제공
-3. **실행 최적화** — 라우팅, 스케줄링, 자원 관리, 워크로드 실행과 결과 회수를 하나의 plane 으로 통합
-4. **경험 축적** — 대화, incident, remediation, report 를 구조화해 runbook/knowledge/policy 로 승격
-5. **레이턴시 제거** — GC pause, 직렬화 오버헤드, 네트워크 홉을 원천 차단하여 P99 < 1ms 오버헤드 달성
-6. **GPU 자원 최적화** — NUMA 토폴로지, NVLink/NVSwitch 인터커넥트, 열/전력 예산을 고려한 스케줄링
-7. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 전체 스택 구동, 마이크로서비스 난비 지양
-8. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원
-9. **오픈소스 최대 활용** — Claude Code / [assistant-ui](https://github.com/assistant-ui/assistant-ui) / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화. OpenWebUI 는 2026-04-14 D-20260414-02 로 drop — 2025-04 라이선스 변경 + 단일 바이너리 원칙 충돌.
-10. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (penny는 Unix 전용으로 시작)
-
-### 1.3 경쟁 차별화
-
-#### LiteLLM vs Gadgetron
-
-| 영역 | LiteLLM | Gadgetron |
-|------|---------|-----------|
-| 언어 | Python | Rust (GC 없음, P99 < 1ms) |
-| GPU 관리 | 없음 | NVML + NUMA + MIG + 열/전력 |
-| 로컬 추론 | 간접 지원 | vLLM/SGLang 1급 시민 |
-| 배포 단위 | pip 패키지 | 단일 정적 바이너리 |
-| 스트리밍 | Python 제너레이터 | 제로카피 `Pin<Box<Stream>>` |
-| 스케줄링 | 없음 | VRAM 인식 모델 배포 + LRU eviction |
-| 클러스터 | 없음 | 다중 노드, K8s/Slurm 통합 |
-
-#### Portkey vs Gadgetron
-
-| 영역 | Portkey | Gadgetron |
-|------|---------|-----------|
-| 배포 모델 | SaaS 전용 | 자체 호스팅 (온프레미스 가능) |
-| GPU 관리 | 없음 | 전체 GPU 수명주기 관리 |
-| 로컬 추론 | 없음 | vLLM/SGLang/Ollama 네이티브 |
-| 레이턴시 | 네트워크 홉 존재 | 인프라 내부 오버헤드 최소화 |
-| 데이터 주권 | 클라우드 종속 | 완전한 데이터 통제 |
-
-#### OpenRouter vs Gadgetron
-
-| 영역 | OpenRouter | Gadgetron |
-|------|------------|-----------|
-| 모델 소싱 | 클라우드 API 전용 | 클라우드 + 로컬 GPU |
-| 가격 모델 | 마크업 기반 | 셀프 호스팅(비용 무료) + API 비용 |
-| GPU 제어 | 없음 | 직접 GPU 관리 |
-| 커스터마이징 | 제한적 | TOML 설정 + 플러그인 |
-| 에이전트 | 없음 | AgentaaS 계층 |
-
-#### 핵심 차별화 요약
+### 1.1 작동 흐름
 
 ```
-Gadgetron의 독보적 위치:
-
-  +-------------------------------------------+
-  |         Gadgetron만의 영역                 |
-  |                                           |
-  |   GPU 스케줄링 x LLM 오케스트레이션      |
-  |   x 로컬 추론 x 단일 바이너리             |
-  |   x Rust 성능                             |
-  +-------------------------------------------+
-
-  LiteLLM   --- LLM 라우팅만 (Python)
-  Portkey   --- LLM 게이트웨이만 (SaaS)
-  OpenRouter --- 클라우드 API 프록시만
-  vLLM/SGLang --- 단일 모델 서빙만
+  사용자 요청
+       │
+       ▼
+  ┌─── Penny (agent) ───┐
+  │                     │
+  │  1. 지식 레이어 조회   │
+  │  2. 필요하면 웹 조사   │
+  │  3. 결과 종합해 응답   │
+  │  4. 유의미한 사실은    │──► 지식 레이어에 기록
+  │     레이어에 기록     │
+  └─────────────────────┘
 ```
+
+동일한 질문에는 레이어에 이미 정리된 내용이 먼저 쓰인다.
+
+### 1.2 Penny — Gadgetron의 에이전트
+
+Penny (Penny Brown)는 Gadgetron이 제공하는 에이전트다. 사용자는 Penny에게 말하고, Penny는 지식 레이어와 플러그인을 도구로 삼아 요청을 해결한다.
+
+- **기본 런타임**: Claude Code CLI + Claude Opus. OAuth (`claude_max`) 또는 Anthropic API 키.
+- **교체 가능**: 사용자 설정으로 다른 클라우드 모델 (OpenAI / Gemini 등) 또는 로컬 모델 (vLLM / SGLang / Ollama)로 바꿀 수 있다.
+- **노출 방식**: OpenAI 호환 엔드포인트의 `model = "penny"`, Web UI (`/web`)에서 대화.
+- 상세: [`docs/design/phase2/02-penny-agent.md`](design/phase2/02-penny-agent.md).
+
+### 1.3 지식 레이어
+
+Gadgetron 지식 레이어는 여러 구성요소로 이루어진다:
+
+- **LLM Wiki** — Markdown + Obsidian 스타일 `[[link]]` + git 버전 관리 (모든 쓰기 = 자동 커밋). 사람이 읽을 수 있고 에이전트가 다룰 수 있는 구조.
+- **웹 조사** — SearXNG 프록시 또는 선택 외부 검색. 조사 결과는 필요시 LLM Wiki 페이지로 정리되어 축적된다.
+- **RAW 지식 입수 파이프라인** — 사용자가 특정 폴더(예: `knowledge/inbox/`)에 PDF · 텍스트 · 회의록을 드롭하면 백그라운드로 LLM Wiki 페이지를 생성. 원본은 보존.
+- **검색 인덱스** — P2A는 인메모리 역인덱스, P2B+는 SQLite + `sqlite-vec` 벡터 / `tantivy` 전문검색.
+
+쓰기 안전 장치 (PEM / AWS / GCP 자격증명 차단, 페이지 크기 상한, 경로 탈출 방지)는 `M1–M8` 위협 모델로 문서화되어 있다.
+
+- 상세: [`docs/design/phase2/01-knowledge-layer.md`](design/phase2/01-knowledge-layer.md), [`docs/design/phase2/05-knowledge-semantic.md`](design/phase2/05-knowledge-semantic.md).
+
+### 1.4 MCP 플러그인
+
+Gadgetron의 도구는 MCP (Model Context Protocol)로 노출되며, Penny는 MCP 툴 레지스트리를 읽어 사용 가능한 기능을 발견한다. 새 기능을 추가하려면 `McpToolProvider` 트레이트를 구현해 등록하면 된다 — Penny나 제품 코어는 건드리지 않는다.
+
+| 플러그인 | 상태 | 제공 도구 |
+|---|---|---|
+| Knowledge | P2A 출시 | `wiki.list` / `wiki.get` / `wiki.search` / `wiki.write` / `web.search` |
+| 서버 운영 | 설계 중 | 서버 상태 조회, 로그 열람, 설정 변경, 위험 경고, 재시작 |
+| 클러스터 관리 | 후속 | K8s / Slurm 잡 제출 · 스케일링 · drain |
+| 작업 관리 | 후속 | 큐 / 스케줄 / SLA 추적 |
+
+- 레지스트리 설계: [`docs/design/phase2/04-mcp-tool-registry.md`](design/phase2/04-mcp-tool-registry.md)
+- 서버 운영 플러그인: [`docs/design/ops/operations-tool-providers.md`](design/ops/operations-tool-providers.md)
+
+### 1.5 구현 형태
+
+- 기본 배포 단위는 **단일 Rust 바이너리** (`gadgetron serve`). 필요에 따라 프로세스 단위로 분리할 수 있다.
+- 기본 설정은 **단일 TOML 파일**. 필요에 따라 분할한다.
+- 스토리지는 **로컬 데스크톱 / 온프레미스 / 클라우드 (S3 · GCS 등)** 를 같은 코드 경로로 지원. 배포 형태는 §5 로드맵 참조.
+- 게이트웨이 본체 오버헤드는 P99 서브밀리초 목표 (§7.1). GPU 자원(NVML · VRAM · NUMA · MIG)은 스케줄러가 직접 관리 (§7.2).
+- Claude Code / assistant-ui / SearXNG / git2 / sqlite-vec 등 오픈소스 조각을 조립하고, 직접 구현은 최소화한다.
 
 ---
 
@@ -481,41 +451,16 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - Streaming audit `latency_ms=0` (dispatch-time only; 02-penny-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
 - Audit `provider=None` (실제 라우팅된 provider 미기록)
 
-### Phase 2 — Assistant Plane + Collaboration Entry Point (v0.2, **진행 중**)
+### Phase 2 — Knowledge Layer + Penny + MCP Plugins (v0.2, **진행 중**)
 
-**목표**: Phase 1 substrate 위에 Claude Code 기반 Penny를 assistant plane entry point 로 올리고, knowledge layer + web UI + approval/registry seam 을 통해 협업형 control plane 으로 확장할 기반을 구축.
-
-**핵심 아키텍처 결정**: Claude Code (CLI) 가 에이전트 본체. Rust는 MCP 서버와 subprocess 관리자만 제공. `gadgetron-penny`는 `LlmProvider` trait를 구현해서 router에 `"penny"` 이름으로 등록 — gateway dispatch 코드 변경 0.
+**목표**: Phase 1 substrate 위에 지식 레이어(LLM Wiki + 웹 조사 + RAW 입수 + 검색 인덱스), Penny 에이전트, MCP 플러그인 확장 surface를 올려 지식 협업 플랫폼을 구성.
 
 **신규 크레이트 (3개)**:
-- `gadgetron-knowledge` — wiki (md+git2+Obsidian `[[link]]`) / SearXNG 프록시 / manual JSON-RPC 2.0 stdio MCP 서버. 도메인 leaf 크레이트.
-- `gadgetron-penny` — `LlmProvider` 구현 / `ClaudeCodeSession` (owned consuming + `kill_on_drop(true)`) / stream-json → ChatChunk 번역기 / `tempfile` M1 / `redact_stderr` M2.
-- `gadgetron-web` — embedded assistant-ui Web UI (`/web`) + approval/report/assistant entry UX substrate.
+- `gadgetron-knowledge` — 지식 레이어 구성요소 (wiki / SearXNG 프록시 / stdio MCP 서버).
+- `gadgetron-penny` — Claude Code subprocess 브릿지 + `McpToolRegistry` + `LlmProvider` 구현 (`model = "penny"`).
+- `gadgetron-web` — embedded assistant-ui Web UI (`/web`).
 
-**Phase 2 서브-스프린트 (16주)**:
-
-| 서브-스프린트 | 기간 | 증명 목표 |
-|---|---|---|
-| **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
-| **P2A — Penny MVP** | 4주 | desktop-first assistant plane entry point + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `penny` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
-| **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
-| **P2C — Multi + Storage** | 4주 | `PennyManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
-| **P2D — Media & Polish** | 4주 | `whisper.cpp` 오디오 STT + CLIP ONNX 이미지 캡션 + 비디오 프레임 샘플링 + 운영 배포 docs/manual |
-
-**Phase 2 보안 (00-overview §8 STRIDE + M1-M8)**:
-- **M1** MCP 설정 tempfile mkstemp atomic 0600 (`#[cfg(not(unix))] compile_error!`)
-- **M2** `redact_stderr()` — Anthropic/Gadgetron/Bearer/generic/AWS/PEM 패턴 (catch-all 금지로 진단 정보 보존)
-- **M3** `wiki::fs::resolve_path` pure 함수 + `O_NOFOLLOW` 최종 파일 오픈
-- **M4** `--allowed-tools` enforcement 검증 (ADR-P2A-01, 구현 전 PM 행동 테스트)
-- **M5** `wiki_write` BLOCK (PEM/AKIA/GCP) + AUDIT (토큰 패턴) + `wiki_max_page_bytes` 캡
-- **M6** `tools_called` 는 툴 이름만 감사 (arguments 제외)
-- **M7** SearXNG + git 영구성 디스클로저 (`docs/manual/penny.md` 머지 전 필수)
-- **M8** P2A 단일유저 리스크 수락 (ADR-P2A-02)
-
-**배포 형태 (동일 코드베이스, 스토리지만 swap)**:
-1. **Local** — 단일 유저 데스크탑, 파일시스템 스토리지 (P2A)
-2. **On-premise** — 팀/조직, 로컬 또는 NAS 스토리지 (P2C+)
-3. **Cloud** — SaaS형, S3/GCS, 멀티 테넌트 격리 (P2C+)
+**서브-스프린트 4종 (P2A→P2D, 각 4주)**, 배포 형태 3종 (Local / On-prem / Cloud, 같은 코드 경로, 스토리지만 swap), 보안 위협 모델 M1–M8은 [`docs/design/phase2/00-overview.md`](design/phase2/00-overview.md)에 통합되어 있다. 핵심 ADR은 [`docs/adr/`](adr/) ADR-P2A-01 ~ ADR-P2A-07.
 
 ### Phase 3 — Cluster Ops Hardening & Rich Automation (v1.0)
 

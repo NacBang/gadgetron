@@ -1,50 +1,66 @@
 # Gadgetron
 
-Rust-native heterogeneous cluster collaboration platform with sub-millisecond P99 gateway overhead. Gadgetron combines an assistant plane for daily requests, an operations plane for cluster monitoring/control, and an execution plane for workload routing and optimization in a single binary.
+Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes) under an agent called **Penny**, and extends its capabilities through **MCP plugins**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
 
-**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: assistant-plane and collaboration-entry MVP on top of the existing operations/execution substrate. Interactive approval flow remains deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
+**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: knowledge layer, Penny agent runtime, and embedded Web UI. Interactive approval flow is deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
 
-## Product Framing
+## How it works
 
-- **Assistant Plane** — daily requests, summaries, knowledge work, delegation UX
-- **Operations Plane** — cluster monitoring, diagnostics, risk reporting, configuration changes
-- **Execution Plane** — provider routing, scheduling, resource optimization, workload execution
-- **Direct + Delegate** — administrators and users can act directly or hand work to the agent
-- **Experience Loop** — the agent observes requests, approvals, troubleshooting, and resolutions to become a better collaborator over time
+```
+  user request
+       │
+       ▼
+  ┌─── Penny (agent) ───┐
+  │                     │
+  │  1. query knowledge │
+  │  2. web-search if   │
+  │     needed          │
+  │  3. compose reply   │
+  │  4. write back      │──► knowledge layer
+  │     lasting facts   │
+  └─────────────────────┘
+```
+
+Details: [`docs/00-overview.md`](docs/00-overview.md) §1 for the product narrative, [`docs/INDEX.md`](docs/INDEX.md) for the doc reader guide, [`docs/design/phase2/`](docs/design/phase2/) for the active design surface.
 
 ## Features
 
-### Operations & Execution Substrate (Phase 1)
+### Penny — the Gadgetron agent (Phase 2A)
+
+- **Runtime** — Claude Code CLI + Claude Opus by default (OAuth via `claude_max`, or explicit Anthropic API key). Per [`02-penny-agent.md v4`](docs/design/phase2/02-penny-agent.md).
+- **Replaceable** — point Penny at any other cloud model (OpenAI / Gemini …) or a local model (vLLM / SGLang / Ollama). Same trait abstraction, same UX.
+- **Exposure** — OpenAI-compatible endpoint at `model = "penny"`, plus an embedded Web UI at `/web`.
+- **`[penny]` → `[agent.brain]` migration** — `AppConfig::load` rewrites legacy v0.1.x config sections automatically with `tracing::warn!` per moved field. See [`04 v2 §11.1`](docs/design/phase2/04-mcp-tool-registry.md).
+- **Reserved `agent.*` namespace** — agent cannot modify its own brain/config. Three-layer defense (category / prefix / specific-name).
+
+### Knowledge layer (Phase 2A)
+
+- **Markdown wiki + git** — `wiki::Wiki` aggregate; every write is an auto-commit with an abstract message (no user query / content in commit messages). `git2` / libgit2 backed.
+- **Path traversal guard (M3)** — `wiki::fs::resolve_path`: no `..`, no null bytes, no symlink escape, NFC/NFD boundary stays inside `wiki_root`.
+- **Credential BLOCK + AUDIT (M5)** — `wiki::secrets` rejects PEM private keys, AWS access keys, and GCP service-account JSON BEFORE touching disk. Bearer tokens / Anthropic / Gadgetron keys trigger AUDIT warnings but do not block.
+- **Obsidian `[[link]]` parser** — `wiki::link`. Supports `[[target|alias]]`, `[[target#heading]]`, UTF-8 Korean/CJK targets, fenced / inline code-block exclusion.
+- **In-memory inverted index** — `wiki::index`. Rebuilt per call at P2A scale; ~20-50 ms for <10k pages. P2B adds `sqlite-vec` vector search + `tantivy` full-text.
+- **SearXNG web search** — `search::searxng`. Bounded HTTP timeout + redirect limit + fixed-text error sanitization per A4.
+- **RAW ingestion** — drop-folder pipeline (PDF / text / meeting notes → LLM Wiki pages) planned for P2B.
+
+### MCP plugins
+
+- **`McpToolProvider` trait** — stable plugin interface in `gadgetron-core::agent::tools`. Register a provider and Penny discovers its tools via the MCP tool registry — no changes to Penny or the product core.
+- **`McpToolRegistry` builder/freeze** — `gadgetron-penny::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
+- **3-tier × 3-mode permission model** — `Tier::{Read, Write, Destructive}` × `ToolMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
+- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio MCP server (`gadgetron-penny::mcp_server`). Invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per [`01-knowledge-layer.md v3 §6.1`](docs/design/phase2/01-knowledge-layer.md).
+- **Plugin roadmap** — `Knowledge` ships in P2A (`wiki.list` / `wiki.get` / `wiki.search` / `wiki.write` / `web.search`). `Server operations` is in design (see [`docs/design/ops/operations-tool-providers.md`](docs/design/ops/operations-tool-providers.md)). Cluster management and task management follow.
+
+### OpenAI-compatible gateway (Phase 1 substrate)
+
+Gadgetron's knowledge + agent layer sits on top of a self-hosted gateway that Phase 1 already ships:
 
 - **OpenAI-compatible API** — drop-in `/v1/chat/completions` with SSE streaming
 - **6 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, vLLM, SGLang
 - **6 routing strategies** — RoundRobin, CostOptimal, LatencyOptimal, QualityOptimal, Fallback, Weighted
 - **GPU-aware scheduling** — VRAM bin-packing, NUMA topology, MIG support
-- **Multi-tenant platform** — API key auth, per-tenant quota (i64 cents), audit logging
-- **Single binary** — `gadgetron serve` runs the full stack
-
-### Assistant & Collaboration Entry Point (Phase 2A)
-
-- **Penny assistant runtime** — Claude Code CLI wrapped as an OpenAI-compatible provider (`model = "penny"`). Per `02-penny-agent.md v4`.
-- **`McpToolProvider` trait** — stable plugin interface for MCP tool providers; `gadgetron-core::agent::tools`. P2A ships `KnowledgeToolProvider`; P2B/P2C extend with `InfraToolProvider`, `SchedulerToolProvider`, etc.
-- **`McpToolRegistry` builder/freeze** — `gadgetron-penny::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
-- **3-tier × 3-mode permission model** — `Tier::{Read, Write, Destructive}` × `ToolMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
-- **`[penny]` → `[agent.brain]` migration** — `AppConfig::load` rewrites legacy v0.1.x config sections automatically with `tracing::warn!` per moved field. See [04 v2 §11.1](docs/design/phase2/04-mcp-tool-registry.md).
-- **Reserved `agent.*` namespace** — agent cannot modify its own brain/config. Three-layer defense: category check, prefix check, specific-name list. Per `ensure_tool_name_allowed`.
-
-### Knowledge Layer (Phase 2A)
-
-- **Markdown wiki + git** — `wiki::Wiki` aggregate; every write is an auto-commit with an abstract message (no user query / content in commit messages). `git2` / libgit2 backed.
-- **Path traversal guard** — `wiki::fs::resolve_path` enforces M3: no `..`, no null bytes, no symlink escape, NFC/NFD boundary stays inside `wiki_root`.
-- **Credential BLOCK + AUDIT (M5)** — `wiki::secrets` rejects PEM private keys, AWS access keys, and GCP service-account JSON BEFORE touching disk. Bearer tokens, Anthropic / Gadgetron keys trigger AUDIT warnings but do not block.
-- **Obsidian `[[link]]` parser** — `wiki::link`. Supports `[[target|alias]]`, `[[target#heading]]`, UTF-8 Korean/CJK targets, fenced / inline code-block exclusion.
-- **In-memory inverted index** — `wiki::index`. Rebuilt per call at P2A scale; ~20-50 ms for <10k pages.
-- **SearXNG web search** — `search::searxng`. Bounded HTTP timeout + redirect limit + fixed-text error sanitization per A4.
-- **5 MCP tools** — `wiki.list`, `wiki.get`, `wiki.search`, `wiki.write`, `web.search` (last one optional, configured via `[knowledge.search]`).
-
-### Stdio MCP Server (Phase 2A)
-
-- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio MCP server (`gadgetron-penny::mcp_server`). Invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per `01-knowledge-layer.md v3 §6.1`.
+- **Multi-tenant** — API key auth, per-tenant quota (integer cents), audit logging
+- **Single binary by default** — `gadgetron serve` runs the full stack; can be split into separate processes if needed.
 
 ## Quick Start
 
