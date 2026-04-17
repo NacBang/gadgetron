@@ -38,12 +38,18 @@
    └→ 문서: 코드-문서 불일치 0건
    └→ "더 이상 할 것 없음" 판단까지 반복
 
-⑦ 매뉴얼 업데이트 (push 전 필수)
+⑦ 검증 완료 (구현 후 필수)
+   └→ 코드/스크립트 변경 직후 `./verify_cycle.sh changed`
+   └→ PR 직전 `./verify_cycle.sh ci`
+   └→ 필요한 도메인 smoke/eval 은 추가로 수행
+   └→ 최종 보고에 "무엇을 실행했고 무엇을 생략했는지" 명시
+
+⑧ 매뉴얼 업데이트 (push 전 필수)
    └→ docs/manual/ 에 구현된 내용 반영
    └→ 새 endpoint, CLI, config, 에러 코드 모두 매뉴얼에 포함
    └→ 매뉴얼에 없는 기능 = push 금지
 
-⑧ PR + Merge
+⑨ PR + Merge
    └→ git commit → gh pr create → merge
    └→ clean state에서 다음 Sprint 시작
 ```
@@ -61,6 +67,14 @@
 | 7 | **PM 권한** — 실행 결정은 PM 자율. 전략적 결정만 사용자 escalation |
 | 8 | **테스트 방안 필수** — 모듈 테스트 + 실제 동작 테스트 + 검증 방안 |
 | 9 | **도구 설치 자유** — 구현/테스트/검증에 필요한 툴·플러그인·MCP 사전 승인 |
+
+## 5. 구현 후 검증 계약
+
+1. **구현이 끝나면 바로 `./verify_cycle.sh changed`** 를 실행한다. 이 스크립트는 현재 변경 파일을 기준으로 touched crate를 계산하고, 필요 시 workspace-wide 검증으로 승격한다.
+2. **PR 직전에는 `./verify_cycle.sh ci`** 를 실행한다. 로컬에서 재현 가능한 범위의 CI 게이트(`check` / `fmt` / `clippy` / `test`)를 그대로 따라간다. `cargo-deny`가 설치되어 있으면 보안 검사까지 포함한다.
+3. **공용/파급 큰 crate 변경은 자동으로 더 넓게 검증한다.** `gadgetron-core`, `provider`, `router`, `gateway`, `xaas`, 루트 manifest, CI workflow 변경은 `changed` 모드에서도 workspace 검증으로 올린다.
+4. **Penny/Knowledge/Web 같은 결합 영역은 fan-out 검증을 포함한다.** 예: `gadgetron-penny`/`gadgetron-knowledge` 변경 시 `gadgetron-cli`도 함께 검증하고, `gadgetron-web` 변경 시 `gadgetron-gateway`도 함께 검증한다.
+5. **스크립트가 끝이 아니다.** 실제 동작 smoke, eval harness, 수동 UX 확인이 필요한 작업은 해당 검증을 추가로 실행하고, 최종 보고에 명시한다.
 
 ## 3. 서브에이전트 역할 분담
 

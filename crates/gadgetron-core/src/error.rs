@@ -1082,10 +1082,7 @@ mod tests {
     /// `PennyErrorKind::Display` produces the expected snake_case token.
     #[test]
     fn penny_error_kind_display() {
-        assert_eq!(
-            format!("{}", PennyErrorKind::NotInstalled),
-            "not_installed"
-        );
+        assert_eq!(format!("{}", PennyErrorKind::NotInstalled), "not_installed");
         assert_eq!(
             format!(
                 "{}",
@@ -1202,10 +1199,7 @@ mod tests {
             "tool_approval_timeout"
         );
         assert_eq!(
-            format!(
-                "{}",
-                PennyErrorKind::ToolInvalidArgs { reason: "x".into() }
-            ),
+            format!("{}", PennyErrorKind::ToolInvalidArgs { reason: "x".into() }),
             "tool_invalid_args"
         );
         assert_eq!(

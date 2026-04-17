@@ -100,9 +100,7 @@ pub enum StreamJsonEvent {
     /// The inner `event.type = "content_block_delta"` carries
     /// individual token deltas for real-time streaming.
     #[serde(rename = "stream_event")]
-    StreamEvent {
-        event: RawStreamEvent,
-    },
+    StreamEvent { event: RawStreamEvent },
 }
 
 /// The `message` field inside a `type: "assistant"` event.
@@ -171,9 +169,7 @@ pub struct MessageDelta {
 #[serde(tag = "type")]
 pub enum RawStreamEvent {
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta {
-        delta: ContentBlockDeltaPayload,
-    },
+    ContentBlockDelta { delta: ContentBlockDeltaPayload },
     #[serde(other)]
     Other,
 }
@@ -243,11 +239,8 @@ pub fn event_to_chat_chunks_ex(
                 ContentBlockDeltaPayload::TextDelta { text } if !text.is_empty() => {
                     vec![build_chunk(req, Some(text), None)]
                 }
-                ContentBlockDeltaPayload::ThinkingDelta { thinking }
-                    if !thinking.is_empty() =>
-                {
-                    let formatted =
-                        format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "));
+                ContentBlockDeltaPayload::ThinkingDelta { thinking } if !thinking.is_empty() => {
+                    let formatted = format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "));
                     vec![build_chunk(req, Some(formatted), None)]
                 }
                 _ => Vec::new(),
@@ -260,9 +253,7 @@ pub fn event_to_chat_chunks_ex(
             let mut chunks = Vec::new();
             for block in message.content {
                 match block {
-                    ContentBlock::Text { text }
-                        if !text.is_empty() && !skip_assistant_text =>
-                    {
+                    ContentBlock::Text { text } if !text.is_empty() && !skip_assistant_text => {
                         chunks.push(build_chunk(req, Some(text), None));
                     }
                     ContentBlock::Thinking { thinking } if !thinking.is_empty() => {

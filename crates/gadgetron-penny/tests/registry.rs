@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use gadgetron_core::agent::config::{AgentConfig, ToolMode};
 use gadgetron_core::agent::tools::McpError;
-use gadgetron_penny::{McpToolRegistry, McpToolRegistryBuilder};
 use gadgetron_knowledge::config::WikiConfig;
 use gadgetron_knowledge::mcp::KnowledgeToolProvider;
 use gadgetron_knowledge::wiki::Wiki;
+use gadgetron_penny::{McpToolRegistry, McpToolRegistryBuilder};
 use serde_json::json;
 use tempfile::TempDir;
 

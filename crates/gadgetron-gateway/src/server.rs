@@ -6,7 +6,7 @@ use axum::{
     extract::State,
     http::{header, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -290,7 +290,19 @@ pub fn build_router_with_web(
     }
     let service_cfg = crate::web_csp::translate_config(web_cfg);
     let web_router = crate::web_csp::apply_web_headers(gadgetron_web::service(&service_cfg));
-    base.nest("/web", web_router)
+    base.route("/web/", get(web_trailing_slash_redirect))
+        .route("/favicon.ico", get(web_favicon_handler))
+        .nest("/web", web_router)
+}
+
+#[cfg(feature = "web-ui")]
+async fn web_trailing_slash_redirect() -> Redirect {
+    Redirect::permanent(gadgetron_web::BASE_PATH)
+}
+
+#[cfg(feature = "web-ui")]
+async fn web_favicon_handler() -> impl IntoResponse {
+    StatusCode::NO_CONTENT
 }
 
 // ---------------------------------------------------------------------------

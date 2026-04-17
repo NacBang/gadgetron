@@ -280,8 +280,6 @@ async fn main() -> Result<()> {
 /// construction produce a descriptive message on stderr and exit
 /// code 1.
 async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
-    use std::sync::Arc;
-
     let config_path: PathBuf = config_path_override
         .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
@@ -292,31 +290,6 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
             config_path.display()
         );
     }
-
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-
-    let mut knowledge_cfg =
-        gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
-                 requires the knowledge layer to be configured.",
-                    config_path.display()
-                )
-            })?;
-
-    // Resolve relative `wiki_path` against the config file's directory
-    // so the MCP grandchild process finds the wiki regardless of its
-    // inherited cwd (Claude Code pins cwd to Penny's neutral workdir).
-    if let Some(config_dir) = config_path.parent() {
-        knowledge_cfg.resolve_relative_paths(config_dir);
-    }
-
-    knowledge_cfg
-        .validate()
-        .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
 
     // Also load the `[agent]` section from the same TOML so the
     // registry can enforce L3 defense-in-depth (ADR-P2A-06 addendum
@@ -329,17 +302,13 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
         .map(|app| app.agent)
         .unwrap_or_default();
 
-    let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
-        .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
-
-    let mut builder = gadgetron_penny::McpToolRegistryBuilder::new();
-    builder
-        .register(Arc::new(provider))
-        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
-    // Freeze against the operator's [agent] config so `dispatch()` can
-    // enforce L3 defense-in-depth on any tool call that reaches this
-    // stdio server (ADR-P2A-06 Implementation status addendum item 3).
-    let registry = Arc::new(builder.freeze(&agent_cfg));
+    let registry = load_penny_registry_from_config(&config_path, &agent_cfg)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
+                 requires the knowledge layer to be configured.",
+            config_path.display()
+        )
+    })?;
 
     // Drive the stdio loop until EOF.
     gadgetron_penny::serve_stdio(registry)
@@ -347,6 +316,46 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("mcp stdio server error: {e}"))?;
 
     Ok(())
+}
+
+fn load_penny_registry_from_config(
+    config_path: &std::path::Path,
+    agent_cfg: &gadgetron_core::agent::AgentConfig,
+) -> Result<Option<Arc<gadgetron_penny::McpToolRegistry>>> {
+    let raw = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+
+    let Some(mut knowledge_cfg) =
+        gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    else {
+        return Ok(None);
+    };
+
+    // Resolve relative wiki paths against the operator config file so
+    // both the in-process provider and the MCP grandchild use the same
+    // wiki root regardless of their current working directories.
+    if let Some(config_dir) = config_path.parent() {
+        knowledge_cfg.resolve_relative_paths(config_dir);
+    }
+
+    knowledge_cfg
+        .validate()
+        .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
+
+    let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
+        .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
+
+    let mut builder = gadgetron_penny::McpToolRegistryBuilder::new();
+    builder
+        .register(Arc::new(provider))
+        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
+
+    // Freeze against the operator's [agent] config so `dispatch()` can
+    // enforce L3 defense-in-depth on any tool call that reaches this
+    // registry, regardless of whether it is used in-process or via the
+    // child-side stdio server.
+    Ok(Some(Arc::new(builder.freeze(agent_cfg))))
 }
 
 // ---------------------------------------------------------------------------
@@ -998,64 +1007,21 @@ fn register_penny_if_configured(
     if !config_path.exists() {
         return;
     }
-    let raw = match std::fs::read_to_string(config_path) {
-        Ok(s) => s,
+    let registry = match load_penny_registry_from_config(config_path, &app_config.agent) {
+        Ok(Some(registry)) => registry,
+        Ok(None) => {
+            // No [knowledge] section → penny not available.
+            return;
+        }
         Err(e) => {
             tracing::error!(
                 path = %config_path.display(),
-                error = %e,
-                "penny: cannot re-read config file; skipping knowledge layer"
+                error = ?e,
+                "penny: failed to prepare knowledge registry; skipping"
             );
             return;
         }
     };
-
-    let mut knowledge_cfg =
-        match gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw) {
-            Ok(Some(cfg)) => cfg,
-            Ok(None) => {
-                // No [knowledge] section → penny not available.
-                return;
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "penny: [knowledge] section malformed; skipping"
-                );
-                return;
-            }
-        };
-
-    // Resolve relative wiki_path against the config file's directory so
-    // the in-process knowledge provider uses the same path as the MCP
-    // grandchild (spawn.rs pins cwd to Penny workdir).
-    if let Some(config_dir) = config_path.parent() {
-        knowledge_cfg.resolve_relative_paths(config_dir);
-    }
-
-    if let Err(e) = knowledge_cfg.validate() {
-        tracing::error!(error = %e, "penny: [knowledge] validation failed; skipping");
-        return;
-    }
-
-    // Build the KnowledgeToolProvider (opens/inits the wiki repo).
-    let provider = match gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = ?e, "penny: KnowledgeToolProvider::new failed; skipping");
-            return;
-        }
-    };
-
-    // Freeze the registry with the single P2A provider. The `[agent]`
-    // config is captured at freeze time so `dispatch()` can enforce L3
-    // defense-in-depth (ADR-P2A-06 Implementation status addendum item 3).
-    let mut builder = gadgetron_penny::McpToolRegistryBuilder::new();
-    if let Err(e) = builder.register(Arc::new(provider)) {
-        tracing::error!(error = ?e, "penny: registry.register failed; skipping");
-        return;
-    }
-    let registry = Arc::new(builder.freeze(&app_config.agent));
 
     // Register PennyProvider under the "penny" model id in the
     // router map. The existing provider map already holds concrete
@@ -2278,6 +2244,79 @@ mod tests {
         assert_eq!(
             after, sentinel,
             "existing file content must not be modified when --yes is absent"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_penny_registry_returns_none_without_knowledge_section() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("gadgetron_noknowledge_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let config_path = dir.join("gadgetron.toml");
+        fs::write(
+            &config_path,
+            r#"
+[server]
+bind = "127.0.0.1:8080"
+"#,
+        )
+        .expect("failed to write config");
+
+        let registry = load_penny_registry_from_config(
+            &config_path,
+            &gadgetron_core::agent::AgentConfig::default(),
+        )
+        .expect("load should succeed");
+        assert!(
+            registry.is_none(),
+            "missing [knowledge] should not build a Penny registry"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_penny_registry_resolves_relative_wiki_path_against_config_dir() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("gadgetron_registry_{}", Uuid::new_v4()));
+        let state_dir = dir.join("state");
+        fs::create_dir_all(&state_dir).expect("failed to create state dir");
+        let config_path = dir.join("gadgetron.toml");
+        fs::write(
+            &config_path,
+            r#"
+[agent]
+binary = "claude"
+
+[knowledge]
+wiki_path = "./state/wiki"
+wiki_autocommit = true
+wiki_max_page_bytes = 1048576
+"#,
+        )
+        .expect("failed to write config");
+
+        let registry = load_penny_registry_from_config(
+            &config_path,
+            &gadgetron_core::agent::AgentConfig::default(),
+        )
+        .expect("load should succeed")
+        .expect("knowledge config should build a Penny registry");
+
+        assert!(
+            !registry.is_empty(),
+            "knowledge-backed Penny registry should expose tools"
+        );
+        assert!(
+            registry
+                .all_schemas()
+                .iter()
+                .any(|schema| schema.name == "wiki.list"),
+            "knowledge-backed Penny registry should include wiki.list"
         );
 
         let _ = fs::remove_dir_all(&dir);
