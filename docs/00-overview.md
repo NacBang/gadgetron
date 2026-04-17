@@ -451,41 +451,16 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - Streaming audit `latency_ms=0` (dispatch-time only; 02-penny-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
 - Audit `provider=None` (실제 라우팅된 provider 미기록)
 
-### Phase 2 — Assistant Plane + Collaboration Entry Point (v0.2, **진행 중**)
+### Phase 2 — Knowledge Layer + Penny + MCP Plugins (v0.2, **진행 중**)
 
-**목표**: Phase 1 substrate 위에 Claude Code 기반 Penny를 assistant plane entry point 로 올리고, knowledge layer + web UI + approval/registry seam 을 통해 협업형 control plane 으로 확장할 기반을 구축.
-
-**핵심 아키텍처 결정**: Claude Code (CLI) 가 에이전트 본체. Rust는 MCP 서버와 subprocess 관리자만 제공. `gadgetron-penny`는 `LlmProvider` trait를 구현해서 router에 `"penny"` 이름으로 등록 — gateway dispatch 코드 변경 0.
+**목표**: Phase 1 substrate 위에 지식 레이어(LLM Wiki + 웹 조사 + RAW 입수 + 검색 인덱스), Penny 에이전트, MCP 플러그인 확장 surface를 올려 지식 협업 플랫폼을 구성.
 
 **신규 크레이트 (3개)**:
-- `gadgetron-knowledge` — wiki (md+git2+Obsidian `[[link]]`) / SearXNG 프록시 / manual JSON-RPC 2.0 stdio MCP 서버. 도메인 leaf 크레이트.
-- `gadgetron-penny` — `LlmProvider` 구현 / `ClaudeCodeSession` (owned consuming + `kill_on_drop(true)`) / stream-json → ChatChunk 번역기 / `tempfile` M1 / `redact_stderr` M2.
-- `gadgetron-web` — embedded assistant-ui Web UI (`/web`) + approval/report/assistant entry UX substrate.
+- `gadgetron-knowledge` — 지식 레이어 구성요소 (wiki / SearXNG 프록시 / stdio MCP 서버).
+- `gadgetron-penny` — Claude Code subprocess 브릿지 + `McpToolRegistry` + `LlmProvider` 구현 (`model = "penny"`).
+- `gadgetron-web` — embedded assistant-ui Web UI (`/web`).
 
-**Phase 2 서브-스프린트 (16주)**:
-
-| 서브-스프린트 | 기간 | 증명 목표 |
-|---|---|---|
-| **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
-| **P2A — Penny MVP** | 4주 | desktop-first assistant plane entry point + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `penny` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
-| **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
-| **P2C — Multi + Storage** | 4주 | `PennyManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
-| **P2D — Media & Polish** | 4주 | `whisper.cpp` 오디오 STT + CLIP ONNX 이미지 캡션 + 비디오 프레임 샘플링 + 운영 배포 docs/manual |
-
-**Phase 2 보안 (00-overview §8 STRIDE + M1-M8)**:
-- **M1** MCP 설정 tempfile mkstemp atomic 0600 (`#[cfg(not(unix))] compile_error!`)
-- **M2** `redact_stderr()` — Anthropic/Gadgetron/Bearer/generic/AWS/PEM 패턴 (catch-all 금지로 진단 정보 보존)
-- **M3** `wiki::fs::resolve_path` pure 함수 + `O_NOFOLLOW` 최종 파일 오픈
-- **M4** `--allowed-tools` enforcement 검증 (ADR-P2A-01, 구현 전 PM 행동 테스트)
-- **M5** `wiki_write` BLOCK (PEM/AKIA/GCP) + AUDIT (토큰 패턴) + `wiki_max_page_bytes` 캡
-- **M6** `tools_called` 는 툴 이름만 감사 (arguments 제외)
-- **M7** SearXNG + git 영구성 디스클로저 (`docs/manual/penny.md` 머지 전 필수)
-- **M8** P2A 단일유저 리스크 수락 (ADR-P2A-02)
-
-**배포 형태 (동일 코드베이스, 스토리지만 swap)**:
-1. **Local** — 단일 유저 데스크탑, 파일시스템 스토리지 (P2A)
-2. **On-premise** — 팀/조직, 로컬 또는 NAS 스토리지 (P2C+)
-3. **Cloud** — SaaS형, S3/GCS, 멀티 테넌트 격리 (P2C+)
+**서브-스프린트 4종 (P2A→P2D, 각 4주)**, 배포 형태 3종 (Local / On-prem / Cloud, 같은 코드 경로, 스토리지만 swap), 보안 위협 모델 M1–M8은 [`docs/design/phase2/00-overview.md`](design/phase2/00-overview.md)에 통합되어 있다. 핵심 ADR은 [`docs/adr/`](adr/) ADR-P2A-01 ~ ADR-P2A-07.
 
 ### Phase 3 — Cluster Ops Hardening & Rich Automation (v1.0)
 
