@@ -38,7 +38,7 @@ cp gadgetron.example.toml gadgetron.toml
 $EDITOR gadgetron.toml
 ```
 
-최소 구성 (Kairos만 쓰고 LLM provider는 나중):
+최소 구성 (Penny만 쓰고 LLM provider는 나중):
 
 ```toml
 [server]
@@ -96,7 +96,7 @@ API Key Created
 
 ```
 provider registered name=<provider>
-kairos: registered (KnowledgeToolProvider active...)
+penny: registered (KnowledgeToolProvider active...)
 listening addr=0.0.0.0:8080
 ```
 
@@ -107,7 +107,7 @@ curl http://localhost:8080/health
 # {"status":"ok"}
 
 curl http://localhost:8080/v1/models -H "Authorization: Bearer <키>"
-# kairos + 등록한 provider들이 보여야 함
+# penny + 등록한 provider들이 보여야 함
 ```
 
 브라우저에서 `http://localhost:8080/web` 접속 → API 키 붙여넣기 → 대화 시작.
@@ -116,13 +116,13 @@ curl http://localhost:8080/v1/models -H "Authorization: Bearer <키>"
 
 [`operators/troubleshooting.md`](./troubleshooting.md) 참조. 주요 에러 코드:
 
-- `kairos_not_installed` → `agent.binary` 경로 확인
-- `kairos_agent_error` + `exit_code=1` + stderr "stream-json requires --verbose" → Claude Code 버전이 너무 낮음, 2.1.104+ 업그레이드
-- `provider_error` (model=kairos 요청인데 vLLM으로 갔음) → Router direct-match가 동작 안 함, v0.3.0-demo 이후 버전 필요
+- `penny_not_installed` → `agent.binary` 경로 확인
+- `penny_agent_error` + `exit_code=1` + stderr "stream-json requires --verbose" → Claude Code 버전이 너무 낮음, 2.1.104+ 업그레이드
+- `provider_error` (model=penny 요청인데 vLLM으로 갔음) → Router direct-match가 동작 안 함, v0.3.0-demo 이후 버전 필요
 - `401 Unauthorized` → Bearer 키 틀림. `key create` 다시 실행
 
 ## 다음 단계
 
-- [`kairos/usage.md`](../kairos/usage.md) — Kairos 사용법
-- [`kairos/conventions.md`](../kairos/conventions.md) — 위키 작명 규칙
+- [`penny/usage.md`](../penny/usage.md) — Penny 사용법
+- [`penny/conventions.md`](../penny/conventions.md) — 위키 작명 규칙
 - [`operators/troubleshooting.md`](./troubleshooting.md) — 운영 트러블슈팅

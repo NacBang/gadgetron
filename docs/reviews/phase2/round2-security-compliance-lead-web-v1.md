@@ -704,7 +704,7 @@ If Next.js static export emits `404.html`, the cache policy branch in §5 `rende
 
 ## 4. GDPR / SOC2 Mapping Gaps
 
-The design doc has **no compliance mapping section**. §10 of `00-overview.md` covers Phase 2A single-user compliance at the Kairos layer, but `gadgetron-web` introduces new controls that must be mapped:
+The design doc has **no compliance mapping section**. §10 of `00-overview.md` covers Phase 2A single-user compliance at the Penny layer, but `gadgetron-web` introduces new controls that must be mapped:
 
 ### 4.1 GDPR obligations (new in v1)
 

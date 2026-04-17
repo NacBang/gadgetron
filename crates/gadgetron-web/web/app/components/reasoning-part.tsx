@@ -9,7 +9,7 @@ import {
 } from "./ui/collapsible";
 
 /**
- * Renders a ReasoningMessagePart — Kairos's internal thinking/scratch text.
+ * Renders a ReasoningMessagePart — Penny's internal thinking/scratch text.
  * Collapsible so the final answer stays visually dominant.
  *
  * Live-state polish:

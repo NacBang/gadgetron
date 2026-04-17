@@ -292,7 +292,7 @@ api_base_path = "/v1"
 
 ### `[agent]`
 
-Kairos subprocess runtime의 상위 설정입니다.
+Penny subprocess runtime의 상위 설정입니다.
 
 ```toml
 [agent]
@@ -304,7 +304,7 @@ max_concurrent_subprocesses = 4
 
 - `binary`: Claude Code CLI 경로 또는 basename
 - `claude_code_min_version`: 허용되는 최소 Claude Code 버전
-- `request_timeout_secs`: 단일 Kairos 요청 제한 시간
+- `request_timeout_secs`: 단일 Penny 요청 제한 시간
 - `max_concurrent_subprocesses`: 동시 Claude Code subprocess 상한
 
 ### `[agent.brain]`
@@ -325,7 +325,7 @@ mode = "claude_max"
 
 ### `[knowledge]`
 
-이 섹션이 있어야 `gadgetron serve`가 `kairos` 모델을 등록합니다. 현재 `gadgetron init`은 이 블록을 자동으로 생성하지 않습니다.
+이 섹션이 있어야 `gadgetron serve`가 `penny` 모델을 등록합니다. 현재 `gadgetron init`은 이 블록을 자동으로 생성하지 않습니다.
 
 ```toml
 [knowledge]
@@ -337,7 +337,7 @@ wiki_max_page_bytes = 1048576
 - `wiki_path`: 위키 저장소 루트. 부모 디렉터리는 미리 존재해야 합니다.
   절대 경로와 상대 경로 모두 지원합니다 — 상대 경로는 **`gadgetron.toml`
   파일이 있는 디렉터리 기준**으로 해석됩니다 (cwd 기준이 아님). 이 덕분에
-  Kairos가 `gadgetron mcp serve`를 `~/.gadgetron/kairos/work/` cwd로
+  Penny가 `gadgetron mcp serve`를 `~/.gadgetron/penny/work/` cwd로
   spawn 하더라도 상대 경로가 올바르게 풀립니다.
 - `wiki_autocommit`: 쓰기마다 자동 git commit 수행 여부
 - `wiki_max_page_bytes`: 페이지 최대 크기

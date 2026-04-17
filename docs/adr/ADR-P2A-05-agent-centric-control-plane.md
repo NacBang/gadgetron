@@ -14,7 +14,7 @@
 
 ## Context
 
-Phase 2 의 기존 프레이밍은 "하방(Phase 1 LLM 오케스트레이션 인프라) + 상방(Kairos 지식 레이어 기반 개인 비서)" 로 두 레이어가 동등하게 존재했다. Kairos 는 wiki + 웹 검색 도구를 가진 한 개의 LlmProvider 로서 라우터 provider map 에 다른 provider 와 병렬 등록되었다. 인프라 제어(노드 상태, GPU 이용률, 라우팅 전략, 클러스터 관리) 는 운영자가 TUI·HTTP API 로 별도 제어하는 별개 경로였다.
+Phase 2 의 기존 프레이밍은 "하방(Phase 1 LLM 오케스트레이션 인프라) + 상방(Penny 지식 레이어 기반 개인 비서)" 로 두 레이어가 동등하게 존재했다. Penny 는 wiki + 웹 검색 도구를 가진 한 개의 LlmProvider 로서 라우터 provider map 에 다른 provider 와 병렬 등록되었다. 인프라 제어(노드 상태, GPU 이용률, 라우팅 전략, 클러스터 관리) 는 운영자가 TUI·HTTP API 로 별도 제어하는 별개 경로였다.
 
 2026-04-14 사용자 지시로 이 구조가 재정렬된다:
 
@@ -23,7 +23,7 @@ Phase 2 의 기존 프레이밍은 "하방(Phase 1 LLM 오케스트레이션 인
 3. **인프라는 에이전트의 도구**. Phase 1 의 router/provider/node/scheduler/cluster 관리 기능은 에이전트가 호출하는 MCP 도구로 재노출
 4. **확장 가능한 tool registry**. P2A 에서부터 stable plugin 인터페이스로 설계해, P2B(inference tools) / P2C(infra tools) / P3(scheduler/cluster tools) 를 단순 추가로 처리
 
-우회 경로(사용자 편의성): 사용자가 `POST /v1/chat/completions` 에 `model=vllm/llama3` 같이 직접 지정하면 에이전트를 통과하지 않고 바로 provider 로. `gadgetron-web` 드롭다운에서 `kairos` 가 기본이지만 다른 모델도 선택 가능.
+우회 경로(사용자 편의성): 사용자가 `POST /v1/chat/completions` 에 `model=vllm/llama3` 같이 직접 지정하면 에이전트를 통과하지 않고 바로 provider 로. `gadgetron-web` 드롭다운에서 `penny` 가 기본이지만 다른 모델도 선택 가능.
 
 브레인 모델 선택: 에이전트의 추론에 사용되는 LLM 을 **운영자** 가 4가지 모드 중 선택. `gadgetron_local` 모드에서는 Gadgetron 자체 인프라의 로컬 모델을 Claude Code 의 브레인으로 사용 (내부 Anthropic shim 을 통해).
 
@@ -81,7 +81,7 @@ Tier 는 tool 개발자가 `ToolSchema.tier` 로 선언; Mode 는 운영자가 `
 
 ### (e) 서버 측 approval 흐름 — SSE + `/v1/approvals/{id}`
 
-- `gadgetron-kairos::approval::ApprovalRegistry` 에 `DashMap<ApprovalId, oneshot::Sender<Decision>>`
+- `gadgetron-penny::approval::ApprovalRegistry` 에 `DashMap<ApprovalId, oneshot::Sender<Decision>>`
 - MCP server 가 `ask` mode tool 요청 시 registry 에 enqueue → SSE event emit → `oneshot::Receiver` 대기
 - 프론트엔드 → `POST /v1/approvals/{id} { decision }`
 - Gateway → `ApprovalRegistry::decide(id, decision)` → tool 실행 또는 거부
@@ -100,7 +100,7 @@ Tier 는 tool 개발자가 `ToolSchema.tier` 로 선언; Mode 는 운영자가 `
 - Loopback-only 바인딩
 - 시작 시 32바이트 랜덤 토큰 생성, Claude Code subprocess 의 `ANTHROPIC_API_KEY` env 로 전달, 메모리에만 존재, 재시작 시 rotation
 - Rust 네이티브 Anthropic ↔ OpenAI 프로토콜 번역기 (`messages` / `system` / `tools` / 스트림 이벤트만 커버; 이미지/PDF/cache_control 은 Phase 3)
-- 재귀 방지: config validation 거부 + 요청 태그 (`internal_call = true` → `KairosProvider` dispatch 제외) + recursion depth 헤더 (≥ 2 거부)
+- 재귀 방지: config validation 거부 + 요청 태그 (`internal_call = true` → `PennyProvider` dispatch 제외) + recursion depth 헤더 (≥ 2 거부)
 - 쿼터: 사용자 쿼터는 최상위 `/v1/chat/completions` 만 차감; 브레인 호출은 별도 `agent_brain` audit 카테고리로 기록하되 쿼터 미차감
 
 ### (g) 에이전트는 자기 브레인을 선택할 수 없다 (scope boundary)
@@ -114,7 +114,7 @@ Tier 는 tool 개발자가 `ToolSchema.tier` 로 선언; Mode 는 운영자가 `
 ### (h) 환경설정은 유저 명시적 — auto-detect 금지
 
 - `gadgetron.toml` 이 유일한 진실 공급원
-- `kairos init` 이 대화형으로 운영자에게 브레인 모드를 묻되, 자동 탐지(`~/.claude/` 존재 여부 등)로 기본값을 "똑똑하게" 바꾸지 않음. 기본은 항상 `claude_max` 이고, 다른 선택지는 운영자가 직접 타이핑
+- `penny init` 이 대화형으로 운영자에게 브레인 모드를 묻되, 자동 탐지(`~/.claude/` 존재 여부 등)로 기본값을 "똑똑하게" 바꾸지 않음. 기본은 항상 `claude_max` 이고, 다른 선택지는 운영자가 직접 타이핑
 - 모호성은 에러로 드러나야 함 — 조용히 동작하지 않음
 
 ## Alternatives considered
@@ -123,7 +123,7 @@ Tier 는 tool 개발자가 `ToolSchema.tier` 로 선언; Mode 는 운영자가 `
 
 | Option | 요지 | 판결 |
 |---|---|---|
-| A. 외부 프록시 위임 | `kairos.claude_base_url` 로 사용자가 LiteLLM 직접 운영 | ❌ 단일 바이너리 철학 + "자체 제공하는 로컬 모델" 요구사항과 충돌 |
+| A. 외부 프록시 위임 | `penny.claude_base_url` 로 사용자가 LiteLLM 직접 운영 | ❌ 단일 바이너리 철학 + "자체 제공하는 로컬 모델" 요구사항과 충돌 |
 | B. LiteLLM 을 compose sibling 으로 번들 | docker-compose 에 Python 프록시 추가 | ❌ OpenWebUI 제거(D-20260414-02)와 일관성 없음, sibling Python 프로세스 |
 | C. 완전한 `/v1/messages` Anthropic 호환 구현 | Gateway 가 Anthropic 프로토콜 모든 표면 구현 | ⏸ Phase 3+ 유보. P2A 에는 과도한 스코프 |
 | D. **최소 내부 shim (선택)** | `/internal/agent-brain/v1/messages` + 최소 번역기 + 기존 router 재사용 | ✅ 단일 바이너리 유지, 점진적 확장, 재사용 극대화 |
@@ -145,7 +145,7 @@ Tier 는 tool 개발자가 `ToolSchema.tier` 로 선언; Mode 는 운영자가 `
 ### Phase 2A 구현 중
 
 - `#10` (MCP server) 가 `McpToolProvider` trait 기반으로 구현 — `KnowledgeToolProvider` 가 첫 구현체
-- `#13`-`#15` (Kairos session/stream/provider) 가 `ApprovalRegistry` 통합
+- `#13`-`#15` (Penny session/stream/provider) 가 `ApprovalRegistry` 통합
 - Gateway `POST /v1/approvals/{id}` 엔드포인트 추가 (`#5` 후속 확장)
 - `gadgetron-web` `<ApprovalCard>` 컴포넌트 + SSE 이벤트 파서 (`#4` 후속 확장)
 
@@ -161,7 +161,7 @@ Tier 는 tool 개발자가 `ToolSchema.tier` 로 선언; Mode 는 운영자가 `
 
 1. `docs/design/phase2/04-mcp-tool-registry.md` 가 존재하고 `McpToolProvider` trait + `ToolSchema` + `Tier` 를 명시
 2. `gadgetron_core::config::AgentConfig` 가 `destructive.default_mode = "auto"` 설정 시 `validate()` 에러
-3. `gadgetron_core::config::AgentConfig` 가 `brain.mode = "gadgetron_local"` + `brain.local_model = "kairos"` 시 `validate()` 에러 (재귀 방지)
+3. `gadgetron_core::config::AgentConfig` 가 `brain.mode = "gadgetron_local"` + `brain.local_model = "penny"` 시 `validate()` 에러 (재귀 방지)
 4. MCP 도구 registry 에 `agent.set_brain` / `agent.read_config` / `agent.write_config` 가 존재하지 않음 (grep `McpToolProvider` 구현체)
 5. `<ApprovalCard>` 컴포넌트의 T3 렌더 경로가 `Allow always` 버튼을 조건부 숨김 (`if tier === "T3"`)
 6. `gadgetron-web` 의 브라우저 `localStorage.gadgetron_web_auto_approve` 가 T3 tool 을 저장하지 않음 (프론트엔드 코드 가드)

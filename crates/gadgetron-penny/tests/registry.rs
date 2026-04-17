@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use gadgetron_core::agent::config::{AgentConfig, ToolMode};
 use gadgetron_core::agent::tools::McpError;
-use gadgetron_kairos::{McpToolRegistry, McpToolRegistryBuilder};
+use gadgetron_penny::{McpToolRegistry, McpToolRegistryBuilder};
 use gadgetron_knowledge::config::WikiConfig;
 use gadgetron_knowledge::mcp::KnowledgeToolProvider;
 use gadgetron_knowledge::wiki::Wiki;
@@ -202,7 +202,7 @@ async fn dispatch_wiki_list_reflects_writes_through_registry() {
     let pages = result.content["pages"].as_array().unwrap();
     let names: Vec<&str> = pages.iter().filter_map(|v| v.as_str()).collect();
     // `fresh_provider` ships the built-in seed pages (README, decisions/README,
-    // kairos/{conventions,usage}, operators/{getting-started,troubleshooting},
+    // penny/{conventions,usage}, operators/{getting-started,troubleshooting},
     // runbooks/README) alongside the three pages we just wrote — the list must
     // surface all of them. Assert containment, not equality, to avoid a brittle
     // dependency on the seed page set.

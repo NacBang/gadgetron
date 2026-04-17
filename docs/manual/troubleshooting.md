@@ -120,11 +120,11 @@ psql -U postgres -c "CREATE DATABASE gadgetron OWNER gadgetron_user;"
 
 ---
 
-### `kairos`가 `/v1/models`에 나타나지 않음
+### `penny`가 `/v1/models`에 나타나지 않음
 
-**What happened:** 서버는 기동됐지만 `GET /v1/models` 응답에 `kairos`가 없습니다.
+**What happened:** 서버는 기동됐지만 `GET /v1/models` 응답에 `penny`가 없습니다.
 
-**Why:** Kairos는 일반 provider와 다르게 `gadgetron.toml`의 `[knowledge]` 섹션이 유효할 때만 런타임에 등록됩니다. `[knowledge]`가 없거나, `wiki_path` 부모 디렉터리가 없거나, 설정 검증에 실패하면 서버는 계속 뜨지만 Kairos 등록만 건너뜁니다.
+**Why:** Penny는 일반 provider와 다르게 `gadgetron.toml`의 `[knowledge]` 섹션이 유효할 때만 런타임에 등록됩니다. `[knowledge]`가 없거나, `wiki_path` 부모 디렉터리가 없거나, 설정 검증에 실패하면 서버는 계속 뜨지만 Penny 등록만 건너뜁니다.
 
 **Fix — 설정 확인:**
 
@@ -143,7 +143,7 @@ mkdir -p .gadgetron
 
 **Fix — 로그 확인:**
 
-정상 경로에서는 startup log에 `kairos: registered`가 남습니다. 실패 경로에서는 `kairos: [knowledge] validation failed; skipping` 또는 `kairos: KnowledgeToolProvider::new failed; skipping` 같은 로그가 남습니다.
+정상 경로에서는 startup log에 `penny: registered`가 남습니다. 실패 경로에서는 `penny: [knowledge] validation failed; skipping` 또는 `penny: KnowledgeToolProvider::new failed; skipping` 같은 로그가 남습니다.
 
 ---
 

@@ -16,7 +16,7 @@ import {
 
 /**
  * Fallback ToolCallMessagePart renderer — used for every MCP tool invocation
- * Kairos makes. Shows tool name + collapsible input/output panel.
+ * Penny makes. Shows tool name + collapsible input/output panel.
  *
  * Live-state polish:
  *   - While the call is in-flight, a spinning `Loader2` replaces the static
@@ -45,7 +45,7 @@ export function ToolPart(props: {
   // Client-side wall-clock timing. Server doesn't currently thread
   // tool_use_id/tool_result_id through the OpenAI SSE shape, so measuring
   // on the client from the first `status === running` tick to the first
-  // `complete` transition gives us the best "how long did Kairos wait on
+  // `complete` transition gives us the best "how long did Penny wait on
   // this tool" number we have. 100 ms poll is plenty for human perception
   // and costs ~10 setState per second per live tool call.
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);

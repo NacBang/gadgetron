@@ -78,9 +78,9 @@ A를 선택했다. 이유는...
 - [[decisions/이전-관련-결정]]
 ```
 
-## Kairos와의 협업
+## Penny와의 협업
 
-- 대화에서 결정이 내려지면 Kairos가 자동으로 이 폴더에 기록할 수 있습니다
+- 대화에서 결정이 내려지면 Penny가 자동으로 이 폴더에 기록할 수 있습니다
 - 기록 시 `source = "conversation"` + `confidence = "medium"` 표시
 - 사용자가 "이 결정은 확정이야"라고 하면 `confidence = "high"`로 업데이트
 
@@ -94,4 +94,4 @@ A를 선택했다. 이유는...
 ## 관련
 
 - [`runbooks/README.md`](../runbooks/README.md) — 반복 작업 절차
-- [`kairos/conventions.md`](../kairos/conventions.md) — 작명 규칙
+- [`penny/conventions.md`](../penny/conventions.md) — 작명 규칙

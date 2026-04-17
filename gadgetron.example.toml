@@ -26,9 +26,9 @@ bind = "0.0.0.0:8080"
 [router.default_strategy]
 type = "round_robin"
 
-# --- Phase 2A: Kairos assistant plane ------------------------------------
+# --- Phase 2A: Penny assistant plane ------------------------------------
 # Requires Claude Code CLI installed and `claude login` completed.
-# Without [agent] + [knowledge], Kairos is not registered (only raw
+# Without [agent] + [knowledge], Penny is not registered (only raw
 # providers remain available at /v1/chat/completions).
 
 # [agent]

@@ -6,7 +6,7 @@
 | **Date** | 2026-04-13 |
 | **Author** | security-compliance-lead |
 | **Parent docs** | `docs/design/phase2/00-overview.md` v2 §8 M7; §10 Compliance, Disclosure 2; `docs/design/phase2/01-knowledge-layer.md` v2 §9 M7 |
-| **Pre-merge gate** | `docs/manual/kairos.md` MUST contain the verbatim disclosure text before any P2A impl PR merges to `main` |
+| **Pre-merge gate** | `docs/manual/penny.md` MUST contain the verbatim disclosure text before any P2A impl PR merges to `main` |
 
 ---
 
@@ -14,7 +14,7 @@
 
 ### What SearXNG does with queries
 
-Kairos exposes a `web_search` MCP tool backed by a self-hosted SearXNG instance.
+Penny exposes a `web_search` MCP tool backed by a self-hosted SearXNG instance.
 When Claude Code calls `web_search`, the `gadgetron-knowledge` crate sends an HTTP
 request to the SearXNG instance configured in `[knowledge.search] searxng_url`.
 
@@ -38,8 +38,8 @@ logging behavior of that default is not controlled by Gadgetron.
 
 Gadgetron does not persist the query text. The audit log records only:
 - `tools_called: Vec<String>` — contains the string `"web_search"` when the tool
-  was called, nothing more (per M6 in `docs/design/phase2/02-kairos-agent.md` v2)
-- `kairos_dispatched: bool`, `subprocess_duration_ms: i32`
+  was called, nothing more (per M6 in `docs/design/phase2/02-penny-agent.md` v2)
+- `penny_dispatched: bool`, `subprocess_duration_ms: i32`
 
 The query text is not in the audit log. The query text is not stored in the wiki
 (unless the user or model explicitly writes a wiki page containing it). The wiki
@@ -84,13 +84,13 @@ is documented as SEC-7 resolution in
 
 ### Required disclosure in user manual
 
-Privacy disclosure for SearXNG query routing MUST appear in `docs/manual/kairos.md`
+Privacy disclosure for SearXNG query routing MUST appear in `docs/manual/penny.md`
 before any P2A implementation PR merges to `main`.
 
 **Required verbatim text** (canonical source:
 `docs/design/phase2/00-overview.md` v2 §10 Disclosure 2):
 
-> **Privacy note**: Web search via Kairos proxies your queries through SearXNG to
+> **Privacy note**: Web search via Penny proxies your queries through SearXNG to
 > the search engines configured in your SearXNG instance (by default: Google, Bing,
 > DuckDuckGo, Brave — but your administrator may have enabled different engines).
 > Queries are anonymized at the SearXNG layer, but the search engines receive the
@@ -98,7 +98,7 @@ before any P2A implementation PR merges to `main`.
 > itself does not store your search queries. If you need stricter privacy, disable
 > `web_search` by leaving `searxng_url` unset in your config.
 
-This text must appear in `docs/manual/kairos.md` under a clearly labeled
+This text must appear in `docs/manual/penny.md` under a clearly labeled
 "Privacy and Security" or equivalent section. It must appear both in the Korean
 version and any English version of the manual (per `feedback_manual_before_push.md`,
 the user manual is Korean-primary; an English equivalent is acceptable adjacent to
@@ -114,7 +114,7 @@ Placement guidance:
 The companion Disclosure 1 text (also required but owned by the wiki data retention
 concern, not this ADR) is:
 
-> **Permanence note**: Every wiki page you (or Kairos on your behalf) write is
+> **Permanence note**: Every wiki page you (or Penny on your behalf) write is
 > committed to a local git repository at `~/.gadgetron/wiki/`. Git history is
 > **permanent**. [...]
 
@@ -150,18 +150,18 @@ needed.
 
 ### Pre-merge gate enforcement
 
-This ADR designates the presence of the disclosure text in `docs/manual/kairos.md`
+This ADR designates the presence of the disclosure text in `docs/manual/penny.md`
 as a **blocking pre-merge gate** for all P2A implementation PRs.
 
 **What "P2A implementation PR" means**: any pull request that merges code from
-the `gadgetron-kairos` or `gadgetron-knowledge` crates to `main`. This includes:
-- The initial core PR (adding `GadgetronError::Wiki` and `GadgetronError::Kairos`
+the `gadgetron-penny` or `gadgetron-knowledge` crates to `main`. This includes:
+- The initial core PR (adding `GadgetronError::Wiki` and `GadgetronError::Penny`
   variants to `gadgetron-core`)
-- Any PR adding kairos session/stream/spawn code
+- Any PR adding penny session/stream/spawn code
 - Any PR adding knowledge wiki/search/MCP server code
 
 **What enforces this gate**: PR reviewers (PM and security-compliance-lead) MUST
-check that `docs/manual/kairos.md` exists and contains the required verbatim text
+check that `docs/manual/penny.md` exists and contains the required verbatim text
 before approving any P2A code PR. This is a manual review step, not an automated CI
 check, because manual contents are inherently judgment-dependent.
 
@@ -175,7 +175,7 @@ without sign-off from security-compliance-lead that the disclosure is present.
 
 ### For the manual
 
-- `docs/manual/kairos.md` must be written BEFORE the first P2A code PR is opened
+- `docs/manual/penny.md` must be written BEFORE the first P2A code PR is opened
 - The disclosure text is verbatim-locked by this ADR; editorial changes require
   reopening this ADR and updating the parent design doc accordingly
 - The manual must accurately describe the opt-out (`searxng_url` unset) so users
@@ -253,7 +253,7 @@ ADVERSARIAL CONTENT (what comes back) is addressed in the STRIDE table.
 | `docs/design/phase2/01-knowledge-layer.md` v2 | §9 M7 | Implementation-level disclosure gate |
 | `docs/design/phase2/01-knowledge-layer.md` v2 | §4.4 M5 | Abstract commit messages (no query content in git) |
 | `docs/design/phase2/01-knowledge-layer.md` v2 | §7 config schema | `searxng_url` opt-out mechanism |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §16 ADR table | Listed as impl blocker |
+| `docs/design/phase2/02-penny-agent.md` v2 | §16 ADR table | Listed as impl blocker |
 | `docs/process/03-review-rubric.md` | §1.5 | Security review gate including this check |
 | GDPR | Art. 13, Art. 14 | Right to be informed; basis for user disclosure |
 

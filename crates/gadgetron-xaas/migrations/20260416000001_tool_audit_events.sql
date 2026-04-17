@@ -1,6 +1,6 @@
 -- ADR-P2A-06 Implementation status addendum item 1:
 -- Persistent `ToolCallCompleted` audit records emitted from
--- `gadgetron-kairos::stream::event_to_chat_chunks` through
+-- `gadgetron-penny::stream::event_to_chat_chunks` through
 -- `ToolAuditEventSink`. Schema includes `conversation_id` and
 -- `claude_session_uuid` from day one so the A5–A7 native-session
 -- integration does not require a second migration.

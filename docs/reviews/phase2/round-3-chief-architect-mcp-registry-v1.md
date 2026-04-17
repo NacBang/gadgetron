@@ -8,7 +8,7 @@
 | **Date** | 2026-04-14 |
 | **Decision anchors** | D-12 (crate boundary), D-13 (`GadgetronError`), D-20260411-10 (`Scope` enum), D-20260412-02 (implementation determinism), D-20260414-04 (Agent-Centric), ADR-P2A-05 |
 | **Predecessors** | Round 1.5 dx-product-lead (`round-1_5-dx-product-lead-mcp-registry-v1.md`, BLOCK), Round 2 qa-test-architect (`round-2-qa-test-architect-mcp-registry-v1.md`, BLOCK) |
-| **Sibling docs already Round-3 cleared** | `00-overview.md` v3, `01-knowledge-layer.md` v3, `02-kairos-agent.md` v3, `03-gadgetron-web.md` v2.1 |
+| **Sibling docs already Round-3 cleared** | `00-overview.md` v3, `01-knowledge-layer.md` v3, `02-penny-agent.md` v3, `03-gadgetron-web.md` v2.1 |
 | **Load-bearing** | This trait is the *stable plugin seam* for P2A → P2B → P2C → P3. Every change to `McpToolProvider` breaks downstream crates, so this Round 3 gate is higher-stakes than the siblings. |
 | **Verdict** | **BLOCK** |
 
@@ -18,11 +18,11 @@
 
 The document is architecturally sound at the decision level — the 3-tier × 3-mode matrix, the dashmap+oneshot approval flow, and the namespace reservation are all defensible. However, the text-level spec has **seven** concrete architectural defects (CA-MCP-B1…B7) that prevent a TDD implementer from writing code directly from the doc. Five of them are crate-seam / type-inconsistency issues that would surface immediately on `cargo check`. Two are correctness defects in the `ApprovalRegistry` lifetime model that would ship a latent bug.
 
-The doc was authored *after* an initial scaffolding of `gadgetron-core::agent::{config,tools}` landed in commit `b6b314d`. Several claims in the doc ("NEW module", exact trait shape, `#[derive(...)]` list) are already contradicted by the code on main. The doc is therefore simultaneously forward-spec (describing a future `gadgetron-kairos` crate that doesn't exist) and backward-spec (describing `gadgetron-core::agent::tools` that *does* exist but differs). Both halves need to be reconciled.
+The doc was authored *after* an initial scaffolding of `gadgetron-core::agent::{config,tools}` landed in commit `b6b314d`. Several claims in the doc ("NEW module", exact trait shape, `#[derive(...)]` list) are already contradicted by the code on main. The doc is therefore simultaneously forward-spec (describing a future `gadgetron-penny` crate that doesn't exist) and backward-spec (describing `gadgetron-core::agent::tools` that *does* exist but differs). Both halves need to be reconciled.
 
 I found 7 blockers, 6 majors, and 7 minors. QA (`QA-MCP-B1/B2`) and dx (`DX-MCP-B1…B5`) already cover the test-surface and operator-UX gaps; my findings are disjoint and focus on the Rust type system + crate seam + determinism rails.
 
-**v0.1.x → v0.2.0 migration path for `[kairos]` → `[agent.brain]` is entirely unimplemented in code** despite being claimed in §11 — this is the single highest-impact finding (CA-MCP-B1), because it forms a direct cross-doc contradiction with `02-kairos-agent.md` v3 which the PM already Round-3 cleared.
+**v0.1.x → v0.2.0 migration path for `[penny]` → `[agent.brain]` is entirely unimplemented in code** despite being claimed in §11 — this is the single highest-impact finding (CA-MCP-B1), because it forms a direct cross-doc contradiction with `02-penny-agent.md` v3 which the PM already Round-3 cleared.
 
 ---
 
@@ -30,39 +30,39 @@ I found 7 blockers, 6 majors, and 7 minors. QA (`QA-MCP-B1/B2`) and dx (`DX-MCP-
 
 | Doc | Prior blocker | Status for this review |
 |---|---|---|
-| 00-overview v3 `LlmProvider` seam | APPROVED | Unchanged; this doc correctly does NOT add `KairosProvider` as a new trait path; the agent-centric pivot keeps the router provider map as the dispatch table, with `McpToolProvider` a separate plugin seam beneath it. Good. |
+| 00-overview v3 `LlmProvider` seam | APPROVED | Unchanged; this doc correctly does NOT add `PennyProvider` as a new trait path; the agent-centric pivot keeps the router provider map as the dispatch table, with `McpToolProvider` a separate plugin seam beneath it. Good. |
 | 01-knowledge v3 `WikiError` taxonomy | APPROVED | This doc does not touch `WikiError`; however see **CA-MCP-B3** below — `McpError` does not compose into `GadgetronError`, which creates a parallel error universe. |
-| 02-kairos v3 `[kairos]` config shape | APPROVED | **This is now contradicted** by §11 of this doc. See **CA-MCP-B1**. |
+| 02-penny v3 `[penny]` config shape | APPROVED | **This is now contradicted** by §11 of this doc. See **CA-MCP-B1**. |
 | 03-gadgetron-web v2.1 `WebConfig` placement | APPROVED | Unchanged — this doc adds `AgentConfig` as a peer field in `AppConfig`, consistent with how `WebConfig` was added. `AppConfig::agent` has already landed at `crates/gadgetron-core/src/config.rs:21`. Good. |
 
 ---
 
 ## BLOCKER findings
 
-### CA-MCP-B1 — §11 `[kairos]` → `[agent.brain]` migration is pure prose; the `AppConfig` loader has zero support for field aliasing and `02-kairos-agent.md` v3 (Round-3 cleared) directly contradicts this spec
+### CA-MCP-B1 — §11 `[penny]` → `[agent.brain]` migration is pure prose; the `AppConfig` loader has zero support for field aliasing and `02-penny-agent.md` v3 (Round-3 cleared) directly contradicts this spec
 
-**Type / module under scrutiny**: `gadgetron_core::config::AppConfig::load` + `gadgetron_core::agent::config::{AgentConfig, BrainConfig}` + `02-kairos-agent.md §10` TOML example
+**Type / module under scrutiny**: `gadgetron_core::config::AppConfig::load` + `gadgetron_core::agent::config::{AgentConfig, BrainConfig}` + `02-penny-agent.md §10` TOML example
 
 **Defect**:
 
 The doc §11 reads:
-> The Kairos session builder (§5 of `02-kairos-agent.md`) already constructs the subprocess env from `KairosConfig.claude_base_url` / `KairosConfig.claude_model`. The only change in P2A is that these fields are now populated from `[agent.brain]` instead of `[kairos]` (rename + migration in the config loader; legacy `[kairos]` fields accepted with deprecation warning through P2B).
+> The Penny session builder (§5 of `02-penny-agent.md`) already constructs the subprocess env from `PennyConfig.claude_base_url` / `PennyConfig.claude_model`. The only change in P2A is that these fields are now populated from `[agent.brain]` instead of `[penny]` (rename + migration in the config loader; legacy `[penny]` fields accepted with deprecation warning through P2B).
 
 Three independent problems:
 
-1. **The loader has no aliasing.** `crates/gadgetron-core/src/config.rs:181` calls `toml::from_str(&content)` against a strongly-typed `AppConfig` struct. `AppConfig` has NO `kairos` field, no `#[serde(alias = "kairos")]`, no `#[serde(flatten)]` into a deprecated section, and no post-deserialize migration hook. Exactly what happens today if an operator supplies `[kairos] claude_binary = "claude"` is: `toml::from_str` **silently ignores** the entire unknown table (toml crate default behavior is to accept unknown top-level keys in untagged structs). The operator gets a running server with `[agent.brain].mode = "claude_max"` silently, losing their `claude_base_url` override. That is a **silent behavior regression** from v0.1.x — the worst possible outcome for a user upgrading.
+1. **The loader has no aliasing.** `crates/gadgetron-core/src/config.rs:181` calls `toml::from_str(&content)` against a strongly-typed `AppConfig` struct. `AppConfig` has NO `penny` field, no `#[serde(alias = "penny")]`, no `#[serde(flatten)]` into a deprecated section, and no post-deserialize migration hook. Exactly what happens today if an operator supplies `[penny] claude_binary = "claude"` is: `toml::from_str` **silently ignores** the entire unknown table (toml crate default behavior is to accept unknown top-level keys in untagged structs). The operator gets a running server with `[agent.brain].mode = "claude_max"` silently, losing their `claude_base_url` override. That is a **silent behavior regression** from v0.1.x — the worst possible outcome for a user upgrading.
 
-2. **`02-kairos-agent.md` v3 §10 (lines 982–988) still prescribes the canonical `[kairos]` schema** with fields `claude_binary`, `claude_base_url`, `claude_model`, `request_timeout_secs`, `max_concurrent_subprocesses`. Env overrides are listed as `GADGETRON_KAIROS_CLAUDE_BINARY` etc. None of these exist in the new `[agent]` / `[agent.brain]` schema in this doc §4. The two docs are now **mutually contradictory canonical TOML examples**. Since 02-kairos-agent.md v3 is Round-3 cleared, fixing this doc alone is not sufficient — the PM must also patch 02-kairos-agent.md v3 §10 or explicitly mark it superseded.
+2. **`02-penny-agent.md` v3 §10 (lines 982–988) still prescribes the canonical `[penny]` schema** with fields `claude_binary`, `claude_base_url`, `claude_model`, `request_timeout_secs`, `max_concurrent_subprocesses`. Env overrides are listed as `GADGETRON_PENNY_CLAUDE_BINARY` etc. None of these exist in the new `[agent]` / `[agent.brain]` schema in this doc §4. The two docs are now **mutually contradictory canonical TOML examples**. Since 02-penny-agent.md v3 is Round-3 cleared, fixing this doc alone is not sufficient — the PM must also patch 02-penny-agent.md v3 §10 or explicitly mark it superseded.
 
-3. **The field mapping is incomplete even as prose.** §11 names only `claude_base_url` / `claude_model` as migrating, but `[kairos]` also has `claude_binary` (→ `[agent].binary`?), `request_timeout_secs` (→ where? `[agent].request_timeout_secs` does not exist in the new schema at all), and `max_concurrent_subprocesses` (→ ditto, dropped?). An operator reading §11 cannot construct a correct migration.
+3. **The field mapping is incomplete even as prose.** §11 names only `claude_base_url` / `claude_model` as migrating, but `[penny]` also has `claude_binary` (→ `[agent].binary`?), `request_timeout_secs` (→ where? `[agent].request_timeout_secs` does not exist in the new schema at all), and `max_concurrent_subprocesses` (→ ditto, dropped?). An operator reading §11 cannot construct a correct migration.
 
-**Exact fix** (this must land in v2 of this doc AND a companion patch to `02-kairos-agent.md`):
+**Exact fix** (this must land in v2 of this doc AND a companion patch to `02-penny-agent.md`):
 
 1. Add a new subsection **§11.1 "v0.1.x → v0.2.0 field migration table"** with every v0.1.x field, its v0.2.0 destination (or "removed, see §X"), and the exact behavior when the v0.1.x field is present:
 
-   | v0.1.x `[kairos]` | v0.2.0 destination | Behavior when v0.1.x field present |
+   | v0.1.x `[penny]` | v0.2.0 destination | Behavior when v0.1.x field present |
    |---|---|---|
-   | `claude_binary` | `[agent].binary` | Populate `agent.binary` if `[agent].binary` absent, emit `tracing::warn!(field = "kairos.claude_binary", replacement = "agent.binary", "deprecated Phase 2A field — will be removed in Phase 2C")` |
+   | `claude_binary` | `[agent].binary` | Populate `agent.binary` if `[agent].binary` absent, emit `tracing::warn!(field = "penny.claude_binary", replacement = "agent.binary", "deprecated Phase 2A field — will be removed in Phase 2C")` |
    | `claude_base_url` | `[agent.brain].external_base_url` + set `mode = "external_proxy"` | Same pattern |
    | `claude_model` | dropped — agent cannot pick brain model via this field any longer (see §14); emit an ERROR-level warning telling the operator to move to `[agent.brain]` |
    | `request_timeout_secs` | `[agent].request_timeout_secs` (NEW field — add to §4 schema) | Populate + deprecation warn |
@@ -70,11 +70,11 @@ Three independent problems:
 
 2. Specify the loader mechanism. The only safe mechanism given that `AppConfig` is a strongly-typed struct is:
    - Parse the TOML to `toml::Value` first (untyped).
-   - If `root.kairos` is present, extract its fields, move them under `root.agent.brain` (with the mapping above), and emit one deprecation warning per moved field.
+   - If `root.penny` is present, extract its fields, move them under `root.agent.brain` (with the mapping above), and emit one deprecation warning per moved field.
    - Then serialize the `Value` back to a string and deserialize into `AppConfig`.
-   - Test: `v0_1_x_kairos_config_loads_with_deprecation_warning` lives in `crates/gadgetron-core/src/config.rs` tests and asserts every moved field round-trips.
+   - Test: `v0_1_x_penny_config_loads_with_deprecation_warning` lives in `crates/gadgetron-core/src/config.rs` tests and asserts every moved field round-trips.
 
-3. Patch `02-kairos-agent.md` v3 §10 to cross-reference this doc and add "**Superseded in P2A by `docs/design/phase2/04-mcp-tool-registry.md §4` — the `[kairos]` section is read for backward compatibility only, with deprecation warnings.**" at the top of the TOML example.
+3. Patch `02-penny-agent.md` v3 §10 to cross-reference this doc and add "**Superseded in P2A by `docs/design/phase2/04-mcp-tool-registry.md §4` — the `[penny]` section is read for backward compatibility only, with deprecation warnings.**" at the top of the TOML example.
 
 Without this fix, a v0.1.x operator running `gadgetron serve` after upgrading will experience either (a) silent regression to defaults, or (b) a panic at the `subprocess().env(ANTHROPIC_BASE_URL, ...)` site when `agent.brain.external_base_url` is empty. Both are P0 upgrade-path bugs.
 
@@ -96,7 +96,7 @@ Neither `McpToolRegistry` nor `AgentToolRegistry` is declared anywhere in the do
 
 Three concrete gaps:
 
-1. **Which crate does it live in?** The trait is in `gadgetron-core::agent::tools`. The registry must be either (a) in core (problematic: core would hold an `Arc<dyn McpToolProvider>` collection and have runtime state, violating the D-12 principle that core holds only types and pure functions), (b) in `gadgetron-kairos` (natural home — matches `ApprovalRegistry`), or (c) in `gadgetron-gateway` (natural home of the dispatch table). Pick one.
+1. **Which crate does it live in?** The trait is in `gadgetron-core::agent::tools`. The registry must be either (a) in core (problematic: core would hold an `Arc<dyn McpToolProvider>` collection and have runtime state, violating the D-12 principle that core holds only types and pure functions), (b) in `gadgetron-penny` (natural home — matches `ApprovalRegistry`), or (c) in `gadgetron-gateway` (natural home of the dispatch table). Pick one.
 
 2. **What is its fields layout?** The doc only shows `McpToolRegistry::register(Box::new(...))`, leaving the reader to guess. It must be explicitly defined, e.g.:
    ```rust
@@ -110,14 +110,14 @@ Three concrete gaps:
    }
    ```
 
-3. **Ownership semantics**. `ApprovalRegistry` is `Arc<DashMap<...>>` internally (so it clones cheaply); is `McpToolRegistry` a `Arc<McpToolRegistry>` owned by `AppState`? Is `register(&mut self, ...)` a mutation phase followed by a `fn freeze(self) -> Arc<FrozenRegistry>`? The doc never specifies the transition from mutable-startup-phase to immutable-serving-phase. This is the exact architectural concern I flagged on `02-kairos-agent` round-2 — builder pattern vs. mutex. Pick one and write it down.
+3. **Ownership semantics**. `ApprovalRegistry` is `Arc<DashMap<...>>` internally (so it clones cheaply); is `McpToolRegistry` a `Arc<McpToolRegistry>` owned by `AppState`? Is `register(&mut self, ...)` a mutation phase followed by a `fn freeze(self) -> Arc<FrozenRegistry>`? The doc never specifies the transition from mutable-startup-phase to immutable-serving-phase. This is the exact architectural concern I flagged on `02-penny-agent` round-2 — builder pattern vs. mutex. Pick one and write it down.
 
 **Exact fix**:
 
 1. Rename all references to a single name. `McpToolRegistry` is the stronger name (matches `McpToolProvider`).
 2. Add a new **§2.1 "`McpToolRegistry` — the dispatch table"** with the full struct definition, the `register` / `build_allowed_tools` / `dispatch` methods, the crate that owns it, and the builder-freeze pattern:
    ```rust
-   // crates/gadgetron-kairos/src/registry.rs  (or gadgetron-gateway::mcp::registry)
+   // crates/gadgetron-penny/src/registry.rs  (or gadgetron-gateway::mcp::registry)
    pub struct McpToolRegistryBuilder {
        providers: Vec<Box<dyn McpToolProvider>>,
    }
@@ -143,7 +143,7 @@ Three concrete gaps:
        pub async fn dispatch(&self, name: &str, args: Value) -> Result<ToolResult, McpError> { ... }
    }
    ```
-3. State the lifecycle in a short paragraph: "the builder is mutable, lives in `main()` until all `register` calls complete, then is consumed by `.freeze()` into an immutable `Arc<McpToolRegistry>` that is cloned into `AppState` and the kairos session builder."
+3. State the lifecycle in a short paragraph: "the builder is mutable, lives in `main()` until all `register` calls complete, then is consumed by `.freeze()` into an immutable `Arc<McpToolRegistry>` that is cloned into `AppState` and the penny session builder."
 
 Without this, `#10` (MCP server) cannot begin coding because the dispatch target is undefined.
 
@@ -164,10 +164,10 @@ Consider the call chain under `ask`-mode denial:
 
 OK so far — within the MCP stdio transport, `McpError` stays `McpError`. But:
 
-4. `McpError::ApprovalTimeout` can also arise at the `Kairos session` level (the approval receiver times out inside the `KairosProvider::chat_stream` call, which is running in the router dispatch inside the axum handler).
-5. The handler must convert this to an HTTP response. `KairosProvider` returns `Result<BoxedStream, GadgetronError>`. The inner `ApprovalTimeout` must become a `GadgetronError` variant — but no variant exists for it.
+4. `McpError::ApprovalTimeout` can also arise at the `Penny session` level (the approval receiver times out inside the `PennyProvider::chat_stream` call, which is running in the router dispatch inside the axum handler).
+5. The handler must convert this to an HTTP response. `PennyProvider` returns `Result<BoxedStream, GadgetronError>`. The inner `ApprovalTimeout` must become a `GadgetronError` variant — but no variant exists for it.
 
-The obvious candidates are `GadgetronError::StreamInterrupted { reason }` (lossy — loses the error code) or a new `GadgetronError::Kairos { kind: KairosErrorKind::ToolApprovalTimeout { secs } }` variant (adds a new variant to `KairosErrorKind`, which is `#[non_exhaustive]` so non-breaking).
+The obvious candidates are `GadgetronError::StreamInterrupted { reason }` (lossy — loses the error code) or a new `GadgetronError::Penny { kind: PennyErrorKind::ToolApprovalTimeout { secs } }` variant (adds a new variant to `PennyErrorKind`, which is `#[non_exhaustive]` so non-breaking).
 
 **Exact fix**:
 
@@ -175,18 +175,18 @@ The obvious candidates are `GadgetronError::StreamInterrupted { reason }` (lossy
 
    | `McpError` variant | `GadgetronError` target | HTTP code | error_code |
    |---|---|---|---|
-   | `UnknownTool(_)` | `GadgetronError::Kairos { kind: KairosErrorKind::ToolError { code: "mcp_unknown_tool" }, ... }` | 500 | `kairos_tool_error` |
-   | `Denied { reason }` | `GadgetronError::Kairos { kind: KairosErrorKind::ToolDenied { reason }, ... }` | 403 | `kairos_tool_denied` |
-   | `RateLimited { .. }` | `GadgetronError::Kairos { kind: KairosErrorKind::ToolRateLimited { .. }, ... }` | 429 | `kairos_tool_rate_limited` |
-   | `ApprovalTimeout { secs }` | `GadgetronError::Kairos { kind: KairosErrorKind::ToolApprovalTimeout { secs }, ... }` | 504 | `kairos_tool_approval_timeout` |
-   | `InvalidArgs(_)` | `GadgetronError::Kairos { kind: KairosErrorKind::ToolInvalidArgs { reason }, ... }` | 400 | `kairos_tool_invalid_args` |
-   | `Execution(_)` | `GadgetronError::Kairos { kind: KairosErrorKind::ToolExecution { reason }, ... }` | 500 | `kairos_tool_execution_failed` |
+   | `UnknownTool(_)` | `GadgetronError::Penny { kind: PennyErrorKind::ToolError { code: "mcp_unknown_tool" }, ... }` | 500 | `penny_tool_error` |
+   | `Denied { reason }` | `GadgetronError::Penny { kind: PennyErrorKind::ToolDenied { reason }, ... }` | 403 | `penny_tool_denied` |
+   | `RateLimited { .. }` | `GadgetronError::Penny { kind: PennyErrorKind::ToolRateLimited { .. }, ... }` | 429 | `penny_tool_rate_limited` |
+   | `ApprovalTimeout { secs }` | `GadgetronError::Penny { kind: PennyErrorKind::ToolApprovalTimeout { secs }, ... }` | 504 | `penny_tool_approval_timeout` |
+   | `InvalidArgs(_)` | `GadgetronError::Penny { kind: PennyErrorKind::ToolInvalidArgs { reason }, ... }` | 400 | `penny_tool_invalid_args` |
+   | `Execution(_)` | `GadgetronError::Penny { kind: PennyErrorKind::ToolExecution { reason }, ... }` | 500 | `penny_tool_execution_failed` |
 
-2. Add the 6 new variants to `KairosErrorKind` in `crates/gadgetron-core/src/error.rs`. Since `KairosErrorKind` is `#[non_exhaustive]` this is additive. Extend `error_code`, `error_message`, `http_status_code` in the same file and bump the variant count test `all_fourteen_variants_exist` (currently 14) — wait, actually the variant count is counting `GadgetronError` variants, not `KairosErrorKind`, so 14 stays; only `KairosErrorKind` grows.
+2. Add the 6 new variants to `PennyErrorKind` in `crates/gadgetron-core/src/error.rs`. Since `PennyErrorKind` is `#[non_exhaustive]` this is additive. Extend `error_code`, `error_message`, `http_status_code` in the same file and bump the variant count test `all_fourteen_variants_exist` (currently 14) — wait, actually the variant count is counting `GadgetronError` variants, not `PennyErrorKind`, so 14 stays; only `PennyErrorKind` grows.
 
-3. Add the `impl From<McpError> for GadgetronError { ... }` block explicitly in §10.1. Put it in `crates/gadgetron-core/src/agent/tools.rs` (needs `use crate::error::{GadgetronError, KairosErrorKind}`) or split it out so `tools.rs` stays layer-clean. Per D-12 and my round-2 review of 02-kairos-agent: `From<X> for GadgetronError` conversions should live in `error.rs` as a dedicated `mod conversions` module.
+3. Add the `impl From<McpError> for GadgetronError { ... }` block explicitly in §10.1. Put it in `crates/gadgetron-core/src/agent/tools.rs` (needs `use crate::error::{GadgetronError, PennyErrorKind}`) or split it out so `tools.rs` stays layer-clean. Per D-12 and my round-2 review of 02-penny-agent: `From<X> for GadgetronError` conversions should live in `error.rs` as a dedicated `mod conversions` module.
 
-Without this, a `Denied` error in the `KairosProvider::chat_stream` path will force the implementer to invent an ad-hoc conversion (probably `GadgetronError::StreamInterrupted { reason: format!("{e}") }`) which loses structured information and fails the existing `kairos_agent_error_message_does_not_contain_stderr` test pattern (since `McpError::Execution(reason)` might carry subprocess output that needs redaction).
+Without this, a `Denied` error in the `PennyProvider::chat_stream` path will force the implementer to invent an ad-hoc conversion (probably `GadgetronError::StreamInterrupted { reason: format!("{e}") }`) which loses structured information and fails the existing `penny_agent_error_message_does_not_contain_stderr` test pattern (since `McpError::Execution(reason)` might carry subprocess output that needs redaction).
 
 ---
 
@@ -333,7 +333,7 @@ Key property: **the decision is written to shared state before signalling**, so 
 
 Add a new `ApprovalError::AlreadyDecided` variant to distinguish from `NotFound`.
 
-Add the test **`enqueue_decide_and_timeout_race_does_not_produce_double_timeout`** in `crates/gadgetron-kairos/tests/approval_flow.rs` using `tokio::time::pause` + `advance` to deterministically interleave:
+Add the test **`enqueue_decide_and_timeout_race_does_not_produce_double_timeout`** in `crates/gadgetron-penny/tests/approval_flow.rs` using `tokio::time::pause` + `advance` to deterministically interleave:
 ```rust
 let (id, rx) = reg.enqueue(...);
 let h = tokio::spawn(async move { reg_clone.await_decision(id).await });
@@ -352,21 +352,21 @@ This is a load-bearing correctness fix — without it, the audit log is wrong in
 
 ### CA-MCP-B6 — `approval_timeout_secs` default 60s can outlive the parent chat SSE request; no cleanup when the client drops the SSE stream (browser tab closed, network drop)
 
-**Type / module under scrutiny**: `ApprovalRegistry::await_decision` lifetime vs. `KairosProvider::chat_stream` lifetime vs. the incoming `axum::response::sse::Sse` stream from the browser
+**Type / module under scrutiny**: `ApprovalRegistry::await_decision` lifetime vs. `PennyProvider::chat_stream` lifetime vs. the incoming `axum::response::sse::Sse` stream from the browser
 
 **Defect**:
 
 The approval flow spans three lifetimes:
 
 1. **Browser SSE stream** — lives as long as the browser keeps the tab open to `POST /v1/chat/completions` with `stream=true`. If the user closes the tab, the axum handler's `Sse` stream future is dropped.
-2. **`KairosProvider::chat_stream`** — returns a `BoxStream<'static, Result<ChatChunk, GadgetronError>>`. This stream owns the subprocess handle (via `ClaudeCodeSession`) and is driven forward when the axum handler polls the SSE. When the SSE is dropped, the stream is dropped, which drops the session, which SIGTERMs claude.
+2. **`PennyProvider::chat_stream`** — returns a `BoxStream<'static, Result<ChatChunk, GadgetronError>>`. This stream owns the subprocess handle (via `ClaudeCodeSession`) and is driven forward when the axum handler polls the SSE. When the SSE is dropped, the stream is dropped, which drops the session, which SIGTERMs claude.
 3. **`ApprovalRegistry::await_decision`** — is called from **inside** the chat_stream during a tool call. It `rx.await`s up to 60s.
 
-Now consider: user opens the tab, kairos invokes `wiki.write` in `ask` mode. The SSE emits `gadgetron.approval_required`. User closes the tab. Expected behavior:
+Now consider: user opens the tab, penny invokes `wiki.write` in `ask` mode. The SSE emits `gadgetron.approval_required`. User closes the tab. Expected behavior:
 
 - Browser SSE drops.
 - Axum handler future is dropped.
-- BUT: the subprocess has already sent the MCP tool call and is blocked reading the response. The `KairosProvider::chat_stream` future is dropped mid-flight, **dropping the `await_decision` future**. The `rx` future is dropped. The oneshot sender is still held in `DashMap`. The sender will never deliver — cleanup only happens when the timeout fires 60s later.
+- BUT: the subprocess has already sent the MCP tool call and is blocked reading the response. The `PennyProvider::chat_stream` future is dropped mid-flight, **dropping the `await_decision` future**. The `rx` future is dropped. The oneshot sender is still held in `DashMap`. The sender will never deliver — cleanup only happens when the timeout fires 60s later.
 - During those 60s, the entry lingers in the map. The approval_id is visible to other request paths (a replay attack could POST to `/v1/approvals/{id}` with the stale id and resolve it after the parent request is dead — no one cares, but this is a resource leak).
 
 Additionally, **the claude subprocess is SIGTERMed** (via `Drop for ClaudeCodeSession`) — but it had an MCP call in flight, so the subprocess may have already exited by the time `await_decision` even begins. The MCP call never completes on the stdio side. Whether the subprocess is still alive is indeterminate from the approval registry's view.
@@ -501,7 +501,7 @@ Two concrete gaps:
 1. **Is `ToolAuditEvent` a new standalone enum, or an extension of a Phase 1 parent?** If standalone, where is the `fn write_audit_event(&AuditStore, ToolAuditEvent) -> Result<()>` surface, and how does it compose with Phase 1 `audit_log.row_id` foreign keys? If an extension, name the parent enum and show the added variants.
 
 2. **Which crate owns it?** Options:
-   - `gadgetron-kairos::audit` — natural because kairos owns the approval flow
+   - `gadgetron-penny::audit` — natural because penny owns the approval flow
    - `gadgetron-gateway::audit` — natural because gateway owns `/v1/approvals/{id}` dispatch
    - `gadgetron-xaas::audit` — matches the Phase 1 audit subsystem
 
@@ -619,28 +619,28 @@ Related DX finding: Round 1.5 DX-MCP-M1 already flagged that `McpError::Denied::
 
 ---
 
-### CA-MCP-M6 — `gadgetron-kairos` crate is referenced in §7, §10, §16 but does not exist in the workspace; every file path starting with `crates/gadgetron-kairos/` is a ghost path
+### CA-MCP-M6 — `gadgetron-penny` crate is referenced in §7, §10, §16 but does not exist in the workspace; every file path starting with `crates/gadgetron-penny/` is a ghost path
 
-**Location**: §7 L366 (`crates/gadgetron-kairos/src/approval.rs`), §16 L727 (`crates/gadgetron-kairos/tests/approval_flow.rs`), ADR-P2A-05 `gadgetron-kairos` references, workspace `Cargo.toml`
+**Location**: §7 L366 (`crates/gadgetron-penny/src/approval.rs`), §16 L727 (`crates/gadgetron-penny/tests/approval_flow.rs`), ADR-P2A-05 `gadgetron-penny` references, workspace `Cargo.toml`
 
-`Cargo.toml:3-16` lists workspace members; `gadgetron-kairos` is not one. `crates/` directory (`ls` output) confirms — 12 crates, no `gadgetron-kairos`. Yet the design doc, the ADR, and `02-kairos-agent.md` v3 all write file paths under `crates/gadgetron-kairos/`.
+`Cargo.toml:3-16` lists workspace members; `gadgetron-penny` is not one. `crates/` directory (`ls` output) confirms — 12 crates, no `gadgetron-penny`. Yet the design doc, the ADR, and `02-penny-agent.md` v3 all write file paths under `crates/gadgetron-penny/`.
 
 This is a scaffolding gap, not a design defect per se. But:
 
 1. **No `Cargo.toml` has ever been drafted** for this crate. What does it depend on? (Must include `gadgetron-core`, `dashmap`, `tokio`, `uuid`, `thiserror`, `async-trait`, probably `serde` and `serde_json`.) Does `dashmap` need to be added as a workspace dep for this crate? (Actually `dashmap = "6"` is already in workspace deps at root `Cargo.toml:80`, good.)
 
-2. **Ordering**: `#10` (MCP server) and `#13-#15` (Kairos session/stream/provider) need this crate to exist. The TDD order for P2A must start with `crates/gadgetron-kairos/Cargo.toml` creation + workspace member addition.
+2. **Ordering**: `#10` (MCP server) and `#13-#15` (Penny session/stream/provider) need this crate to exist. The TDD order for P2A must start with `crates/gadgetron-penny/Cargo.toml` creation + workspace member addition.
 
-3. **Cross-doc impact**: `02-kairos-agent.md` v3 is Round-3 cleared but assumes `gadgetron-kairos` exists. That doc's Round 2 review (round2-chief-architect.md) explicitly says "`ClaudeCodeSession`... `config: Arc<KairosConfig>` (config sharing fine)" — citing a struct that lives in the absent crate.
+3. **Cross-doc impact**: `02-penny-agent.md` v3 is Round-3 cleared but assumes `gadgetron-penny` exists. That doc's Round 2 review (round2-chief-architect.md) explicitly says "`ClaudeCodeSession`... `config: Arc<PennyConfig>` (config sharing fine)" — citing a struct that lives in the absent crate.
 
 **Fix**: Before this doc can land, add a **§0.1 "Crate scaffolding prerequisites"** section specifying:
 
-1. `gadgetron-kairos` must be added as a workspace member in root `Cargo.toml` at line 16 (after `gadgetron-knowledge`).
-2. Add `gadgetron-kairos = { path = "crates/gadgetron-kairos" }` to root `[workspace.dependencies]` block.
-3. Create `crates/gadgetron-kairos/Cargo.toml` with dependencies:
+1. `gadgetron-penny` must be added as a workspace member in root `Cargo.toml` at line 16 (after `gadgetron-knowledge`).
+2. Add `gadgetron-penny = { path = "crates/gadgetron-penny" }` to root `[workspace.dependencies]` block.
+3. Create `crates/gadgetron-penny/Cargo.toml` with dependencies:
    ```toml
    [package]
-   name = "gadgetron-kairos"
+   name = "gadgetron-penny"
    version.workspace = true
    edition.workspace = true
    license.workspace = true
@@ -661,7 +661,7 @@ This is a scaffolding gap, not a design defect per se. But:
    [dev-dependencies]
    tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
    ```
-4. Specify the module layout: `src/{lib.rs, session.rs, stream.rs, provider.rs, config.rs, approval.rs, redact.rs}` — cross-referencing `02-kairos-agent.md §4-§5` for the first three modules, and this doc §7 for `approval.rs`.
+4. Specify the module layout: `src/{lib.rs, session.rs, stream.rs, provider.rs, config.rs, approval.rs, redact.rs}` — cross-referencing `02-penny-agent.md §4-§5` for the first three modules, and this doc §7 for `approval.rs`.
 5. The scaffolding commit is a prerequisite for any `#10`-`#15` code PR.
 
 This is not strictly this doc's responsibility — it's PM-level scaffolding — but the doc is the most visible place that demands the crate exists. A one-paragraph "prerequisites" note here unblocks the entire P2A TDD start.
@@ -780,12 +780,12 @@ D-12 table (`docs/reviews/pm-decisions.md` §67-89) lists Phase 1 types only. Th
 
 | New type | Crate | File | Justification (per D-12 principle) |
 |---|---|---|---|
-| `McpToolProvider` (trait) | `gadgetron-core` | `src/agent/tools.rs` | ✅ Crosses `gadgetron-knowledge` + `gadgetron-kairos` + `gadgetron-infra` + `gadgetron-scheduler-tools` + `gadgetron-cluster` — shared plugin interface, must live in core |
+| `McpToolProvider` (trait) | `gadgetron-core` | `src/agent/tools.rs` | ✅ Crosses `gadgetron-knowledge` + `gadgetron-penny` + `gadgetron-infra` + `gadgetron-scheduler-tools` + `gadgetron-cluster` — shared plugin interface, must live in core |
 | `ToolSchema` / `Tier` / `ToolResult` / `McpError` | `gadgetron-core` | `src/agent/tools.rs` | ✅ Associated types of `McpToolProvider`; must live with the trait |
 | `AgentConfig` / `BrainConfig` / `BrainMode` / `BrainShimConfig` / `ToolsConfig` / `ToolMode` / `WriteToolsConfig` / `DestructiveToolsConfig` / `ExtraConfirmation` | `gadgetron-core` | `src/agent/config.rs` | ✅ Config types owned by `AppConfig`; standard D-12 pattern matches `WebConfig` placement |
 | `Scope::AgentApproval` (+ `AgentAutoApproveT2` if CA-MCP-M1 resolved as Option B) | `gadgetron-core` | `src/context.rs` | ✅ Extension of existing `#[non_exhaustive]` enum; D-20260411-10 Phase 2 expansion clause covers this |
-| `McpToolRegistry` / `McpToolRegistryBuilder` (after CA-MCP-B2 fix) | `gadgetron-kairos` or `gadgetron-gateway` | TBD | ⚠ **Must be decided** — not yet in D-12 |
-| `ApprovalRegistry` / `PendingApproval` / `ApprovalDecision` / `ApprovalError` | `gadgetron-kairos` | `src/approval.rs` | ✅ Kairos-owned approval state; not used by anyone else; D-12 principle (used-by-one-crate → lives-in-that-crate) |
+| `McpToolRegistry` / `McpToolRegistryBuilder` (after CA-MCP-B2 fix) | `gadgetron-penny` or `gadgetron-gateway` | TBD | ⚠ **Must be decided** — not yet in D-12 |
+| `ApprovalRegistry` / `PendingApproval` / `ApprovalDecision` / `ApprovalError` | `gadgetron-penny` | `src/approval.rs` | ✅ Penny-owned approval state; not used by anyone else; D-12 principle (used-by-one-crate → lives-in-that-crate) |
 | `ToolAuditEvent` (after CA-MCP-M2 fix) | `gadgetron-xaas::audit` (recommended) or `gadgetron-gateway::audit` | TBD | ⚠ **Must be decided** — not yet in D-12 |
 
 **Recommended D-12 update** (after this doc clears Round 3): append the above table entries to `docs/reviews/pm-decisions.md` §D-12 crate boundary table, same format as the existing 19 entries.
@@ -835,9 +835,9 @@ Who enforces this? The `purge_audit_log` reference hints at an existing function
 
 | ID | Severity | Location | Owner | Fix |
 |---|---|---|---|---|
-| CA-MCP-B1 | BLOCKER | §11 + `02-kairos-agent.md §10` | PM | Add §11.1 field migration table + specify loader mechanism + patch `02-kairos-agent.md §10` with supersession note |
+| CA-MCP-B1 | BLOCKER | §11 + `02-penny-agent.md §10` | PM | Add §11.1 field migration table + specify loader mechanism + patch `02-penny-agent.md §10` with supersession note |
 | CA-MCP-B2 | BLOCKER | §2 L84, §6 L355, §13 L657, §14 L694 | PM | Add §2.1 `McpToolRegistry` struct definition + rename `AgentToolRegistry` → `McpToolRegistry` globally + specify builder-freeze lifecycle |
-| CA-MCP-B3 | BLOCKER | §10 (new §10.1) + `error.rs` | chief-architect | Add `impl From<McpError> for GadgetronError` with full variant table + extend `KairosErrorKind` with 6 new variants |
+| CA-MCP-B3 | BLOCKER | §10 (new §10.1) + `error.rs` | chief-architect | Add `impl From<McpError> for GadgetronError` with full variant table + extend `PennyErrorKind` with 6 new variants |
 | CA-MCP-B4 | BLOCKER | §2 L90/95, §4 L288, §7 L489, §14 L686-691 | PM | Pick Option A (rename tool prefixes to match category) or Option C (add `tool_prefix` field) and apply consistently |
 | CA-MCP-B5 | BLOCKER | §7 L444-470 | chief-architect | Rewrite `ApprovalRegistry::{decide,await_decision}` with `Notify`-based coordination + shared decision slot + add double-race test |
 | CA-MCP-B6 | BLOCKER | §7 (new §7.1) | chief-architect | Add lifetime contract section + `cancel_for_request` API + `ChatRequestGuard` drop + new `ToolApprovalCancelled` audit variant + V15 validation rule |
@@ -847,7 +847,7 @@ Who enforces this? The `purge_audit_log` reference hints at an existing function
 | CA-MCP-M3 | MAJOR | `tools.rs` doc comments | chief-architect | Add doc-comment warning against `Box::leak` pattern for `category()` return |
 | CA-MCP-M4 | MAJOR | §2 (new §2.1) | chief-architect | Specify `McpToolRegistry.by_tool_name: HashMap<String, Arc<dyn McpToolProvider>>` for `O(1)` dispatch |
 | CA-MCP-M5 | MAJOR | §6 L357 + §10 L585 | chief-architect | Replace string reason with `DenialReason` enum; promote audit `reason: String` to typed enum |
-| CA-MCP-M6 | MAJOR | §0 (new §0.1) | PM | Add "crate scaffolding prerequisites" with workspace member add + Cargo.toml draft for `gadgetron-kairos` |
+| CA-MCP-M6 | MAJOR | §0 (new §0.1) | PM | Add "crate scaffolding prerequisites" with workspace member add + Cargo.toml draft for `gadgetron-penny` |
 | CA-MCP-N1 | MINOR | §2 L144 | PM | Add `Hash` to `Tier` derive list to match landed code |
 | CA-MCP-N2 | MINOR | §2 L141 | PM | Add `skip_serializing_if` to `idempotent` serde attribute |
 | CA-MCP-N3 | MINOR | §2 end | PM | Show `McpError::error_code()` method in the `McpError` example |
@@ -870,8 +870,8 @@ Who enforces this? The `purge_audit_log` reference hints at an existing function
 | Workspace dep hygiene | PASS | No new deps added by the doc; `dashmap` already workspace |
 | Crate seam (D-12) | FAIL (2 TBD rows) | `McpToolRegistry` and `ToolAuditEvent` crate placement unspecified |
 | Implementation determinism (D-20260412-02) | FAIL | See DET-1..DET-5 |
-| Cross-doc consistency | FAIL | `02-kairos-agent.md` v3 directly contradicted; `Scope::AgentAutoApproveT2` ADR mismatch |
-| `GadgetronError` taxonomy extension plan | FAIL | `KairosErrorKind` must gain 6 variants for McpError interop; not specified |
+| Cross-doc consistency | FAIL | `02-penny-agent.md` v3 directly contradicted; `Scope::AgentAutoApproveT2` ADR mismatch |
+| `GadgetronError` taxonomy extension plan | FAIL | `PennyErrorKind` must gain 6 variants for McpError interop; not specified |
 
 **Pass: 4 / 10. Fail: 5 / 10. Mixed: 1 / 10.**
 
@@ -883,13 +883,13 @@ Who enforces this? The `purge_audit_log` reference hints at an existing function
 
 The architectural decisions are sound. The text-level spec has 7 concrete blockers that prevent TDD-start. None of them are mortal — each has an explicit, ~1-page fix in this review — but all 7 must land in a v2 revision before any `#10` code PR. In particular:
 
-- **CA-MCP-B1** is the highest-priority fix because it creates a direct contradiction with an already-Round-3-cleared sibling (`02-kairos-agent.md` v3) and risks a silent v0.1.x → v0.2.0 upgrade regression.
+- **CA-MCP-B1** is the highest-priority fix because it creates a direct contradiction with an already-Round-3-cleared sibling (`02-penny-agent.md` v3) and risks a silent v0.1.x → v0.2.0 upgrade regression.
 - **CA-MCP-B5** is the highest-risk-if-missed fix because it ships a subtle correctness bug (timer-edge double-Timeout) that will only fire in production under load — exactly when the audit log matters most.
 - **CA-MCP-B6** is the highest-impact-on-UX fix because a browser tab close = 60s dangling approval is a very real operator experience.
 
 The Round 1.5 dx review and Round 2 qa review already cover the operator-UX and test-surface gaps. My findings are disjoint and additive — after v2 addresses all 7 blockers plus integrates the dx (5 blockers) and qa (2 blockers) findings, this doc is ready for a v2 Round-3 pass.
 
-I will **re-review** against v2 with the following gate: all 7 CA-MCP-B* must be resolved + the 5 ghost references (`McpToolRegistry`/`AgentToolRegistry`/`KnowledgeToolProvider`/`gadgetron-kairos` crate/audit enum parent) must all point to concrete types in concrete crates with concrete Cargo.toml dependencies.
+I will **re-review** against v2 with the following gate: all 7 CA-MCP-B* must be resolved + the 5 ghost references (`McpToolRegistry`/`AgentToolRegistry`/`KnowledgeToolProvider`/`gadgetron-penny` crate/audit enum parent) must all point to concrete types in concrete crates with concrete Cargo.toml dependencies.
 
 ---
 

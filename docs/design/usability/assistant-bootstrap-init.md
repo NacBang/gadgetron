@@ -4,7 +4,7 @@
 > **상태**: Draft
 > **작성일**: 2026-04-15
 > **최종 업데이트**: 2026-04-15
-> **관련 크레이트**: `gadgetron-cli`, `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-kairos`
+> **관련 크레이트**: `gadgetron-cli`, `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-penny`
 > **Phase**: [P2A] / [P2B]
 > **관련 문서**: `docs/design/usability/sprint7-cli-init-nodb.md`, `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md`, `docs/design/phase2/04-mcp-tool-registry.md`
 
@@ -22,17 +22,17 @@ Gadgetron의 assistant plane 은 현재 수동 `gadgetron.toml` 작성에 의존
 
 현재의 문제는 두 가지다.
 
-1. **canonical entry point 부재**: Kairos/assistant plane 을 위한 정식 bootstrap 경로가 없다.
+1. **canonical entry point 부재**: Penny/assistant plane 을 위한 정식 bootstrap 경로가 없다.
 2. **문서-구현 간 manual gap**: 운영자는 `[agent]`, `[agent.brain]`, `[knowledge]` 를 직접 작성해야만 한다.
 
-이 문서의 목표는 `gadgetron init` 을 **유일한 canonical bootstrap command** 로 승격하는 것이다. 별도 `gadgetron kairos init` 을 부활시키지 않는다.
+이 문서의 목표는 `gadgetron init` 을 **유일한 canonical bootstrap command** 로 승격하는 것이다. 별도 `gadgetron penny init` 을 부활시키지 않는다.
 
 ### 1.3 채택하지 않은 대안
 
 | 대안 | 설명 | 채택하지 않은 이유 |
 |------|------|--------------------|
 | **A. 수동 TOML 유지** | 매뉴얼 예시만 제공하고 사용자가 직접 작성 | 제품 진입 장벽이 높고, Drift가 재발한다 |
-| **B. `gadgetron kairos init` 부활** | assistant plane 전용 서브커맨드 추가 | 현재 trunk에 없는 별도 진입점을 다시 늘리면 canonical surface가 분열된다 |
+| **B. `gadgetron penny init` 부활** | assistant plane 전용 서브커맨드 추가 | 현재 trunk에 없는 별도 진입점을 다시 늘리면 canonical surface가 분열된다 |
 | **C. `gadgetron init` 확장** | profile 기반으로 gateway / assistant bootstrap 지원 | 기존 진입점을 유지하면서 새 비전을 가장 자연스럽게 수용한다 |
 
 채택: **C. `gadgetron init` 확장**
@@ -311,7 +311,7 @@ This section is required for Round 1.5 per `docs/process/03-review-rubric.md §1
 
 | ID | Mitigation | Location |
 |----|------------|----------|
-| M-I1 | assistant renderer emits canonical `[agent]`, `[agent.brain]`, `[knowledge]` only, never legacy `[kairos]` | §2.3 + unit tests in §4 |
+| M-I1 | assistant renderer emits canonical `[agent]`, `[agent.brain]`, `[knowledge]` only, never legacy `[penny]` | §2.3 + unit tests in §4 |
 | M-I2 | invalid `brain_mode` / `external_base_url` / search combinations fail before file write | §2.3 validation rules |
 | M-I3 | bootstrap does not generate secrets, perform network calls, or mutate cluster state | §2.1 non-goals |
 | M-I4 | generated config must parse and boot through `gadgetron serve --no-db` in integration tests | §5.1 |
@@ -339,9 +339,9 @@ Implementation should land in narrow slices so the generated config, runtime par
    - add assistant config renderer and starter wiki writer
 3. **Boot verification**
    - add integration tests that parse generated config and boot `serve --no-db`
-   - assert `/v1/models` contains `kairos` for assistant profile
+   - assert `/v1/models` contains `penny` for assistant profile
 4. **Manual sync**
-   - update `docs/manual/configuration.md`, `docs/manual/quickstart.md`, and `docs/manual/kairos.md`
+   - update `docs/manual/configuration.md`, `docs/manual/quickstart.md`, and `docs/manual/penny.md`
    - replace manual-only assistant bootstrap guidance with `init --profile assistant`
 
 ---
@@ -359,7 +359,7 @@ operator
       -> gadgetron.toml + starter wiki
   -> gadgetron serve
       -> AppConfig::load()
-      -> register_kairos_if_configured()
+      -> register_penny_if_configured()
       -> /web assistant entry point
 ```
 
@@ -371,13 +371,13 @@ operator
   - owns canonical config structs (`[agent]`, `[agent.brain]`)
 - `gadgetron-knowledge`
   - owns `[knowledge]` runtime semantics, but not bootstrap prompts
-- `gadgetron-kairos`
+- `gadgetron-penny`
   - consumes generated config, but does not participate in `init`
 
 This preserves D-12 boundaries:
 
 - no prompt logic in `gadgetron-core`
-- no file-write bootstrap logic in `gadgetron-kairos`
+- no file-write bootstrap logic in `gadgetron-penny`
 - no assistant orchestration logic in `gadgetron-knowledge`
 
 ### 3.3 타 문서와의 계약
@@ -386,7 +386,7 @@ This preserves D-12 boundaries:
   - remains canonical for `gateway` bootstrap
 - `docs/manual/configuration.md`
   - must be updated to say `init --profile assistant` is the recommended assistant entry path once implemented
-- `docs/manual/kairos.md`
+- `docs/manual/penny.md`
   - manual TOML authoring becomes fallback, not primary guidance
 
 ---
@@ -398,7 +398,7 @@ This preserves D-12 boundaries:
 | 대상 | 검증 invariant |
 |------|----------------|
 | profile resolver | TTY / non-TTY / `--yes` 조합에서 profile 선택이 deterministic 해야 함 |
-| assistant renderer | output must contain `[agent]`, `[agent.brain]`, `[knowledge]`, no `[kairos]` |
+| assistant renderer | output must contain `[agent]`, `[agent.brain]`, `[knowledge]`, no `[penny]` |
 | gateway renderer | current Phase 1 template와 의미상 동일해야 함 |
 | plan validator | invalid `brain_mode` / `external_base_url` 조합은 실패해야 함 |
 | starter wiki writer | assistant profile writes starter page only when requested |
@@ -413,7 +413,7 @@ Named tests:
 
 - `init_noninteractive_defaults_to_gateway_profile`
 - `init_assistant_profile_renders_agent_sections`
-- `init_assistant_profile_never_renders_legacy_kairos_section`
+- `init_assistant_profile_never_renders_legacy_penny_section`
 - `init_assistant_profile_creates_workspace_tree`
 - `init_external_base_url_requires_external_brain_mode`
 - `init_enable_web_search_requires_searxng_url_in_yes_mode`
@@ -436,8 +436,8 @@ Named tests:
 
 2. assistant profile → `gadgetron serve --no-db`
    - server boots
-   - `kairos` registers
-   - `/v1/models` contains `kairos`
+   - `penny` registers
+   - `/v1/models` contains `penny`
 
 3. assistant profile with search enabled
    - generated config contains valid `[knowledge.search]`
@@ -454,7 +454,7 @@ Named tests:
 These tests must fail if:
 
 - assistant bootstrap regresses to manual-only config
-- legacy `[kairos]` becomes the emitted config again
+- legacy `[penny]` becomes the emitted config again
 - generated config cannot boot with `gadgetron serve`
 - docs/examples and generated assistant config diverge
 

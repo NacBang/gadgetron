@@ -86,13 +86,13 @@ The command in `installation.md` and `web.md` is `--features headless` (short fo
 
 Exit code 0 is explicit. A test implementation note is included: "asserts the exact stderr content above and exit code 0."
 
-**`docs/manual/kairos.md §1`** (options section) now has a clean prose description of `--docker` as "P2A 에서 미지원" with the graceful-exit behavior, the manual SearXNG `docker run` command, and the P2B re-introduction note. The v1 strikethrough ambiguity is gone.
+**`docs/manual/penny.md §1`** (options section) now has a clean prose description of `--docker` as "P2A 에서 미지원" with the graceful-exit behavior, the manual SearXNG `docker run` command, and the P2B re-introduction note. The v1 strikethrough ambiguity is gone.
 
 The `§1.1` stdout contract remains intact for the happy path. The `--docker` path is now an entirely separate, explicitly-specified output path. No TDD ambiguity.
 
 ---
 
-### DX-W-B4 — `docs/manual/web.md` + `README.md` entry + `kairos.md` link
+### DX-W-B4 — `docs/manual/web.md` + `README.md` entry + `penny.md` link
 
 **Status: VERIFIED RESOLVED**
 
@@ -101,7 +101,7 @@ The `§1.1` stdout contract remains intact for the happy path. The `--docker` pa
 2. **`docs/manual/README.md`** — row added at line 21:
    > `web.md` | Phase 2A: Gadgetron Web UI — `http://localhost:8080/web` 채팅 UI 설정, Origin 격리, 키 회전, 헤드리스 빌드
 
-3. **`docs/manual/kairos.md`** 연관 문서 table — `web.md` entry present (line 249):
+3. **`docs/manual/penny.md`** 연관 문서 table — `web.md` entry present (line 249):
    > `docs/manual/web.md` | Gadgetron Web UI (`/web`) 설정, Origin 격리, 키 회전, 헤드리스 빌드 — D-20260414-02 이후 신규
 
 All three DX-W-B4 deliverables confirmed.
@@ -191,7 +191,7 @@ Items explicitly deferred to first code PR review (per Appendix C2 line 1895):
 | DX-W-N2 | Deferred | `build.rs` panic messages improved in §4 for the `web/out/` case (the improved message is present). Lockfile-missing path uses `eprintln! + exit(1)` (CA-W-NB1) which is also an improvement. |
 | DX-W-N3 | Addressed | "Saved." inline confirmation for 2 seconds is now spec'd in §12 `/settings` behavior item 5. |
 | DX-W-N4 | Addressed | CI `rust-headless` job now uses `--test web_headless` (separate file split in §7 and §22), eliminating the v1 confusion about which tests run in the headless job. |
-| DX-W-N5 | Addressed | `kairos.md` 변경 이력 has a 2026-04-14 entry (line 258) covering OpenWebUI removal, `gadgetron-web` transition, `--docker` flag P2A handling, and `web.md` addition. |
+| DX-W-N5 | Addressed | `penny.md` 변경 이력 has a 2026-04-14 entry (line 258) covering OpenWebUI removal, `gadgetron-web` transition, `--docker` flag P2A handling, and `web.md` addition. |
 
 ---
 

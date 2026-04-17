@@ -21,40 +21,40 @@
 | API response shape | PASS | `POST /v1/approvals/{id}` shape and `404`/`204` codes are specified |
 | Config fields — doc comment + default + env override | FAIL | Env overrides absent from all `[agent]` fields; `[agent.brain.shim]` fields have no env override |
 | Defaults safety | PASS | `enabled = false` for T3, `ask` for T2, `auto` for T1 are all safe and sensible |
-| 5-minute path | FAIL | `gadgetron kairos init` does not emit `[agent]` section; migration from v0.1.x with no `[agent]` not specified |
+| 5-minute path | FAIL | `gadgetron penny init` does not emit `[agent]` section; migration from v0.1.x with no `[agent]` not specified |
 | Runbook playbook | N/A | No new alerts defined in this doc; deferred to devops-sre-lead |
-| Backward compatibility | FAIL | v0.1.x config with `[kairos]` namespace → v0.2.0 behavior on missing `[agent]` section is unspecified |
+| Backward compatibility | FAIL | v0.1.x config with `[penny]` namespace → v0.2.0 behavior on missing `[agent]` section is unspecified |
 | i18n readiness | FAIL | `rationale` field sourced from agent; no normalization specified for non-English content on the approval card |
 
 ---
 
 ## BLOCKER Findings
 
-### DX-MCP-B1: `gadgetron kairos init` does not write `[agent]` section — operator cannot reach a working config from init alone
+### DX-MCP-B1: `gadgetron penny init` does not write `[agent]` section — operator cannot reach a working config from init alone
 
-**What**: The `gadgetron kairos init` stdout contract (authoritative in `01-knowledge-layer.md §1.1`) writes `[knowledge]`, `[knowledge.search]`, and a `[router]` stanza — but it does NOT write an `[agent]` or `[agent.brain]` section. The `[agent]` schema is the single most important addition in this doc, and the init command is the operator's primary onboarding path.
+**What**: The `gadgetron penny init` stdout contract (authoritative in `01-knowledge-layer.md §1.1`) writes `[knowledge]`, `[knowledge.search]`, and a `[router]` stanza — but it does NOT write an `[agent]` or `[agent.brain]` section. The `[agent]` schema is the single most important addition in this doc, and the init command is the operator's primary onboarding path.
 
-**Why this blocks**: An operator who runs `gadgetron kairos init` will get a `gadgetron.toml` with no `[agent]` section. On `gadgetron serve`, `AppConfig::load()` will call `AgentConfig::validate()`. The doc does not specify what happens when `[agent]` is entirely absent: does the server error with a helpful message? Start with all-`never` defaults? Start with defaults inherited from `[kairos]`? There is no guidance, and no example of the written toml includes `[agent]`.
+**Why this blocks**: An operator who runs `gadgetron penny init` will get a `gadgetron.toml` with no `[agent]` section. On `gadgetron serve`, `AppConfig::load()` will call `AgentConfig::validate()`. The doc does not specify what happens when `[agent]` is entirely absent: does the server error with a helpful message? Start with all-`never` defaults? Start with defaults inherited from `[penny]`? There is no guidance, and no example of the written toml includes `[agent]`.
 
 **Remediation**: Add an explicit paragraph to §4 (or §1.1 of 01-knowledge-layer.md, whichever is authoritative for the init stdout contract) specifying:
-1. `gadgetron kairos init` MUST append the complete `[agent]` section from §4 of this doc (with all defaults filled in) to the written `gadgetron.toml`.
+1. `gadgetron penny init` MUST append the complete `[agent]` section from §4 of this doc (with all defaults filled in) to the written `gadgetron.toml`.
 2. The `[OK] Config file:` success line in the init stdout MUST be followed by a note listing which sections were written.
-3. If `[agent]` is absent at server start, `AppConfig::load()` MUST fail with a config error explaining which section is missing and that re-running `gadgetron kairos init` will generate it — not silently apply defaults.
+3. If `[agent]` is absent at server start, `AppConfig::load()` MUST fail with a config error explaining which section is missing and that re-running `gadgetron penny init` will generate it — not silently apply defaults.
 
 ---
 
-### DX-MCP-B2: Migration UX from v0.1.x (`[kairos]` namespace) is undefined
+### DX-MCP-B2: Migration UX from v0.1.x (`[penny]` namespace) is undefined
 
-**What**: §11 states "legacy `[kairos]` fields accepted with deprecation warning through P2B." That sentence is the entirety of the migration specification. There is no description of: what fields are read from the old `[kairos]` namespace, how they map to the new `[agent.brain]` namespace, what the deprecation warning looks like, or whether the operator must manually edit the toml.
+**What**: §11 states "legacy `[penny]` fields accepted with deprecation warning through P2B." That sentence is the entirety of the migration specification. There is no description of: what fields are read from the old `[penny]` namespace, how they map to the new `[agent.brain]` namespace, what the deprecation warning looks like, or whether the operator must manually edit the toml.
 
-**Why this blocks**: The v0.1.x config written by `02-kairos-agent.md §10` uses `[kairos]` with fields `claude_binary`, `claude_base_url`, `claude_model`, `request_timeout_secs`, `max_concurrent_subprocesses`. The v0.2.0 config uses `[agent]` + `[agent.brain]` with renamed fields (e.g. `binary` not `claude_binary`). An operator upgrading from v0.1.x will have a `[kairos]` section and NO `[agent]` section. Without a migration spec, the implementer cannot write a correct config loader and the operator cannot understand what they need to do.
+**Why this blocks**: The v0.1.x config written by `02-penny-agent.md §10` uses `[penny]` with fields `claude_binary`, `claude_base_url`, `claude_model`, `request_timeout_secs`, `max_concurrent_subprocesses`. The v0.2.0 config uses `[agent]` + `[agent.brain]` with renamed fields (e.g. `binary` not `claude_binary`). An operator upgrading from v0.1.x will have a `[penny]` section and NO `[agent]` section. Without a migration spec, the implementer cannot write a correct config loader and the operator cannot understand what they need to do.
 
-Additionally, `02-kairos-agent.md v3` (authored 2026-04-13, the day before this doc) still shows `[kairos]` as the authoritative TOML example in its §10 and has not been patched to `[agent.brain]`. This creates a direct cross-doc inconsistency that will confuse implementers reading both specs.
+Additionally, `02-penny-agent.md v3` (authored 2026-04-13, the day before this doc) still shows `[penny]` as the authoritative TOML example in its §10 and has not been patched to `[agent.brain]`. This creates a direct cross-doc inconsistency that will confuse implementers reading both specs.
 
 **Remediation**:
 1. Add a dedicated §N "v0.1.x → v0.2.0 migration" to this doc specifying: field mapping table, deprecation warning text (exact string), and whether migration is automatic or manual.
-2. File an action item (or cross-ref note) on `02-kairos-agent.md` requiring its §10 TOML example to be updated to `[agent.brain]` before implementation begins. Until that patch lands, the two docs are contradictory.
-3. Specify the exact deprecation warning message format — at minimum: "Deprecated config field `[kairos].*` detected. Migrate to `[agent.brain].*` before P2C. See https://docs.gadgetron.example/migrate-0.2."
+2. File an action item (or cross-ref note) on `02-penny-agent.md` requiring its §10 TOML example to be updated to `[agent.brain]` before implementation begins. Until that patch lands, the two docs are contradictory.
+3. Specify the exact deprecation warning message format — at minimum: "Deprecated config field `[penny].*` detected. Migrate to `[agent.brain].*` before P2C. See https://docs.gadgetron.example/migrate-0.2."
 
 ---
 
@@ -222,7 +222,7 @@ This is not a blocker for P2A (gadgetron-web serves the single-user case), but t
 The document has four blockers, all of which must be resolved before implementation:
 
 - **DX-MCP-B1** (missing `[agent]` section in init output — operator cannot reach working config from init alone)
-- **DX-MCP-B2** (migration from `[kairos]` to `[agent.brain]` undefined; cross-doc inconsistency with `02-kairos-agent.md v3` unresolved)
+- **DX-MCP-B2** (migration from `[penny]` to `[agent.brain]` undefined; cross-doc inconsistency with `02-penny-agent.md v3` unresolved)
 - **DX-MCP-B3** (ADR reference in user-visible error message)
 - **DX-MCP-B4** (headless API-SDK approval path undocumented)
 

@@ -1,6 +1,6 @@
 //! Claude Code `stream-json` event parser + `ChatChunk` translator.
 //!
-//! Spec: `docs/design/phase2/02-kairos-agent.md §6`.
+//! Spec: `docs/design/phase2/02-penny-agent.md §6`.
 //!
 //! Claude Code's `-p --output-format stream-json` emits one JSON event
 //! per line on stdout. This module parses those lines into
@@ -11,7 +11,7 @@
 //!
 //! - `message_delta` → one `ChatChunk` per text fragment (streamed)
 //! - `tool_use` → NO chunk emitted (invisible to client); the tool name
-//!   is logged to the `kairos_audit` tracing target. The M6 enforcement
+//!   is logged to the `penny_audit` tracing target. The M6 enforcement
 //!   is that we log ONLY the tool name, never the `input` value —
 //!   `input` may contain user content or query text.
 //! - `tool_result` → NO chunk emitted (server-side continuation)
@@ -274,10 +274,10 @@ pub fn event_to_chat_chunks_ex(
                     }
                     ContentBlock::ToolUse { id, name, input } => {
                         tracing::info!(
-                            target: "kairos_audit",
+                            target: "penny_audit",
                             tool_name = %name,
                             tool_call_id = %id,
-                            "kairos_tool_called"
+                            "penny_tool_called"
                         );
                         // Hide Claude Code's internal scaffolding tools from
                         // the UI — only MCP-registered tools represent real
@@ -347,10 +347,10 @@ pub fn event_to_chat_chunks_ex(
         StreamJsonEvent::MessageDelta { .. } => Vec::new(),
         StreamJsonEvent::ToolUse { name, id, .. } => {
             tracing::info!(
-                target: "kairos_audit",
+                target: "penny_audit",
                 tool_name = %name,
                 tool_call_id = %id,
-                "kairos_tool_called"
+                "penny_tool_called"
             );
             Vec::new()
         }
@@ -363,10 +363,10 @@ pub fn event_to_chat_chunks_ex(
             output_tokens,
         } => {
             tracing::info!(
-                target: "kairos_audit",
+                target: "penny_audit",
                 input_tokens,
                 output_tokens,
-                "kairos_usage"
+                "penny_usage"
             );
             Vec::new()
         }
@@ -416,7 +416,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// unprofessional AND breaks the web transport's `tool_use`↔`tool_result`
 /// pairing — the card appears with no matching `tool_use`, so the client
 /// treats the trailing answer text as orphaned and drops it from the UI
-/// (observed in the 매니코어소프트 설명 case, where Kairos produced a
+/// (observed in the 매니코어소프트 설명 case, where Penny produced a
 /// perfect 1.3 KB markdown answer that never reached the browser).
 fn looks_like_internal_tool_result(text: &str) -> bool {
     let t = text.trim();
@@ -453,7 +453,7 @@ fn build_chunk(
     finish_reason: Option<String>,
 ) -> ChatChunk {
     ChatChunk {
-        id: format!("chatcmpl-kairos-{}", uuid::Uuid::new_v4()),
+        id: format!("chatcmpl-penny-{}", uuid::Uuid::new_v4()),
         object: "chat.completion.chunk".to_string(),
         created: chrono::Utc::now().timestamp() as u64,
         model: req.model.clone(),
@@ -543,7 +543,7 @@ mod tests {
 
     fn req() -> ChatRequest {
         ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![Message::user("hi")],
             temperature: None,
             max_tokens: None,
@@ -655,7 +655,7 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("hello"));
         assert!(chunks[0].choices[0].finish_reason.is_none());
-        assert_eq!(chunks[0].model, "kairos");
+        assert_eq!(chunks[0].model, "penny");
         assert_eq!(chunks[0].object, "chat.completion.chunk");
     }
 
@@ -766,6 +766,6 @@ mod tests {
         let chunks_a = event_to_chat_chunks(event_a, &req());
         let chunks_b = event_to_chat_chunks(event_b, &req());
         assert_ne!(chunks_a[0].id, chunks_b[0].id);
-        assert!(chunks_a[0].id.starts_with("chatcmpl-kairos-"));
+        assert!(chunks_a[0].id.starts_with("chatcmpl-penny-"));
     }
 }

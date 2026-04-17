@@ -1,6 +1,6 @@
-# Kairos 평가 하네스 (eval)
+# Penny 평가 하네스 (eval)
 
-운영자가 개입하지 않고도 Kairos의 주요 경로를 자동 검증할 수 있는 시나리오
+운영자가 개입하지 않고도 Penny의 주요 경로를 자동 검증할 수 있는 시나리오
 기반 평가 도구입니다. 저장소 루트의 [`eval/`](../../eval/) 디렉터리에 삽니다.
 
 Round 2 (2026-04) 기준 8개 시나리오를 추적합니다:
@@ -97,7 +97,7 @@ python3 eval/run_eval.py --no-report              # 리포트 파일 생략
 
 ```yaml
 - id: my-new-scenario
-  description: Something Kairos must do.
+  description: Something Penny must do.
   timeout_s: 60
   prompt: |
     wiki.write 로 예시 페이지를 만들어줘.
@@ -118,6 +118,6 @@ python3 eval/run_eval.py --no-report              # 리포트 파일 생략
 - `--scenario <id>` 로 단일 실행할 때는 선행 시나리오가 남긴 상태가
   전제됩니다 (디스크에 파일이 있어야 rename / delete가 성공). 단일 실행이
   실패하면 `wiki-roundtrip` 부터 다시 돌리십시오.
-- 평가는 실제 Claude Code 서브프로세스를 띄우므로 Kairos 전체 파이프라인
+- 평가는 실제 Claude Code 서브프로세스를 띄우므로 Penny 전체 파이프라인
   (MCP stdio, SearXNG 라운드트립 포함)의 진짜 latency를 측정합니다.
   Round 1 기준 로컬 맥북에서 6 시나리오 전체가 약 70초 내에 끝납니다.

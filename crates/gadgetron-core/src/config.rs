@@ -178,12 +178,12 @@ impl AppConfig {
                 path, e
             ))
         })?;
-        // Pre-deserialize migration pass: rewrite any legacy `[kairos]`
+        // Pre-deserialize migration pass: rewrite any legacy `[penny]`
         // section into `[agent]` / `[agent.brain]` per `04-mcp-tool-registry.md
         // v2 §11.1` and emit `tracing::warn!` per moved field. This is a
-        // best-effort migration; conflicts (same field set in both `[kairos]`
+        // best-effort migration; conflicts (same field set in both `[penny]`
         // and `[agent.*]`) are a hard error.
-        let migrated_content = migrate_legacy_kairos(&content)?;
+        let migrated_content = migrate_legacy_penny(&content)?;
 
         let mut config: AppConfig = toml::from_str(&migrated_content).map_err(|e| {
             crate::error::GadgetronError::Config(format!("Failed to parse config: {}", e))
@@ -236,27 +236,27 @@ impl AppConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy [kairos] → [agent] / [agent.brain] migration (04 v2 §11.1)
+// Legacy [penny] → [agent] / [agent.brain] migration (04 v2 §11.1)
 // ---------------------------------------------------------------------------
 
-/// Rewrite a legacy `[kairos]` section into `[agent]` / `[agent.brain]` per
+/// Rewrite a legacy `[penny]` section into `[agent]` / `[agent.brain]` per
 /// the field mapping table in `04-mcp-tool-registry.md v2 §11.1`. Returns
 /// the migrated TOML source text ready for the strongly-typed deserialize.
 ///
 /// Mapping:
 /// | legacy field                       | new destination                         |
 /// |------------------------------------|-----------------------------------------|
-/// | `kairos.claude_binary`             | `agent.binary`                          |
-/// | `kairos.claude_base_url`           | `agent.brain.external_base_url` + mode="external_proxy" |
-/// | `kairos.claude_model`              | DROPPED — emit ERROR-level log          |
-/// | `kairos.request_timeout_secs`      | `agent.request_timeout_secs`            |
-/// | `kairos.max_concurrent_subprocesses` | `agent.max_concurrent_subprocesses`   |
+/// | `penny.claude_binary`             | `agent.binary`                          |
+/// | `penny.claude_base_url`           | `agent.brain.external_base_url` + mode="external_proxy" |
+/// | `penny.claude_model`              | DROPPED — emit ERROR-level log          |
+/// | `penny.request_timeout_secs`      | `agent.request_timeout_secs`            |
+/// | `penny.max_concurrent_subprocesses` | `agent.max_concurrent_subprocesses`   |
 ///
-/// Conflict policy: if both `[kairos].X` and the target field are present,
+/// Conflict policy: if both `[penny].X` and the target field are present,
 /// this function returns `Err(GadgetronError::Config(...))` — operators
 /// must pick one source of truth. Tracing warnings are emitted for every
 /// successful migration.
-fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
+fn migrate_legacy_penny(source: &str) -> crate::error::Result<String> {
     fn emit_deprecation(migration: &'static str) {
         tracing::warn!(
             target: "config_migration",
@@ -269,26 +269,26 @@ fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
         crate::error::GadgetronError::Config(format!("Failed to parse config: {e}"))
     })?;
 
-    // Extract [kairos] table; if absent, no migration needed.
-    let kairos = match value.as_table_mut().and_then(|t| t.remove("kairos")) {
+    // Extract [penny] table; if absent, no migration needed.
+    let penny = match value.as_table_mut().and_then(|t| t.remove("penny")) {
         Some(toml::Value::Table(t)) => t,
         Some(_) => {
             return Err(crate::error::GadgetronError::Config(
-                "legacy `[kairos]` must be a table".into(),
+                "legacy `[penny]` must be a table".into(),
             ))
         }
         None => return Ok(source.to_string()),
     };
 
     // claude_model is DROPPED (not migrated) — emit error log BEFORE we
-    // take any mutable borrows so we don't need to re-read the kairos
+    // take any mutable borrows so we don't need to re-read the penny
     // table later.
-    if kairos.contains_key("claude_model") {
+    if penny.contains_key("claude_model") {
         tracing::error!(
             target: "config_migration",
-            legacy = "kairos.claude_model",
+            legacy = "penny.claude_model",
             replacement = "agent.brain (operator-chosen)",
-            "legacy field `[kairos].claude_model` is dropped in Phase 2A — \
+            "legacy field `[penny].claude_model` is dropped in Phase 2A — \
              the agent cannot pick its own brain model (ADR-P2A-05 §14). \
              Move brain-selection logic to `[agent.brain]` and remove this field."
         );
@@ -308,41 +308,41 @@ fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
         })?;
 
         // Phase 1 — agent-level fields.
-        if let Some(v) = kairos.get("claude_binary").cloned() {
+        if let Some(v) = penny.get("claude_binary").cloned() {
             if agent.contains_key("binary") {
                 return Err(crate::error::GadgetronError::Config(
-                    "conflict: both `[kairos].claude_binary` and `[agent].binary` are \
-                     set — remove the legacy field from `[kairos]`"
+                    "conflict: both `[penny].claude_binary` and `[agent].binary` are \
+                     set — remove the legacy field from `[penny]`"
                         .into(),
                 ));
             }
             agent.insert("binary".into(), v);
-            emit_deprecation("kairos.claude_binary -> agent.binary");
+            emit_deprecation("penny.claude_binary -> agent.binary");
         }
 
-        if let Some(v) = kairos.get("request_timeout_secs").cloned() {
+        if let Some(v) = penny.get("request_timeout_secs").cloned() {
             if agent.contains_key("request_timeout_secs") {
                 return Err(crate::error::GadgetronError::Config(
-                    "conflict: both `[kairos].request_timeout_secs` and \
+                    "conflict: both `[penny].request_timeout_secs` and \
                      `[agent].request_timeout_secs` are set — remove the legacy field"
                         .into(),
                 ));
             }
             agent.insert("request_timeout_secs".into(), v);
-            emit_deprecation("kairos.request_timeout_secs -> agent.request_timeout_secs");
+            emit_deprecation("penny.request_timeout_secs -> agent.request_timeout_secs");
         }
 
-        if let Some(v) = kairos.get("max_concurrent_subprocesses").cloned() {
+        if let Some(v) = penny.get("max_concurrent_subprocesses").cloned() {
             if agent.contains_key("max_concurrent_subprocesses") {
                 return Err(crate::error::GadgetronError::Config(
-                    "conflict: both `[kairos].max_concurrent_subprocesses` and \
+                    "conflict: both `[penny].max_concurrent_subprocesses` and \
                      `[agent].max_concurrent_subprocesses` are set — remove the legacy field"
                         .into(),
                 ));
             }
             agent.insert("max_concurrent_subprocesses".into(), v);
             emit_deprecation(
-                "kairos.max_concurrent_subprocesses -> agent.max_concurrent_subprocesses",
+                "penny.max_concurrent_subprocesses -> agent.max_concurrent_subprocesses",
             );
         }
 
@@ -355,10 +355,10 @@ fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
             crate::error::GadgetronError::Config("`[agent.brain]` must be a table".into())
         })?;
 
-        if let Some(v) = kairos.get("claude_base_url").cloned() {
+        if let Some(v) = penny.get("claude_base_url").cloned() {
             if brain.contains_key("external_base_url") {
                 return Err(crate::error::GadgetronError::Config(
-                    "conflict: both `[kairos].claude_base_url` and \
+                    "conflict: both `[penny].claude_base_url` and \
                      `[agent.brain].external_base_url` are set — remove the legacy field"
                         .into(),
                 ));
@@ -367,7 +367,7 @@ fn migrate_legacy_kairos(source: &str) -> crate::error::Result<String> {
             if !brain.contains_key("mode") {
                 brain.insert("mode".into(), toml::Value::String("external_proxy".into()));
             }
-            emit_deprecation("kairos.claude_base_url -> agent.brain.external_base_url");
+            emit_deprecation("penny.claude_base_url -> agent.brain.external_base_url");
         }
     }
 
@@ -399,21 +399,21 @@ mod tests {
         );
     }
 
-    // ---- [kairos] → [agent.brain] migration (04 v2 §11.1) ----
+    // ---- [penny] → [agent.brain] migration (04 v2 §11.1) ----
 
     fn parse_after_migration(src: &str) -> toml::Value {
-        let migrated = migrate_legacy_kairos(src).expect("migration ok");
+        let migrated = migrate_legacy_penny(src).expect("migration ok");
         migrated.parse::<toml::Value>().expect("re-parse ok")
     }
 
     #[test]
-    fn migration_no_kairos_section_is_identity_modulo_round_trip() {
+    fn migration_no_penny_section_is_identity_modulo_round_trip() {
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
 request_timeout_ms = 30000
 "#;
-        let migrated = migrate_legacy_kairos(src).unwrap();
+        let migrated = migrate_legacy_penny(src).unwrap();
         // Parse both to Value for a structural equality check — toml
         // re-serialization may reorder keys and normalize whitespace.
         let orig: toml::Value = src.parse().unwrap();
@@ -426,7 +426,7 @@ request_timeout_ms = 30000
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
-[kairos]
+[penny]
 claude_binary = "/usr/bin/claude"
 "#;
         let v = parse_after_migration(src);
@@ -436,8 +436,8 @@ claude_binary = "/usr/bin/claude"
             "migrated value: {v:#?}"
         );
         assert!(
-            v.as_table().unwrap().get("kairos").is_none(),
-            "legacy [kairos] should be removed"
+            v.as_table().unwrap().get("penny").is_none(),
+            "legacy [penny] should be removed"
         );
     }
 
@@ -446,7 +446,7 @@ claude_binary = "/usr/bin/claude"
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
-[kairos]
+[penny]
 request_timeout_secs = 600
 "#;
         let v = parse_after_migration(src);
@@ -458,7 +458,7 @@ request_timeout_secs = 600
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
-[kairos]
+[penny]
 max_concurrent_subprocesses = 8
 "#;
         let v = parse_after_migration(src);
@@ -473,7 +473,7 @@ max_concurrent_subprocesses = 8
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
-[kairos]
+[penny]
 claude_base_url = "http://127.0.0.1:4000"
 "#;
         let v = parse_after_migration(src);
@@ -495,7 +495,7 @@ claude_base_url = "http://127.0.0.1:4000"
 bind = "0.0.0.0:8080"
 [agent.brain]
 mode = "external_anthropic"
-[kairos]
+[penny]
 claude_base_url = "http://localhost:4000"
 "#;
         let v = parse_after_migration(src);
@@ -515,7 +515,7 @@ claude_base_url = "http://localhost:4000"
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
-[kairos]
+[penny]
 claude_model = "claude-3-5-sonnet-20241022"
 "#;
         let v = parse_after_migration(src);
@@ -529,8 +529,8 @@ claude_model = "claude-3-5-sonnet-20241022"
                 );
             }
         }
-        // And of course [kairos] itself is gone.
-        assert!(v.as_table().unwrap().get("kairos").is_none());
+        // And of course [penny] itself is gone.
+        assert!(v.as_table().unwrap().get("penny").is_none());
     }
 
     #[test]
@@ -538,10 +538,10 @@ claude_model = "claude-3-5-sonnet-20241022"
         let src = r#"
 [agent]
 binary = "/usr/local/bin/claude"
-[kairos]
+[penny]
 claude_binary = "/usr/bin/claude"
 "#;
-        let err = migrate_legacy_kairos(src).expect_err("conflict");
+        let err = migrate_legacy_penny(src).expect_err("conflict");
         assert!(err.to_string().contains("conflict"));
         assert!(err.to_string().contains("binary"));
     }
@@ -551,10 +551,10 @@ claude_binary = "/usr/bin/claude"
         let src = r#"
 [agent.brain]
 external_base_url = "http://a"
-[kairos]
+[penny]
 claude_base_url = "http://b"
 "#;
-        let err = migrate_legacy_kairos(src).expect_err("conflict");
+        let err = migrate_legacy_penny(src).expect_err("conflict");
         assert!(err.to_string().contains("conflict"));
         assert!(err.to_string().contains("external_base_url"));
     }
@@ -562,13 +562,13 @@ claude_base_url = "http://b"
     #[test]
     fn migration_full_legacy_config_round_trips() {
         // Operator upgrading from v0.1.x with the canonical legacy shape
-        // per `02-kairos-agent.md v3 §10`.
+        // per `02-penny-agent.md v3 §10`.
         let src = r#"
 [server]
 bind = "0.0.0.0:8080"
 request_timeout_ms = 30000
 
-[kairos]
+[penny]
 claude_binary = "claude"
 claude_base_url = "http://127.0.0.1:4000"
 request_timeout_secs = 300
@@ -586,6 +586,6 @@ max_concurrent_subprocesses = 4
             Some("http://127.0.0.1:4000")
         );
         assert_eq!(v["agent"]["brain"]["mode"].as_str(), Some("external_proxy"));
-        assert!(v.as_table().unwrap().get("kairos").is_none());
+        assert!(v.as_table().unwrap().get("penny").is_none());
     }
 }

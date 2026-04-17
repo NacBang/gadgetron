@@ -1,6 +1,6 @@
 //! `ClaudeCodeSession` — consuming subprocess lifecycle.
 //!
-//! Spec: `docs/design/phase2/02-kairos-agent.md §5`.
+//! Spec: `docs/design/phase2/02-penny-agent.md §5`.
 //!
 //! Owns one Claude Code invocation from `claude -p` spawn through
 //! stdout drain + wait + stderr collection. The session exposes a
@@ -40,7 +40,7 @@
 //! `AgentConfig.request_timeout_secs` caps the total time between
 //! subprocess spawn and `message_stop`. On timeout, the driver
 //! SIGTERMs the child via `start_kill` and emits
-//! `KairosErrorKind::Timeout`.
+//! `PennyErrorKind::Timeout`.
 //!
 //! # Stdin contract (ADR-P2A-01 Part 2, verified 2026-04-13 on 2.1.104)
 //!
@@ -61,7 +61,7 @@ use gadgetron_core::audit::{
     NoopToolAuditEventSink, ToolAuditEvent, ToolAuditEventSink, ToolCallOutcome, ToolMetadata,
     ToolTier,
 };
-use gadgetron_core::error::{GadgetronError, KairosErrorKind, Result};
+use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::Role;
 use gadgetron_core::provider::{ChatChunk, ChatRequest};
 use tempfile::NamedTempFile;
@@ -71,7 +71,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::home::KairosHome;
+use crate::home::PennyHome;
 use crate::mcp_config::write_config_file;
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
@@ -88,7 +88,7 @@ const CHUNK_CHANNEL_CAPACITY: usize = 32;
 /// callers construct `ClaudeCodeSession` and call `.run()`; the driver
 /// resolves the spawn mode internally.
 ///
-/// Spec: `02-kairos-agent.md §5.2.5`.
+/// Spec: `02-penny-agent.md §5.2.5`.
 #[derive(Debug)]
 enum SpawnMode {
     Stateless,
@@ -116,13 +116,13 @@ pub struct ClaudeCodeSession {
     /// spawn inherits the caller's cwd — acceptable for tests but means
     /// Claude Code's per-project auto-memory keys to whatever directory
     /// the server was started from. Production (`register_with_router`)
-    /// always supplies one so the cwd pins to `~/.gadgetron/kairos/work/`.
-    kairos_home: Option<Arc<KairosHome>>,
+    /// always supplies one so the cwd pins to `~/.gadgetron/penny/work/`.
+    penny_home: Option<Arc<PennyHome>>,
     /// Absolute path to the `gadgetron.toml` the server was started with.
     /// Forwarded into the MCP config JSON as `--config <abs>` so the
     /// `gadgetron mcp serve` grandchild that Claude Code spawns can
     /// locate `[knowledge]` / `[agent]` regardless of its cwd (which is
-    /// pinned to `~/.gadgetron/kairos/work/` for auto-memory isolation).
+    /// pinned to `~/.gadgetron/penny/work/` for auto-memory isolation).
     /// `None` in tests and legacy constructors.
     config_path: Option<PathBuf>,
 }
@@ -131,7 +131,7 @@ impl ClaudeCodeSession {
     /// Construct a session with an explicit audit sink + tool metadata
     /// snapshot. The metadata snapshot is taken from
     /// `McpToolRegistry::tool_metadata_snapshot()` by the caller (the
-    /// `KairosProvider`). Tests that don't exercise audit can pass
+    /// `PennyProvider`). Tests that don't exercise audit can pass
     /// `NoopToolAuditEventSink::new_arc()` and an empty HashMap.
     pub fn new(
         config: Arc<AgentConfig>,
@@ -152,7 +152,7 @@ impl ClaudeCodeSession {
         )
     }
 
-    /// Variant that accepts an isolated Kairos home. Production wiring
+    /// Variant that accepts an isolated Penny home. Production wiring
     /// (`register_with_router`) calls this.
     pub fn new_with_home(
         config: Arc<AgentConfig>,
@@ -161,7 +161,7 @@ impl ClaudeCodeSession {
         tool_metadata: Arc<HashMap<String, ToolMetadata>>,
         audit_sink: Arc<dyn ToolAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
-        kairos_home: Option<Arc<KairosHome>>,
+        penny_home: Option<Arc<PennyHome>>,
     ) -> Self {
         Self::new_with_home_and_config_path(
             config,
@@ -170,14 +170,14 @@ impl ClaudeCodeSession {
             tool_metadata,
             audit_sink,
             session_store,
-            kairos_home,
+            penny_home,
             None,
         )
     }
 
     /// Full-fat constructor that additionally captures the operator's
     /// TOML path for MCP-child config lookup. Production wiring calls
-    /// this via `KairosProvider::chat_stream`.
+    /// this via `PennyProvider::chat_stream`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_home_and_config_path(
         config: Arc<AgentConfig>,
@@ -186,7 +186,7 @@ impl ClaudeCodeSession {
         tool_metadata: Arc<HashMap<String, ToolMetadata>>,
         audit_sink: Arc<dyn ToolAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
-        kairos_home: Option<Arc<KairosHome>>,
+        penny_home: Option<Arc<PennyHome>>,
         config_path: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -196,7 +196,7 @@ impl ClaudeCodeSession {
             tool_metadata,
             audit_sink,
             session_store,
-            kairos_home,
+            penny_home,
             config_path,
         }
     }
@@ -241,7 +241,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         tool_metadata,
         audit_sink,
         session_store,
-        kairos_home,
+        penny_home,
         config_path,
     } = session;
 
@@ -253,7 +253,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         audit_sink.as_ref(),
         &tx,
         session_store.as_deref(),
-        kairos_home.as_deref(),
+        penny_home.as_deref(),
         config_path.as_deref(),
     )
     .await
@@ -308,7 +308,7 @@ fn emit_tool_audit_if_needed(
 /// Resolve the spawn mode from config, request, and session store.
 /// Single decision point for native session branching.
 ///
-/// Spec: `02-kairos-agent.md §5.2.5`.
+/// Spec: `02-penny-agent.md §5.2.5`.
 async fn resolve_spawn_mode(
     config: &AgentConfig,
     request: &ChatRequest,
@@ -327,7 +327,7 @@ async fn resolve_spawn_mode(
         Some(s) => s,
         None => {
             tracing::warn!(
-                target: "kairos_session",
+                target: "penny_session",
                 conversation_id,
                 "conversation_id present but no SessionStore — stateless fallback"
             );
@@ -338,8 +338,8 @@ async fn resolve_spawn_mode(
     let (entry, first_turn) = store.get_or_create(conversation_id.to_string());
 
     if first_turn && config.session_mode == SessionMode::NativeOnly {
-        return Err(GadgetronError::Kairos {
-            kind: KairosErrorKind::SessionNotFound {
+        return Err(GadgetronError::Penny {
+            kind: PennyErrorKind::SessionNotFound {
                 conversation_id: conversation_id.to_string(),
             },
             message: "conversation not found in session store (native_only mode)".to_string(),
@@ -351,8 +351,8 @@ async fn resolve_spawn_mode(
         entry.mutex.clone().lock_owned(),
     )
     .await
-    .map_err(|_| GadgetronError::Kairos {
-        kind: KairosErrorKind::SessionConcurrent {
+    .map_err(|_| GadgetronError::Penny {
+        kind: PennyErrorKind::SessionConcurrent {
             conversation_id: conversation_id.to_string(),
         },
         message: "concurrent request on same conversation_id timed out waiting for mutex"
@@ -380,7 +380,7 @@ async fn resolve_spawn_mode(
 ///
 /// Arg count is intentionally high — every argument is a distinct
 /// subprocess-lifecycle concern (config, allowed tools, inbound request,
-/// tool metadata, audit sink, outbound channel, session store, kairos
+/// tool metadata, audit sink, outbound channel, session store, penny
 /// home). Bundling them into a struct just to satisfy a lint would
 /// obscure the ownership model (`&dyn`, `Option<&T>`) we need here.
 #[allow(clippy::too_many_arguments)]
@@ -392,7 +392,7 @@ async fn drive(
     audit_sink: &dyn ToolAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
     session_store: Option<&SessionStore>,
-    kairos_home: Option<&KairosHome>,
+    penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
 ) -> Result<()> {
     // 0. Resolve spawn mode (native session branching).
@@ -440,11 +440,11 @@ async fn drive(
 
     // 1. MCP config tempfile (M1 — mkstemp 0600 atomic). `config_path`
     // is forwarded so the MCP grandchild spawned by Claude Code can find
-    // `[knowledge]` / `[agent]` even though its cwd is pinned to Kairos's
+    // `[knowledge]` / `[agent]` even though its cwd is pinned to Penny's
     // neutral workdir (which contains no TOML).
     let mcp_tmp: NamedTempFile =
-        write_config_file(config_path).map_err(|e| GadgetronError::Kairos {
-            kind: KairosErrorKind::SpawnFailed {
+        write_config_file(config_path).map_err(|e| GadgetronError::Penny {
+            kind: PennyErrorKind::SpawnFailed {
                 reason: format!("mcp tmpfile: {e}"),
             },
             message: "failed to create MCP config tmpfile".to_string(),
@@ -458,21 +458,21 @@ async fn drive(
         claude_session_mode,
         &StdEnv,
     )
-    .map_err(|e| GadgetronError::Kairos {
-        kind: KairosErrorKind::SpawnFailed {
+    .map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::SpawnFailed {
             reason: e.to_string(),
         },
         message: format!("failed to build claude command: {e}"),
     })?;
 
-    // 2b. Kairos home isolation — CWD-only. We pin the subprocess cwd to
-    // Kairos's neutral workdir so Claude Code's per-project auto-memory
-    // key maps to a Kairos-scoped slug (never the operator's real repo).
+    // 2b. Penny home isolation — CWD-only. We pin the subprocess cwd to
+    // Penny's neutral workdir so Claude Code's per-project auto-memory
+    // key maps to a Penny-scoped slug (never the operator's real repo).
     // HOME stays real: Claude Max OAuth on macOS refuses to read the
     // keychain when HOME ≠ os.homedir() (see `home.rs` docstring for the
-    // full finding). When `kairos_home` is None (tests, legacy
+    // full finding). When `penny_home` is None (tests, legacy
     // constructors) we keep the cwd from `build_claude_command_with_session`.
-    if let Some(home) = kairos_home {
+    if let Some(home) = penny_home {
         cmd.current_dir(home.workdir());
     }
 
@@ -484,13 +484,13 @@ async fn drive(
         .spawn()
         .map_err(|e| {
             let kind = if e.kind() == std::io::ErrorKind::NotFound {
-                KairosErrorKind::NotInstalled
+                PennyErrorKind::NotInstalled
             } else {
-                KairosErrorKind::SpawnFailed {
+                PennyErrorKind::SpawnFailed {
                     reason: e.to_string(),
                 }
             };
-            GadgetronError::Kairos {
+            GadgetronError::Penny {
                 kind,
                 message: "failed to spawn claude subprocess".to_string(),
             }
@@ -511,7 +511,7 @@ async fn drive(
 
     // 5. Compute the deadline BEFORE writing stdin — per ADR-P2A-06
     //    Implementation status addendum item 5 (B-2 regression). The
-    //    `request_timeout_secs` contract in `02-kairos-agent.md §5` covers
+    //    `request_timeout_secs` contract in `02-penny-agent.md §5` covers
     //    the full subprocess span from spawn to `message_stop`; computing
     //    the deadline after `feed_stdin` would let long chat histories or
     //    slow OS pipe buffers consume seconds outside the timeout window.
@@ -536,8 +536,8 @@ async fn drive(
         line.clear();
         tokio::select! {
             read = reader.read_line(&mut line) => {
-                let n = read.map_err(|e| GadgetronError::Kairos {
-                    kind: KairosErrorKind::AgentError {
+                let n = read.map_err(|e| GadgetronError::Penny {
+                    kind: PennyErrorKind::AgentError {
                         exit_code: -1,
                         stderr_redacted: String::new(),
                     },
@@ -576,7 +576,7 @@ async fn drive(
                     Ok(None) => { /* empty line or unknown variant */ }
                     Err(e) => {
                         tracing::warn!(
-                            target: "kairos_stream",
+                            target: "penny_stream",
                             error = %e,
                             "stream-json line did not parse; skipping"
                         );
@@ -604,17 +604,17 @@ async fn drive(
         // Regression-locked by `stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop`.
         let _ = tokio::time::timeout(Duration::from_secs(2), stderr_handle).await;
         drop(mcp_tmp);
-        return Err(GadgetronError::Kairos {
-            kind: KairosErrorKind::Timeout {
+        return Err(GadgetronError::Penny {
+            kind: PennyErrorKind::Timeout {
                 seconds: timeout_secs,
             },
-            message: "kairos subprocess exceeded request_timeout_secs".to_string(),
+            message: "penny subprocess exceeded request_timeout_secs".to_string(),
         });
     }
 
     // 7. Wait for exit status (NOT wait_with_output).
-    let status = child.wait().await.map_err(|e| GadgetronError::Kairos {
-        kind: KairosErrorKind::AgentError {
+    let status = child.wait().await.map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::AgentError {
             exit_code: -1,
             stderr_redacted: String::new(),
         },
@@ -629,18 +629,18 @@ async fn drive(
     if !status.success() {
         let exit_code = status.code().unwrap_or(-1);
         tracing::warn!(
-            target: "kairos_subprocess",
+            target: "penny_subprocess",
             exit_code,
             stderr = %stderr_redacted,
-            "kairos subprocess exited with error"
+            "penny subprocess exited with error"
         );
         drop(mcp_tmp);
-        return Err(GadgetronError::Kairos {
-            kind: KairosErrorKind::AgentError {
+        return Err(GadgetronError::Penny {
+            kind: PennyErrorKind::AgentError {
                 exit_code,
                 stderr_redacted,
             },
-            message: "kairos subprocess exited with error".to_string(),
+            message: "penny subprocess exited with error".to_string(),
         });
     }
 
@@ -658,7 +658,7 @@ async fn drive(
 /// How `feed_stdin` should shape the stdin payload. Selected by the
 /// driver based on `SpawnMode` / `ChatRequest.conversation_id`.
 ///
-/// Spec: `02-kairos-agent.md §5.2.6`.
+/// Spec: `02-penny-agent.md §5.2.6`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdinMode {
     /// Flatten the full `req.messages` history into
@@ -678,7 +678,7 @@ pub enum StdinMode {
 
 /// Build the stdin payload bytes for a given mode. Separated from
 /// the async I/O so helpers + tests can verify the exact bytes.
-/// Returns `Err(KairosErrorKind::ToolInvalidArgs)` if a required
+/// Returns `Err(PennyErrorKind::ToolInvalidArgs)` if a required
 /// message is missing (e.g. resume turn with no user message).
 pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String> {
     match mode {
@@ -709,8 +709,8 @@ pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String>
                 .iter()
                 .rev()
                 .find(|m| matches!(m.role, Role::User))
-                .ok_or_else(|| GadgetronError::Kairos {
-                    kind: KairosErrorKind::ToolInvalidArgs {
+                .ok_or_else(|| GadgetronError::Penny {
+                    kind: PennyErrorKind::ToolInvalidArgs {
                         reason: "first-turn request must contain at least one user message"
                             .to_string(),
                     },
@@ -729,15 +729,15 @@ pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String>
             // `messages.last()`. Anything else is a caller bug —
             // the gateway is responsible for appending the new user
             // turn to the client-supplied history.
-            let last = req.messages.last().ok_or_else(|| GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolInvalidArgs {
+            let last = req.messages.last().ok_or_else(|| GadgetronError::Penny {
+                kind: PennyErrorKind::ToolInvalidArgs {
                     reason: "resume-turn request must contain at least one message".to_string(),
                 },
                 message: "native_resume_turn: empty messages".to_string(),
             })?;
             if !matches!(last.role, Role::User) {
-                return Err(GadgetronError::Kairos {
-                    kind: KairosErrorKind::ToolInvalidArgs {
+                return Err(GadgetronError::Penny {
+                    kind: PennyErrorKind::ToolInvalidArgs {
                         reason: format!(
                             "resume-turn expected messages.last().role == User, got {:?}",
                             last.role
@@ -759,8 +759,8 @@ async fn feed_stdin_with_mode(stdin: ChildStdin, req: &ChatRequest, mode: StdinM
     stdin
         .write_all(buf.as_bytes())
         .await
-        .map_err(|e| GadgetronError::Kairos {
-            kind: KairosErrorKind::SpawnFailed {
+        .map_err(|e| GadgetronError::Penny {
+            kind: PennyErrorKind::SpawnFailed {
                 reason: format!("stdin write failed: {e}"),
             },
             message: "failed to write conversation history to claude stdin".to_string(),
@@ -789,7 +789,7 @@ mod tests {
 
     fn test_request() -> ChatRequest {
         ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![
                 Message::system("be helpful"),
                 Message::user("hello"),
@@ -843,7 +843,7 @@ mod tests {
     }
 
     /// If the `claude` binary is missing, `drive` must surface
-    /// `KairosErrorKind::NotInstalled` — not a generic spawn failure.
+    /// `PennyErrorKind::NotInstalled` — not a generic spawn failure.
     #[tokio::test]
     async fn spawn_missing_binary_returns_not_installed() {
         let mut cfg = AgentConfig::default();
@@ -856,8 +856,8 @@ mod tests {
         let first = stream.next().await.expect("must yield one item");
         let err = first.expect_err("must be error");
         match err {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 ..
             } => {}
             other => panic!("wrong variant: {other:?}"),
@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn kairos_emits_tool_call_completed_audit_entry() {
+    fn penny_emits_tool_call_completed_audit_entry() {
         // TDD Red → Green for ADR-P2A-06 addendum item 1.
         //
         // Construct a ToolUse stream-json event with the Claude Code
@@ -1029,7 +1029,7 @@ mod tests {
         }
         messages.push(Message::user("FINAL TURN"));
         ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages,
             temperature: None,
             max_tokens: None,
@@ -1056,7 +1056,7 @@ mod tests {
         // Per §5.2.10 item 9. A first-turn request with a System
         // message + a new user turn writes `"{system}\n\n{user}"`.
         let req = ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![Message::system("be helpful"), Message::user("hi")],
             temperature: None,
             max_tokens: None,
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn first_turn_stdin_without_system_message_just_emits_user() {
         let req = ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![Message::user("what time is it")],
             temperature: None,
             max_tokens: None,
@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn first_turn_stdin_with_no_user_message_errors() {
         let req = ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![Message::system("be helpful")],
             temperature: None,
             max_tokens: None,
@@ -1105,8 +1105,8 @@ mod tests {
         };
         let err = build_stdin_payload(&req, StdinMode::NativeFirstTurn).expect_err("must error");
         match err {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolInvalidArgs { .. },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolInvalidArgs { .. },
                 ..
             } => {}
             other => panic!("wrong variant: {other:?}"),
@@ -1132,7 +1132,7 @@ mod tests {
         // NOT user is a caller bug — gateway appends the new user
         // message; if it didn't, we fail loud with ToolInvalidArgs.
         let req = ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![Message::user("hi"), Message::assistant("hello")],
             temperature: None,
             max_tokens: None,
@@ -1145,8 +1145,8 @@ mod tests {
         let err = build_stdin_payload(&req, StdinMode::NativeResumeTurn)
             .expect_err("must reject assistant-last");
         match err {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolInvalidArgs { reason },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolInvalidArgs { reason },
                 ..
             } => {
                 assert!(
@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn resume_turn_rejects_empty_messages() {
         let req = ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![],
             temperature: None,
             max_tokens: None,
@@ -1175,8 +1175,8 @@ mod tests {
             build_stdin_payload(&req, StdinMode::NativeResumeTurn).expect_err("must reject empty");
         assert!(matches!(
             err,
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolInvalidArgs { .. },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolInvalidArgs { .. },
                 ..
             }
         ));
@@ -1186,39 +1186,39 @@ mod tests {
 
     #[test]
     fn session_not_found_maps_to_http_404() {
-        let err = GadgetronError::Kairos {
-            kind: KairosErrorKind::SessionNotFound {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::SessionNotFound {
                 conversation_id: "ghost".to_string(),
             },
             message: "no such conversation".to_string(),
         };
         assert_eq!(err.http_status_code(), 404);
-        assert_eq!(err.error_code(), "kairos_session_not_found");
+        assert_eq!(err.error_code(), "penny_session_not_found");
     }
 
     #[test]
     fn session_concurrent_maps_to_http_429() {
-        let err = GadgetronError::Kairos {
-            kind: KairosErrorKind::SessionConcurrent {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::SessionConcurrent {
                 conversation_id: "c1".to_string(),
             },
             message: "concurrent".to_string(),
         };
         assert_eq!(err.http_status_code(), 429);
-        assert_eq!(err.error_code(), "kairos_session_concurrent");
+        assert_eq!(err.error_code(), "penny_session_concurrent");
     }
 
     #[test]
     fn session_corrupted_maps_to_http_500() {
-        let err = GadgetronError::Kairos {
-            kind: KairosErrorKind::SessionCorrupted {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::SessionCorrupted {
                 conversation_id: "c1".to_string(),
                 reason: "jsonl missing".to_string(),
             },
             message: "corrupted".to_string(),
         };
         assert_eq!(err.http_status_code(), 500);
-        assert_eq!(err.error_code(), "kairos_session_corrupted");
+        assert_eq!(err.error_code(), "penny_session_corrupted");
     }
 
     // ---- B-2 regression lock (ADR-P2A-06 addendum item 5) ----
@@ -1230,7 +1230,7 @@ mod tests {
         // `drive` function. Otherwise stdin write time escapes
         // `request_timeout_secs` — on long chat histories or a slow OS pipe
         // buffer, `feed_stdin` can consume seconds that the contract says
-        // MUST be inside the deadline (see 02-kairos-agent.md §5 contract
+        // MUST be inside the deadline (see 02-penny-agent.md §5 contract
         // language: "caps the total time between subprocess spawn and
         // `message_stop`"). A behavioral test would require a fake claude
         // that blocks stdin reads; Step 21's `fake_claude` will add it, but
@@ -1252,7 +1252,7 @@ mod tests {
             "B-2 regression: `let deadline` (byte {deadline_idx}) must precede \
              `feed_stdin_with_mode` (byte {feed_idx}) so stdin write time \
              is included in request_timeout_secs. Per ADR-P2A-06 Implementation \
-             status addendum item 5 and 02-kairos-agent.md §5 contract."
+             status addendum item 5 and 02-penny-agent.md §5 contract."
         );
     }
 
@@ -1303,7 +1303,7 @@ mod tests {
 
     fn request_with_conv_id(id: Option<&str>) -> ChatRequest {
         ChatRequest {
-            model: "kairos".into(),
+            model: "penny".into(),
             messages: vec![Message::user("hi")],
             temperature: None,
             max_tokens: None,
@@ -1433,8 +1433,8 @@ mod tests {
             .await
             .expect_err("must return SessionNotFound");
         match err {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::SessionNotFound { conversation_id },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::SessionNotFound { conversation_id },
                 ..
             } => {
                 assert_eq!(conversation_id, "ghost");

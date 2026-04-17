@@ -13,7 +13,7 @@ members = [
     "crates/gadgetron-testing",
     "crates/gadgetron-web",
     "crates/gadgetron-knowledge",
-    "crates/gadgetron-kairos",
+    "crates/gadgetron-penny",
 ]
 
 [workspace.package]
@@ -35,7 +35,7 @@ gadgetron-xaas = { path = "crates/gadgetron-xaas" }
 gadgetron-testing = { path = "crates/gadgetron-testing" }
 gadgetron-web = { path = "crates/gadgetron-web" }
 gadgetron-knowledge = { path = "crates/gadgetron-knowledge" }
-gadgetron-kairos = { path = "crates/gadgetron-kairos" }
+gadgetron-penny = { path = "crates/gadgetron-penny" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

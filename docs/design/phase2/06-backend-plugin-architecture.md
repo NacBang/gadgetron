@@ -4,7 +4,7 @@
 > **Author**: PM (Claude)
 > **Parent**: `docs/design/phase2/00-overview.md`, `docs/design/phase2/01-knowledge-layer.md`, `docs/design/phase2/05-knowledge-semantic.md`
 > **Drives**: P2B workstream "plugin-ai-infra extraction"
-> **Scope**: Separate the AI-infrastructure management functionality from the core Kairos/knowledge/gateway stack, enabling multiple backends (AI infra, CI/CD, accounting, ...) to plug into the same collaboration hub.
+> **Scope**: Separate the AI-infrastructure management functionality from the core Penny/knowledge/gateway stack, enabling multiple backends (AI infra, CI/CD, accounting, ...) to plug into the same collaboration hub.
 > **Relationship to ADR-P2A-07**: Complementary. ADR-P2A-07 confirms "지식 레이어 core는 도메인 비종속" — this document makes the functional layer match that principle.
 
 ---
@@ -29,12 +29,12 @@
 
 ### Problem
 
-Gadgetron's current crate layout mixes **backend-agnostic** infrastructure (gateway, Kairos, knowledge, web UI) with **AI-infrastructure-specific** code (provider adapters, scheduler, node monitor, model catalog) in a single monolithic binary. This works for Phase 2A's single-backend scope, but:
+Gadgetron's current crate layout mixes **backend-agnostic** infrastructure (gateway, Penny, knowledge, web UI) with **AI-infrastructure-specific** code (provider adapters, scheduler, node monitor, model catalog) in a single monolithic binary. This works for Phase 2A's single-backend scope, but:
 
 - **ADR-P2A-07 explicitly states** the knowledge layer is domain-agnostic. Today's AI-infra backend is a use case, not the system's identity.
 - Adding a second backend (CI/CD, calendar, accounting, ...) would currently require editing core crates.
 - Uninstalling AI-infra code is architecturally impossible — it is entangled.
-- `gadgetron-web`, `gadgetron-kairos`, `gadgetron-knowledge` are already designed to be backend-neutral; only the binary composition is monolithic.
+- `gadgetron-web`, `gadgetron-penny`, `gadgetron-knowledge` are already designed to be backend-neutral; only the binary composition is monolithic.
 
 ### Principle
 
@@ -51,7 +51,7 @@ Follows directly from ADR-P2A-07's domain-agnostic framing + `05-knowledge-seman
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │                🟦 CORE (backend-agnostic)                          │
-│                "Kairos의 집 + 협업 기판"                            │
+│                "Penny의 집 + 협업 기판"                            │
 │  ┌────────────────────────────────────────────────────────────┐   │
 │  │  gadgetron-core                                             │   │
 │  │   · AppConfig, GadgetronError, LlmProvider trait            │   │
@@ -64,10 +64,10 @@ Follows directly from ADR-P2A-07's domain-agnostic framing + `05-knowledge-seman
 │  └──────────────────┘  └──────────────────┘  │ postgres pool  │   │
 │                                              │ + pgvector     │   │
 │  ┌─────────────────────────────────────────┐ └────────────────┘   │
-│  │ gadgetron-kairos                        │                      │
+│  │ gadgetron-penny                        │                      │
 │  │   · Claude Code 서브프로세스 드라이버    │                      │
 │  │   · McpToolRegistry (plugins register here)                    │
-│  │   · Kairos 페르소나 system prompt                               │
+│  │   · Penny 페르소나 system prompt                               │
 │  └─────────────────────────────────────────┘                      │
 │  ┌─────────────────────────────────────────┐                      │
 │  │ gadgetron-knowledge                     │   ← JARVIS의 "기억"   │
@@ -313,7 +313,7 @@ Then for each page:
 crates/
 ├── gadgetron-core
 ├── gadgetron-gateway
-├── gadgetron-kairos
+├── gadgetron-penny
 ├── gadgetron-knowledge
 ├── gadgetron-web
 ├── gadgetron-xaas
@@ -330,7 +330,7 @@ crates/
 crates/
 ├── gadgetron-core          (BackendPlugin trait + PluginRegistry here)
 ├── gadgetron-gateway
-├── gadgetron-kairos
+├── gadgetron-penny
 ├── gadgetron-knowledge     (ADR-P2A-07 pgvector + embedding)
 ├── gadgetron-web
 ├── gadgetron-xaas          (tenants/audit only; model-catalog moved)
@@ -383,7 +383,7 @@ The user's vision is JARVIS. The architectural payoff of "one shared wiki + many
 
 Flow:
 
-1. **Kairos receives the query.** Model reasons about domains involved: ai-infra + cicd.
+1. **Penny receives the query.** Model reasons about domains involved: ai-infra + cicd.
 2. **Hybrid search** (one call, both domains):
    - Semantic: embedding of "부팅 실패 배포 시기" matches both ai-infra incident pages AND cicd deploy-log pages.
    - Keyword: "H100", "deploy", "CI" hit both.
@@ -391,8 +391,8 @@ Flow:
 3. **Tool calls** (plugin-specific):
    - `mcp__ai-infra__gpu.stats` (ai-infra plugin)
    - `mcp__cicd__deploy.log` (cicd plugin, future)
-   - Kairos calls both sequentially based on what the wiki pages reference.
-4. **Synthesis.** Kairos combines retrieved knowledge + live data in the user's language.
+   - Penny calls both sequentially based on what the wiki pages reference.
+4. **Synthesis.** Penny combines retrieved knowledge + live data in the user's language.
 5. **Knowledge capture.** If the conclusion is new, `wiki.write` to `decisions/cross/<date>-gpu-vs-ci.md` with `tags = ["ai-infra", "cicd"]`.
 
 This is **impossible** with namespaced-per-plugin wikis. The shared wiki is the architectural linchpin.
@@ -403,7 +403,7 @@ This is **impossible** with namespaced-per-plugin wikis. The shared wiki is the 
 
 ### P2A (current, DONE)
 
-- Kairos, knowledge, gateway, web all shipped as one binary.
+- Penny, knowledge, gateway, web all shipped as one binary.
 - AI-infra code sits in separate crates but statically linked into binary.
 - PR #31 on main delivered the demo-capable integration.
 
@@ -430,10 +430,10 @@ This is **impossible** with namespaced-per-plugin wikis. The shared wiki is the 
 
 ---
 
-## 9.5. Kairos brain ↔ ai-infra provider seam (Sprint B1 prep)
+## 9.5. Penny brain ↔ ai-infra provider seam (Sprint B1 prep)
 
 User-flagged gap (2026-04-16 session): 
-> Kairos의 endpoint와 ai-infra provider는 별개로 관리가 되어야 할 것 같은데, 맞나?
+> Penny의 endpoint와 ai-infra provider는 별개로 관리가 되어야 할 것 같은데, 맞나?
 
 ### Current state
 
@@ -441,10 +441,10 @@ Two parallel concepts in `gadgetron.toml` that don't yet cross-reference:
 
 | Concept | Where | What it controls |
 |---|---|---|
-| Kairos brain | `[agent.brain]` | Which LLM endpoint Claude Code reasons through |
+| Penny brain | `[agent.brain]` | Which LLM endpoint Claude Code reasons through |
 | LLM providers | `[providers.*]` | What raw models `/v1/chat/completions` exposes to callers |
 
-`BrainMode` today: `ClaudeMax | ExternalAnthropic | ExternalProxy | GadgetronLocal` — none of them reference `[providers.*]`. To point Kairos at a local vLLM, the operator currently has to run a separate LiteLLM-style proxy so the provider's OpenAI-compat endpoint is rewrapped as Anthropic-compat.
+`BrainMode` today: `ClaudeMax | ExternalAnthropic | ExternalProxy | GadgetronLocal` — none of them reference `[providers.*]`. To point Penny at a local vLLM, the operator currently has to run a separate LiteLLM-style proxy so the provider's OpenAI-compat endpoint is rewrapped as Anthropic-compat.
 
 ### Proposed addition
 
@@ -485,9 +485,9 @@ models = ["claude-3-5-haiku-20241022"]
 
 ### Plugin-architecture implication
 
-When `ai-infra` becomes a plugin (P2B), LLM providers move into `plugin-ai-infra`. The core Kairos (still in the binary) resolves the `brain.provider` reference via the generic `LlmProvider` registry maintained by core. The plugin contributes entries; Kairos consumes one.
+When `ai-infra` becomes a plugin (P2B), LLM providers move into `plugin-ai-infra`. The core Penny (still in the binary) resolves the `brain.provider` reference via the generic `LlmProvider` registry maintained by core. The plugin contributes entries; Penny consumes one.
 
-This is the **core principle**: Kairos is core (identity travels with the product), ai-infra providers are plugin-scoped (domain-specific). The brain-provider seam is the bridge.
+This is the **core principle**: Penny is core (identity travels with the product), ai-infra providers are plugin-scoped (domain-specific). The brain-provider seam is the bridge.
 
 ### Why deferred
 
@@ -502,7 +502,7 @@ Estimated ~200 lines including tests. Scheduled for Sprint B3 after ADR-P2A-07 (
 
 - `[agent.brain] mode = "use_provider", provider = "foo"` where `[providers.foo] type = "anthropic"` works end-to-end.
 - Non-anthropic provider types fail validation with a clear message pointing at `external_proxy`.
-- `docs/manual/kairos.md` gains a section "Using an ai-infra provider as Kairos's brain".
+- `docs/manual/penny.md` gains a section "Using an ai-infra provider as Penny's brain".
 
 ---
 
@@ -512,7 +512,7 @@ Estimated ~200 lines including tests. Scheduled for Sprint B3 after ADR-P2A-07 (
 2. **Plugin config validation** — each plugin owns its `[plugins.<name>]` schema validation. Should the core do sanity checks (e.g., `enabled` list matches compiled-in plugins)? Propose: yes, at startup.
 3. **Plugin version / core version compatibility** — P2B+. Semver compat matrix or capability-flag negotiation.
 4. **Seed page update semantics** — if operator has edited a seeded page, and the plugin upgrades, do we overwrite? Propose: never overwrite operator edits; emit `gadgetron wiki audit`-style warning.
-5. **LLM provider plugins** — the ai-infra plugin currently contributes LLM providers (vllm, sglang, etc.). Is this a plugin concern or a separate concept? Propose: plugins CAN register providers via `PluginContext::register_llm_provider`, but Kairos itself (embedded in core) is NOT a plugin. Kairos is part of the core identity.
+5. **LLM provider plugins** — the ai-infra plugin currently contributes LLM providers (vllm, sglang, etc.). Is this a plugin concern or a separate concept? Propose: plugins CAN register providers via `PluginContext::register_llm_provider`, but Penny itself (embedded in core) is NOT a plugin. Penny is part of the core identity.
 6. **Observability conventions** — plugin-emitted traces/metrics should carry `plugin = "<name>"` span attribute. Standardize in core.
 
 ---
@@ -521,7 +521,7 @@ Estimated ~200 lines including tests. Scheduled for Sprint B3 after ADR-P2A-07 (
 
 - **Not a package manager.** P2A-P2C do not include plugin installation/discovery/marketplace. Plugins are compiled-in crates the operator chooses at build time.
 - **Not a sandbox.** Plugins run in the same process with full access. No capability-based security. Revisit in P3.
-- **Not an API gateway for non-Kairos clients.** Plugins expose MCP tools for Kairos; they may optionally expose HTTP routes under `/api/v1/plugins/<name>/*`, but the primary surface is Kairos.
+- **Not an API gateway for non-Penny clients.** Plugins expose MCP tools for Penny; they may optionally expose HTTP routes under `/api/v1/plugins/<name>/*`, but the primary surface is Penny.
 
 ---
 

@@ -1,4 +1,4 @@
-# 02 — Kairos Agent Adapter Detailed Implementation Spec (`gadgetron-kairos`)
+# 02 — Penny Agent Adapter Detailed Implementation Spec (`gadgetron-penny`)
 
 > **Status**: Draft v4 (Path 1 alignment — agent-centric control plane, approval flow deferred to P2B)
 > **Author**: PM (Claude)
@@ -6,12 +6,12 @@
 > **Date (v4)**: 2026-04-14
 > **Parent**: `docs/design/phase2/00-overview.md` v3, `04-mcp-tool-registry.md` v2 (new source of truth for `[agent]` config)
 > **Sibling**: `docs/design/phase2/01-knowledge-layer.md` v3, `03-gadgetron-web.md` v2.1, `04-mcp-tool-registry.md` v2
-> **Scope (v4)**: `gadgetron-kairos` crate + `gadgetron-core::error::GadgetronError::Kairos` variant + subprocess spawn discipline. Agent-centric control plane types (`McpToolProvider`, `AgentConfig`) live in `gadgetron-core::agent::*` per `04 v2`. Approval flow (`ApprovalRegistry`, SSE emit, `POST /v1/approvals/{id}`) is **deferred to Phase 2B per ADR-P2A-06**.
+> **Scope (v4)**: `gadgetron-penny` crate + `gadgetron-core::error::GadgetronError::Penny` variant + subprocess spawn discipline. Agent-centric control plane types (`McpToolProvider`, `AgentConfig`) live in `gadgetron-core::agent::*` per `04 v2`. Approval flow (`ApprovalRegistry`, SSE emit, `POST /v1/approvals/{id}`) is **deferred to Phase 2B per ADR-P2A-06**.
 > **Implementation determinism**: every type, function, error, and test is explicit. No TBD, no hand-waving — any competent contributor must be able to produce the same code from this doc.
 > **Provenance**:
 > - v2 → v3: Round 2 review (chief-architect CA-B1/B2/B3/DET1, security SEC-B1/B3/B4, dx DX-B3, qa QA-NB2/DET1/DET2/DET3/NIT4, gap GAP-3) addressed 2026-04-13
-> - v3 → v4: Agent-centric pivot alignment (D-20260414-04, ADR-P2A-05, ADR-P2A-06). Config namespace `[kairos]` is now **legacy** — the canonical P2A schema is `[agent]` + `[agent.brain]` in `04 v2 §4`. This doc's §10 retains the v3 `KairosConfig` as an **internal struct** fed from `[agent.brain]` via the loader; the legacy `[kairos]` TOML example is retained for migration reference only (see `04 v2 §11.1`).
-> **Current trunk note**: references below to `gadgetron kairos init` are design-history / bootstrap-UX debt, not the shipped CLI surface. Current trunk uses manual `[agent]` + `[agent.brain]` + `[knowledge]` authoring plus `gadgetron mcp serve`.
+> - v3 → v4: Agent-centric pivot alignment (D-20260414-04, ADR-P2A-05, ADR-P2A-06). Config namespace `[penny]` is now **legacy** — the canonical P2A schema is `[agent]` + `[agent.brain]` in `04 v2 §4`. This doc's §10 retains the v3 `PennyConfig` as an **internal struct** fed from `[agent.brain]` via the loader; the legacy `[penny]` TOML example is retained for migration reference only (see `04 v2 §11.1`).
+> **Current trunk note**: references below to `gadgetron penny init` are design-history / bootstrap-UX debt, not the shipped CLI surface. Current trunk uses manual `[agent]` + `[agent.brain]` + `[knowledge]` authoring plus `gadgetron mcp serve`.
 
 ## Table of Contents
 
@@ -23,7 +23,7 @@
 6. Stream translation
 7. MCP config tmpfile (M1)
 8. Stderr redaction (M2)
-9. `GadgetronError::Kairos` extension
+9. `GadgetronError::Penny` extension
 10. Configuration
 11. Provider registration in router
 12. `gadgetron mcp serve` / bootstrap wiring
@@ -32,7 +32,7 @@
 15. Security & Threat Model (STRIDE)
 16. ADRs required before implementation
 17. Open items
-18. `KairosFixture` test harness
+18. `PennyFixture` test harness
 19. Review provenance
 
 ---
@@ -40,13 +40,13 @@
 ## 1. Scope & Non-Scope
 
 ### In scope
-- `gadgetron-kairos` crate: `LlmProvider` impl, Claude Code subprocess, stream translation, MCP config tmpfile, stderr redaction
-- `gadgetron-core::error::GadgetronError::Kairos { kind: KairosErrorKind, message: String }` variant
-- Register `KairosProvider` in router's provider map
+- `gadgetron-penny` crate: `LlmProvider` impl, Claude Code subprocess, stream translation, MCP config tmpfile, stderr redaction
+- `gadgetron-core::error::GadgetronError::Penny { kind: PennyErrorKind, message: String }` variant
+- Register `PennyProvider` in router's provider map
 - `gadgetron-cli::cmd_mcp_serve` dispatch
-- `gadgetron-cli::cmd_kairos_init` dispatch (stdout contract authoritative in `01-knowledge-layer.md` §1.1)
+- `gadgetron-cli::cmd_penny_init` dispatch (stdout contract authoritative in `01-knowledge-layer.md` §1.1)
 - ADR-P2A-01/02/03
-- `KairosFixture` test harness in `gadgetron-testing` (§18)
+- `PennyFixture` test harness in `gadgetron-testing` (§18)
 
 ### Out of scope — deferred or sibling
 - Wiki / MCP server implementation → `01-knowledge-layer.md`
@@ -56,11 +56,11 @@
 - Multi-user per-tenant session → P2C
 
 ### Compile sequencing (chief-arch N4)
-`gadgetron-kairos` requires `gadgetron-core` to have BOTH `Wiki` and `Kairos` variants defined. Both variant additions MUST land in a **single core PR** at the start of P2A implementation, before either knowledge or kairos crate is coded. This prevents a dep cycle where 01 and 02 can't build standalone.
+`gadgetron-penny` requires `gadgetron-core` to have BOTH `Wiki` and `Penny` variants defined. Both variant additions MUST land in a **single core PR** at the start of P2A implementation, before either knowledge or penny crate is coded. This prevents a dep cycle where 01 and 02 can't build standalone.
 
 ### Preconditions from 00-overview v2 + 01 v2
-- Architecture: kairos as provider (not gateway handler)
-- Error taxonomy: `KairosErrorKind` nested, this spec owns the variant addition
+- Architecture: penny as provider (not gateway handler)
+- Error taxonomy: `PennyErrorKind` nested, this spec owns the variant addition
 - Security mitigations: M1 (tempfile atomic 0600), M2 (redact_stderr), M4 (verify or sandbox), M6 (tools_called names), M8 (P2A risk acceptance)
 - OSS stack: `tempfile`, `tokio::process`, `async_stream` (new), `which` (new), `regex`, `once_cell`
 
@@ -72,15 +72,15 @@
 ```toml
 [workspace.dependencies]
 # existing ...
-async_stream = "0.3"           # NEW — gadgetron-kairos session.rs
-which = "6"                    # NEW — gadgetron-kairos health()
+async_stream = "0.3"           # NEW — gadgetron-penny session.rs
+which = "6"                    # NEW — gadgetron-penny health()
 ```
 
-### `crates/gadgetron-kairos/Cargo.toml`
+### `crates/gadgetron-penny/Cargo.toml`
 
 ```toml
 [package]
-name = "gadgetron-kairos"
+name = "gadgetron-penny"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -125,18 +125,18 @@ format; `feed_stdin` unconditionally writes concatenated text.
 ### Module tree
 
 ```
-crates/gadgetron-kairos/
+crates/gadgetron-penny/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
-│   ├── provider.rs       — KairosProvider: LlmProvider impl
+│   ├── provider.rs       — PennyProvider: LlmProvider impl
 │   ├── session.rs        — ClaudeCodeSession: consuming run()
 │   ├── stream.rs         — stream-json → ChatChunk translator
 │   ├── spawn.rs          — Command builder with kill_on_drop(true)
 │   ├── mcp_config.rs     — tempfile M1 (atomic 0600, non-unix compile_error)
 │   ├── redact.rs         — redact_stderr (M2, NO oauth_state catch-all)
-│   ├── error.rs          — Local KairosError + conversion
-│   └── config.rs         — KairosConfig + validation
+│   ├── error.rs          — Local PennyError + conversion
+│   └── config.rs         — PennyConfig + validation
 └── tests/
     ├── sse_conformance.rs
     ├── subprocess_determinism.rs
@@ -162,9 +162,9 @@ pub mod redact;
 pub mod config;
 pub mod error;
 
-pub use config::KairosConfig;
-pub use error::{KairosError, KairosErrorKind};
-pub use provider::{KairosProvider, register_with_router};
+pub use config::PennyConfig;
+pub use error::{PennyError, PennyErrorKind};
+pub use provider::{PennyProvider, register_with_router};
 pub use redact::redact_stderr;
 ```
 
@@ -186,33 +186,33 @@ use futures::Stream;
 use gadgetron_core::provider::{LlmProvider, ChatRequest, ChatResponse, ChatChunk, ModelInfo};
 use gadgetron_core::error::{GadgetronError, Result};
 
-use crate::config::KairosConfig;
-use crate::error::KairosErrorKind;
+use crate::config::PennyConfig;
+use crate::error::PennyErrorKind;
 
-pub struct KairosProvider {
-    config: Arc<KairosConfig>,
+pub struct PennyProvider {
+    config: Arc<PennyConfig>,
 }
 
-impl KairosProvider {
-    pub fn new(config: KairosConfig) -> Self {
+impl PennyProvider {
+    pub fn new(config: PennyConfig) -> Self {
         Self { config: Arc::new(config) }
     }
 }
 
 #[async_trait]
-impl LlmProvider for KairosProvider {
-    fn name(&self) -> &str { "kairos" }
+impl LlmProvider for PennyProvider {
+    fn name(&self) -> &str { "penny" }
 
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse> {
-        // Kairos supports streaming only (P2A scope). Non-streaming `chat()` is
+        // Penny supports streaming only (P2A scope). Non-streaming `chat()` is
         // intentionally not implemented: the agent loop requires SSE to pipe
         // Claude Code output progressively. If a client sends `stream: false`,
-        // the gateway returns 400 before dispatch; kairos is never invoked.
-        Err(GadgetronError::Kairos {
+        // the gateway returns 400 before dispatch; penny is never invoked.
+        Err(GadgetronError::Penny {
             // NotInstalled reused for "not supported" — closest existing variant.
             // Does not imply binary is absent; message text makes the reason explicit.
-            kind: KairosErrorKind::NotInstalled,
-            message: "kairos does not support stream=false; set stream=true".into(),
+            kind: PennyErrorKind::NotInstalled,
+            message: "penny does not support stream=false; set stream=true".into(),
         })
     }
 
@@ -228,26 +228,26 @@ impl LlmProvider for KairosProvider {
 
     async fn models(&self) -> Result<Vec<ModelInfo>> {
         Ok(vec![ModelInfo {
-            id: "kairos".to_string(),
+            id: "penny".to_string(),
             object: "model".to_string(),       // NOT `created`; the real struct field
-            owned_by: "gadgetron-kairos".to_string(),
+            owned_by: "gadgetron-penny".to_string(),
         }])
     }
 
     async fn health(&self) -> Result<()> {
         let bin = &self.config.claude_binary;
-        which::which(bin).map(|_| ()).map_err(|e| GadgetronError::Kairos {
-            kind: KairosErrorKind::NotInstalled,
+        which::which(bin).map(|_| ()).map_err(|e| GadgetronError::Penny {
+            kind: PennyErrorKind::NotInstalled,
             message: format!("claude binary not found via `which`: {e}"),
         })
     }
 }
 
 pub fn register_with_router(
-    config: KairosConfig,
+    config: PennyConfig,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
 ) {
-    providers.insert("kairos".to_string(), Arc::new(KairosProvider::new(config)));
+    providers.insert("penny".to_string(), Arc::new(PennyProvider::new(config)));
 }
 ```
 
@@ -271,17 +271,17 @@ use tempfile::NamedTempFile;
 use gadgetron_core::provider::{ChatRequest, ChatChunk};
 use gadgetron_core::error::{GadgetronError, Result};
 
-use crate::config::KairosConfig;
-use crate::error::KairosErrorKind;
+use crate::config::PennyConfig;
+use crate::error::PennyErrorKind;
 
 pub struct ClaudeCodeSession {
-    config: Arc<KairosConfig>,
+    config: Arc<PennyConfig>,
     request: ChatRequest,
     mcp_config_file: Option<NamedTempFile>,
 }
 
 impl ClaudeCodeSession {
-    pub fn new(config: Arc<KairosConfig>, request: ChatRequest) -> Self {
+    pub fn new(config: Arc<PennyConfig>, request: ChatRequest) -> Self {
         Self { config, request, mcp_config_file: None }
     }
 
@@ -300,8 +300,8 @@ impl ClaudeCodeSession {
         Box::pin(try_stream! {
             // Step 1: MCP config tmpfile (M1)
             let mcp_tmp = crate::mcp_config::write_config_file()
-                .map_err(|e| GadgetronError::Kairos {
-                    kind: KairosErrorKind::SpawnFailed { reason: format!("mcp tmpfile: {e}") },
+                .map_err(|e| GadgetronError::Penny {
+                    kind: PennyErrorKind::SpawnFailed { reason: format!("mcp tmpfile: {e}") },
                     message: "failed to create MCP config tmpfile".to_string(),
                 })?;
             self.mcp_config_file = Some(mcp_tmp);
@@ -320,11 +320,11 @@ impl ClaudeCodeSession {
                 .spawn()
                 .map_err(|e| {
                     let kind = if e.kind() == std::io::ErrorKind::NotFound {
-                        KairosErrorKind::NotInstalled
+                        PennyErrorKind::NotInstalled
                     } else {
-                        KairosErrorKind::SpawnFailed { reason: e.to_string() }
+                        PennyErrorKind::SpawnFailed { reason: e.to_string() }
                     };
-                    GadgetronError::Kairos { kind, message: format!("spawn: {e}") }
+                    GadgetronError::Penny { kind, message: format!("spawn: {e}") }
                 })?;
 
             let stdin = child.stdin.take().expect("piped stdin");
@@ -353,8 +353,8 @@ impl ClaudeCodeSession {
                 line.clear();
                 tokio::select! {
                     read = reader.read_line(&mut line) => {
-                        let n = read.map_err(|e| GadgetronError::Kairos {
-                            kind: KairosErrorKind::AgentError {
+                        let n = read.map_err(|e| GadgetronError::Penny {
+                            kind: PennyErrorKind::AgentError {
                                 exit_code: -1,
                                 stderr_redacted: String::new(),
                             },
@@ -369,19 +369,19 @@ impl ClaudeCodeSession {
                     }
                     _ = tokio::time::sleep_until(deadline) => {
                         let _ = child.start_kill();
-                        Err(GadgetronError::Kairos {
-                            kind: KairosErrorKind::Timeout {
+                        Err(GadgetronError::Penny {
+                            kind: PennyErrorKind::Timeout {
                                 seconds: self.config.request_timeout_secs,
                             },
-                            message: "kairos subprocess timed out".to_string(),
+                            message: "penny subprocess timed out".to_string(),
                         })?;
                     }
                 }
             }
 
             // Step 7: Wait for exit status only (chief-arch B3: NOT wait_with_output)
-            let status = child.wait().await.map_err(|e| GadgetronError::Kairos {
-                kind: KairosErrorKind::AgentError {
+            let status = child.wait().await.map_err(|e| GadgetronError::Penny {
+                kind: PennyErrorKind::AgentError {
                     exit_code: -1,
                     stderr_redacted: String::new(),
                 },
@@ -395,13 +395,13 @@ impl ClaudeCodeSession {
 
             if !status.success() {
                 let exit_code = status.code().unwrap_or(-1);
-                tracing::warn!(exit_code, stderr = %stderr_redacted, "kairos subprocess failed");
-                Err(GadgetronError::Kairos {
-                    kind: KairosErrorKind::AgentError {
+                tracing::warn!(exit_code, stderr = %stderr_redacted, "penny subprocess failed");
+                Err(GadgetronError::Penny {
+                    kind: PennyErrorKind::AgentError {
                         exit_code,
                         stderr_redacted: stderr_redacted.clone(),
                     },
-                    message: "kairos subprocess exited with error".to_string(),
+                    message: "penny subprocess exited with error".to_string(),
                 })?;
             }
             // Stream ends; all resources drop (tempfile removed, child reaped).
@@ -440,8 +440,8 @@ async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
         buf.push_str("\n\n");
     }
     let mut stdin = stdin;
-    stdin.write_all(buf.as_bytes()).await.map_err(|e| GadgetronError::Kairos {
-        kind: KairosErrorKind::SpawnFailed { reason: e.to_string() },
+    stdin.write_all(buf.as_bytes()).await.map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::SpawnFailed { reason: e.to_string() },
         message: format!("stdin write: {e}"),
     })?;
     drop(stdin);  // signals EOF to Claude Code
@@ -456,9 +456,9 @@ async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
 ```rust
 use std::path::Path;
 use tokio::process::Command;
-use crate::config::KairosConfig;
+use crate::config::PennyConfig;
 
-pub fn build_claude_command(config: &KairosConfig, mcp_config_path: &Path) -> Command {
+pub fn build_claude_command(config: &PennyConfig, mcp_config_path: &Path) -> Command {
     let mut cmd = Command::new(&config.claude_binary);
 
     // SEC-B1: clear parent env to prevent secret leak to Claude Code subprocess.
@@ -538,8 +538,8 @@ PM ran a 6-test suite against `/Users/junghopark/.local/bin/claude` version 2.1.
 
 **`<cwd-hash>` pinning contract (load-bearing, closes Codex review `a957d8d6cebf4ee5a` finding 4)**: gadgetron MUST spawn every `claude -p` invocation from an IDENTICAL cwd per conversation — otherwise a resume-turn call from a different cwd will look up a different `<cwd-hash>` directory and not find the session. The contract:
 
-1. `spawn.rs::build_claude_command` sets `cmd.current_dir(session_root)` where `session_root` is resolved at `KairosProvider` construction time from `AgentConfig.session_store_path: Option<PathBuf>` (new field, §5.2.8). If `session_store_path.is_some()`, use it verbatim; otherwise capture `std::env::current_dir()` ONCE at startup and store on the provider — do NOT re-read per request (a cwd change mid-process must not shift active sessions).
-2. The captured path is an `Arc<PathBuf>` on `KairosProvider`; `ClaudeCodeSession::new` takes it as a constructor argument so the session-per-request object also observes the same root.
+1. `spawn.rs::build_claude_command` sets `cmd.current_dir(session_root)` where `session_root` is resolved at `PennyProvider` construction time from `AgentConfig.session_store_path: Option<PathBuf>` (new field, §5.2.8). If `session_store_path.is_some()`, use it verbatim; otherwise capture `std::env::current_dir()` ONCE at startup and store on the provider — do NOT re-read per request (a cwd change mid-process must not shift active sessions).
+2. The captured path is an `Arc<PathBuf>` on `PennyProvider`; `ClaudeCodeSession::new` takes it as a constructor argument so the session-per-request object also observes the same root.
 3. Test `spawn_uses_consistent_cwd_across_first_and_resume` (item 14 in §5.2.10) asserts two invocations for the same `conversation_id` produce identical `cmd.current_dir()` values.
 4. Test `cwd_pin_survives_parent_chdir` asserts that calling `std::env::set_current_dir()` on the parent process BETWEEN the first and resume call does NOT change the cwd passed to the subprocess.
 
@@ -571,7 +571,7 @@ pub struct ChatRequest {
     pub stop: Option<Vec<String>>,
 
     /// Conversation identifier for multi-turn native session continuity.
-    /// When `Some`, `gadgetron-kairos::KairosProvider` routes the request
+    /// When `Some`, `gadgetron-penny::PennyProvider` routes the request
     /// through `SessionStore` and spawns Claude Code with `--session-id`
     /// (first turn) or `--resume` (subsequent turns). When `None`, the
     /// provider falls back to stateless history re-ship (the pre-2026-04-15
@@ -588,13 +588,13 @@ pub struct ChatRequest {
 2. Request body field `metadata.conversation_id` — OpenAI-compatible `metadata` map, opt-in for clients that can't set custom headers.
 3. Neither present → `conversation_id = None` → stateless fallback.
 
-If both are present and differ, the header wins; log a `tracing::warn!(target: "gadgetron_gateway::kairos", ?header_id, ?body_id, "conversation_id mismatch; using header")`.
+If both are present and differ, the header wins; log a `tracing::warn!(target: "gadgetron_gateway::penny", ?header_id, ?body_id, "conversation_id mismatch; using header")`.
 
 `conversation_id` format: arbitrary UTF-8, maximum 256 bytes, must not contain NUL, `\r`, or `\n`. The gateway validates this at request-receipt time and returns `400 Bad Request` with `error.code = "invalid_conversation_id"` on violation. The SessionStore does NOT re-validate.
 
-#### 5.2.4 `SessionStore` (`gadgetron-kairos::session_store`)
+#### 5.2.4 `SessionStore` (`gadgetron-penny::session_store`)
 
-New module `crates/gadgetron-kairos/src/session_store.rs`:
+New module `crates/gadgetron-penny/src/session_store.rs`:
 
 ```rust
 use std::path::PathBuf;
@@ -675,11 +675,11 @@ impl SessionStore {
 
 **TTL default**: 24 hours (`86_400` seconds). Rationale: a personal-assistant MVP user closes the chat overnight; the next morning the 24h-old session is stale and a new conversation starts. Configurable via `AgentConfig.session_ttl_secs`.
 
-**Concurrency**: each `SessionEntry` carries an `Arc<Mutex<()>>`. The session driver acquires it for the duration of a single spawn-and-drive cycle, releases it after EOF or kill. A second concurrent request for the same `conversation_id` **blocks on the Mutex** until the first completes. If the Mutex wait exceeds `AgentConfig.request_timeout_secs`, the second request returns `KairosErrorKind::SessionConcurrent` (HTTP 429) rather than timing out silently.
+**Concurrency**: each `SessionEntry` carries an `Arc<Mutex<()>>`. The session driver acquires it for the duration of a single spawn-and-drive cycle, releases it after EOF or kill. A second concurrent request for the same `conversation_id` **blocks on the Mutex** until the first completes. If the Mutex wait exceeds `AgentConfig.request_timeout_secs`, the second request returns `PennyErrorKind::SessionConcurrent` (HTTP 429) rather than timing out silently.
 
 #### 5.2.5 Session lifecycle branches (`session.rs`)
 
-`ClaudeCodeSession` (currently at `crates/gadgetron-kairos/src/session.rs:77-82`) gains a private helper on its driver:
+`ClaudeCodeSession` (currently at `crates/gadgetron-penny/src/session.rs:77-82`) gains a private helper on its driver:
 
 ```rust
 enum SpawnMode {
@@ -720,8 +720,8 @@ let mode = match request.conversation_id.as_deref() {
             entry.mutex.clone().lock_owned(),
         )
         .await
-        .map_err(|_| GadgetronError::Kairos {
-            kind: KairosErrorKind::SessionConcurrent { conversation_id: id.to_string() },
+        .map_err(|_| GadgetronError::Penny {
+            kind: PennyErrorKind::SessionConcurrent { conversation_id: id.to_string() },
             message: "concurrent request on same conversation_id timed out waiting".into(),
         })?;
 
@@ -770,7 +770,7 @@ async fn feed_stdin_first_turn(mut stdin: ChildStdin, req: &ChatRequest) -> Resu
     let user_msg = req.messages.iter()
         .rev()
         .find(|m| matches!(m.role, Role::User))
-        .ok_or(KairosErrorKind::InvalidRequest)?;
+        .ok_or(PennyErrorKind::InvalidRequest)?;
 
     let mut buf = String::new();
     if let Some(sys) = req.messages.iter().find(|m| matches!(m.role, Role::System)) {
@@ -779,7 +779,7 @@ async fn feed_stdin_first_turn(mut stdin: ChildStdin, req: &ChatRequest) -> Resu
     }
     if req.messages.iter().any(|m| matches!(m.role, Role::Assistant)) {
         tracing::warn!(
-            target: "gadgetron_kairos::session",
+            target: "gadgetron_penny::session",
             "first turn called with existing assistant messages; writing only last user turn"
         );
     }
@@ -795,10 +795,10 @@ async fn feed_stdin_new_user_turn_only(mut stdin: ChildStdin, req: &ChatRequest)
     // has all prior turns in its jsonl. The caller (gateway) is responsible
     // for ensuring req.messages.last() is the new user turn.
     let last = req.messages.last()
-        .ok_or(KairosErrorKind::InvalidRequest)?;
+        .ok_or(PennyErrorKind::InvalidRequest)?;
     if !matches!(last.role, Role::User) {
-        return Err(GadgetronError::Kairos {
-            kind: KairosErrorKind::InvalidRequest,
+        return Err(GadgetronError::Penny {
+            kind: PennyErrorKind::InvalidRequest,
             message: "resume-turn expected messages.last().role == User".into(),
         });
     }
@@ -811,7 +811,7 @@ async fn feed_stdin_new_user_turn_only(mut stdin: ChildStdin, req: &ChatRequest)
 
 #### 5.2.7 `spawn.rs` — `ClaudeSessionMode` parameter
 
-`build_claude_command` (`crates/gadgetron-kairos/src/spawn.rs:115-209`) gains an additional parameter:
+`build_claude_command` (`crates/gadgetron-penny/src/spawn.rs:115-209`) gains an additional parameter:
 
 ```rust
 pub enum ClaudeSessionMode {
@@ -875,13 +875,13 @@ pub struct AgentConfig {
     pub session_mode: SessionMode,
     pub session_ttl_secs: u64,
     pub session_store_max_entries: usize,
-    /// Root directory gadgetron-kairos spawns Claude Code from. Load-bearing
+    /// Root directory gadgetron-penny spawns Claude Code from. Load-bearing
     /// for native session continuity: Claude Code derives its session-file
     /// directory (`~/.claude/projects/<cwd-hash>/`) from the subprocess's
     /// current working directory, so a resume from a different cwd silently
     /// misses the jsonl file.
     ///
-    /// Resolution at `KairosProvider` construction time:
+    /// Resolution at `PennyProvider` construction time:
     /// - `Some(path)` → `spawn.rs::build_claude_command` sets
     ///   `cmd.current_dir(path)` on every invocation.
     /// - `None` → capture `std::env::current_dir()` **once** at construction,
@@ -901,24 +901,24 @@ Defaults: `session_mode = NativeWithFallback`, `session_ttl_secs = 86_400`, `ses
 - **V17 (native-only requires conversation_id)**: when `session_mode = NativeOnly`, the gateway must reject requests without `conversation_id` at receipt time. This is enforced in `gadgetron-gateway`, not in `AgentConfig::validate` — `validate` only checks the config is internally consistent.
 - **V18 (session_store_path validation)**: when `session_store_path = Some(path)`, the path must exist, be a directory, and be writable by the current effective UID. Validation uses `std::fs::metadata` + `std::fs::File::create` on a test file `.gadgetron_probe` inside the directory (delete after probe). When `session_store_path = None`, no validation — the startup-captured cwd is trusted by construction.
 
-#### 5.2.9 `KairosErrorKind` new variants
+#### 5.2.9 `PennyErrorKind` new variants
 
 Add to `crates/gadgetron-core/src/error.rs`:
 
 ```rust
 #[non_exhaustive]
-pub enum KairosErrorKind {
+pub enum PennyErrorKind {
     // … existing variants …
 
     /// `conversation_id` was provided but the store has no entry and
     /// `session_mode = NativeOnly`. Client must start a new conversation.
-    /// HTTP 404, error.code = "kairos_session_not_found".
+    /// HTTP 404, error.code = "penny_session_not_found".
     SessionNotFound { conversation_id: String },
 
     /// Two concurrent requests for the same `conversation_id`; the second
     /// request timed out waiting for the per-session mutex. Client should
     /// retry after the first request completes.
-    /// HTTP 429, error.code = "kairos_session_concurrent".
+    /// HTTP 429, error.code = "penny_session_concurrent".
     SessionConcurrent { conversation_id: String },
 
     /// Claude Code returned an error indicating the jsonl file is corrupted
@@ -926,7 +926,7 @@ pub enum KairosErrorKind {
     /// deleted the jsonl file). The store entry is removed; the client is
     /// expected to retry with the same `conversation_id`, which will then
     /// hit the first-turn branch.
-    /// HTTP 500, error.code = "kairos_session_corrupted".
+    /// HTTP 500, error.code = "penny_session_corrupted".
     SessionCorrupted { conversation_id: String, reason: String },
 }
 ```
@@ -935,7 +935,7 @@ Add matching rows to the `04-mcp-tool-registry.md §10.1` conversion table (thou
 
 #### 5.2.10 Test plan — deterministic, no placeholders
 
-All tests live in `crates/gadgetron-kairos/tests/` unless marked `[inline]`.
+All tests live in `crates/gadgetron-penny/tests/` unless marked `[inline]`.
 
 1. **`native_session_first_turn_uses_session_id_flag`** — fake `AgentConfig` + `SessionStore::new(60, 10)`. Construct `ChatRequest { conversation_id: Some("c1"), messages: [User("hi")] }`. Invoke driver with `SpawnMode::FirstTurn` captured via a `FakeSpawn` injected via `build_claude_command_with_env`. Assert the captured `Command` argv contains `--session-id <uuid>` and NOT `--resume`. Assert the `session_store.get("c1").is_some()` after the call.
 
@@ -943,11 +943,11 @@ All tests live in `crates/gadgetron-kairos/tests/` unless marked `[inline]`.
 
 3. **`native_session_stateless_fallback_when_no_conversation_id`** — `ChatRequest { conversation_id: None, messages: […] }`. Assert captured argv contains NEITHER `--session-id` NOR `--resume`, AND that `feed_stdin` received the full flattened history (compare against `feed_stdin_flatten_history` golden output).
 
-4. **`concurrent_resume_on_same_conversation_serialized_by_mutex`** — `tokio::test` with `tokio::time::pause()`. Pre-seed store with `c1`. Construct TWO oneshot-gated fake spawns: the first fake blocks until the test sends on a `tokio::sync::oneshot` channel, the second is a plain fake. Spawn both concurrent driver invocations for `c1`. **Barrier discipline (closes the race Codex flagged in review `a957d8d6cebf4ee5a`)**: before calling `tokio::time::advance()`, the test `await`s a second barrier that the driver signals inside the `lock_owned` call site — specifically, the test instruments the `SessionStore` under test with a `tokio::sync::Notify` that fires the instant a `lock_owned()` call begins waiting. Only after receiving both "first fake is blocked" and "second driver is in lock_owned.await" does the test call `advance(config.request_timeout + 1s)`. Assert: (a) second driver returns `KairosErrorKind::SessionConcurrent { conversation_id: "c1" }`; (b) first driver completes normally after oneshot release; (c) `turn_count == 1` (only the first call incremented). This test guarantees deterministic ordering without wall-clock dependency.
+4. **`concurrent_resume_on_same_conversation_serialized_by_mutex`** — `tokio::test` with `tokio::time::pause()`. Pre-seed store with `c1`. Construct TWO oneshot-gated fake spawns: the first fake blocks until the test sends on a `tokio::sync::oneshot` channel, the second is a plain fake. Spawn both concurrent driver invocations for `c1`. **Barrier discipline (closes the race Codex flagged in review `a957d8d6cebf4ee5a`)**: before calling `tokio::time::advance()`, the test `await`s a second barrier that the driver signals inside the `lock_owned` call site — specifically, the test instruments the `SessionStore` under test with a `tokio::sync::Notify` that fires the instant a `lock_owned()` call begins waiting. Only after receiving both "first fake is blocked" and "second driver is in lock_owned.await" does the test call `advance(config.request_timeout + 1s)`. Assert: (a) second driver returns `PennyErrorKind::SessionConcurrent { conversation_id: "c1" }`; (b) first driver completes normally after oneshot release; (c) `turn_count == 1` (only the first call incremented). This test guarantees deterministic ordering without wall-clock dependency.
 
-5. **`session_not_found_falls_back_to_stateless_with_warning`** — `session_mode = NativeWithFallback`, `ChatRequest { conversation_id: Some("ghost") }`. Pre-seed store is empty. Assert the call resolves to first-turn mode (new UUID inserted into store) AND a `tracing::warn!` was emitted with target `gadgetron_kairos::session`. Use `tracing-subscriber::fmt::test::writer` to capture.
+5. **`session_not_found_falls_back_to_stateless_with_warning`** — `session_mode = NativeWithFallback`, `ChatRequest { conversation_id: Some("ghost") }`. Pre-seed store is empty. Assert the call resolves to first-turn mode (new UUID inserted into store) AND a `tracing::warn!` was emitted with target `gadgetron_penny::session`. Use `tracing-subscriber::fmt::test::writer` to capture.
 
-6. **`session_not_found_errors_in_native_only_mode`** — same as 5 but with `session_mode = NativeOnly`. Assert the call returns `KairosErrorKind::SessionNotFound { conversation_id: "ghost" }`.
+6. **`session_not_found_errors_in_native_only_mode`** — same as 5 but with `session_mode = NativeOnly`. Assert the call returns `PennyErrorKind::SessionNotFound { conversation_id: "ghost" }`.
 
 7. **`session_store_eviction_respects_lru`** — `SessionStore::new(60, 3)`. Insert c1, c2, c3. Touch c1. Insert c4. Assert c2 is evicted (oldest `last_used`), c1/c3/c4 remain.
 
@@ -957,15 +957,15 @@ All tests live in `crates/gadgetron-kairos/tests/` unless marked `[inline]`.
 
 10. **`resume_turn_stdin_contains_only_last_user_message`** — call `feed_stdin_new_user_turn_only` with `messages: [User("hi"), Assistant("hello"), User("what time is it")]`. Capture stdin bytes. Assert bytes == `"what time is it"` exactly, no history, no labels.
 
-11. **`resume_turn_rejects_non_user_last_message`** — call `feed_stdin_new_user_turn_only` with `messages: [User("hi"), Assistant("hello")]` (last is assistant). Assert returns `KairosErrorKind::InvalidRequest` with message containing "expected messages.last().role == User".
+11. **`resume_turn_rejects_non_user_last_message`** — call `feed_stdin_new_user_turn_only` with `messages: [User("hi"), Assistant("hello")]` (last is assistant). Assert returns `PennyErrorKind::InvalidRequest` with message containing "expected messages.last().role == User".
 
 12. **`tool_scope_is_reenforced_per_turn_on_resume`** (regression lock) — E2E test gated by `GADGETRON_E2E_CLAUDE=1`. Seed session with `--tools ""`, assert seed returns "OK". Resume the same session with `--tools ""` and request Bash use; assert agent refuses. Resume AGAIN with `--tools "Bash"` and request Bash; assert agent executes. This locks the empirical verification result from 2026-04-15 in regression.
 
 13. **`kill_on_drop_cleans_up_session_entry_on_cancellation`** — start a resume-turn request, drop the future before completion. Assert the subprocess is killed (existing `kill_on_drop` test) AND the per-session mutex is released AND `turn_count` was NOT incremented (because the turn didn't complete).
 
-14. **`spawn_uses_consistent_cwd_across_first_and_resume`** — construct a `KairosProvider` with `session_store_path = Some(/tmp/test-session-root)`. Invoke two turns for the same `conversation_id`: one first-turn, one resume-turn. Capture the `Command::current_dir` on each via `build_claude_command_with_env` + `FakeEnv`. Assert both equal `/tmp/test-session-root`, identical byte-for-byte. Closes Codex review `a957d8d6cebf4ee5a` finding 4.
+14. **`spawn_uses_consistent_cwd_across_first_and_resume`** — construct a `PennyProvider` with `session_store_path = Some(/tmp/test-session-root)`. Invoke two turns for the same `conversation_id`: one first-turn, one resume-turn. Capture the `Command::current_dir` on each via `build_claude_command_with_env` + `FakeEnv`. Assert both equal `/tmp/test-session-root`, identical byte-for-byte. Closes Codex review `a957d8d6cebf4ee5a` finding 4.
 
-15. **`cwd_pin_survives_parent_chdir`** — construct a `KairosProvider` with `session_store_path = None` while the current process is in `/tmp/initial-cwd`. The provider captures the startup cwd. In the test, invoke a first-turn call (cwd captured inside the provider). Then call `std::env::set_current_dir("/tmp/changed-cwd")`. Invoke a resume-turn for the same conversation_id. Capture `Command::current_dir` on the second spawn and assert it equals `/tmp/initial-cwd` (the startup capture, NOT the current process cwd). This locks the "startup-captured cwd does not shift" invariant against future refactoring that might accidentally re-read cwd per request.
+15. **`cwd_pin_survives_parent_chdir`** — construct a `PennyProvider` with `session_store_path = None` while the current process is in `/tmp/initial-cwd`. The provider captures the startup cwd. In the test, invoke a first-turn call (cwd captured inside the provider). Then call `std::env::set_current_dir("/tmp/changed-cwd")`. Invoke a resume-turn for the same conversation_id. Capture `Command::current_dir` on the second spawn and assert it equals `/tmp/initial-cwd` (the startup capture, NOT the current process cwd). This locks the "startup-captured cwd does not shift" invariant against future refactoring that might accidentally re-read cwd per request.
 
 16. **`session_store_get_or_create_is_atomic_under_concurrent_first_turns`** — `tokio::test`. `SessionStore::new(60, 10)`. Launch 10 concurrent `tokio::spawn` tasks each calling `store.get_or_create("c1")`. After all join, assert `store.len() == 1` (exactly one entry), and exactly one of the 10 tasks observed `first_turn == true` while the other 9 observed `first_turn == false`. Closes Codex review `a957d8d6cebf4ee5a` finding 7 (the atomic get-or-insert race).
 
@@ -980,17 +980,17 @@ ADR-P2A-01 currently documents `--allowed-tools` enforcement verification. Part 
 Step-by-step migration checklist (for the implementer, once cross-review passes and B-2/H4 are merged):
 
 1. Land `ChatRequest.conversation_id` field first (single file, backward compatible). Gateway change to read the header/metadata, still always passes `None` in the initial PR.
-2. Land `SessionStore` module with the store-only subset of §5.2.10 (tests 7, 8, 16 — eviction, TTL cleanup, and the atomic `get_or_create` concurrency test). Not yet wired to `session.rs`. `cargo test -p gadgetron-kairos session_store` passes.
+2. Land `SessionStore` module with the store-only subset of §5.2.10 (tests 7, 8, 16 — eviction, TTL cleanup, and the atomic `get_or_create` concurrency test). Not yet wired to `session.rs`. `cargo test -p gadgetron-penny session_store` passes.
 3. Land `AgentConfig` new fields + validation V15-V18 at the core layer, including `session_store_path: Option<PathBuf>` with the V18 probe-file existence/writability check. (Moved before step 4 per Codex review `a957d8d6cebf4ee5a` — `build_claude_command` specs against `AgentConfig`, so the config types must exist first for the spawn signature change to compile.)
 4. Land `ClaudeSessionMode` enum + `build_claude_command` parameter + `current_dir` pin resolution. Existing spawn tests pass with `ClaudeSessionMode::Stateless` explicitly; new test `spawn_uses_consistent_cwd_across_first_and_resume` added.
 5. Land `feed_stdin_first_turn` and `feed_stdin_new_user_turn_only` helpers with tests 9/10/11.
-6. Land `KairosErrorKind::{SessionNotFound, SessionConcurrent, SessionCorrupted}` with HTTP status + error code mapping. (Moved before step 7 per Codex review `a957d8d6cebf4ee5a` — driver branching tests require `SessionConcurrent` and `SessionNotFound` variants to compile their assertions.)
+6. Land `PennyErrorKind::{SessionNotFound, SessionConcurrent, SessionCorrupted}` with HTTP status + error code mapping. (Moved before step 7 per Codex review `a957d8d6cebf4ee5a` — driver branching tests require `SessionConcurrent` and `SessionNotFound` variants to compile their assertions.)
 7. Land `SpawnMode` + driver branching in `session.rs`. Tests 1/2/3/4/5/6/13/14 pass.
 8. Land gateway wiring: header/metadata parsing, 400 response on malformed, routing `conversation_id` into `ChatRequest`.
 9. Land E2E test 12 behind `GADGETRON_E2E_CLAUDE=1` gate.
 10. ADR-P2A-01 amendment lands in the same PR as step 9.
 
-No step above depends on the CLI wiring (Steps 22-23). All 16 tests can be green before Step 22 starts; the CLI composition just wires `SessionStore` into the same registry assembly as `KairosProvider`.
+No step above depends on the CLI wiring (Steps 22-23). All 16 tests can be green before Step 22 starts; the CLI composition just wires `SessionStore` into the same registry assembly as `PennyProvider`.
 
 ---
 
@@ -1062,7 +1062,7 @@ pub fn event_to_chat_chunks(
     match event {
         StreamJsonEvent::MessageDelta { delta: MessageDelta { text: Some(t), .. } } => {
             vec![ChatChunk {
-                id: format!("chatcmpl-kairos-{}", uuid::Uuid::new_v4()),
+                id: format!("chatcmpl-penny-{}", uuid::Uuid::new_v4()),
                 object: "chat.completion.chunk".to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
                 model: req.model.clone(),
@@ -1081,7 +1081,7 @@ pub fn event_to_chat_chunks(
         StreamJsonEvent::ToolUse { name, .. } => {
             // M6: log tool NAME only, NOT `input` (may contain user content)
             tracing::info!(
-                target: "kairos_audit",
+                target: "penny_audit",
                 tool_name = %name,
                 "tool_called"
             );
@@ -1089,7 +1089,7 @@ pub fn event_to_chat_chunks(
         }
         StreamJsonEvent::MessageStop { .. } => {
             vec![ChatChunk {
-                id: format!("chatcmpl-kairos-{}", uuid::Uuid::new_v4()),
+                id: format!("chatcmpl-penny-{}", uuid::Uuid::new_v4()),
                 object: "chat.completion.chunk".to_string(),
                 created: chrono::Utc::now().timestamp() as u64,
                 model: req.model.clone(),
@@ -1122,7 +1122,7 @@ pub fn event_to_chat_chunks(
 
 ```rust
 #[cfg(not(unix))]
-compile_error!("gadgetron-kairos requires a Unix target (uses mkstemp via tempfile crate)");
+compile_error!("gadgetron-penny requires a Unix target (uses mkstemp via tempfile crate)");
 
 use tempfile::NamedTempFile;
 
@@ -1326,25 +1326,25 @@ proptest! {
 
 ---
 
-## 9. `GadgetronError::Kairos` extension (only Kairos here; `Wiki` added by 01)
+## 9. `GadgetronError::Penny` extension (only Penny here; `Wiki` added by 01)
 
 ```rust
 // gadgetron-core/src/error.rs additions
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KairosErrorKind {
+pub enum PennyErrorKind {
     NotInstalled,
     SpawnFailed { reason: String },
     AgentError { exit_code: i32, stderr_redacted: String },
     Timeout { seconds: u64 },
 }
 
-impl std::fmt::Display for KairosErrorKind { /* snake_case kind name */ }
+impl std::fmt::Display for PennyErrorKind { /* snake_case kind name */ }
 
 // In GadgetronError enum (ADDED in same core PR as 01's Wiki variant):
-//     #[error("Kairos error ({kind}): {message}")]
-//     Kairos { kind: KairosErrorKind, message: String },
+//     #[error("Penny error ({kind}): {message}")]
+//     Penny { kind: PennyErrorKind, message: String },
 ```
 
 ### Dispatch
@@ -1352,21 +1352,21 @@ impl std::fmt::Display for KairosErrorKind { /* snake_case kind name */ }
 ```rust
 impl GadgetronError {
     // error_code:
-    Self::Kairos { kind, .. } => match kind {
-        KairosErrorKind::NotInstalled            => "kairos_not_installed",
-        KairosErrorKind::SpawnFailed { .. }      => "kairos_spawn_failed",
-        KairosErrorKind::AgentError { .. }       => "kairos_agent_error",
-        KairosErrorKind::Timeout { .. }          => "kairos_timeout",
+    Self::Penny { kind, .. } => match kind {
+        PennyErrorKind::NotInstalled            => "penny_not_installed",
+        PennyErrorKind::SpawnFailed { .. }      => "penny_spawn_failed",
+        PennyErrorKind::AgentError { .. }       => "penny_agent_error",
+        PennyErrorKind::Timeout { .. }          => "penny_timeout",
     },
 
     // error_type (all server_error):
-    Self::Kairos { .. } => "server_error",
+    Self::Penny { .. } => "server_error",
 
     // http_status_code:
-    Self::Kairos { kind, .. } => match kind {
-        KairosErrorKind::NotInstalled | KairosErrorKind::SpawnFailed { .. } => 503,
-        KairosErrorKind::AgentError { .. } => 500,
-        KairosErrorKind::Timeout { .. }    => 504,
+    Self::Penny { kind, .. } => match kind {
+        PennyErrorKind::NotInstalled | PennyErrorKind::SpawnFailed { .. } => 503,
+        PennyErrorKind::AgentError { .. } => 500,
+        PennyErrorKind::Timeout { .. }    => 504,
     },
 }
 ```
@@ -1375,16 +1375,16 @@ impl GadgetronError {
 
 | kind | message |
 |---|---|
-| `NotInstalled` | "The Kairos assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`." |
-| `SpawnFailed { .. }` | "The Kairos assistant is not available. The server could not start the Claude Code process. Run `gadgetron serve` with `RUST_LOG=gadgetron_kairos=debug` for spawn diagnostics, or check `journalctl -u gadgetron` for spawn errors." (**log hint added per dx**) |
-| `AgentError { .. }` | "The Kairos assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator." |
-| `Timeout { seconds }` | `format!("The Kairos assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request.")` |
+| `NotInstalled` | "The Penny assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`." |
+| `SpawnFailed { .. }` | "The Penny assistant is not available. The server could not start the Claude Code process. Run `gadgetron serve` with `RUST_LOG=gadgetron_penny=debug` for spawn diagnostics, or check `journalctl -u gadgetron` for spawn errors." (**log hint added per dx**) |
+| `AgentError { .. }` | "The Penny assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator." |
+| `Timeout { seconds }` | `format!("The Penny assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request.")` |
 
 ### Test updates in `gadgetron-core/src/error.rs`
 
-- `all_twelve_variants_exist` → `all_fourteen_variants_exist` (Wiki + Kairos added in same PR)
-- New assertions: 4 Kairos codes + types + statuses
-- `kairos_agent_error_message_does_not_contain_stderr` — asserts `error_message()` returns the generic string, NEVER includes `stderr_redacted` content
+- `all_twelve_variants_exist` → `all_fourteen_variants_exist` (Wiki + Penny added in same PR)
+- New assertions: 4 Penny codes + types + statuses
+- `penny_agent_error_message_does_not_contain_stderr` — asserts `error_message()` returns the generic string, NEVER includes `stderr_redacted` content
 - `http_500_response_does_not_leak_stderr` (integration test, §14.3) — end-to-end check that the HTTP body does not leak
 
 ---
@@ -1394,14 +1394,14 @@ impl GadgetronError {
 > **v4 note (2026-04-14)**: The canonical P2A operator-facing config schema is
 > `[agent]` + `[agent.brain]` in `04-mcp-tool-registry.md v2 §4`. `AgentConfig`
 > lives in `gadgetron-core::agent::config` (landed in commit `b6b314d`) and
-> drives the subprocess env plumbing via a thin `KairosConfig`-shaped view
-> inside `gadgetron-kairos` that reads `[agent.brain]` fields at startup.
+> drives the subprocess env plumbing via a thin `PennyConfig`-shaped view
+> inside `gadgetron-penny` that reads `[agent.brain]` fields at startup.
 >
-> The `KairosConfig` struct below is preserved as the **internal** config
-> surface that `KairosProvider::new` consumes — it is populated from
-> `AgentConfig` by the loader, not parsed directly from `[kairos]` in
+> The `PennyConfig` struct below is preserved as the **internal** config
+> surface that `PennyProvider::new` consumes — it is populated from
+> `AgentConfig` by the loader, not parsed directly from `[penny]` in
 > `gadgetron.toml`. Operators upgrading from v0.1.x with an existing
-> `[kairos]` section get a one-shot migration to `[agent.brain]` per
+> `[penny]` section get a one-shot migration to `[agent.brain]` per
 > `04 v2 §11.1` (pre-deserialize loader pass with `tracing::warn!` per
 > moved field).
 >
@@ -1412,7 +1412,7 @@ impl GadgetronError {
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct KairosConfig {
+pub struct PennyConfig {
     #[serde(default = "default_claude_binary")]
     pub claude_binary: String,
 
@@ -1437,7 +1437,7 @@ fn default_claude_binary() -> String { "claude".to_string() }
 fn default_request_timeout() -> u64 { 300 }
 fn default_max_concurrent() -> usize { 4 }
 
-impl KairosConfig {
+impl PennyConfig {
     /// Validates config at load time. Valid ranges:
     /// - `request_timeout_secs`: [10, 3600]
     /// - `max_concurrent_subprocesses`: [1, 32]
@@ -1446,20 +1446,20 @@ impl KairosConfig {
     pub fn validate(&self) -> Result<(), String> {
         // SEC-B3: validate claude_binary.
         if self.claude_binary.is_empty() {
-            return Err("kairos.claude_binary must not be empty".into());
+            return Err("penny.claude_binary must not be empty".into());
         }
         // Reject shell metacharacters that are never valid in a binary path
         const FORBIDDEN: &[char] = &[';', '|', '&', '$', '`', '(', ')', '<', '>', '\n', '\r', '\t'];
         if self.claude_binary.chars().any(|c| FORBIDDEN.contains(&c)) {
-            return Err("kairos.claude_binary contains invalid shell metacharacters".into());
+            return Err("penny.claude_binary contains invalid shell metacharacters".into());
         }
         // If it contains '/', it must be an absolute path (no ./ or ../)
         if self.claude_binary.contains('/') && !self.claude_binary.starts_with('/') {
-            return Err("kairos.claude_binary with path separator must be absolute (start with /)".into());
+            return Err("penny.claude_binary with path separator must be absolute (start with /)".into());
         }
         // Reject leading '-' (would be interpreted as a flag by some shells)
         if self.claude_binary.starts_with('-') {
-            return Err("kairos.claude_binary must not start with '-'".into());
+            return Err("penny.claude_binary must not start with '-'".into());
         }
         if !(10..=3600).contains(&self.request_timeout_secs) {
             return Err(format!("request_timeout_secs {} out of [10, 3600]", self.request_timeout_secs));
@@ -1489,11 +1489,11 @@ impl KairosConfig {
 
 ### TOML example — LEGACY v0.1.x (retained for migration reference only)
 
-**This `[kairos]` section is superseded by `[agent]` + `[agent.brain]` in `04 v2 §4`.** The loader accepts it for backward compatibility in v0.2.0 with a per-field deprecation warning; it will be removed in Phase 2C.
+**This `[penny]` section is superseded by `[agent]` + `[agent.brain]` in `04 v2 §4`.** The loader accepts it for backward compatibility in v0.2.0 with a per-field deprecation warning; it will be removed in Phase 2C.
 
 ```toml
 # LEGACY — do not author new configs with this shape. See 04 v2 §4 for [agent].
-[kairos]
+[penny]
 claude_binary = "claude"
 # claude_base_url = "http://127.0.0.1:4000"         # optional, commented out
 # claude_model = "claude-3-5-sonnet-20241022"       # optional, commented out
@@ -1503,7 +1503,7 @@ max_concurrent_subprocesses = 4                      # P2A desktop default; rang
 
 **Field mapping to `[agent]` (v0.2.0 canonical):**
 
-| v0.1.x `[kairos]` | v0.2.0 destination | Notes |
+| v0.1.x `[penny]` | v0.2.0 destination | Notes |
 |---|---|---|
 | `claude_binary` | `[agent].binary` | Populate + `tracing::warn!` |
 | `claude_base_url` | `[agent.brain].external_base_url` + set `mode = "external_proxy"` | Populate + warn |
@@ -1513,7 +1513,7 @@ max_concurrent_subprocesses = 4                      # P2A desktop default; rang
 
 See `04 v2 §11.1` for the loader implementation and test names.
 
-**v0.2.0 env override convention**: `GADGETRON_AGENT_*` with section path uppercased and `.` → `_`. Legacy `GADGETRON_KAIROS_*` vars are recognized during P2A with the same deprecation warning as the TOML fields; they stop being read in P2C.
+**v0.2.0 env override convention**: `GADGETRON_AGENT_*` with section path uppercased and `.` → `_`. Legacy `GADGETRON_PENNY_*` vars are recognized during P2A with the same deprecation warning as the TOML fields; they stop being read in P2C.
 
 ---
 
@@ -1525,33 +1525,33 @@ See `04 v2 §11.1` for the loader implementation and test names.
 // crates/gadgetron-cli/src/main.rs — inside serve()
 
 let mut providers_for_router: HashMap<String, Arc<dyn LlmProvider>> = /* existing */;
-if let Some(kairos_cfg) = config.kairos.as_ref() {
-    gadgetron_kairos::register_with_router(kairos_cfg.clone(), &mut providers_for_router);
-    eprintln!("  Kairos provider registered (agent=claude_code)");
+if let Some(penny_cfg) = config.penny.as_ref() {
+    gadgetron_penny::register_with_router(penny_cfg.clone(), &mut providers_for_router);
+    eprintln!("  Penny provider registered (agent=claude_code)");
 }
 let llm_router = Arc::new(LlmRouter::new(providers_for_router, config.router.clone(), metrics_store));
 ```
 
 ### Interaction with `default_strategy` (chief-arch A2)
 
-**Operator note**: `gadgetron-router::Router::resolve` with `default_strategy = "round_robin"` iterates ALL registered providers — including kairos. A request for `model = "gpt-4o"` could therefore dispatch to kairos, which would spawn a subprocess that expects `model = "kairos"` and fail.
+**Operator note**: `gadgetron-router::Router::resolve` with `default_strategy = "round_robin"` iterates ALL registered providers — including penny. A request for `model = "gpt-4o"` could therefore dispatch to penny, which would spawn a subprocess that expects `model = "penny"` and fail.
 
 **Recommended configurations:**
 
-1. **Dedicated kairos mode** (single-user desktop — what a future bootstrap UX should write):
+1. **Dedicated penny mode** (single-user desktop — what a future bootstrap UX should write):
    ```toml
    [router]
-   default_strategy = { type = "fallback", chain = ["kairos"] }
+   default_strategy = { type = "fallback", chain = ["penny"] }
    ```
 
-2. **Mixed mode** (kairos for personal assistance, other providers for direct LLM):
+2. **Mixed mode** (penny for personal assistance, other providers for direct LLM):
    ```toml
    [router]
    default_strategy = { type = "fallback", chain = ["vllm-local"] }
    ```
-   With kairos dispatched only via explicit `model = "kairos"` on the request.
+   With penny dispatched only via explicit `model = "penny"` on the request.
 
-3. **AVOID**: `default_strategy = { type = "round_robin" }` when kairos is registered — unpredictable dispatch behavior.
+3. **AVOID**: `default_strategy = { type = "round_robin" }` when penny is registered — unpredictable dispatch behavior.
 
 ---
 
@@ -1564,7 +1564,7 @@ let llm_router = Arc::new(LlmRouter::new(providers_for_router, config.router.clo
 pub enum Commands {
     // existing ...
     Mcp { #[command(subcommand)] command: McpCommand },
-    Kairos { #[command(subcommand)] command: KairosCommand },
+    Penny { #[command(subcommand)] command: PennyCommand },
 }
 
 #[derive(Subcommand)]
@@ -1573,7 +1573,7 @@ pub enum McpCommand {
 }
 
 #[derive(Subcommand)]
-pub enum KairosCommand {
+pub enum PennyCommand {
     Init {
         #[arg(long)]
         docker: bool,
@@ -1594,14 +1594,14 @@ Commands::Mcp { command: McpCommand::Serve { config } } => {
     gadgetron_knowledge::serve_stdio(knowledge_cfg).await
 }
 
-Commands::Kairos { command: KairosCommand::Init { docker, wiki_path } } => {
+Commands::Penny { command: PennyCommand::Init { docker, wiki_path } } => {
     // Exact stdout contract authoritative in docs/design/phase2/01-knowledge-layer.md §1.1.
     // Both specs share this subcommand; 01 owns the stdout lines to avoid duplication.
-    cmd_kairos_init(docker, wiki_path).await
+    cmd_penny_init(docker, wiki_path).await
 }
 ```
 
-The `cmd_kairos_init` function in `gadgetron-cli::main.rs` reads the exact literal stdout from `01-knowledge-layer.md` §1.1 (success path, `--docker` path, and 3 failure paths). No divergence permitted.
+The `cmd_penny_init` function in `gadgetron-cli::main.rs` reads the exact literal stdout from `01-knowledge-layer.md` §1.1 (success path, `--docker` path, and 3 failure paths). No divergence permitted.
 
 ---
 
@@ -1615,17 +1615,17 @@ Behavioral test on `claude 2.1.104` confirmed:
 
 1. `--allowedTools` / `--disallowedTools` are **enforced at the binary level** via `tool_use_error` tool results. A disallowed tool call surfaces to the agent as `is_error: true` with message `"No such tool available: {T}. {T} exists but is not enabled in this context."`
 2. Enforcement **holds even when** `--dangerously-skip-permissions` is set (`permissionMode: bypassPermissions`). That flag bypasses interactive permission prompts for ALLOWED tools — it does NOT widen the allowlist.
-3. The agent loop naturally recovers: it observes the error tool_result and falls back to a permitted tool. For kairos this means disallowed tool attempts are visible in the stream-json event log but never actually executed.
+3. The agent loop naturally recovers: it observes the error tool_result and falls back to a permitted tool. For penny this means disallowed tool attempts are visible in the stream-json event log but never actually executed.
 
-### Implication for kairos
+### Implication for penny
 
 The M4 mitigation (allowlist only the five MCP tools served by `gadgetron mcp serve`) is sufficient. Linux sandbox fallback NOT required. macOS native development unblocked. ADR-P2A-01 is **ACCEPTED**.
 
 ### Required startup check (M4 version pin)
 
-`gadgetron serve` MUST run `$claude_binary --version` at startup and refuse to start if the parsed semver is below `CLAUDE_CODE_MIN_VERSION = 2.1.104`. A future Claude Code release could regress the enforcement behavior without notice; this version pin is the canary. See ADR-P2A-01 §"Claude Code version pinning" and the `kairos_rejects_stale_claude_version` test.
+`gadgetron serve` MUST run `$claude_binary --version` at startup and refuse to start if the parsed semver is below `CLAUDE_CODE_MIN_VERSION = 2.1.104`. A future Claude Code release could regress the enforcement behavior without notice; this version pin is the canary. See ADR-P2A-01 §"Claude Code version pinning" and the `penny_rejects_stale_claude_version` test.
 
-### Required invocation flags (kairos)
+### Required invocation flags (penny)
 
 ```bash
 claude -p \
@@ -1647,13 +1647,13 @@ claude -p \
 
 | Module | Tests |
 |---|---|
-| `provider.rs` | `name_returns_kairos`, `models_returns_single_kairos_entry_with_object_field`, `health_passes_when_binary_exists`, `health_fails_when_binary_missing` |
+| `provider.rs` | `name_returns_penny`, `models_returns_single_penny_entry_with_object_field`, `health_passes_when_binary_exists`, `health_fails_when_binary_missing` |
 | `session.rs` | `feed_stdin_serializes_messages` (uses fake stdin sink) |
 | `stream.rs` | `parse_event_message_delta`, `parse_event_tool_use`, `parse_event_message_stop`, `parse_event_message_usage`, `parse_event_empty_line_returns_none`, `parse_event_unknown_type_returns_none`, `parse_event_malformed_returns_err`, `event_to_chat_chunks_delta_emits_content`, `event_to_chat_chunks_tool_use_emits_nothing`, `event_to_chat_chunks_message_stop_emits_finish_reason`, `tool_call_log_contains_name_not_args` (M6) |
 | `spawn.rs` | `build_claude_command_has_expected_args`, `build_claude_command_sets_env_base_url_when_configured`, `build_claude_command_omits_env_base_url_when_none`, **`build_claude_command_sets_kill_on_drop_true`** (security B3), **`build_claude_command_env_does_not_inherit_api_key`** (SEC-B1 — set `ANTHROPIC_API_KEY=sk-test-123` in test env, call `build_claude_command`, assert the produced `Command` does not have that var set) |
 | `redact.rs` | 9 unit + 2 proptests (see §8) |
 | `config.rs` | `validate_accepts_defaults`, `validate_rejects_zero_timeout`, `validate_rejects_out_of_range_timeout`, **`validate_rejects_max_concurrent_zero`** (qa), **`validate_accepts_max_concurrent_boundary_values`** (1 and 32), **`validate_rejects_ftp_base_url`** (qa), **`validate_accepts_https_base_url`** (qa), **`validate_accepts_port_in_base_url`** (qa), **`validate_rejects_empty_claude_model`** (dx), **`validate_rejects_claude_model_starting_with_dash`** (security F1), **`validate_rejects_relative_path_with_traversal`** (SEC-B3), **`validate_rejects_shell_metachar_in_binary`** (SEC-B3), **`validate_rejects_dash_prefix_binary`** (SEC-B3), **`validate_accepts_basename_on_path`** (e.g. `"claude"`, SEC-B3), **`validate_accepts_absolute_path`** (e.g. `"/usr/local/bin/claude"`, SEC-B3) |
-| `error.rs` | `from_kairos_error_kind_returns_gadgetron_kairos_variant`, `user_visible_message_does_not_contain_stderr` |
+| `error.rs` | `from_penny_error_kind_returns_gadgetron_penny_variant`, `user_visible_message_does_not_contain_stderr` |
 
 ### 14.2 Fake Claude binary (`crates/gadgetron-testing/src/bin/fake_claude.rs`) — 4 NEW scenarios per qa
 
@@ -1690,7 +1690,7 @@ Original 4 preserved: `sse_simple_text_scenario`, `sse_tool_use_does_not_emit_cl
 #[tokio::test]
 async fn sse_round_trip_text_content_exact() {
     // Round-trip invariant (qa): total output content == fake_claude emit text
-    let fx = KairosFixture::with_fake_scenario("simple_text").await;
+    let fx = PennyFixture::with_fake_scenario("simple_text").await;
     let chunks = fx.collect_chat_chunks("test").await;
     let assembled: String = chunks.iter()
         .flat_map(|c| c.choices.first().and_then(|ch| ch.delta.content.clone()))
@@ -1700,7 +1700,7 @@ async fn sse_round_trip_text_content_exact() {
 
 #[tokio::test]
 async fn sse_empty_stream_is_valid() {
-    let fx = KairosFixture::with_fake_scenario("message_stop_only").await;
+    let fx = PennyFixture::with_fake_scenario("message_stop_only").await;
     let chunks = fx.collect_chat_chunks("test").await;
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].choices[0].finish_reason.as_deref(), Some("stop"));
@@ -1708,7 +1708,7 @@ async fn sse_empty_stream_is_valid() {
 
 #[tokio::test]
 async fn sse_unknown_event_skipped_gracefully() {
-    let fx = KairosFixture::with_fake_scenario("unknown_event").await;
+    let fx = PennyFixture::with_fake_scenario("unknown_event").await;
     let chunks = fx.collect_chat_chunks("test").await;
     // Unknown event silently skipped; still yields message_stop
     let last = chunks.last().expect("at least one chunk");
@@ -1721,7 +1721,7 @@ async fn sse_unknown_event_skipped_gracefully() {
 ```rust
 #[tokio::test]
 async fn concurrent_runs_produce_independent_output() {
-    let fx = KairosFixture::with_fake_scenario("simple_text").await;
+    let fx = PennyFixture::with_fake_scenario("simple_text").await;
     let mut handles = Vec::new();
     for _ in 0..4 {
         let fx = fx.clone();
@@ -1740,7 +1740,7 @@ async fn concurrent_runs_produce_independent_output() {
 async fn stdin_closed_before_stdout_drain() {
     // qa: fake scenario "stdin_echo" reads stdin, echoes byte count.
     // Test asserts echoed count matches the serialized request length.
-    let fx = KairosFixture::with_fake_scenario("stdin_echo").await;
+    let fx = PennyFixture::with_fake_scenario("stdin_echo").await;
     let chunks = fx.collect_chat_chunks("a user prompt").await;
     let text: String = chunks.iter()
         .flat_map(|c| c.choices[0].delta.content.clone())
@@ -1755,7 +1755,7 @@ async fn stream_drop_kills_subprocess() {
     // security B3 + dx §7: subprocess must be SIGKILLed on stream drop.
     // Uses fake "timeout" scenario (sleeps forever). Fake also writes its PID
     // to a known tmpfile first so the test can check process liveness.
-    let fx = KairosFixture::with_fake_scenario("timeout_with_pid").await;
+    let fx = PennyFixture::with_fake_scenario("timeout_with_pid").await;
     let stream = fx.start_chat_stream("test").await;
     let pid = fx.read_fake_pid().await;
     drop(stream);
@@ -1774,16 +1774,16 @@ async fn stream_drop_kills_subprocess() {
 ### 14.5 E2E happy-path (5 concrete assertions per qa)
 
 ```rust
-// crates/gadgetron-testing/tests/kairos_e2e.rs
+// crates/gadgetron-testing/tests/penny_e2e.rs
 
 #[tokio::test]
 #[ignore]  // gated by GADGETRON_E2E_CLAUDE=1
-async fn kairos_e2e_happy_path() {
+async fn penny_e2e_happy_path() {
     if std::env::var("GADGETRON_E2E_CLAUDE").is_err() { return; }
-    let fx = RealKairosFixture::new().await;
+    let fx = RealPennyFixture::new().await;
     let response = fx
         .post_json("/v1/chat/completions", serde_json::json!({
-            "model": "kairos",
+            "model": "penny",
             "messages": [{"role": "user", "content": "say hello"}],
             "stream": true,
         }))
@@ -1814,11 +1814,11 @@ async fn kairos_e2e_happy_path() {
 ### 14.6 Load SLO — non-criterion `#[tokio::test]` (qa)
 
 ```rust
-// crates/gadgetron-kairos/tests/load_slo.rs
+// crates/gadgetron-penny/tests/load_slo.rs
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_spawn_16_ttfb_max_under_100ms() {
-    let fx = KairosFixture::with_fake_scenario("simple_text")
+    let fx = PennyFixture::with_fake_scenario("simple_text")
         .with_max_concurrent(16)
         .await;
     let mut handles = Vec::with_capacity(16);
@@ -1851,17 +1851,17 @@ Criterion benches in `benches/` are preserved as performance trend tools but **d
 
 | Test type | Path |
 |---|---|
-| Unit — kairos | `crates/gadgetron-kairos/src/**/*.rs #[cfg(test)]` |
-| Integration — kairos | `crates/gadgetron-kairos/tests/*.rs` |
-| Load SLO | `crates/gadgetron-kairos/tests/load_slo.rs` |
-| E2E (gated) | `crates/gadgetron-testing/tests/kairos_e2e.rs` |
+| Unit — penny | `crates/gadgetron-penny/src/**/*.rs #[cfg(test)]` |
+| Integration — penny | `crates/gadgetron-penny/tests/*.rs` |
+| Load SLO | `crates/gadgetron-penny/tests/load_slo.rs` |
+| E2E (gated) | `crates/gadgetron-testing/tests/penny_e2e.rs` |
 | Fake binary | `crates/gadgetron-testing/src/bin/fake_claude.rs` |
-| Test harness | `crates/gadgetron-testing/src/kairos_fixture.rs` (see §18) |
-| Snapshots | `crates/gadgetron-kairos/tests/snapshots/*.snap` |
+| Test harness | `crates/gadgetron-testing/src/penny_fixture.rs` (see §18) |
+| Snapshots | `crates/gadgetron-penny/tests/snapshots/*.snap` |
 
 ### 14.8 MCP protocol handshake cross-reference
 
-MCP protocol handshake (`initialize`/`initialized`) is exercised by `01-knowledge-layer.md §10.5 mcp_initialize_handshake_succeeds` — kairos relies on this in every session, tested end-to-end by the `KairosFixture` which uses the same `KnowledgeFixture` internally. No separate MCP handshake test is required in this crate.
+MCP protocol handshake (`initialize`/`initialized`) is exercised by `01-knowledge-layer.md §10.5 mcp_initialize_handshake_succeeds` — penny relies on this in every session, tested end-to-end by the `PennyFixture` which uses the same `KnowledgeFixture` internally. No separate MCP handshake test is required in this crate.
 
 ---
 
@@ -1875,15 +1875,15 @@ MCP protocol handshake (`initialize`/`initialized`) is exercised by `01-knowledg
 | MCP config tmpfile contents | Low (public knowledge of schema) | Process |
 | Subprocess stdout (streams to client) | **High** — assistant response reflecting wiki/search content | User |
 | Subprocess stderr | **High** — may include session diagnostics, partial tokens | User |
-| `KairosConfig` in-memory (claude_base_url, claude_model) | Medium | Operator |
+| `PennyConfig` in-memory (claude_base_url, claude_model) | Medium | Operator |
 | `gadgetron-gateway` API key (Bearer) used by `gadgetron-web` (assistant-ui) browser client | High | Operator (key lives in user's browser localStorage on `:8080/web`; same-origin with `/v1/*`) |
 
 ### 15.2 Trust boundaries
 
 | ID | Boundary | Auth mechanism |
 |---|---|---|
-| B-K1 | gateway → KairosProvider (Rust call) | in-process, tenant_id from gateway auth |
-| B-K2 | KairosProvider → Claude Code subprocess (stdio) | OS pid parenthood |
+| B-K1 | gateway → PennyProvider (Rust call) | in-process, tenant_id from gateway auth |
+| B-K2 | PennyProvider → Claude Code subprocess (stdio) | OS pid parenthood |
 | B-K3 | Claude Code → knowledge MCP server (stdio) | inherits from Claude Code child |
 | B-K4 | Claude Code → Anthropic cloud (HTTPS) | OAuth from ~/.claude/ |
 
@@ -1891,7 +1891,7 @@ MCP protocol handshake (`initialize`/`initialized`) is exercised by `01-knowledg
 
 | Component | S | T | R | I | D | E | Highest unmitigated risk |
 |---|---|---|---|---|---|---|---|
-| `KairosProvider` | Low (inherits gateway auth) | Low | Low | Low | Low | Low | None — thin adapter |
+| `PennyProvider` | Low (inherits gateway auth) | Low | Low | Low | Low | Low | None — thin adapter |
 | `ClaudeCodeSession` | Low | Medium — stdin can be tampered in-memory only | Low | **High** — subprocess stderr may leak tokens; mitigated by M2 | Medium — `max_concurrent_subprocesses` hard cap + `kill_on_drop` | Low | stderr leak → mitigated by `redact_stderr` + no catch-all |
 | `spawn.rs` | Low | **High** — env vars (`claude_model`, `claude_base_url`) flow to subprocess; malicious values could alter behavior | Low | Medium — `ANTHROPIC_BASE_URL` could redirect Claude Code to attacker endpoint | Low | Medium | config value injection → mitigated by `validate()` rejecting `-` prefix, empty strings, non-http URLs |
 | `mcp_config.rs` | Low | Low — atomic 0600 | Low | Low — non-secret content | Low | Low | None for P2A; `/tmp` parent dir accessible but file is 0600 |
@@ -1935,7 +1935,7 @@ All acceptance is **explicitly P2A-scoped**. P2C multi-user deployments must reo
 | **ADR-P2A-02** | `--dangerously-skip-permissions` + P2A single-user risk acceptance | Impl blocker |
 | **ADR-P2A-03** | SearXNG query privacy disclosure posture | Impl blocker — gates manual write |
 
-Each ADR lives in `docs/adr/P2A-xx-<slug>.md`. Written BEFORE kairos impl starts. Reviewed by security-compliance-lead.
+Each ADR lives in `docs/adr/P2A-xx-<slug>.md`. Written BEFORE penny impl starts. Reviewed by security-compliance-lead.
 
 ---
 
@@ -1946,27 +1946,27 @@ Each ADR lives in `docs/adr/P2A-xx-<slug>.md`. Written BEFORE kairos impl starts
 | Claude Code `-p` stdin contract (JSON vs concatenated text) | PM — ADR-P2A-01 behavioral test | `session::feed_stdin` final format |
 | `rmcp` crate maturity (shared with 01) | PM | MCP server decision |
 | M4 `--allowed-tools` verification | PM — ADR-P2A-01 | 02 security posture |
-| `which` + `async_stream` crate workspace addition | PM — PR starting P2A | kairos crate compilation |
+| `which` + `async_stream` crate workspace addition | PM — PR starting P2A | penny crate compilation |
 
 ---
 
-## 18. `KairosFixture` test harness (NEW — security F3)
+## 18. `PennyFixture` test harness (NEW — security F3)
 
-`KairosFixture` and `RealKairosFixture` live in `crates/gadgetron-testing/src/kairos_fixture.rs`. The fixture composes the Phase 1 `GatewayHarness` with kairos-specific setup: fake-claude binary path, wiki tmpdir, fake knowledge MCP server.
+`PennyFixture` and `RealPennyFixture` live in `crates/gadgetron-testing/src/penny_fixture.rs`. The fixture composes the Phase 1 `GatewayHarness` with penny-specific setup: fake-claude binary path, wiki tmpdir, fake knowledge MCP server.
 
 ```rust
-// crates/gadgetron-testing/src/kairos_fixture.rs
+// crates/gadgetron-testing/src/penny_fixture.rs
 
-pub struct KairosFixture {
+pub struct PennyFixture {
     pub gw: GatewayHarness,
     pub wiki_tmpdir: TempDir,
     pub fake_claude_path: PathBuf,
     pub fake_mcp_server: Option<FakeMcpServer>,
 }
 
-impl KairosFixture {
+impl PennyFixture {
     /// Build a fixture that uses the compiled `fake_claude` binary with the
-    /// specified scenario. Starts the gateway harness with a KairosProvider
+    /// specified scenario. Starts the gateway harness with a PennyProvider
     /// registered pointing at the fake binary.
     pub async fn with_fake_scenario(scenario: &str) -> Self { /* ... */ }
 
@@ -1989,19 +1989,19 @@ impl KairosFixture {
     pub async fn read_fake_pid(&self) -> u32 { /* reads tmpdir/.fake_pid */ }
 }
 
-impl Clone for KairosFixture {
+impl Clone for PennyFixture {
     /// Shallow clone — shared state via Arc.
     fn clone(&self) -> Self { /* ... */ }
 }
 
 /// E2E-only fixture using the real `claude` binary.
 /// Requires `GADGETRON_E2E_CLAUDE=1` + `#[ignore]` gate.
-pub struct RealKairosFixture {
+pub struct RealPennyFixture {
     pub gw: GatewayHarness,
     pub wiki_tmpdir: TempDir,
 }
 
-impl RealKairosFixture {
+impl RealPennyFixture {
     pub async fn new() -> Self { /* ... */ }
     pub async fn post_json(&self, path: &str, body: serde_json::Value) -> reqwest::Response { /* ... */ }
     pub async fn body_lines(&self, resp: &reqwest::Response) -> Vec<String> { /* ... */ }
@@ -2018,12 +2018,12 @@ impl RealKairosFixture {
 
 | Reviewer | Round | v1 verdict | v2 changes |
 |---|---|---|---|
-| chief-architect | Round 0 + Round 3 | REVISE (B1, B2, B3, A1, A2, A3) | **B1** `Result<ChatChunk>` (1-arg alias) + `ModelInfo { id, object, owned_by }` (no `created`); **B2** `async_stream` + `which` in Cargo.toml §2; **B3** `child.wait()` + parallel stderr sink task; **A1** `which` in workspace; **A2** RoundRobin+kairos operator note (§11); **A3** `oauth_state` catch-all removed |
-| dx-product-lead | Round 1.5 | REVISE (block §12 + 3 revise) | **§12** cross-ref to 01 v2 §1.1 (authoritative kairos init stdout); **§5/spawn.rs** `kill_on_drop(true)`; **§10** `max_concurrent_subprocesses` in TOML + `claude_model` empty-string validation; **§9** `SpawnFailed` log hint |
-| security-compliance-lead | Round 1.5 | REVISE (B1, B2, B3, F1-F3, STRIDE) | **B1** corrected tempfile comment + `#[cfg(not(unix))] compile_error!`; **B2** `oauth_state` removed + `preserves_long_path_in_clean_text` test; **B3** `kill_on_drop(true)` + `stream_drop_kills_subprocess` test; **F1** `starts_with('-')` validation; **F2** `[P2C-SECURITY-REOPEN]` tag; **F3** `KairosFixture` §18; **STRIDE** §15 formal threat model |
+| chief-architect | Round 0 + Round 3 | REVISE (B1, B2, B3, A1, A2, A3) | **B1** `Result<ChatChunk>` (1-arg alias) + `ModelInfo { id, object, owned_by }` (no `created`); **B2** `async_stream` + `which` in Cargo.toml §2; **B3** `child.wait()` + parallel stderr sink task; **A1** `which` in workspace; **A2** RoundRobin+penny operator note (§11); **A3** `oauth_state` catch-all removed |
+| dx-product-lead | Round 1.5 | REVISE (block §12 + 3 revise) | **§12** cross-ref to 01 v2 §1.1 (authoritative penny init stdout); **§5/spawn.rs** `kill_on_drop(true)`; **§10** `max_concurrent_subprocesses` in TOML + `claude_model` empty-string validation; **§9** `SpawnFailed` log hint |
+| security-compliance-lead | Round 1.5 | REVISE (B1, B2, B3, F1-F3, STRIDE) | **B1** corrected tempfile comment + `#[cfg(not(unix))] compile_error!`; **B2** `oauth_state` removed + `preserves_long_path_in_clean_text` test; **B3** `kill_on_drop(true)` + `stream_drop_kills_subprocess` test; **F1** `starts_with('-')` validation; **F2** `[P2C-SECURITY-REOPEN]` tag; **F3** `PennyFixture` §18; **STRIDE** §15 formal threat model |
 | qa-test-architect | Round 2 | REVISE (8 items) | **§14.2** 4 fake_claude scenarios + stdin_echo + message_stop_only; **§14.3** 3 SSE tests (round_trip, empty_stream, unknown_event); **§14.4** 3 subprocess tests (concurrent, stdin_close, stream_drop); **§14.5** E2E 5 concrete assertions; **§14.6** non-criterion load SLO; **§8** redact_stderr proptests; **§14.1** 5 config boundary tests; **§7** mcp_config_tmpfile test names |
 | chief-architect + dx + security + qa | Round 2 (2026-04-13) | APPROVE WITH MINOR / REVISE (security) | Resolved in v3: CA-B1 (ChunkChoice/ChunkDelta types + reasoning_content), CA-B2 (uuid dep), CA-B3 (AsyncBufReadExt), CA-DET1 (chat() streaming-only), SEC-B1 (env_clear allowlist), SEC-B3 (binary validation), SEC-B4 ({20,512} bound + ReDoS proptest), DX-B3 (feed_stdin conditional branches + option_b_stdin feature), QA-NB2 (MCP handshake cross-ref §14.8), QA-DET1 (poll loop replaces sleep), QA-DET2 (multi_thread runtime), QA-DET3 (max not p99, N=16 note), QA-NIT4 (tmpfile path explicit), GAP-3 (M5 row in mitigations table) |
 
 Next round: 4-reviewer parallel verification on v3.
 
-*End of 02-kairos-agent.md v3. Round 2 review addressed.*
+*End of 02-penny-agent.md v3. Round 2 review addressed.*

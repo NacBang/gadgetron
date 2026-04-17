@@ -61,11 +61,11 @@ impl EnvResolver for FakeEnv {
 // Top-level AgentConfig
 // ---------------------------------------------------------------------------
 
-/// Native Claude Code session mode. Selects how `KairosProvider`
+/// Native Claude Code session mode. Selects how `PennyProvider`
 /// handles `ChatRequest.conversation_id`.
 ///
 /// Per ADR-P2A-06 Implementation status addendum item 7 /
-/// `02-kairos-agent.md §5.2.8`:
+/// `02-penny-agent.md §5.2.8`:
 /// - `NativeWithFallback` (default) — when `conversation_id` is
 ///   present, use `--session-id` / `--resume`; when absent, fall
 ///   back to stateless history re-ship. Safe default for P2A.
@@ -86,7 +86,7 @@ pub enum SessionMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Which agent binary powers Kairos. P2A: only `"claude"` (Claude Code CLI).
+    /// Which agent binary powers Penny. P2A: only `"claude"` (Claude Code CLI).
     #[serde(default = "default_agent_binary")]
     pub binary: String,
 
@@ -97,12 +97,12 @@ pub struct AgentConfig {
 
     /// Subprocess wall-clock timeout for a single Claude Code invocation.
     /// Range [10, 3600]. Default 300. Migrated from legacy
-    /// `[kairos].request_timeout_secs` per 04 v2 §11.1.
+    /// `[penny].request_timeout_secs` per 04 v2 §11.1.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
 
     /// Maximum number of concurrent Claude Code subprocesses. Range [1, 32].
-    /// Default 4. Migrated from legacy `[kairos].max_concurrent_subprocesses`
+    /// Default 4. Migrated from legacy `[penny].max_concurrent_subprocesses`
     /// per 04 v2 §11.1.
     #[serde(default = "default_max_concurrent_subprocesses")]
     pub max_concurrent_subprocesses: usize,
@@ -328,7 +328,7 @@ pub struct BrainConfig {
     pub external_base_url: String,
 
     /// gadgetron_local mode: `<provider_name>/<model_id>` from the router's
-    /// provider map. Must NOT reference kairos or an Anthropic-family
+    /// provider map. Must NOT reference penny or an Anthropic-family
     /// provider (recursion guard — V9).
     #[serde(default)]
     pub local_model: String,
@@ -483,9 +483,9 @@ impl BrainConfig {
                 }
                 // V9 — recursion guard
                 let lower = self.local_model.to_ascii_lowercase();
-                if lower.contains("kairos") || lower.starts_with("anthropic/") {
+                if lower.contains("penny") || lower.starts_with("anthropic/") {
                     return Err(GadgetronError::Config(format!(
-                        "agent.brain.local_model cannot reference kairos or an Anthropic-family \
+                        "agent.brain.local_model cannot reference penny or an Anthropic-family \
                          provider (recursion guard, ADR-P2A-05 §12); got {:?}",
                         self.local_model
                     )));
@@ -782,15 +782,15 @@ mod config_tests {
     }
 
     #[test]
-    fn v9_local_model_cannot_reference_kairos() {
+    fn v9_local_model_cannot_reference_penny() {
         let mut brain = BrainConfig::default();
         brain.mode = BrainMode::GadgetronLocal;
-        brain.local_model = "kairos/anything".into();
+        brain.local_model = "penny/anything".into();
         let err = brain
             .validate_with_env(&empty_providers(), &empty_env())
             .unwrap_err();
         assert!(
-            err.to_string().contains("cannot reference kairos"),
+            err.to_string().contains("cannot reference penny"),
             "err: {err}"
         );
     }

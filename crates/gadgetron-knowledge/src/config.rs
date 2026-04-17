@@ -214,7 +214,7 @@ pub struct KnowledgeConfig {
 
     /// Git author identity in `"Name <email>"` format. If `None`,
     /// `KnowledgeConfig::to_wiki_config` auto-detects from the global
-    /// gitconfig and falls back to `"Kairos <kairos@gadgetron.local>"`.
+    /// gitconfig and falls back to `"Penny <penny@gadgetron.local>"`.
     /// Env: `GADGETRON_KNOWLEDGE_WIKI_GIT_AUTHOR`
     #[serde(default)]
     pub wiki_git_author: Option<String>,
@@ -241,7 +241,7 @@ impl KnowledgeConfig {
     /// Extract a `[knowledge]` section from a raw `gadgetron.toml`
     /// content string. Returns `None` when the section is absent —
     /// callers treat a missing `[knowledge]` as "knowledge layer
-    /// disabled, don't register Kairos".
+    /// disabled, don't register Penny".
     ///
     /// Returns `Err(String)` only on malformed toml OR when the
     /// `[knowledge]` section is present but fails deserialization
@@ -261,7 +261,7 @@ impl KnowledgeConfig {
     /// paths are left untouched.
     ///
     /// Why: `gadgetron mcp serve` runs as a grandchild process spawned by
-    /// Claude Code with cwd pinned to `~/.gadgetron/kairos/work/`, so a
+    /// Claude Code with cwd pinned to `~/.gadgetron/penny/work/`, so a
     /// relative `wiki_path = "./.gadgetron/wiki"` in the operator's TOML
     /// would resolve to the wrong directory. Resolving against the config
     /// file's own directory makes the path cwd-independent.
@@ -273,7 +273,7 @@ impl KnowledgeConfig {
 
     /// Validates at load time. Rules:
     /// - `wiki_path` parent must exist (wiki_path itself may not —
-    ///   `gadgetron kairos init` creates it on first start).
+    ///   `gadgetron penny init` creates it on first start).
     /// - `wiki_max_page_bytes` must be in [1, 100 MiB]
     /// - Nested `search` config (if present) passes its own validate.
     pub fn validate(&self) -> Result<(), String> {
@@ -357,9 +357,9 @@ fn autodetect_git_author_or_fallback() -> (String, String) {
     // Fallback when the system gitconfig is missing or empty.
     tracing::warn!(
         target: "knowledge_config",
-        "git config user.name / user.email not set — falling back to 'Kairos <kairos@gadgetron.local>'"
+        "git config user.name / user.email not set — falling back to 'Penny <penny@gadgetron.local>'"
     );
-    ("Kairos".to_string(), "kairos@gadgetron.local".to_string())
+    ("Penny".to_string(), "penny@gadgetron.local".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -449,12 +449,12 @@ mod knowledge_config_tests {
         let cfg = KnowledgeConfig {
             wiki_path: tmp.path().join("wiki"),
             wiki_autocommit: false,
-            wiki_git_author: Some("Kairos <k@g.local>".into()),
+            wiki_git_author: Some("Penny <k@g.local>".into()),
             wiki_max_page_bytes: 2048,
             search: None,
         };
         let wc = cfg.to_wiki_config().unwrap();
-        assert_eq!(wc.git_author_name, "Kairos");
+        assert_eq!(wc.git_author_name, "Penny");
         assert_eq!(wc.git_author_email, "k@g.local");
         assert_eq!(wc.max_page_bytes, 2048);
         assert!(!wc.autocommit);

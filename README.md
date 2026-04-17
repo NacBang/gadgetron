@@ -25,11 +25,11 @@ Rust-native heterogeneous cluster collaboration platform with sub-millisecond P9
 
 ### Assistant & Collaboration Entry Point (Phase 2A)
 
-- **Kairos assistant runtime** — Claude Code CLI wrapped as an OpenAI-compatible provider (`model = "kairos"`). Per `02-kairos-agent.md v4`.
+- **Penny assistant runtime** — Claude Code CLI wrapped as an OpenAI-compatible provider (`model = "penny"`). Per `02-penny-agent.md v4`.
 - **`McpToolProvider` trait** — stable plugin interface for MCP tool providers; `gadgetron-core::agent::tools`. P2A ships `KnowledgeToolProvider`; P2B/P2C extend with `InfraToolProvider`, `SchedulerToolProvider`, etc.
-- **`McpToolRegistry` builder/freeze** — `gadgetron-kairos::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
+- **`McpToolRegistry` builder/freeze** — `gadgetron-penny::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
 - **3-tier × 3-mode permission model** — `Tier::{Read, Write, Destructive}` × `ToolMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
-- **`[kairos]` → `[agent.brain]` migration** — `AppConfig::load` rewrites legacy v0.1.x config sections automatically with `tracing::warn!` per moved field. See [04 v2 §11.1](docs/design/phase2/04-mcp-tool-registry.md).
+- **`[penny]` → `[agent.brain]` migration** — `AppConfig::load` rewrites legacy v0.1.x config sections automatically with `tracing::warn!` per moved field. See [04 v2 §11.1](docs/design/phase2/04-mcp-tool-registry.md).
 - **Reserved `agent.*` namespace** — agent cannot modify its own brain/config. Three-layer defense: category check, prefix check, specific-name list. Per `ensure_tool_name_allowed`.
 
 ### Knowledge Layer (Phase 2A)
@@ -44,13 +44,13 @@ Rust-native heterogeneous cluster collaboration platform with sub-millisecond P9
 
 ### Stdio MCP Server (Phase 2A)
 
-- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio MCP server (`gadgetron-kairos::mcp_server`). Invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per `01-knowledge-layer.md v3 §6.1`.
+- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio MCP server (`gadgetron-penny::mcp_server`). Invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per `01-knowledge-layer.md v3 §6.1`.
 
 ## Quick Start
 
 ```bash
 # Prerequisites: Rust 1.85+, git, PostgreSQL (optional for no-db mode),
-#                Claude Code CLI if you want Kairos.
+#                Claude Code CLI if you want Penny.
 
 # 1. Build
 cargo build --release
@@ -89,12 +89,12 @@ TOML
 # 5. Run the server (no-db mode)
 ./target/release/gadgetron serve --no-db
 
-# 6. Chat with Kairos
+# 6. Chat with Penny
 curl -sN http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer gad_live_<your_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "kairos",
+    "model": "penny",
     "stream": true,
     "messages": [
       {"role":"user","content":"wiki에 오늘 회의 내용을 저장해줘"}
@@ -102,7 +102,7 @@ curl -sN http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-The full platform quickstart (PostgreSQL, multi-tenant, provider configs) lives in [`docs/manual/quickstart.md`](docs/manual/quickstart.md). The Kairos user manual section is [`docs/manual/kairos.md`](docs/manual/kairos.md).
+The full platform quickstart (PostgreSQL, multi-tenant, provider configs) lives in [`docs/manual/quickstart.md`](docs/manual/quickstart.md). The Penny user manual section is [`docs/manual/penny.md`](docs/manual/penny.md).
 
 ## Architecture
 
@@ -119,17 +119,17 @@ gadgetron (single binary)
 ├── gadgetron-tui         — Ratatui terminal dashboard
 ├── gadgetron-web         — embedded assistant-ui Web UI (include_dir!)
 ├── gadgetron-knowledge   — wiki (fs/git/secrets/link/index) + searxng + KnowledgeToolProvider
-├── gadgetron-kairos      — McpToolRegistry, ClaudeCodeSession, KairosProvider, mcp_server
+├── gadgetron-penny      — McpToolRegistry, ClaudeCodeSession, PennyProvider, mcp_server
 └── gadgetron-cli         — CLI entry point (gadgetron serve / mcp serve / init / doctor)
 ```
 
-Data flow for a Kairos chat:
+Data flow for a Penny chat:
 
 ```
-POST /v1/chat/completions?model=kairos
+POST /v1/chat/completions?model=penny
       │
       ▼
-gadgetron-gateway  ──►  LlmRouter  ──►  KairosProvider::chat_stream
+gadgetron-gateway  ──►  LlmRouter  ──►  PennyProvider::chat_stream
                                                │
                                                ▼
                             ClaudeCodeSession::run(self)
@@ -221,11 +221,11 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 | [Operations Tool Providers](docs/design/ops/operations-tool-providers.md) | Draft |
 | [Phase 2A Overview](docs/design/phase2/00-overview.md) | v3 approved |
 | [01 — Knowledge Layer](docs/design/phase2/01-knowledge-layer.md) | v3 approved |
-| [02 — Kairos Agent](docs/design/phase2/02-kairos-agent.md) | v4 (Path 1 aligned) |
+| [02 — Penny Agent](docs/design/phase2/02-penny-agent.md) | v4 (Path 1 aligned) |
 | [03 — gadgetron-web](docs/design/phase2/03-gadgetron-web.md) | v2.1 approved |
 | [04 — MCP Tool Registry](docs/design/phase2/04-mcp-tool-registry.md) | **v2 (Path 1 scope cut)** |
 
-`docs/manual/*` tracks the operator-facing surface on trunk: the stable Phase 1 gateway plus the currently shipped Phase 2A Kairos/Web runtime. `docs/design/*` continues to track approved and in-progress implementation work.
+`docs/manual/*` tracks the operator-facing surface on trunk: the stable Phase 1 gateway plus the currently shipped Phase 2A Penny/Web runtime. `docs/design/*` continues to track approved and in-progress implementation work.
 
 ### Phase 2A ADRs
 | ADR | Title |
@@ -244,10 +244,10 @@ Tracked in [`docs/design/phase2/00-overview.md §15`](docs/design/phase2/00-over
 | Phase | Steps | Status |
 |-------|-------|--------|
 | **1 Knowledge foundation** | 1-5 | ✅ wiki::{fs, git, secrets, link, index} + search::searxng |
-| **2 Agent control plane** | 6-9 | ✅ AppConfig `[kairos]` → `[agent.brain]` migration, AgentConfig fields, KairosErrorKind tool variants, EnvResolver, ask-mode warn |
+| **2 Agent control plane** | 6-9 | ✅ AppConfig `[penny]` → `[agent.brain]` migration, AgentConfig fields, PennyErrorKind tool variants, EnvResolver, ask-mode warn |
 | **3 MCP registry + provider** | 10-14 | ✅ McpToolRegistry, Wiki aggregate + KnowledgeToolProvider, cross-crate integration (12 absorbed, 13 deferred to P2B) |
-| **4 Kairos subprocess** | 15-21 | ✅ mcp_config (M1), spawn, redact (M2), session, stream, provider, inline tests |
-| **5 CLI wiring** | 22-26 | ✅ register_kairos_if_configured, `gadgetron mcp serve` subcommand; 24 (`init` `[agent]` emit) / 25 (feature gates) / 26 (gateway no-op) remain |
+| **4 Penny subprocess** | 15-21 | ✅ mcp_config (M1), spawn, redact (M2), session, stream, provider, inline tests |
+| **5 CLI wiring** | 22-26 | ✅ register_penny_if_configured, `gadgetron mcp serve` subcommand; 24 (`init` `[agent]` emit) / 25 (feature gates) / 26 (gateway no-op) remain |
 | **6 Integration + E2E** | 27-29 | 🔲 fake_claude + real Claude E2E + gadgetron-web smoke |
 
 **Test matrix** (Rust 1.94 / Ubuntu 22.04 Docker): ~500 tests pass across the workspace, 0 failures excluding `gadgetron-testing` e2e (which requires live PostgreSQL).

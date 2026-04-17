@@ -344,7 +344,7 @@ mod tests {
 
     fn fresh_repo() -> (TempDir, git2::Repository) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let repo = open_or_init(dir.path(), "Kairos Test", "kairos@test.local").expect("init");
+        let repo = open_or_init(dir.path(), "Penny Test", "penny@test.local").expect("init");
         (dir, repo)
     }
 
@@ -374,7 +374,7 @@ mod tests {
         let file = dir.path().join("hello.md");
         fs::write(&file, "# Hello\n").unwrap();
 
-        let sig = signature("Kairos", "kairos@test.local").expect("sig");
+        let sig = signature("Penny", "penny@test.local").expect("sig");
         let oid = autocommit(&repo, Path::new("hello.md"), &sig).expect("commit");
 
         // New commit is now HEAD.

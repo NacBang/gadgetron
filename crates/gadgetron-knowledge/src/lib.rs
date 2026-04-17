@@ -1,7 +1,7 @@
-//! gadgetron-knowledge — knowledge layer for Kairos personal assistant.
+//! gadgetron-knowledge — knowledge layer for Penny personal assistant.
 //!
 //! Provides: wiki store (md+git), web search proxy (SearXNG), MCP server (stdio).
-//! Consumers: gadgetron-kairos (Claude Code subprocess), gadgetron-cli (`mcp serve`).
+//! Consumers: gadgetron-penny (Claude Code subprocess), gadgetron-cli (`mcp serve`).
 //!
 //! P2A implementation is built incrementally per the TDD order in
 //! `docs/design/phase2/00-overview.md §15`:

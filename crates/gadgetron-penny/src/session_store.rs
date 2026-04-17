@@ -1,6 +1,6 @@
 //! `SessionStore` — per-conversation Claude Code native session tracking.
 //!
-//! Spec: `docs/design/phase2/02-kairos-agent.md §5.2.4`.
+//! Spec: `docs/design/phase2/02-penny-agent.md §5.2.4`.
 //!
 //! The store maps gadgetron-side `conversation_id` → `SessionEntry`,
 //! which holds the UUID passed to Claude Code's `--session-id` /

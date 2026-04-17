@@ -33,10 +33,10 @@
 현재 구현은 이 전체 비전의 일부를 이미 담고 있습니다.
 
 - **Operations + Execution substrate**: Rust 네이티브 단일 바이너리 gateway/scheduler/node stack. LiteLLM/Portkey/OpenRouter 대비 P99 < 1ms, 로컬 GPU 1급, 단일 배포 단위.
-- **Assistant entry point**: Claude Code (CLI) 기반 Kairos. Rust는 절차적 에이전트 루프를 재구현하지 않고 MCP 서버와 subprocess 관리자 역할에 집중.
+- **Assistant entry point**: Claude Code (CLI) 기반 Penny. Rust는 절차적 에이전트 루프를 재구현하지 않고 MCP 서버와 subprocess 관리자 역할에 집중.
 - **Future collaboration loop**: direct + delegate + shadow 학습. 에이전트는 사람의 요청, 승인, 트러블슈팅, 해결 과정을 구조화하여 더 적합한 협업 파트너로 진화.
 
-**상세 설계**: `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md` (vision + STRIDE), `01-knowledge-layer.md` (`gadgetron-knowledge` crate), `02-kairos-agent.md` (`gadgetron-kairos` crate).
+**상세 설계**: `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md` (vision + STRIDE), `01-knowledge-layer.md` (`gadgetron-knowledge` crate), `02-penny-agent.md` (`gadgetron-penny` crate).
 
 ### 1.2 미션
 
@@ -49,7 +49,7 @@
 7. **운영 단순성** — 단일 바이너리 + TOML 설정 파일로 전체 스택 구동, 마이크로서비스 난비 지양
 8. **멀티 백엔드** — vLLM/SGLang을 1급 시민으로, Ollama/TGI/llama.cpp를 2급 시민으로 지원
 9. **오픈소스 최대 활용** — Claude Code / [assistant-ui](https://github.com/assistant-ui/assistant-ui) / SearXNG / git2 / pulldown-cmark / sqlite-vec / whisper.cpp 등 직접 구현 최소화. OpenWebUI 는 2026-04-14 D-20260414-02 로 drop — 2025-04 라이선스 변경 + 단일 바이너리 원칙 충돌.
-10. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (kairos는 Unix 전용으로 시작)
+10. **멀티 플랫폼** — Linux를 1순위, macOS를 개발용, Windows는 P2A 이후 (penny는 Unix 전용으로 시작)
 
 ### 1.3 경쟁 차별화
 
@@ -148,9 +148,9 @@ Gadgetron의 독보적 위치:
 
   Phase 2 신규 (trunk 구현됨):
     knowledge   <- core                                    (Phase 2: wiki + search + stdio MCP server)
-    kairos      <- core, knowledge                         (Phase 2: LlmProvider impl → router 등록)
+    penny      <- core, knowledge                         (Phase 2: LlmProvider impl → router 등록)
     web         <- (embedded static UI crate, gateway가 feature `web-ui`로 mount)
-    cli         <- +knowledge, kairos                      (`mcp serve` 서브커맨드 + kairos/web wiring)
+    cli         <- +knowledge, penny                      (`mcp serve` 서브커맨드 + penny/web wiring)
 ```
 
 ### 2.2 런타임 컴포넌트 다이어그램
@@ -815,18 +815,18 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - Hotfix PRs #7-10: streaming audit latency Phase 1 semantics 명확화, 401 `invalid_api_key` + 413 `request_too_large` OpenAI-compat, `--tui` TTY pre-check, 매뉴얼 동기화
 
 **Phase 1 알려진 제약 (Phase 2 TODO)**:
-- Streaming audit `latency_ms=0` (dispatch-time only; 02-kairos-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
+- Streaming audit `latency_ms=0` (dispatch-time only; 02-penny-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
 - Audit `provider=None` (실제 라우팅된 provider 미기록)
 
 ### Phase 2 — Assistant Plane + Collaboration Entry Point (v0.2, **진행 중**)
 
-**목표**: Phase 1 substrate 위에 Claude Code 기반 Kairos를 assistant plane entry point 로 올리고, knowledge layer + web UI + approval/registry seam 을 통해 협업형 control plane 으로 확장할 기반을 구축.
+**목표**: Phase 1 substrate 위에 Claude Code 기반 Penny를 assistant plane entry point 로 올리고, knowledge layer + web UI + approval/registry seam 을 통해 협업형 control plane 으로 확장할 기반을 구축.
 
-**핵심 아키텍처 결정**: Claude Code (CLI) 가 에이전트 본체. Rust는 MCP 서버와 subprocess 관리자만 제공. `gadgetron-kairos`는 `LlmProvider` trait를 구현해서 router에 `"kairos"` 이름으로 등록 — gateway dispatch 코드 변경 0.
+**핵심 아키텍처 결정**: Claude Code (CLI) 가 에이전트 본체. Rust는 MCP 서버와 subprocess 관리자만 제공. `gadgetron-penny`는 `LlmProvider` trait를 구현해서 router에 `"penny"` 이름으로 등록 — gateway dispatch 코드 변경 0.
 
 **신규 크레이트 (3개)**:
 - `gadgetron-knowledge` — wiki (md+git2+Obsidian `[[link]]`) / SearXNG 프록시 / manual JSON-RPC 2.0 stdio MCP 서버. 도메인 leaf 크레이트.
-- `gadgetron-kairos` — `LlmProvider` 구현 / `ClaudeCodeSession` (owned consuming + `kill_on_drop(true)`) / stream-json → ChatChunk 번역기 / `tempfile` M1 / `redact_stderr` M2.
+- `gadgetron-penny` — `LlmProvider` 구현 / `ClaudeCodeSession` (owned consuming + `kill_on_drop(true)`) / stream-json → ChatChunk 번역기 / `tempfile` M1 / `redact_stderr` M2.
 - `gadgetron-web` — embedded assistant-ui Web UI (`/web`) + approval/report/assistant entry UX substrate.
 
 **Phase 2 서브-스프린트 (16주)**:
@@ -834,9 +834,9 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 | 서브-스프린트 | 기간 | 증명 목표 |
 |---|---|---|
 | **P1.5** | 1주 | v0.1.0-phase1 태그, `docs/design/phase2/` 설계 3종 완결 (**완료**) |
-| **P2A — Kairos MVP** | 4주 | desktop-first assistant plane entry point + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `kairos` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
+| **P2A — Penny MVP** | 4주 | desktop-first assistant plane entry point + md/git wiki + (선택) SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 단일 바이너리 embed)**. Acceptance: 사용자가 `http://localhost:8080/web` 에서 API 키 입력 → `penny` 모델 선택 → 메시지 입력 → wiki 읽기/쓰기 + 웹 검색 MCP 툴 자동 사용 → 2s TTFB 스트리밍 응답 (D-20260414-02) |
 | **P2B — Rich Knowledge** | 4주 | SQLite + `sqlite-vec` 벡터 검색 + `pdf-extract` 텍스트/PDF ingest + 대화 auto-ingest hook + tantivy 전문검색 |
-| **P2C — Multi + Storage** | 4주 | `KairosManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
+| **P2C — Multi + Storage** | 4주 | `PennyManager` per-tenant isolation + `object_store` (Local/S3/GCS) + SharedKnowledge merge seam (실제 merge는 P2D) + P2A 단일유저 security posture 재검토 |
 | **P2D — Media & Polish** | 4주 | `whisper.cpp` 오디오 STT + CLIP ONNX 이미지 캡션 + 비디오 프레임 샘플링 + 운영 배포 docs/manual |
 
 **Phase 2 보안 (00-overview §8 STRIDE + M1-M8)**:
@@ -846,7 +846,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - **M4** `--allowed-tools` enforcement 검증 (ADR-P2A-01, 구현 전 PM 행동 테스트)
 - **M5** `wiki_write` BLOCK (PEM/AKIA/GCP) + AUDIT (토큰 패턴) + `wiki_max_page_bytes` 캡
 - **M6** `tools_called` 는 툴 이름만 감사 (arguments 제외)
-- **M7** SearXNG + git 영구성 디스클로저 (`docs/manual/kairos.md` 머지 전 필수)
+- **M7** SearXNG + git 영구성 디스클로저 (`docs/manual/penny.md` 머지 전 필수)
 - **M8** P2A 단일유저 리스크 수락 (ADR-P2A-02)
 
 **배포 형태 (동일 코드베이스, 스토리지만 swap)**:
@@ -866,9 +866,9 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 | 열/전력 스로틀링 | `GpuInfo::temperature_c`, `power_draw_w` 기반 요청 제한 | `gadgetron-scheduler` + `gadgetron-node` |
 | 핫 리로드 | TOML 설정 변경 시 무중단 반영 | `gadgetron-core` |
 | 영구 메트릭 | Prometheus 익스포터, 시계열 DB 저장 | `gadgetron-router` |
-| GPUaaS / ModelaaS / AgentaaS | 계층형 추상화 (Phase 2 Kairos는 AgentaaS의 첫 소비자) | `gadgetron-xaas` 확장 |
+| GPUaaS / ModelaaS / AgentaaS | 계층형 추상화 (Phase 2 Penny는 AgentaaS의 첫 소비자) | `gadgetron-xaas` 확장 |
 | 벤더 마이그레이션 | 클라우드 ↔ 로컬 자동 페일오버 | `gadgetron-router` + `gadgetron-scheduler` |
-| 멀티 테넌시 강화 | 조직 격리, 리소스 쿼터, 사용량 청구 (Phase 2 KairosManager 기반) | `gadgetron-xaas` + `gadgetron-kairos` |
+| 멀티 테넌시 강화 | 조직 격리, 리소스 쿼터, 사용량 청구 (Phase 2 PennyManager 기반) | `gadgetron-xaas` + `gadgetron-penny` |
 | 플러그인 시스템 | 커스텀 provider / routing / MCP 도구 | 워크스페이스 확장 |
 | HuggingFace Hub 통합 | 모델 카탈로그/다운로드 | `gadgetron-scheduler` |
 | OpenTelemetry | 분산 트레이싱 | `gadgetron-gateway` |

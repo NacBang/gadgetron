@@ -87,7 +87,7 @@ export default function Home() {
     () =>
       new OpenAIChatTransport({
         api: `${getApiBase()}/chat/completions`,
-        model: "kairos",
+        model: "penny",
         headers: (): Record<string, string> => {
           const key =
             typeof localStorage !== "undefined"
@@ -149,7 +149,7 @@ export default function Home() {
 
         <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
           <div className="relative flex flex-1 flex-col overflow-hidden">
-            <ThreadPrimitive.Viewport className="kairos-scroll flex-1 overflow-y-auto">
+            <ThreadPrimitive.Viewport className="penny-scroll flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-4 py-6">
                 <ThreadPrimitive.Empty>
                   <EmptyState />
@@ -268,7 +268,7 @@ function AppHeader({
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border/50 bg-background/80 px-6 backdrop-blur">
       <div className="flex items-center gap-2">
         <div className="size-7 rounded-lg bg-gradient-to-br from-blue-500 to-purple-500 shadow-[0_0_20px_-6px_rgba(139,92,246,0.5)]" />
-        <span className="font-semibold tracking-tight">Kairos</span>
+        <span className="font-semibold tracking-tight">Penny</span>
         <span className="hidden text-xs text-muted-foreground md:inline">
           · Gadgetron의 AI 에이전트
         </span>
@@ -343,7 +343,7 @@ function EmptyState() {
           무엇을 도와드릴까요?
         </h1>
         <p className="max-w-md text-sm text-muted-foreground">
-          저장·검색·조사는 모두 Kairos가 알아서 합니다. 대화는 내부 위키에
+          저장·검색·조사는 모두 Penny가 알아서 합니다. 대화는 내부 위키에
           자동으로 커밋됩니다.
         </p>
       </div>
@@ -483,7 +483,7 @@ function AssistantMessage() {
       </Avatar>
       <div className="flex max-w-[85%] flex-col gap-1">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">Kairos</span>
+          <span className="text-xs text-muted-foreground">Penny</span>
           <AssistantStatusBadge />
         </div>
         <Card className="relative bg-card/70 ring-1 ring-border/60 shadow-sm transition-colors hover:bg-card/90">
@@ -506,7 +506,7 @@ function AssistantMessage() {
 }
 
 /**
- * Tiny label next to "Kairos" that calls out incomplete messages — a user
+ * Tiny label next to "Penny" that calls out incomplete messages — a user
  * who hits the Stop button mid-stream should see *why* the response is
  * partial, not silent truncation. Also surfaces length/content-filter
  * cutoffs if the underlying runtime ever reports them.

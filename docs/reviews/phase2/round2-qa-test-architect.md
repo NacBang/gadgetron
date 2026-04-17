@@ -1,7 +1,7 @@
 # Round 2 Cross-Review — qa-test-architect
 
 **Date**: 2026-04-13
-**Scope**: `docs/design/phase2/00-overview.md` v2, `docs/design/phase2/01-knowledge-layer.md` v2, `docs/design/phase2/02-kairos-agent.md` v2 + `docs/adr/ADR-P2A-{01,02,03}.md`
+**Scope**: `docs/design/phase2/00-overview.md` v2, `docs/design/phase2/01-knowledge-layer.md` v2, `docs/design/phase2/02-penny-agent.md` v2 + `docs/adr/ADR-P2A-{01,02,03}.md`
 **Reviewer role**: Round 2 testability (per `docs/process/03-review-rubric.md §2`)
 **Cross-check baseline**: `docs/design/testing/harness.md` (P1 harness, `PROPTEST_SEED=42` / `PROPTEST_CASES=1024` established there)
 
@@ -20,14 +20,14 @@ All 10 v1 blockers are addressed. Two new non-blocking issues are raised (propte
 | ID | Topic | Status | Citation |
 |----|-------|--------|----------|
 | A1 | MCP conformance test plan | APPROVED | `01-knowledge-layer.md §10.5` lines 1507-1554: 9 concrete `#[tokio::test]` functions including `tools_list_returns_four_tools_without_search`, `wiki_write_rejects_pem_private_key_block`, `unknown_tool_returns_tool_error_not_panic`, `wiki_get_missing_required_field_returns_tool_error`, `wiki_get_wrong_argument_type_returns_tool_error` |
-| A2 | SSE conformance test plan | APPROVED | `02-kairos-agent.md §14.3` lines 1069-1103: 4 original + 3 new tests (`sse_round_trip_text_content_exact`, `sse_empty_stream_is_valid`, `sse_unknown_event_skipped_gracefully`). File location: `crates/gadgetron-kairos/tests/sse_conformance.rs` |
-| A3 | Rust fake-claude binary | APPROVED | `00-overview.md §9` line 530: `crates/gadgetron-testing/src/bin/fake_claude.rs`. `02-kairos-agent.md §14.2` lines 1045-1067: 11 total scenarios (5 original + 6 new including `partial_crash`, `usage_only`, `large_output`, `unknown_event`, `message_stop_only`, `stdin_echo`) |
-| A4 | KairosE2EFixture harness | APPROVED | `02-kairos-agent.md §18` lines 1327-1387: full `KairosFixture` + `RealKairosFixture` struct definitions with all methods. Location: `crates/gadgetron-testing/src/kairos_fixture.rs` |
-| A5 | Proptest corpus | APPROVED | `01-knowledge-layer.md §10.3` lines 1406-1464: `traversal_strategy()` + `valid_name_strategy()` + 2 `proptest!` blocks. `§10.4` lines 1467-1504: `valid_link_strategy()` + `malformed_link_strategy()` + 2 `proptest!` blocks. `02-kairos-agent.md §14.1`: 2 `redact_stderr` proptests |
-| A6 | Determinism strategy (subprocess/stream/git) | APPROVED | `00-overview.md §9` lines 548-555: 4 explicit rules (wait_with_output, sync after wait, <100ms timeout-free, fixed stdin+scenario). `fake_claude` uses no wall clock. `02-kairos-agent.md §14.4`: 3 determinism tests |
-| A7 | E2E gate for P2A release | APPROVED | `00-overview.md §9` lines 557-564: `#[ignore]` + `GADGETRON_E2E_CLAUDE=1` env gate. `02-kairos-agent.md §14.5` lines 1153-1191: 5 concrete assertions (HTTP 200, SSE lines, non-empty content, finish_reason=stop, no-leak) |
-| A8 | Concurrent spawn load test | APPROVED | `02-kairos-agent.md §14.6` lines 1193-1227: `concurrent_spawn_16_ttfb_p99_under_100ms` — 16 concurrent TTFB measurement, P99 < 100ms assertion, `#[tokio::test]` (not criterion-only) |
-| A9 | Authoritative test file location table | APPROVED | `00-overview.md §9` lines 593-612: 14-row table. `02-kairos-agent.md §14.7` lines 1229-1239: 7-row kairos-specific table. Both are labeled authoritative |
+| A2 | SSE conformance test plan | APPROVED | `02-penny-agent.md §14.3` lines 1069-1103: 4 original + 3 new tests (`sse_round_trip_text_content_exact`, `sse_empty_stream_is_valid`, `sse_unknown_event_skipped_gracefully`). File location: `crates/gadgetron-penny/tests/sse_conformance.rs` |
+| A3 | Rust fake-claude binary | APPROVED | `00-overview.md §9` line 530: `crates/gadgetron-testing/src/bin/fake_claude.rs`. `02-penny-agent.md §14.2` lines 1045-1067: 11 total scenarios (5 original + 6 new including `partial_crash`, `usage_only`, `large_output`, `unknown_event`, `message_stop_only`, `stdin_echo`) |
+| A4 | PennyE2EFixture harness | APPROVED | `02-penny-agent.md §18` lines 1327-1387: full `PennyFixture` + `RealPennyFixture` struct definitions with all methods. Location: `crates/gadgetron-testing/src/penny_fixture.rs` |
+| A5 | Proptest corpus | APPROVED | `01-knowledge-layer.md §10.3` lines 1406-1464: `traversal_strategy()` + `valid_name_strategy()` + 2 `proptest!` blocks. `§10.4` lines 1467-1504: `valid_link_strategy()` + `malformed_link_strategy()` + 2 `proptest!` blocks. `02-penny-agent.md §14.1`: 2 `redact_stderr` proptests |
+| A6 | Determinism strategy (subprocess/stream/git) | APPROVED | `00-overview.md §9` lines 548-555: 4 explicit rules (wait_with_output, sync after wait, <100ms timeout-free, fixed stdin+scenario). `fake_claude` uses no wall clock. `02-penny-agent.md §14.4`: 3 determinism tests |
+| A7 | E2E gate for P2A release | APPROVED | `00-overview.md §9` lines 557-564: `#[ignore]` + `GADGETRON_E2E_CLAUDE=1` env gate. `02-penny-agent.md §14.5` lines 1153-1191: 5 concrete assertions (HTTP 200, SSE lines, non-empty content, finish_reason=stop, no-leak) |
+| A8 | Concurrent spawn load test | APPROVED | `02-penny-agent.md §14.6` lines 1193-1227: `concurrent_spawn_16_ttfb_p99_under_100ms` — 16 concurrent TTFB measurement, P99 < 100ms assertion, `#[tokio::test]` (not criterion-only) |
+| A9 | Authoritative test file location table | APPROVED | `00-overview.md §9` lines 593-612: 14-row table. `02-penny-agent.md §14.7` lines 1229-1239: 7-row penny-specific table. Both are labeled authoritative |
 | A10 | Git corruption recovery tests | APPROVED | `01-knowledge-layer.md §10.6` lines 1556-1615: 4 concrete test implementations (`locked_index`, `detached_head`, `missing_objects`, `unresolved_merge_conflict`) with real git2 API calls for setup |
 
 ---
@@ -42,9 +42,9 @@ None. No new blockers are raised. Two issues below are NON-BLOCKING but must be 
 
 ### NB-1: Proptest seed/case configuration absent from phase2 test plans
 
-**Location**: `01-knowledge-layer.md §10.3`–`§10.4`, `02-kairos-agent.md §14.1 redact.rs`
+**Location**: `01-knowledge-layer.md §10.3`–`§10.4`, `02-penny-agent.md §14.1 redact.rs`
 
-**Issue**: The existing P1 harness (`docs/design/testing/harness.md §2.10`) establishes `PROPTEST_SEED=42` / `PROPTEST_CASES=1024` as the project-wide standard, enforced by the CI `test-cpu` job via `env: PROPTEST_CASES: "1024" PROPTEST_SEED: "42"`. The phase2 proptest blocks in `§10.3` and `§10.4` of `01-knowledge-layer.md` and the `redact_stderr` proptests in `02-kairos-agent.md §14.1` contain no `#![proptest_config(...)]` annotation. Without it:
+**Issue**: The existing P1 harness (`docs/design/testing/harness.md §2.10`) establishes `PROPTEST_SEED=42` / `PROPTEST_CASES=1024` as the project-wide standard, enforced by the CI `test-cpu` job via `env: PROPTEST_CASES: "1024" PROPTEST_SEED: "42"`. The phase2 proptest blocks in `§10.3` and `§10.4` of `01-knowledge-layer.md` and the `redact_stderr` proptests in `02-penny-agent.md §14.1` contain no `#![proptest_config(...)]` annotation. Without it:
 - The default proptest case count (100) will be used locally even when `PROPTEST_CASES` env is not forwarded
 - If CI sets `PROPTEST_SEED` globally but the specific proptest blocks do not call `ProptestConfig::default()` with the env variable plumbed through, the seed will not be reproducible per the standard
 
@@ -56,7 +56,7 @@ None. No new blockers are raised. Two issues below are NON-BLOCKING but must be 
     ..ProptestConfig::default()
 })]
 ```
-This is the same pattern already specified in `harness.md §2.10`. The CI env `PROPTEST_SEED=42` handles seed injection. The config annotation ensures case count consistency. Add a note to `01-knowledge-layer.md §10.3`, `§10.4`, and `02-kairos-agent.md §8` (redact proptests) requiring this annotation at implementation time.
+This is the same pattern already specified in `harness.md §2.10`. The CI env `PROPTEST_SEED=42` handles seed injection. The config annotation ensures case count consistency. Add a note to `01-knowledge-layer.md §10.3`, `§10.4`, and `02-penny-agent.md §8` (redact proptests) requiring this annotation at implementation time.
 
 ---
 
@@ -99,25 +99,25 @@ Alternatively, document that `KnowledgeFixture` uses the `rmcp` client which han
 
 ### GAP-1: No test for `claude login` never run on host (NotInstalled path)
 
-**Location**: `02-kairos-agent.md §14.1` `provider.rs` unit tests
+**Location**: `02-penny-agent.md §14.1` `provider.rs` unit tests
 
 The `health_fails_when_binary_missing` test covers `NotInstalled` when the `claude` binary is absent from PATH. However, the scenario where the binary IS on PATH but `claude login` has never been run (so `~/.claude/credentials.json` does not exist or is malformed) is not tested. Claude Code will likely produce a non-zero exit code with a specific stderr message in this case.
 
-This is distinct from `SpawnFailed` (which is a spawn-level failure). The suggested test: a `fake_claude` scenario `no_auth` that emits a known stderr (e.g., `"claude: error: not logged in"`) and exits non-zero, plus an integration test asserting the HTTP response is `503 kairos_not_installed` or `500 kairos_agent_error` (the distinction matters for the runbook).
+This is distinct from `SpawnFailed` (which is a spawn-level failure). The suggested test: a `fake_claude` scenario `no_auth` that emits a known stderr (e.g., `"claude: error: not logged in"`) and exits non-zero, plus an integration test asserting the HTTP response is `503 penny_not_installed` or `500 penny_agent_error` (the distinction matters for the runbook).
 
 This is NOT a blocker for the spec review — it is an implementation-time gap to close.
 
 ### GAP-2: `~/.claude/` read-only filesystem test absent
 
-**Location**: `02-kairos-agent.md §14`, `15.4 M1`
+**Location**: `02-penny-agent.md §14`, `15.4 M1`
 
 If `~/.claude/credentials.json` is present but the directory is made read-only by the OS (e.g., an operator runs `chmod 400 ~/.claude`), the `spawn.rs` `Command::new()` call will succeed but Claude Code's auth initialization will fail. This is not represented in any scenario or test. The existing `m1` test only checks the MCP config tmpfile at `$TMPDIR`, not the auth file. Low priority for P2A single-user, but the gap should be acknowledged.
 
 ### GAP-3: STRIDE mitigation table row for M5 (wiki secret BLOCK) has no test row
 
-**Location**: `02-kairos-agent.md §15.4` Mitigations table (lines 1278-1290)
+**Location**: `02-penny-agent.md §15.4` Mitigations table (lines 1278-1290)
 
-M5 (wiki size cap + secret block) is mitigated in `gadgetron-knowledge`, not in kairos. The STRIDE table in `02-kairos-agent.md §15.4` lists M1, M2, M2a, M4, M6, M8, F1, B3s, B3a, F2 but does NOT include M5. This is technically correct (M5 belongs to 01) but the cross-crate risk acceptance statement (§15.5 R2) references M5 without citing its test. This should reference `01-knowledge-layer.md §10.5 wiki_write_rejects_pem_private_key_block` and `tests/wiki_secret_patterns.rs` to close the risk loop. Not a blocker.
+M5 (wiki size cap + secret block) is mitigated in `gadgetron-knowledge`, not in penny. The STRIDE table in `02-penny-agent.md §15.4` lists M1, M2, M2a, M4, M6, M8, F1, B3s, B3a, F2 but does NOT include M5. This is technically correct (M5 belongs to 01) but the cross-crate risk acceptance statement (§15.5 R2) references M5 without citing its test. This should reference `01-knowledge-layer.md §10.5 wiki_write_rejects_pem_private_key_block` and `tests/wiki_secret_patterns.rs` to close the risk loop. Not a blocker.
 
 ### GAP-4: Audit log integrity (M6) test is a stub
 
@@ -137,7 +137,7 @@ This is a stub (`/* M6 */`). For an append-only security control (SOC2 CC6.1, au
 
 ### DET-1: `stream_drop_kills_subprocess` uses `tokio::time::sleep` (wall-clock)
 
-**Location**: `02-kairos-agent.md §14.4` lines 1139-1150
+**Location**: `02-penny-agent.md §14.4` lines 1139-1150
 
 ```rust
 drop(stream);
@@ -161,7 +161,7 @@ This is a minor determinism defect — the test is structurally correct but the 
 
 ### DET-2: `concurrent_spawn_16_ttfb_p99_under_100ms` uses `std::time::Instant` (wall-clock SLO)
 
-**Location**: `02-kairos-agent.md §14.6` lines 1193-1225
+**Location**: `02-penny-agent.md §14.6` lines 1193-1225
 
 The load SLO test measures TTFB using `std::time::Instant::now()`. This is intentional and correct for a wall-clock SLO (the 100ms budget is a real-time requirement). However:
 1. The test spawns 16 `tokio::spawn` tasks but `#[tokio::test]` defaults to single-threaded runtime. 16 concurrent spawns on a single-thread runtime are serialized — the P99 measurement will not reflect true OS-level spawn concurrency.
@@ -171,7 +171,7 @@ This is a material testability defect in the load SLO design.
 
 ### DET-3: P99 calculation is incorrect for N=16
 
-**Location**: `02-kairos-agent.md §14.6` line 1219
+**Location**: `02-penny-agent.md §14.6` line 1219
 
 ```rust
 let p99 = ttfbs[(ttfbs.len() * 99 / 100).saturating_sub(1).max(0)];
@@ -220,7 +220,7 @@ The 7 tests (4 original + 3 new) cover:
 | 500 no stderr leak | `http_500_response_does_not_leak_stderr` |
 | Unknown event skip | `sse_unknown_event_skipped_gracefully` |
 
-**Gap**: `chat_chunk_to_sse` (the gateway adapter reused by kairos) is not tested with `finish_reason != "stop"` (e.g., `"length"` or `"tool_calls"`) nor with an error-in-stream scenario where `isError: true` mid-stream. The existing tests cover the `"stop"` path and the error-on-HTTP-response path, but not "Claude Code emits a partial stream then a tool_use error result". This is a MINOR gap since the kairos stream only terminates on `message_stop` or process exit — there is no mid-stream tool error that propagates to SSE. No action required.
+**Gap**: `chat_chunk_to_sse` (the gateway adapter reused by penny) is not tested with `finish_reason != "stop"` (e.g., `"length"` or `"tool_calls"`) nor with an error-in-stream scenario where `isError: true` mid-stream. The existing tests cover the `"stop"` path and the error-on-HTTP-response path, but not "Claude Code emits a partial stream then a tool_use error result". This is a MINOR gap since the penny stream only terminates on `message_stop` or process exit — there is no mid-stream tool error that propagates to SSE. No action required.
 
 ---
 
@@ -240,13 +240,13 @@ The 7 tests (4 original + 3 new) cover:
 
 ## Test File Location Determinism
 
-The authoritative table at `00-overview.md §9` (14 rows) covers both crates. The `02-kairos-agent.md §14.7` (7 rows) covers kairos only. Both are internally consistent.
+The authoritative table at `00-overview.md §9` (14 rows) covers both crates. The `02-penny-agent.md §14.7` (7 rows) covers penny only. Both are internally consistent.
 
-**One discrepancy**: `00-overview.md §9` test layer table (line 520) lists `crates/gadgetron-testing/tests/kairos_integration.rs` as "Integration (subprocess) — Full provider registration + real router + fake-claude binary". This path is NOT in the `02-kairos-agent.md §14.7` authoritative table. The kairos-specific table lists only `crates/gadgetron-kairos/tests/*.rs` for integration. Either:
-1. `kairos_integration.rs` in `gadgetron-testing/tests/` is an additional test file not listed in the kairos-specific table, which is an omission; or
-2. It duplicates the kairos integration tests in a cross-crate harness (valid)
+**One discrepancy**: `00-overview.md §9` test layer table (line 520) lists `crates/gadgetron-testing/tests/penny_integration.rs` as "Integration (subprocess) — Full provider registration + real router + fake-claude binary". This path is NOT in the `02-penny-agent.md §14.7` authoritative table. The penny-specific table lists only `crates/gadgetron-penny/tests/*.rs` for integration. Either:
+1. `penny_integration.rs` in `gadgetron-testing/tests/` is an additional test file not listed in the penny-specific table, which is an omission; or
+2. It duplicates the penny integration tests in a cross-crate harness (valid)
 
-The ambiguity must be resolved: `02-kairos-agent.md §14.7` should either add a row for `crates/gadgetron-testing/tests/kairos_integration.rs` or the overview table should remove/clarify it. Currently "authoritative" is claimed by two tables that do not fully agree.
+The ambiguity must be resolved: `02-penny-agent.md §14.7` should either add a row for `crates/gadgetron-testing/tests/penny_integration.rs` or the overview table should remove/clarify it. Currently "authoritative" is claimed by two tables that do not fully agree.
 
 ---
 
@@ -254,11 +254,11 @@ The ambiguity must be resolved: `02-kairos-agent.md §14.7` should either add a 
 
 **NIT-1**: `test_autocommit_on_unresolved_merge_conflict` body is empty (`// Setup: ... Use ... or manually stage ...`). This is the only one of the 4 git recovery tests without a concrete implementation. Fill the body before implementation starts, using `git2::Repository::merge_commits` or manual index staging.
 
-**NIT-2**: `02-kairos-agent.md §14.6` comment says "non-criterion `#[tokio::test]`" — confirm this test does NOT also appear in benches/ which would cause confusion about which one gates CI. The spec says criterion benches "do not fail CI" but does not explicitly state the `load_slo.rs` test DOES fail CI. Make this explicit.
+**NIT-2**: `02-penny-agent.md §14.6` comment says "non-criterion `#[tokio::test]`" — confirm this test does NOT also appear in benches/ which would cause confusion about which one gates CI. The spec says criterion benches "do not fail CI" but does not explicitly state the `load_slo.rs` test DOES fail CI. Make this explicit.
 
 **NIT-3**: The `tool_call_audit_log_does_not_contain_arguments` test in `01-knowledge-layer.md §10.5` (line 1553) is a stub. This is a security regression test for M6. At implementation time, the body must be written before the PR merges, not after.
 
-**NIT-4**: `02-kairos-agent.md §14.4` `stream_drop_kills_subprocess` reads a PID from a tmpfile via `read_fake_pid()`. The scenario `timeout_with_pid` must write the PID before sleeping. The spec should state what tmpfile path is used (e.g., `$TMPDIR/fake_claude_pid`) to make the harness implementable without ambiguity.
+**NIT-4**: `02-penny-agent.md §14.4` `stream_drop_kills_subprocess` reads a PID from a tmpfile via `read_fake_pid()`. The scenario `timeout_with_pid` must write the PID before sleeping. The spec should state what tmpfile path is used (e.g., `$TMPDIR/fake_claude_pid`) to make the harness implementable without ambiguity.
 
 ---
 
@@ -268,4 +268,4 @@ The ambiguity must be resolved: `02-kairos-agent.md §14.7` should either add a 
 
 **CI risk**: Two risks remain. First, the `stream_drop_kills_subprocess` test uses a 200ms wall-clock sleep (DET-1), which is fragile on loaded CI runners. Second, the `concurrent_spawn_16_ttfb_p99_under_100ms` test uses a single-thread tokio runtime by default (DET-2), which would not correctly measure concurrent spawn overhead. Both are implementation-time corrections that must be caught before the tests are written, not after. The proptest seed/case annotation (NB-1) is a CI reproducibility gap that the existing harness CI env partially mitigates but does not fully guarantee.
 
-**Implementation readiness**: CONDITIONAL GO on E2E gate. The E2E gate (`#[ignore]` + `GADGETRON_E2E_CLAUDE=1`) is correctly designed for P2A. CI coverage through `fake_claude` is sufficient for merge gating. The 5 concrete E2E assertions cover the minimum happy path. The two non-blocking issues (NB-1 proptest config, NB-2 MCP initialize handshake) and the audit log stub (GAP-4, NIT-3) must be addressed during TDD red-phase, not deferred to later. The test file location table discrepancy (overview vs. kairos-specific table re: `kairos_integration.rs`) must be resolved before the crate structure is built.
+**Implementation readiness**: CONDITIONAL GO on E2E gate. The E2E gate (`#[ignore]` + `GADGETRON_E2E_CLAUDE=1`) is correctly designed for P2A. CI coverage through `fake_claude` is sufficient for merge gating. The 5 concrete E2E assertions cover the minimum happy path. The two non-blocking issues (NB-1 proptest config, NB-2 MCP initialize handshake) and the audit log stub (GAP-4, NIT-3) must be addressed during TDD red-phase, not deferred to later. The test file location table discrepancy (overview vs. penny-specific table re: `penny_integration.rs`) must be resolved before the crate structure is built.

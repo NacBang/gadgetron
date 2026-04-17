@@ -4,7 +4,7 @@
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13 (v3), 2026-04-16 (§4 semantic extension pointer)
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
-> **Scope**: `gadgetron-knowledge` crate (`KnowledgeToolProvider` implementation) + `gadgetron-core::error::GadgetronError::Wiki` variant + reference-level documentation for the MCP protocol surface the knowledge provider exposes. The stdio MCP server transport is **hosted in `gadgetron-kairos::mcp_server`**, not in this crate — see `02-kairos-agent.md §5` and `04-mcp-tool-registry.md §2.1` for the authoritative transport implementation. References below to `gadgetron kairos init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-kairos` LlmProvider + subprocess is `02-kairos-agent.md`.
+> **Scope**: `gadgetron-knowledge` crate (`KnowledgeToolProvider` implementation) + `gadgetron-core::error::GadgetronError::Wiki` variant + reference-level documentation for the MCP protocol surface the knowledge provider exposes. The stdio MCP server transport is **hosted in `gadgetron-penny::mcp_server`**, not in this crate — see `02-penny-agent.md §5` and `04-mcp-tool-registry.md §2.1` for the authoritative transport implementation. References below to `gadgetron penny init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-penny` LlmProvider + subprocess is `02-penny-agent.md`.
 > **Implementation determinism**: every type signature, config field, error code, and test name is explicit. No TBD.
 
 ## Table of Contents
@@ -30,21 +30,21 @@
 ### In scope
 - `gadgetron-knowledge` crate: wiki store, web search proxy, `KnowledgeToolProvider` (implements `gadgetron_core::agent::tools::McpToolProvider`)
 - **`gadgetron-core::error::GadgetronError::Wiki { kind: WikiErrorKind, message: String }` variant** (moved here from 02 per dx A6 and chief-architect B1)
-- `gadgetron-cli` gains `gadgetron mcp serve` subcommand which delegates to `gadgetron_kairos::serve_stdio`, serving a frozen `McpToolRegistry` assembled from `KnowledgeToolProvider` + future providers
+- `gadgetron-cli` gains `gadgetron mcp serve` subcommand which delegates to `gadgetron_penny::serve_stdio`, serving a frozen `McpToolRegistry` assembled from `KnowledgeToolProvider` + future providers
 - future bootstrap UX fills the gap currently covered by manual `gadgetron.toml` authoring
 - Configuration schema `[knowledge]` and `[knowledge.search]` sections in `gadgetron.toml`
 
-### Out of scope — deferred to `02-kairos-agent.md`
-- `gadgetron-kairos` crate: `LlmProvider` impl, Claude Code subprocess management, stream-json → OpenAI SSE translation
-- `GadgetronError::Kairos { kind: KairosErrorKind, .. }` variant in core
+### Out of scope — deferred to `02-penny-agent.md`
+- `gadgetron-penny` crate: `LlmProvider` impl, Claude Code subprocess management, stream-json → OpenAI SSE translation
+- `GadgetronError::Penny { kind: PennyErrorKind, .. }` variant in core
 - `redact_stderr()` implementation (subprocess stderr — 02)
 - `--allowed-tools` enforcement verification (M4) — blocking for 02
 
 ### Preconditions locked from `00-overview.md` v2
-- Architecture: kairos implements `LlmProvider` via router provider map
+- Architecture: penny implements `LlmProvider` via router provider map
 - Error taxonomy: `WikiErrorKind` nested variant (this spec adds to core)
 - Security mitigations: M1 (tmpfile — 02), M2 (redact — 02), M3 (path traversal), M5 (size + pattern block/audit + git history), M6 (tools_called names), M7 (SearXNG + git permanence disclosures), M8 (P2A risk acceptance)
-- OSS stack: `git2`, `pulldown-cmark`, `gray_matter` + `toml`, `reqwest`, `regex`, `once_cell`, plus a manual JSON-RPC 2.0 MCP transport implemented in `gadgetron-kairos::mcp_server` (see §6.1 — `rmcp` integration deferred to P2B+)
+- OSS stack: `git2`, `pulldown-cmark`, `gray_matter` + `toml`, `reqwest`, `regex`, `once_cell`, plus a manual JSON-RPC 2.0 MCP transport implemented in `gadgetron-penny::mcp_server` (see §6.1 — `rmcp` integration deferred to P2B+)
 
 ### 1.1 Bootstrap UX stdout contract (future, dx A4 blocker)
 
@@ -52,7 +52,7 @@ A future bootstrap subcommand or equivalent guided init flow MUST print the foll
 
 **Success path (all checks pass):**
 ```
-Gadgetron Kairos init — bootstrapping personal assistant workspace
+Gadgetron Penny init — bootstrapping personal assistant workspace
 
   [OK] Claude Code binary: /usr/local/bin/claude (version 2.0.x)
   [OK] git: /usr/bin/git (version 2.40.x)
@@ -75,7 +75,7 @@ Next steps:
      gadgetron serve --config ~/.gadgetron/gadgetron.toml
 
   4. Browse to http://localhost:8080/web (gadgetron-web — assistant-ui)
-     Open Settings, paste the API key, pick model "kairos", start chatting.
+     Open Settings, paste the API key, pick model "penny", start chatting.
 
 Done.
 ```
@@ -84,19 +84,19 @@ Done.
 ```
 Error: Claude Code CLI (`claude`) was not found on PATH.
 
-Kairos requires Claude Code to be installed and logged in (via Claude Max
+Penny requires Claude Code to be installed and logged in (via Claude Max
 subscription). Install it from:
 
     https://docs.anthropic.com/en/docs/claude-code/overview
 
-After installation, run `claude login` and retry `gadgetron kairos init`.
+After installation, run `claude login` and retry `gadgetron penny init`.
 ```
 
 **Failure path — git config not set (warning, not error):**
 ```
   ...
   [WARN] git config user.name/user.email not set
-         Falling back to "Kairos <kairos@gadgetron.local>" for wiki commits.
+         Falling back to "Penny <penny@gadgetron.local>" for wiki commits.
          To override: set wiki_git_author in ~/.gadgetron/gadgetron.toml,
          or run: git config --global user.name "Your Name"
                  git config --global user.email "you@example.com"
@@ -110,11 +110,11 @@ The warning is printed via `eprintln!`, NOT `tracing::warn!` alone (per dx A5). 
 Error: Wiki directory is not writable: /opt/readonly/wiki
 Permission denied (os error 13).
 
-Fix: choose a different path with `gadgetron kairos init --wiki-path <PATH>`,
+Fix: choose a different path with `gadgetron penny init --wiki-path <PATH>`,
 or ensure the target directory is writable by the current user.
 ```
 
-**`--docker` flag**: **Deferred to P2B per D-20260414-02 + ADR-P2A-04 (DX-W-B3 resolution Option C)**. In P2A, `kairos init --docker` prints the following warning to stderr, exits 0, and does not write any file:
+**`--docker` flag**: **Deferred to P2B per D-20260414-02 + ADR-P2A-04 (DX-W-B3 resolution Option C)**. In P2A, `penny init --docker` prints the following warning to stderr, exits 0, and does not write any file:
 
 ```
 [WARN] --docker is not supported in P2A.
@@ -126,7 +126,7 @@ or ensure the target directory is writable by the current user.
        --docker will be re-introduced in P2B as SearXNG-only mode if needed.
 ```
 
-Exit code is **0** (graceful deprecation, not an error). A next-session coder writing a test for `kairos init --docker` asserts the exact stderr content above and exit code 0.
+Exit code is **0** (graceful deprecation, not an error). A next-session coder writing a test for `penny init --docker` asserts the exact stderr content above and exit code 0.
 
 **`--wiki-path <PATH>` flag**
 
@@ -134,14 +134,14 @@ Exit code is **0** (graceful deprecation, not an error). A next-session coder wr
 - If an existing `gadgetron.toml` already specifies `[knowledge] wiki_path`, the
   `--wiki-path` CLI value WINS (it overrides the config file).
 - The written `gadgetron.toml` always persists the resolved path; re-running
-  `kairos init --wiki-path /new/path` rewrites the config.
+  `penny init --wiki-path /new/path` rewrites the config.
 - The success-path `[OK] Wiki directory: …` line always shows the resolved
   absolute path (after symlink resolution via `std::fs::canonicalize`).
 - If `--wiki-path` points to an existing non-empty directory that is not a git
   repo, the command fails with exit code 3 and message "Wiki directory exists
   but is not a git repository. Use `--force-init-git` or choose a different path."
 
-Note: `gadgetron doctor` (Phase 1) uses lowercase `[ok]` / `[FAIL]`. `kairos init` uses uppercase `[OK]` / `[WARN]` / `[FAIL]` for scanability alongside `[WARN]`. Both forms are intentional; `docs/manual/troubleshooting.md` documents the distinction.
+Note: `gadgetron doctor` (Phase 1) uses lowercase `[ok]` / `[FAIL]`. `penny init` uses uppercase `[OK]` / `[WARN]` / `[FAIL]` for scanability alongside `[WARN]`. Both forms are intentional; `docs/manual/troubleshooting.md` documents the distinction.
 
 ---
 
@@ -261,10 +261,10 @@ crates/gadgetron-knowledge/
 ## 3. Public API surface (`lib.rs`)
 
 ```rust
-//! gadgetron-knowledge — knowledge layer for Kairos personal assistant.
+//! gadgetron-knowledge — knowledge layer for Penny personal assistant.
 //!
 //! Provides: wiki store (md+git), web search proxy (SearXNG), MCP server (stdio).
-//! Consumers: gadgetron-kairos (Claude Code subprocess), gadgetron-cli (`mcp serve` subcommand).
+//! Consumers: gadgetron-penny (Claude Code subprocess), gadgetron-cli (`mcp serve` subcommand).
 
 #![warn(missing_docs)]
 
@@ -881,11 +881,11 @@ struct SearxngResult {
 
 ## 6. MCP server
 
-> **Implementation note (2026-04-15)**: The stdio MCP server is hosted in `crates/gadgetron-kairos/src/mcp_server.rs`, not in `gadgetron-knowledge`. `gadgetron-knowledge` provides only `KnowledgeToolProvider`, which is registered into `McpToolRegistry` at startup and served by the kairos stdio runtime. This section describes the **logical protocol surface** the knowledge provider exposes — §6.1 and §6.2 are reference-level pseudocode for schema shape, dispatch, and JSON-RPC envelopes. The authoritative transport code and `gadgetron mcp serve` entry point live in `02-kairos-agent.md §5` + `04-mcp-tool-registry.md §2.1`. Any discrepancy between the pseudocode here and the actual `gadgetron-kairos::mcp_server` implementation is resolved in favor of the kairos code.
+> **Implementation note (2026-04-15)**: The stdio MCP server is hosted in `crates/gadgetron-penny/src/mcp_server.rs`, not in `gadgetron-knowledge`. `gadgetron-knowledge` provides only `KnowledgeToolProvider`, which is registered into `McpToolRegistry` at startup and served by the penny stdio runtime. This section describes the **logical protocol surface** the knowledge provider exposes — §6.1 and §6.2 are reference-level pseudocode for schema shape, dispatch, and JSON-RPC envelopes. The authoritative transport code and `gadgetron mcp serve` entry point live in `02-penny-agent.md §5` + `04-mcp-tool-registry.md §2.1`. Any discrepancy between the pseudocode here and the actual `gadgetron-penny::mcp_server` implementation is resolved in favor of the penny code.
 
-### 6.1 Manual MCP transport (reference — real code in `gadgetron-kairos::mcp_server`)
+### 6.1 Manual MCP transport (reference — real code in `gadgetron-penny::mcp_server`)
 
-P2A ships a manual JSON-RPC 2.0 MCP transport. The authoritative implementation is `crates/gadgetron-kairos/src/mcp_server.rs`; the pseudocode below documents the protocol contract the knowledge layer assumes. `rmcp` crate integration is deferred to P2B+ when its API stabilizes (re-evaluation at P2A→P2B transition).
+P2A ships a manual JSON-RPC 2.0 MCP transport. The authoritative implementation is `crates/gadgetron-penny/src/mcp_server.rs`; the pseudocode below documents the protocol contract the knowledge layer assumes. `rmcp` crate integration is deferred to P2B+ when its API stabilizes (re-evaluation at P2A→P2B transition).
 
 ```rust
 //! MCP server for gadgetron-knowledge. Stdio transport, per-request lifecycle.
@@ -1018,7 +1018,7 @@ use serde_json::{json, Value};
 pub fn schema_wiki_list() -> Value {
     json!({
         "name": "wiki.list",
-        "description": "List all pages in the Kairos wiki. Returns page names, optional \
+        "description": "List all pages in the Penny wiki. Returns page names, optional \
                         titles (from frontmatter or first H1), and modification times. Use \
                         this to discover what pages exist before searching or fetching.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -1242,7 +1242,7 @@ impl KnowledgeConfig {
     /// - searxng_url if present must be http(s):// with non-empty hostname
     /// - timeout_secs must be in [1, 60]
     pub fn validate(&self) -> Result<(), String> {
-        // Wiki path itself may not exist yet (kairos init creates it).
+        // Wiki path itself may not exist yet (penny init creates it).
         // What MUST exist: the parent directory, and it must be writable.
         let parent = self.wiki_path.parent()
             .ok_or_else(|| format!("wiki_path must not be filesystem root: {}", self.wiki_path.display()))?;
@@ -1277,7 +1277,7 @@ impl KnowledgeConfig {
 
     /// Builds WikiConfig from KnowledgeConfig. Field-for-field mapping.
     /// Auto-detects git author if wiki_git_author is None,
-    /// falling back to "Kairos <kairos@gadgetron.local>" with eprintln! warning.
+    /// falling back to "Penny <penny@gadgetron.local>" with eprintln! warning.
     pub fn to_wiki_config(&self) -> Result<crate::wiki::WikiConfig, String> {
         let (git_author_name, git_author_email) = match &self.wiki_git_author {
             Some(author) => {
@@ -1318,7 +1318,7 @@ fn autodetect_git_author() -> Option<String> {
     Some(format!("{} <{}>", name, email))
 }
 
-/// Wraps autodetect with eprintln! fallback for use in kairos init and to_wiki_config().
+/// Wraps autodetect with eprintln! fallback for use in penny init and to_wiki_config().
 fn autodetect_git_author_or_fallback() -> (String, String) {
     match autodetect_git_author() {
         Some(author) => {
@@ -1328,16 +1328,16 @@ fn autodetect_git_author_or_fallback() -> (String, String) {
                 let email = author[lt+2..author.len()-1].to_string();
                 return (name, email);
             }
-            ("Kairos".to_string(), "kairos@gadgetron.local".to_string())
+            ("Penny".to_string(), "penny@gadgetron.local".to_string())
         }
         None => {
             eprintln!("  [WARN] git config user.name/user.email not set");
-            eprintln!("         Falling back to \"Kairos <kairos@gadgetron.local>\" for wiki commits.");
+            eprintln!("         Falling back to \"Penny <penny@gadgetron.local>\" for wiki commits.");
             eprintln!("         To override: set wiki_git_author in ~/.gadgetron/gadgetron.toml,");
             eprintln!("         or run: git config --global user.name \"Your Name\"");
             eprintln!("                 git config --global user.email \"you@example.com\"");
             tracing::warn!("wiki_git_author fallback used");
-            ("Kairos".to_string(), "kairos@gadgetron.local".to_string())
+            ("Penny".to_string(), "penny@gadgetron.local".to_string())
         }
     }
 }
@@ -1396,7 +1396,7 @@ impl std::fmt::Display for WikiErrorKind {
 ```
 
 **Test updates** in `gadgetron-core/src/error.rs`:
-- `all_twelve_variants_exist` → `all_thirteen_variants_exist` (Wiki added, Kairos in 02)
+- `all_twelve_variants_exist` → `all_thirteen_variants_exist` (Wiki added, Penny in 02)
 - New assertions for all 5 WikiErrorKind codes/types/statuses
 
 ### 8.2 Knowledge-local wrapper (`error.rs`)
@@ -1517,8 +1517,8 @@ pub enum SearchError {
 | **M5** Abstract git commit messages | `wiki/git.rs::autocommit` (hardcoded format) | `wiki::git::tests::commit_message_is_abstract` |
 | **M5** Git history permanence inline comment | `wiki/mod.rs::Wiki::write` layer 3 | code-review only |
 | **M6** `tools_called` names only | `mcp/tools.rs` dispatch (no arg logging) | `mcp_conformance.rs::tool_call_audit_log_does_not_contain_arguments` |
-| **M7** Git history permanence disclosure | `docs/manual/kairos.md` (pre-merge gate) | manual review |
-| **M7** SearXNG privacy disclosure | `docs/manual/kairos.md` (pre-merge gate) | manual review |
+| **M7** Git history permanence disclosure | `docs/manual/penny.md` (pre-merge gate) | manual review |
+| **M7** SearXNG privacy disclosure | `docs/manual/penny.md` (pre-merge gate) | manual review |
 | **SSRF** `redirect::limited(3)` | `search/searxng.rs::SearxngClient::new` | integration test with mock redirect |
 
 Out-of-scope (02): M1 tempfile, M2 stderr redaction, M4 `--allowed-tools` verification, M8 risk acceptance ADR.
@@ -1781,8 +1781,8 @@ async fn tool_call_audit_log_does_not_contain_arguments() {
     let audit_sink = fx.audit_sink();  // in-memory AuditWriter fake
     fx.call_tool("wiki.get", json!({ "name": "secrets/my-api-key-is-sk-ant-12345" })).await;
     let entries = audit_sink.entries();
-    // Find the kairos-dispatched entry
-    let entry = entries.iter().find(|e| e.kairos_dispatched).expect("audit entry");
+    // Find the penny-dispatched entry
+    let entry = entries.iter().find(|e| e.penny_dispatched).expect("audit entry");
     // tools_called must contain the tool NAME
     assert!(entry.tools_called.iter().any(|n| n == "wiki.get"));
     // The sensitive arg text must NOT appear anywhere in the serialized entry
@@ -1836,7 +1836,7 @@ impl AuditSink {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuditEntry {
-    pub kairos_dispatched: bool,
+    pub penny_dispatched: bool,
     pub tools_called: Vec<String>,  // tool NAMES only — never argument values
     pub subprocess_duration_ms: i64,
     pub request_id: String,
@@ -1940,19 +1940,19 @@ Overview §9 file location table must be amended to include a row for crate-loca
 | Item | Owner | Blocks |
 |---|---|---|
 | `gadgetron-core::error::GadgetronError::Wiki { kind, message }` variant | **This spec** (01) | knowledge crate compilation |
-| `gadgetron-core::error::GadgetronError::Kairos { kind, message }` variant | 02 spec | kairos crate compilation |
+| `gadgetron-core::error::GadgetronError::Penny { kind, message }` variant | 02 spec | penny crate compilation |
 | `rmcp` maturity verification + feature-gate fallback | PM | MCP server impl |
 | `--allowed-tools` enforcement verification (M4) | PM (before 02 finalization) | 02 security posture |
 | `gadgetron-cli::cmd_mcp_serve` subcommand wiring in `main.rs` | 02 spec references | subcommand dispatch |
-| `gadgetron-cli::cmd_kairos_init` subcommand implementation | This spec (§1.1 stdout contract) + 02 spec dispatch | first-run UX |
-| `docs/manual/kairos.md` (Korean + English) with 2 disclosures (M7) | PM | P2A PR merge gate |
+| `gadgetron-cli::cmd_penny_init` subcommand implementation | This spec (§1.1 stdout contract) + 02 spec dispatch | first-run UX |
+| `docs/manual/penny.md` (Korean + English) with 2 disclosures (M7) | PM | P2A PR merge gate |
 | Test file location table amendment for crate-local snapshots | Overview v2.1 (small edit) | cosmetic |
 
-**Compile sequencing**: `gadgetron-knowledge` requires `gadgetron-core::error::GadgetronError::Wiki` variant to exist, which is added by this spec. `gadgetron-kairos` requires `GadgetronError::Kairos` variant, added by 02. Both core variant additions should land in a single core PR at the start of P2A implementation, before either knowledge or kairos crate is coded.
+**Compile sequencing**: `gadgetron-knowledge` requires `gadgetron-core::error::GadgetronError::Wiki` variant to exist, which is added by this spec. `gadgetron-penny` requires `GadgetronError::Penny` variant, added by 02. Both core variant additions should land in a single core PR at the start of P2A implementation, before either knowledge or penny crate is coded.
 
 **Post-v3 refactor**: split `WikiErrorKind::GitCorruption` into distinct `Io`, `Parse`, `GitCorruption` variants (requires gadgetron-core error enum extension). Currently `WikiError::Io` and `WikiError::Frontmatter` both map to `GitCorruption` with a disambiguating user message — see §8 `From<WikiError>` impl and the inline comment there.
 
-**ADR-P2A-01 Part 2 RESOLVED 2026-04-13** — stdin contract is **Option B (TEXT)**: plain text prompt on stdin, `--input-format text` is the default. `feed_stdin` in `02-kairos-agent.md` §5 is now unconditional — no feature flag, no branches. The `fake_claude::stdin_echo` scenario assertion is fixed on the text byte-sequence format described in §5. ADR-P2A-01 is ACCEPTED; `CLAUDE_CODE_MIN_VERSION = 2.1.104`.
+**ADR-P2A-01 Part 2 RESOLVED 2026-04-13** — stdin contract is **Option B (TEXT)**: plain text prompt on stdin, `--input-format text` is the default. `feed_stdin` in `02-penny-agent.md` §5 is now unconditional — no feature flag, no branches. The `fake_claude::stdin_echo` scenario assertion is fixed on the text byte-sequence format described in §5. ADR-P2A-01 is ACCEPTED; `CLAUDE_CODE_MIN_VERSION = 2.1.104`.
 
 ---
 
@@ -1961,12 +1961,12 @@ Overview §9 file location table must be amended to include a row for crate-loca
 | Reviewer | Round | v1 verdict | v2 changes |
 |---|---|---|---|
 | chief-architect | Round 0 + Round 3 | REVISE (B1, B2, N1-N4) | B1 single canonical WikiErrorKind in core, B2 pure resolve_path, N1 git2::Oid, N2 HashMap index, N3 manual MCP fallback inline, N4 compile-sequencing note in §11 |
-| dx-product-lead | Round 1.5 usability | REVISE (A1-A6) | A1 rewrote wiki_search + web_search descriptions, A2 max_results default 5, A3 PageTooLarge error text includes bytes/limit, A4 kairos init stdout §1.1, A5 eprintln! fallback, A6 Wiki variant moved to 01 scope |
+| dx-product-lead | Round 1.5 usability | REVISE (A1-A6) | A1 rewrote wiki_search + web_search descriptions, A2 max_results default 5, A3 PageTooLarge error text includes bytes/limit, A4 penny init stdout §1.1, A5 eprintln! fallback, A6 Wiki variant moved to 01 scope |
 | security-compliance-lead | Round 1.5 security | REVISE (A1-A8) | A1 O_NOFOLLOW on write, A2 create_dir_all moved to caller, A3 PEM/AKIA/GCP BLOCK patterns + CredentialBlocked variant, A4 SearchError::Parse static strings, A5 P2C tag + redirect::limited(3), A6 mixed traversal proptest arms, A7 git history inline SECURITY comment, A8 %2e%2e non-threat doc |
 | qa-test-architect | Round 2 testability | REVISE (3 blockers + 6 non-blockers) | happy-path proptest, malformed link proptest arm, concrete detached_head + missing_objects setup, frontmatter edge tests, URL validation edges, MCP idempotency/unknown/malformed tests, SearXNG fixture variants, InvertedIndex Mutex clarification |
 | chief-architect | Round 2 | APPROVE WITH MINOR | NIT3: `#[cfg(use-rmcp)]` dead code removed — P2A uses manual path unconditionally; NIT4: WikiError::Io/Frontmatter→GitCorruption message reworded; DET2: validate() placeholder replaced; DET3: git_config_get undefined → git2::Config::open_default() — resolved in v3 |
 | dx-product-lead | Round 2 | APPROVE WITH MINOR | B2: --wiki-path flag behavior specified; DET3: SearchConfig field names pinned; DET4: detached-HEAD test uses assert not matches!; NIT1: [ok] vs [OK] note added — resolved in v3 |
-| security-compliance-lead | Round 2 | REVISE (4 blockers) | B1-B4 are in 02-kairos-agent.md scope (subprocess env, audit request_id, claude_binary validation, redact regex) — not applicable to 01; 01-specific items resolved in v3 |
+| security-compliance-lead | Round 2 | REVISE (4 blockers) | B1-B4 are in 02-penny-agent.md scope (subprocess env, audit request_id, claude_binary validation, redact regex) — not applicable to 01; 01-specific items resolved in v3 |
 | qa-test-architect | Round 2 | APPROVE WITH MINOR | NB1: proptest_config added to all 4 proptest blocks; NB2: mcp_initialize_handshake test added; GAP4/NIT3: audit log stub replaced with concrete assertions; raw_stdio_connection fixture variant specified — resolved in v3 |
 
 Next round: implementation (all four Round 2 reviewers: APPROVE WITH MINOR or resolved items).

@@ -157,9 +157,9 @@ The last test is critical: the fallback `index.html` title in §4 currently read
 | 3. grep binary for "open.webui\|OpenWebUI" | Step 7 | Covered |
 | 4. M-W1: `<script>alert(1)</script>` renders as text | **NOT AUTOMATED** | Only in manual QA checklist |
 | 5. CSP header exact match | Step 6 (partial — only checks absent on `/v1/models`) | Gateway integration test checks presence; e2e does not assert the exact CSP string |
-| 6. Model dropdown includes `kairos` | **NOT AUTOMATED** | Only in manual QA checklist |
+| 6. Model dropdown includes `penny` | **NOT AUTOMATED** | Only in manual QA checklist |
 
-Items 4 and 6 are not exercised by any automated test. Item 4 (XSS rendered as text) is a P1 security property — it must be automated. Item 6 (kairos in model list) is the kairos integration acceptance criterion from D-20260414-02(d).
+Items 4 and 6 are not exercised by any automated test. Item 4 (XSS rendered as text) is a P1 security property — it must be automated. Item 6 (penny in model list) is the penny integration acceptance criterion from D-20260414-02(d).
 
 **Required fix**: Add two additional e2e steps:
 
@@ -175,9 +175,9 @@ More practically: the XSS guard must be covered by an automated TS test (already
 For item 6, add to `web_smoke.sh`:
 
 ```bash
-# Step 8: kairos appears in /v1/models when [kairos] block is in gadgetron.toml
+# Step 8: penny appears in /v1/models when [penny] block is in gadgetron.toml
 MODELS=$(curl -sf -H "Authorization: Bearer $GADGETRON_TEST_KEY" http://localhost:8080/v1/models)
-echo "$MODELS" | grep -q '"id":"kairos"' || { echo "FAIL: kairos not in /v1/models"; exit 1; }
+echo "$MODELS" | grep -q '"id":"penny"' || { echo "FAIL: penny not in /v1/models"; exit 1; }
 ```
 
 This requires a real API key for the e2e environment. Document the `GADGETRON_TEST_KEY` env var in the e2e script header alongside `GADGETRON_E2E_WEB=1`.
@@ -351,7 +351,7 @@ Document this pattern in the e2e script comment block.
 | QA-W-B1 | Blocker | Critical | §23 CI, §22 TS table | TS test runner unspecified; fetch mock strategy undefined |
 | QA-W-B2 | Blocker | Critical | §22 Rust unit table | `proptest_path_inputs_never_panic` strategy/seed/cases absent |
 | QA-W-B3 | Blocker | Critical | §4, §22 | `build.rs` fallback/strict-build branches have no test plan |
-| QA-W-B4 | Blocker | High | §22 E2E | XSS guard (ADR check 4) and kairos model list (ADR check 6) not automated |
+| QA-W-B4 | Blocker | High | §22 E2E | XSS guard (ADR check 4) and penny model list (ADR check 6) not automated |
 | QA-W-B5 | Blocker | High | §24 open item #2, §23 | No bundle-size CI gate; shiki regression path is silent |
 | QA-W-NB1 | Non-blocker | Medium | §23 | Node 20 patch floating; recommend pin via `.nvmrc` |
 | QA-W-NB2 | Non-blocker | Medium | §22 gateway integration | `FakeGatewayRouter` / `GatewayHarness` for web-ui tests not specified |
@@ -373,7 +373,7 @@ The PM must update `docs/design/phase2/03-gadgetron-web.md` to resolve QA-W-B1 t
 1. **QA-W-B1**: Specify Vitest + happy-dom + `vi.stubGlobal` (or MSW) in §22 and §23. Pin `"test"` script in `package.json`. Add `vitest.config.ts` to §10 file tree.
 2. **QA-W-B2**: Add the `path_strategy()` proptest definition and the `proptest_config` block to §22.
 3. **QA-W-B3**: Add the 5-row `build_rs_logic.rs` test plan to §22 and the `BuildEnv` extraction note to §4.
-4. **QA-W-B4**: Add step 8 (kairos model list assertion with `GADGETRON_TEST_KEY`) to the e2e script in §22. Specify the XSS automation approach (Playwright component test or Vitest + jsdom injection).
+4. **QA-W-B4**: Add step 8 (penny model list assertion with `GADGETRON_TEST_KEY`) to the e2e script in §22. Specify the XSS automation approach (Playwright component test or Vitest + jsdom injection).
 5. **QA-W-B5**: Resolve open item #2 with explicit choice (grammar set = common, budget = 3 MB). Add `bundle_size.rs` test to §22. Add du-based check to `web-frontend` CI job in §23.
 
 QA-W-DET1 and QA-W-DET2 must also be resolved before implementation — the e2e script and the integration test assertion are both not implementable as written without further specification. QA-W-NB1 through NB3 can be resolved in the same revision pass or deferred to the implementation PR, at PM's discretion.

@@ -54,7 +54,7 @@ async fn apply_web_headers_sets_nosniff_and_referrer_policy() {
 #[tokio::test]
 async fn csp_currently_omits_trusted_types_for_nextjs_compat() {
     // SEC-W-B2 (Trusted Types) was temporarily relaxed in `01ddff0
-    // feat(kairos): end-to-end demo plumbing + Kairos persona + Next.js UI`:
+    // feat(penny): end-to-end demo plumbing + Penny persona + Next.js UI`:
     // `require-trusted-types-for 'script'` + `trusted-types default dompurify`
     // broke the embedded Next.js client-side hydration, so they were dropped
     // from `crates/gadgetron-gateway/src/web_csp.rs::CSP`. Meanwhile

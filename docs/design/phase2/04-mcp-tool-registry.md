@@ -5,7 +5,7 @@
 > **Date (v1)**: 2026-04-14 — pending Round 1.5/2/3 reviews
 > **Date (v2)**: 2026-04-14 — 4 parallel reviews (dx/security/qa/chief-architect) all returned **BLOCK** with 24 combined blockers. Rather than iterate the doc to v3/v4, the PM cut the interactive approval flow from P2A scope (ADR-P2A-06). The remaining spec — `McpToolProvider` trait, `AgentConfig`, `McpToolRegistry`, `KnowledgeToolProvider`, brain-mode env plumbing — ships as P2A. The approval flow (ApprovalRegistry, SSE events, `POST /v1/approvals/{id}`, `<ApprovalCard>`, "Allow always" localStorage, rate limiting) reopens in Phase 2B with a fresh design round once the cross-process bridge architecture is settled.
 > **Drives**: D-20260414-04, ADR-P2A-05 (+ scope amendment ADR-P2A-06)
-> **Siblings**: `00-overview.md` v3, `01-knowledge-layer.md` v3, `02-kairos-agent.md` v4, `03-gadgetron-web.md` v2.1
+> **Siblings**: `00-overview.md` v3, `01-knowledge-layer.md` v3, `02-penny-agent.md` v4, `03-gadgetron-web.md` v2.1
 > **Pre-merge gate (v2)**: ADR-P2A-05 ACCEPTED, ADR-P2A-06 ACCEPTED. Round 1.5/2/3 reviews of v1 are filed as historical record; v2 re-review is **not** blocking implementation because the deleted sections are what caused most blockers. Remaining findings from v1 reviews that still apply to v2 scope are addressed inline and listed in §17 "Review findings carried from v1".
 
 ## Table of Contents
@@ -40,12 +40,12 @@
 
 - `McpToolProvider` trait in `gadgetron-core::agent::tools` (landed in commit `b6b314d`)
 - `AgentConfig` + `BrainConfig` + `ToolsConfig` in `gadgetron-core::agent::config` (landed in commit `b6b314d`) — validation rules V1..V14 enforced at `AppConfig::load` time
-- `McpToolRegistry` — new struct in `gadgetron-kairos::registry` — builder/freeze pattern, `HashMap<String, Arc<dyn McpToolProvider>>` dispatch (CA-MCP-B2)
+- `McpToolRegistry` — new struct in `gadgetron-penny::registry` — builder/freeze pattern, `HashMap<String, Arc<dyn McpToolProvider>>` dispatch (CA-MCP-B2)
 - `KnowledgeToolProvider` — first trait implementation in `gadgetron-knowledge::mcp` (P2A)
 - Tier classification + `Tier::{Read, Write, Destructive}` — declared by tool author, checked at registration (see §13)
 - `[agent.brain]` config surface for modes `claude_max` / `external_anthropic` / `external_proxy` (all three functional in P2A via subprocess env plumbing) + `gadgetron_local` (config schema only — shim is P2C)
 - `agent.*` reserved namespace enforcement via `ensure_tool_name_allowed` — landed in code (§13)
-- `[kairos]` → `[agent.brain]` config migration in the `AppConfig` loader (§11.1) — v0.1.x operators upgrading see a deprecation warning, not a silent regression
+- `[penny]` → `[agent.brain]` config migration in the `AppConfig` loader (§11.1) — v0.1.x operators upgrading see a deprecation warning, not a silent regression
 - Audit: `ToolCallCompleted` event emitted on every tool dispatch (§10)
 - Static mode plumbing: T1 `Read` = `Auto`, T2 `Write` = `Auto` / `Never` per subcategory, T3 `Destructive` = `enabled = false` (forced)
 
@@ -162,16 +162,16 @@ impl McpError {
 
 ### Why this lives in `gadgetron-core`
 
-Per D-12 crate boundary: core holds types and traits; leaf crates hold runtime state. The `McpToolProvider` trait is a pure interface — no state. Its consumers (`gadgetron-knowledge`, P2C `gadgetron-infra`, P3 `gadgetron-scheduler-tools`, `gadgetron-kairos` for dispatch) all depend on core anyway. Putting the trait in core adds no new transitive deps (`async-trait`, `serde`, `thiserror`, `serde_json` are all already workspace-wide).
+Per D-12 crate boundary: core holds types and traits; leaf crates hold runtime state. The `McpToolProvider` trait is a pure interface — no state. Its consumers (`gadgetron-knowledge`, P2C `gadgetron-infra`, P3 `gadgetron-scheduler-tools`, `gadgetron-penny` for dispatch) all depend on core anyway. Putting the trait in core adds no new transitive deps (`async-trait`, `serde`, `thiserror`, `serde_json` are all already workspace-wide).
 
 ---
 
 ## 2.1 `McpToolRegistry` — the dispatch table (CA-MCP-B2 fix)
 
-The registry is a **new** struct in `gadgetron-kairos::registry`. It is NOT in `gadgetron-core` because it holds runtime state (a `HashMap` populated at startup from operator-supplied providers).
+The registry is a **new** struct in `gadgetron-penny::registry`. It is NOT in `gadgetron-core` because it holds runtime state (a `HashMap` populated at startup from operator-supplied providers).
 
 ```rust
-// crates/gadgetron-kairos/src/registry.rs (P2A — to be written)
+// crates/gadgetron-penny/src/registry.rs (P2A — to be written)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -244,15 +244,15 @@ impl McpToolRegistry {
 1. `main()` (in `gadgetron-cli::bin::gadgetron`) constructs `McpToolRegistryBuilder::new()` and calls `register()` for each concrete provider: `KnowledgeToolProvider::new(knowledge_cfg)`, future `InfraToolProvider`, etc.
 2. `builder.freeze()` consumes the builder and returns an immutable `McpToolRegistry`.
 3. The registry is wrapped in `Arc` and passed to:
-   - `KairosProvider` for tool dispatch during Claude Code sessions
+   - `PennyProvider` for tool dispatch during Claude Code sessions
    - `gadgetron mcp serve` subprocess (via the stdio MCP server) — when Claude Code invokes a tool, the subprocess dispatches through its own `McpToolRegistry` instance (built from the same config on startup)
 
-### Why `gadgetron-kairos`?
+### Why `gadgetron-penny`?
 
 Three options were considered (CA-MCP-B2):
 - `gadgetron-core` — rejected: holds runtime state, violates D-12
 - `gadgetron-gateway` — rejected: gateway shouldn't know MCP dispatch internals
-- **`gadgetron-kairos`** — accepted: kairos is the primary P2A consumer (Claude Code session + subprocess mcp-serve), sibling to `ApprovalRegistry` (when that lands in P2B), natural import for P2C `gadgetron-infra`
+- **`gadgetron-penny`** — accepted: penny is the primary P2A consumer (Claude Code session + subprocess mcp-serve), sibling to `ApprovalRegistry` (when that lands in P2B), natural import for P2C `gadgetron-infra`
 
 ---
 
@@ -272,7 +272,7 @@ Three options were considered (CA-MCP-B2):
 
 ### Note on default for `wiki_write`
 
-The landed code at `crates/gadgetron-core/src/agent/config.rs::default_wiki_write_mode` defaults `wiki_write = Auto`. This is the P2A operating mode: a single-user desktop wants the Kairos "remember this" flow to work without confirmation. Operators who don't trust the agent set `wiki_write = "never"` to disable wiki writes entirely.
+The landed code at `crates/gadgetron-core/src/agent/config.rs::default_wiki_write_mode` defaults `wiki_write = Auto`. This is the P2A operating mode: a single-user desktop wants the Penny "remember this" flow to work without confirmation. Operators who don't trust the agent set `wiki_write = "never"` to disable wiki writes entirely.
 
 ### Note on default for other T2 subcategories
 
@@ -356,7 +356,7 @@ approval_timeout_secs = 60
 # Env: GADGETRON_AGENT_TOOLS_WRITE_DEFAULT_MODE
 default_mode = "ask"
 
-# wiki_write defaults to "auto" — Kairos "remember this" works out of the box.
+# wiki_write defaults to "auto" — Penny "remember this" works out of the box.
 wiki_write = "auto"
 
 # P2C tools (not yet implemented). Values validated but harmless in P2A.
@@ -396,7 +396,7 @@ Landed in `AgentConfig::validate` / `BrainConfig::validate` / `ToolsConfig::vali
 | V6 | `enabled == true` + `extra_confirmation == File` + token file missing/wrong perms | `agent.tools.destructive.extra_confirmation_token_file {path} does not exist` OR `... must have mode 0400 or 0600; got {mode}` (`#[cfg(unix)]`; Windows no-op) |
 | V7 | `brain.mode` deserialize failure | (serde) |
 | V8 | `brain.mode == GadgetronLocal && local_model == ""` | `agent.brain.local_model is required when brain.mode = 'gadgetron_local'` |
-| V9 | `brain.mode == GadgetronLocal && local_model` references kairos or `anthropic/` | `agent.brain.local_model cannot reference kairos or an Anthropic-family provider (recursion guard, ADR-P2A-05 §12); got {value}` |
+| V9 | `brain.mode == GadgetronLocal && local_model` references penny or `anthropic/` | `agent.brain.local_model cannot reference penny or an Anthropic-family provider (recursion guard, ADR-P2A-05 §12); got {value}` |
 | V10 | `brain.mode == GadgetronLocal && local_model`'s provider not in `[providers.*]` | `agent.brain.local_model {value} not found in [providers.*] — define the provider before using it as the agent brain` |
 | V11 | `brain.mode == ExternalAnthropic && std::env::var(env_name).is_err()` | `agent.brain.external_anthropic_api_key_env {env_name} is not set in the environment` |
 | V12 | `brain.shim.max_recursion_depth < 1` | `agent.brain.shim.max_recursion_depth must be >= 1` |
@@ -509,18 +509,18 @@ Deferred to P2B (along with the approval flow):
 
 ### 10.1 `McpError` → `GadgetronError` conversion (CA-MCP-B3)
 
-`McpError` is a local error universe inside the MCP dispatch boundary. When it needs to escape the kairos provider boundary (e.g., the agent's chat-stream call returns an error that must become an HTTP response), it converts into `GadgetronError::Kairos { kind: KairosErrorKind::... }`. The conversion lives in `gadgetron-core/src/error.rs::conversions`:
+`McpError` is a local error universe inside the MCP dispatch boundary. When it needs to escape the penny provider boundary (e.g., the agent's chat-stream call returns an error that must become an HTTP response), it converts into `GadgetronError::Penny { kind: PennyErrorKind::... }`. The conversion lives in `gadgetron-core/src/error.rs::conversions`:
 
-| `McpError` variant | `GadgetronError::Kairos { kind: ... }` | HTTP | `error_code` |
+| `McpError` variant | `GadgetronError::Penny { kind: ... }` | HTTP | `error_code` |
 |---|---|---|---|
-| `UnknownTool(name)` | `KairosErrorKind::ToolUnknown { name }` | 500 | `kairos_tool_unknown` |
-| `Denied { reason }` | `KairosErrorKind::ToolDenied { reason }` | 403 | `kairos_tool_denied` |
-| `RateLimited { .. }` | `KairosErrorKind::ToolRateLimited { .. }` | 429 | `kairos_tool_rate_limited` |
-| `ApprovalTimeout { secs }` | `KairosErrorKind::ToolApprovalTimeout { secs }` (P2B only — P2A never emits) | 504 | `kairos_tool_approval_timeout` |
-| `InvalidArgs(reason)` | `KairosErrorKind::ToolInvalidArgs { reason }` | 400 | `kairos_tool_invalid_args` |
-| `Execution(reason)` | `KairosErrorKind::ToolExecution { reason }` | 500 | `kairos_tool_execution_failed` |
+| `UnknownTool(name)` | `PennyErrorKind::ToolUnknown { name }` | 500 | `penny_tool_unknown` |
+| `Denied { reason }` | `PennyErrorKind::ToolDenied { reason }` | 403 | `penny_tool_denied` |
+| `RateLimited { .. }` | `PennyErrorKind::ToolRateLimited { .. }` | 429 | `penny_tool_rate_limited` |
+| `ApprovalTimeout { secs }` | `PennyErrorKind::ToolApprovalTimeout { secs }` (P2B only — P2A never emits) | 504 | `penny_tool_approval_timeout` |
+| `InvalidArgs(reason)` | `PennyErrorKind::ToolInvalidArgs { reason }` | 400 | `penny_tool_invalid_args` |
+| `Execution(reason)` | `PennyErrorKind::ToolExecution { reason }` | 500 | `penny_tool_execution_failed` |
 
-Implementation: 6 new variants on `KairosErrorKind` (which is already `#[non_exhaustive]` — additive, not breaking). The `From<McpError> for GadgetronError` impl lives in `crates/gadgetron-core/src/error.rs`, same file as other conversions. `stderr` redaction applies via `redact_stderr` before the `reason` string is embedded in the error variant (inherited pattern from `02-kairos-agent.md §8`).
+Implementation: 6 new variants on `PennyErrorKind` (which is already `#[non_exhaustive]` — additive, not breaking). The `From<McpError> for GadgetronError` impl lives in `crates/gadgetron-core/src/error.rs`, same file as other conversions. `stderr` redaction applies via `redact_stderr` before the `reason` string is embedded in the error variant (inherited pattern from `02-penny-agent.md §8`).
 
 ---
 
@@ -535,20 +535,20 @@ Landed in `gadgetron-core/src/agent/config.rs::BrainConfig`. Four modes; three f
 | `external_proxy` | `ANTHROPIC_BASE_URL` → user-run LiteLLM etc. | Gadgetron sets base URL only | **functional** |
 | `gadgetron_local` | `ANTHROPIC_BASE_URL = http://127.0.0.1:PORT/internal/agent-brain` → Gadgetron shim → router → local provider | shim = Anthropic↔OpenAI translator | **P2C** (config schema defined; shim not implemented; `AgentConfig::validate` in P2A rejects this mode at startup with a pointer to P2C) |
 
-The three functional modes are pure subprocess-env plumbing. The `KairosProvider::spawn` / `build_claude_command_env` code paths (02-kairos-agent.md §5) construct an allowlisted env that includes `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` only in the correct modes.
+The three functional modes are pure subprocess-env plumbing. The `PennyProvider::spawn` / `build_claude_command_env` code paths (02-penny-agent.md §5) construct an allowlisted env that includes `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` only in the correct modes.
 
 ### 11.1 v0.1.x → v0.2.0 config migration (DX-MCP-B2 / CA-MCP-B1)
 
-V0.1.x operators upgrading to v0.2.0 have a `[kairos]` section in their `gadgetron.toml`. The loader in `gadgetron-core::config::AppConfig::load` applies a pre-deserialize migration step:
+V0.1.x operators upgrading to v0.2.0 have a `[penny]` section in their `gadgetron.toml`. The loader in `gadgetron-core::config::AppConfig::load` applies a pre-deserialize migration step:
 
 1. Parse the raw TOML to `toml::Value` (untyped).
-2. If `root.kairos` is present, move its fields to the v0.2.0 destinations per the table below, emitting one `tracing::warn!(field = "kairos.<name>", replacement = "agent.<name>", "deprecated Phase 2A field — will be removed in Phase 2C")` per moved field.
+2. If `root.penny` is present, move its fields to the v0.2.0 destinations per the table below, emitting one `tracing::warn!(field = "penny.<name>", replacement = "agent.<name>", "deprecated Phase 2A field — will be removed in Phase 2C")` per moved field.
 3. If a target field (e.g. `agent.brain.external_base_url`) is already set in `[agent.*]`, DO NOT overwrite — emit `tracing::error!` pointing at the conflict and fail the load.
 4. Serialize the migrated `Value` back and deserialize into `AppConfig`.
 
 **Field mapping table:**
 
-| v0.1.x `[kairos]` field | v0.2.0 destination | Migration behavior |
+| v0.1.x `[penny]` field | v0.2.0 destination | Migration behavior |
 |---|---|---|
 | `claude_binary` | `[agent].binary` | Populate + warn |
 | `claude_base_url` | `[agent.brain].external_base_url` + set `mode = "external_proxy"` if mode absent | Populate + warn |
@@ -558,9 +558,9 @@ V0.1.x operators upgrading to v0.2.0 have a `[kairos]` section in their `gadgetr
 
 The two NEW fields on `AgentConfig` (`request_timeout_secs`, `max_concurrent_subprocesses`) must be added to `crates/gadgetron-core/src/agent/config.rs` as part of the P2A TDD order.
 
-**Test**: `crates/gadgetron-core/src/config.rs` tests gain `v0_1_x_kairos_config_loads_with_deprecation_warning` asserting every moved field round-trips correctly.
+**Test**: `crates/gadgetron-core/src/config.rs` tests gain `v0_1_x_penny_config_loads_with_deprecation_warning` asserting every moved field round-trips correctly.
 
-**02-kairos-agent.md §10** — the v3 TOML example is SUPERSEDED by this doc's §4. `02-kairos-agent.md` v4 patches §10 to cross-reference this doc and add a "legacy example retained for migration reference only" note.
+**02-penny-agent.md §10** — the v3 TOML example is SUPERSEDED by this doc's §4. `02-penny-agent.md` v4 patches §10 to cross-reference this doc and add a "legacy example retained for migration reference only" note.
 
 ---
 
@@ -572,7 +572,7 @@ Only a sketch here. Full spec reopens when P2C starts.
 - Auth: loopback bind + 32-byte bearer token. Token format: **`gad_brain_[a-f0-9]{64}`** (SEC-MCP-B5 — matches the existing `gad_*` `redact_stderr` pattern). Generated via `rand::rngs::OsRng.fill_bytes(&mut [0u8; 32])` then hex-encoded (same CSPRNG convention as `crates/gadgetron-xaas/src/auth/key_gen.rs`).
 - The token is passed to Claude Code via allowlisted `ANTHROPIC_API_KEY` subprocess env and is NOT inherited by grandchild `gadgetron mcp serve` (explicit `env_clear` + allowlist — the allowlist EXCLUDES `ANTHROPIC_API_KEY` at the mcp-serve boundary).
 - Handler: Rust-native Anthropic↔OpenAI translator (messages, system, tools, streaming, tool_use/tool_result; no image blocks / no cache_control / no extended thinking in P2C)
-- Dispatch: `router.chat_stream(translated_request, internal_call: true)` — the `internal_call` flag excludes `KairosProvider` from the dispatch table (recursion guard)
+- Dispatch: `router.chat_stream(translated_request, internal_call: true)` — the `internal_call` flag excludes `PennyProvider` from the dispatch table (recursion guard)
 - **Recursion depth header trust model (SEC-MCP-B10)**:
   - The header `X-Gadgetron-Recursion-Depth` is COMPUTED by the shim handler on receipt: `let depth = request.header(...).unwrap_or(0); let next = depth + 1;`. The handler passes `next` to the downstream router call.
   - If the downstream call triggers another brain call, that call's shim handler sees `depth + 1` on its inbound; if `>= max_recursion_depth`, reject with 403.
@@ -639,11 +639,11 @@ Each new phase is additive — a new `impl McpToolProvider` + `McpToolRegistryBu
 | 8 | `gadgetron_local` = P2C | LANDED (config schema; validation rejects at startup in P2A) |
 | 9 | `agent.*` reserved namespace | LANDED (`ensure_tool_name_allowed`) |
 | 10 | `Scope::AgentApproval` variant | **DEFERRED TO P2B** (not added to `Scope` enum in P2A) |
-| 11 | `McpToolRegistry` owner crate | `gadgetron-kairos::registry` (CA-MCP-B2 resolved) |
+| 11 | `McpToolRegistry` owner crate | `gadgetron-penny::registry` (CA-MCP-B2 resolved) |
 | 12 | Feature gate owner crate | `gadgetron-cli` (CA-MCP-B7 resolved) |
 | 13 | Category/tool-prefix invariant | **REMOVED** — no `name.starts_with(category())` requirement. Registry routes by full tool name via HashMap. (CA-MCP-B4) |
 | 14 | `McpError` → `GadgetronError` conversion | §10.1 table (CA-MCP-B3 resolved) |
-| 15 | `[kairos]` → `[agent.brain]` migration | §11.1 field table + loader pre-deserialize hook (CA-MCP-B1 / DX-MCP-B2 resolved) |
+| 15 | `[penny]` → `[agent.brain]` migration | §11.1 field table + loader pre-deserialize hook (CA-MCP-B1 / DX-MCP-B2 resolved) |
 
 ---
 
@@ -664,7 +664,7 @@ Landed tests cover `reserved_agent_namespace_is_rejected`, `reserved_tool_names_
 - `error_code_covers_every_variant` — iterate all `McpError` variants, assert `error_code()` is non-empty
 - `tool_schema_round_trips_json` — `ToolSchema` serde round-trip
 
-### Integration — registry (`crates/gadgetron-kairos/tests/registry.rs`)
+### Integration — registry (`crates/gadgetron-penny/tests/registry.rs`)
 
 - `register_then_freeze_produces_dispatch_map`
 - `register_reserved_tool_name_fails`
@@ -721,11 +721,11 @@ All async tests MUST use `tokio::time::pause()` + `tokio::time::advance()` for c
 |---|---|---|
 | Unit — core agent config | `crates/gadgetron-core/src/agent/config.rs #[cfg(test)] mod config_tests` | LANDED |
 | Unit — core agent tools | `crates/gadgetron-core/src/agent/tools.rs #[cfg(test)] mod tests` | LANDED |
-| Integration — registry | `crates/gadgetron-kairos/tests/registry.rs` | NEW (P2A TDD) |
+| Integration — registry | `crates/gadgetron-penny/tests/registry.rs` | NEW (P2A TDD) |
 | Mock — fake tool provider | `crates/gadgetron-testing/src/mocks/mcp/fake_tool_provider.rs` | NEW (P2A TDD) |
 | Integration — knowledge MCP | `crates/gadgetron-knowledge/tests/mcp_conformance.rs` | per 01-knowledge-layer.md |
 
-`00-overview.md §9.8` should gain two rows for the `gadgetron-kairos::registry` tests and the fake tool provider mock. Patch to land alongside v2 of this doc.
+`00-overview.md §9.8` should gain two rows for the `gadgetron-penny::registry` tests and the fake tool provider mock. Patch to land alongside v2 of this doc.
 
 ---
 
@@ -773,7 +773,7 @@ All async tests MUST use `tokio::time::pause()` + `tokio::time::advance()` for c
 | **CA-MCP-M3** — `category()` `&'static str` footgun | **RESOLVED** — §2 doc comment added |
 | **CA-MCP-M4** — `ToolSchema::name` allocation | **RESOLVED** — §2.1 spec'd `HashMap<String, Arc<dyn ...>>` O(1) lookup |
 | **CA-MCP-M5** — three denial paths | Partially — §6 enumerates 3 layers; P2A only exercises L1-L3 (no L4). Full `DenialReason` enum deferred to P2B with the approval flow. |
-| **CA-MCP-M6** — kairos crate missing | **RESOLVED** — crate scaffolded alongside this doc |
+| **CA-MCP-M6** — penny crate missing | **RESOLVED** — crate scaffolded alongside this doc |
 | **CA-MCP-N1..N4** — code/doc divergence | **RESOLVED** — v2 is written against the landed code, not a speculative spec |
 | **CA-MCP-N5** — `Scope::AgentApproval` serde | **OBSOLETE** |
 | **CA-MCP-N6** — async_trait vtable | Documented comment (M3 fix) |
@@ -784,7 +784,7 @@ All async tests MUST use `tokio::time::pause()` + `tokio::time::advance()` for c
 1. bootstrap UX patch to emit `[agent]` + `[knowledge]` section and remove the current manual-config gap (DX-MCP-B1)
 2. `McpToolRegistryBuilder` + `McpToolRegistry` + TDD tests (CA-MCP-B2 impl)
 3. `AgentConfig` new fields `request_timeout_secs`, `max_concurrent_subprocesses` (§11.1 migration targets)
-4. `KairosErrorKind` 6 new variants + `From<McpError> for GadgetronError` (§10.1)
+4. `PennyErrorKind` 6 new variants + `From<McpError> for GadgetronError` (§10.1)
 5. `AppConfig::load` pre-deserialize migration step (§11.1)
 6. `EnvResolver` trait for V11 testability (QA-MCP-M3)
 7. `p2a_rejects_gadgetron_local_mode_at_startup` test + stage check

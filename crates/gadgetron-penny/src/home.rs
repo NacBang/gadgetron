@@ -1,10 +1,10 @@
-//! Kairos's persistent workspace — a neutral cwd for every Claude Code
+//! Penny's persistent workspace — a neutral cwd for every Claude Code
 //! subprocess spawn.
 //!
 //! # What this module does (and doesn't)
 //!
 //! ```text
-//! ~/.gadgetron/kairos/          (Kairos's workspace — persistent, one per operator)
+//! ~/.gadgetron/penny/          (Penny's workspace — persistent, one per operator)
 //! ├── work/                      (spawn cwd — empty, blocks project-memory leak)
 //! │   └── CLAUDE.md              (empty — terminates upward CLAUDE.md search)
 //! └── wiki/                      (knowledge store — migrates here in a follow-up PR;
@@ -13,8 +13,8 @@
 //!
 //! The spawn drives **CWD** to `work/`; `HOME` is left untouched. Claude
 //! Code's "auto-memory" feature derives a per-project slug from the CWD,
-//! so running every Kairos request out of `~/.gadgetron/kairos/work/`
-//! maps to a private memory path (`~/.claude/projects/-Users-…-gadgetron-kairos-work/`)
+//! so running every Penny request out of `~/.gadgetron/penny/work/`
+//! maps to a private memory path (`~/.claude/projects/-Users-…-gadgetron-penny-work/`)
 //! that never accumulates operator coding-session state. This is the
 //! **primary leak vector we're closing**.
 //!
@@ -31,9 +31,9 @@
 //!
 //! # What isolation we DO get (CWD-only)
 //!
-//! 1. Per-project auto-memory: closed. The observed leak was Kairos
+//! 1. Per-project auto-memory: closed. The observed leak was Penny
 //!    replaying entries from `~/.claude/projects/-Users-junghopark-dev-gadgetron/memory/`.
-//!    With CWD pinned to `~/.gadgetron/kairos/work/`, that path never
+//!    With CWD pinned to `~/.gadgetron/penny/work/`, that path never
 //!    gets consulted.
 //! 2. Upward `CLAUDE.md` walk: closed. Our `work/CLAUDE.md` (empty)
 //!    terminates the walk before it reaches any user-controlled content
@@ -52,7 +52,7 @@
 //!
 //! # Lifecycle
 //!
-//! Persistent. Created once on first `prepare_kairos_home()` (idempotent),
+//! Persistent. Created once on first `prepare_penny_home()` (idempotent),
 //! re-used across server restarts. Operator cleans up by `rm -rf` if
 //! needed.
 
@@ -63,30 +63,30 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HomeError {
-    #[error("I/O error preparing Kairos home: {0}")]
+    #[error("I/O error preparing Penny home: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// Handle to a prepared, persistent Kairos workspace.
+/// Handle to a prepared, persistent Penny workspace.
 ///
 /// Cheap to clone — holds nothing but a `PathBuf`. Safe to wrap in `Arc`
 /// and share across spawns.
 ///
-/// Naming: keeps the `KairosHome` / `kairos_home` terminology because
-/// the conceptual "home of Kairos's session state" is still accurate,
+/// Naming: keeps the `PennyHome` / `penny_home` terminology because
+/// the conceptual "home of Penny's session state" is still accurate,
 /// even though we no longer override the subprocess `HOME` env.
 #[derive(Debug, Clone)]
-pub struct KairosHome {
+pub struct PennyHome {
     root: PathBuf,
 }
 
-impl KairosHome {
-    /// Absolute path to the Kairos workspace root.
+impl PennyHome {
+    /// Absolute path to the Penny workspace root.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Absolute path to Kairos's neutral working directory. Use this as
+    /// Absolute path to Penny's neutral working directory. Use this as
     /// the spawn `current_dir` so Claude Code's project-memory key maps
     /// away from the operator's real projects and the upward `CLAUDE.md`
     /// walk terminates at our empty defensive file.
@@ -94,7 +94,7 @@ impl KairosHome {
         self.root.join("work")
     }
 
-    /// Convention path for the wiki inside the Kairos workspace.
+    /// Convention path for the wiki inside the Penny workspace.
     /// Currently the knowledge layer reads its path from
     /// `config.knowledge.wiki_path` (independent), but the convention is
     /// that it lives here. The follow-up PR migrates `wiki_path` to this
@@ -104,12 +104,12 @@ impl KairosHome {
     }
 }
 
-/// The default Kairos workspace root: `<HOME>/.gadgetron/kairos`.
+/// The default Penny workspace root: `<HOME>/.gadgetron/penny`.
 pub fn default_home_root(real_home: &Path) -> PathBuf {
-    real_home.join(".gadgetron/kairos")
+    real_home.join(".gadgetron/penny")
 }
 
-/// Prepare (or refresh) Kairos's persistent workspace.
+/// Prepare (or refresh) Penny's persistent workspace.
 ///
 /// Creates the directory tree if absent and ensures the defensive empty
 /// `CLAUDE.md` sits in `work/`. Idempotent — safe to call on every
@@ -117,12 +117,12 @@ pub fn default_home_root(real_home: &Path) -> PathBuf {
 ///
 /// # Arguments
 ///
-/// - `root`: where the Kairos workspace lives. Callers normally pass
+/// - `root`: where the Penny workspace lives. Callers normally pass
 ///   `default_home_root(&real_home_path)`; tests can override.
 ///
 /// (`real_home` is no longer a parameter — nothing here reads the
 /// operator's real `~/.claude/`.)
-pub fn prepare_kairos_home(root: &Path) -> Result<KairosHome, HomeError> {
+pub fn prepare_penny_home(root: &Path) -> Result<PennyHome, HomeError> {
     let root = root.to_path_buf();
     fs::create_dir_all(&root)?;
 
@@ -143,12 +143,12 @@ pub fn prepare_kairos_home(root: &Path) -> Result<KairosHome, HomeError> {
     fs::create_dir_all(&wiki)?;
 
     tracing::info!(
-        target: "kairos_home",
+        target: "penny_home",
         root = %root.display(),
-        "Kairos workspace ready (cwd-only isolation; HOME not sandboxed)"
+        "Penny workspace ready (cwd-only isolation; HOME not sandboxed)"
     );
 
-    Ok(KairosHome { root })
+    Ok(PennyHome { root })
 }
 
 #[cfg(test)]
@@ -156,20 +156,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kairos_home_creates_work_and_wiki() {
+    fn penny_home_creates_work_and_wiki() {
         let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("kairos");
-        let kh = prepare_kairos_home(&root).expect("kairos home");
+        let root = parent.path().join("penny");
+        let kh = prepare_penny_home(&root).expect("penny home");
         assert!(kh.root().exists());
         assert!(kh.workdir().exists());
         assert!(kh.wiki_path().exists());
     }
 
     #[test]
-    fn kairos_home_workdir_has_empty_claude_md() {
+    fn penny_home_workdir_has_empty_claude_md() {
         let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("kairos");
-        let kh = prepare_kairos_home(&root).expect("kairos home");
+        let root = parent.path().join("penny");
+        let kh = prepare_penny_home(&root).expect("penny home");
         let claude_md = kh.workdir().join("CLAUDE.md");
         assert!(claude_md.exists());
         assert_eq!(
@@ -180,24 +180,24 @@ mod tests {
     }
 
     #[test]
-    fn kairos_home_is_idempotent() {
+    fn penny_home_is_idempotent() {
         let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("kairos");
-        let _kh1 = prepare_kairos_home(&root).expect("first prepare");
+        let root = parent.path().join("penny");
+        let _kh1 = prepare_penny_home(&root).expect("first prepare");
         // Simulate an operator editing the defensive file to something
-        // they want Kairos to always see. Second prepare must NOT
+        // they want Penny to always see. Second prepare must NOT
         // overwrite it (idempotent w.r.t. content, not just existence).
-        fs::write(root.join("work/CLAUDE.md"), "# kairos operator override").unwrap();
-        let _kh2 = prepare_kairos_home(&root).expect("second prepare");
+        fs::write(root.join("work/CLAUDE.md"), "# penny operator override").unwrap();
+        let _kh2 = prepare_penny_home(&root).expect("second prepare");
         assert_eq!(
             fs::read_to_string(root.join("work/CLAUDE.md")).unwrap(),
-            "# kairos operator override",
+            "# penny operator override",
             "prepare must not clobber operator edits"
         );
     }
 
     #[test]
-    fn kairos_home_workdir_is_outside_operator_project_slug_space() {
+    fn penny_home_workdir_is_outside_operator_project_slug_space() {
         // Regression: the leak we're fixing was Claude Code auto-loading
         // per-project memory from `~/.claude/projects/<cwd-slug>/memory/`
         // where the slug = cwd with `/` → `-`. This assert locks in that
@@ -205,18 +205,18 @@ mod tests {
         // repo, so operators running demos from `~/dev/gadgetron` never
         // see their coding-session memory replayed.
         let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("kairos");
-        let kh = prepare_kairos_home(&root).expect("kairos home");
+        let root = parent.path().join("penny");
+        let kh = prepare_penny_home(&root).expect("penny home");
         let workdir_str = kh.workdir().to_string_lossy().to_string();
         assert!(
-            workdir_str.contains("/kairos/work"),
-            "workdir path {workdir_str} must contain /kairos/work so Claude Code's project slug is unmistakably Kairos-scoped"
+            workdir_str.contains("/penny/work"),
+            "workdir path {workdir_str} must contain /penny/work so Claude Code's project slug is unmistakably Penny-scoped"
         );
     }
 
     #[test]
-    fn kairos_home_default_root_uses_gadgetron_subdir() {
+    fn penny_home_default_root_uses_gadgetron_subdir() {
         let home = default_home_root(Path::new("/home/alice"));
-        assert_eq!(home, PathBuf::from("/home/alice/.gadgetron/kairos"));
+        assert_eq!(home, PathBuf::from("/home/alice/.gadgetron/penny"));
     }
 }

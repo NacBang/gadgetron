@@ -29,7 +29,7 @@ Two blockers (B1, B2) must be resolved before TDD Red phase begins. Five major i
 
 ### QA-MCP-B1 — `ApprovalRegistry` concurrency tests are missing four material races; `await_decision` is non-deterministic without clock control
 
-**Location**: `docs/design/phase2/04-mcp-tool-registry.md §16` "Rust integration (`crates/gadgetron-kairos/tests/approval_flow.rs`)"
+**Location**: `docs/design/phase2/04-mcp-tool-registry.md §16` "Rust integration (`crates/gadgetron-penny/tests/approval_flow.rs`)"
 
 **What is missing**:
 
@@ -37,7 +37,7 @@ The four listed tests cover the sequential happy path and the trivial not-found 
 
 1. **Triple-race (enqueue + decide + timeout all fire on the same id)**: `enqueue` inserts the entry; `decide` removes it via `pending.remove(&id)`; simultaneously `await_decision`'s `tokio::time::timeout` fires and tries `self.pending.remove(&id)`. Both `decide` and the timeout branch attempt a remove — one will get `None`. The current `await_decision` code returns `ApprovalDecision::Timeout` even when `decide` already resolved the channel (because the oneshot `rx` is moved into the future and the timeout fires before the runtime delivers the send). This is an observable double-Timeout bug if the wall-clock and channel delivery race within the same tokio tick. Without a test that runs all three concurrent tasks on a multi-thread runtime and asserts exactly one resolution path fires, this race is untested.
 
-2. **Stale oneshot after channel already closed**: `pending.tx.send(decision)` in `decide` returns `Err` when the receiver was already dropped (e.g., the Kairos session crashed between `enqueue` and `await_decision`). The code maps this to `ApprovalError::ChannelClosed` — correct. But there is no test that drops the `rx` before calling `decide` and asserts `ChannelClosed` is returned (not a panic, not `NotFound`). This is a 1-line caller bug that will not be caught without a dedicated test.
+2. **Stale oneshot after channel already closed**: `pending.tx.send(decision)` in `decide` returns `Err` when the receiver was already dropped (e.g., the Penny session crashed between `enqueue` and `await_decision`). The code maps this to `ApprovalError::ChannelClosed` — correct. But there is no test that drops the `rx` before calling `decide` and asserts `ChannelClosed` is returned (not a panic, not `NotFound`). This is a 1-line caller bug that will not be caught without a dedicated test.
 
 3. **Clock-dependent timeout flakiness in CI**: `await_decision` calls `tokio::time::timeout(self.timeout, rx).await`. In tests, `self.timeout` is real wall-clock duration. If CI is loaded, a 1-second timeout test can flake. The project's own determinism rule ("wall-clock 금지" — `harness.md §1.4`) requires `tokio::time::pause()` + `tokio::time::advance()` for all `tokio::time::timeout` paths in tests. `enqueue_timeout_returns_timeout_decision` as specified will use a real sleep, violating this rule. The fix is to call `tokio::time::pause()` before the test and `tokio::time::advance(timeout + epsilon)` to drive the timeout deterministically. This requires the test runtime to be `#[tokio::test]` — no special attribute; `pause`/`advance` work in the default single-thread runtime. However, the spec must explicitly state that this pattern is required; without it implementers will write the obvious `tokio::time::sleep` version.
 
@@ -45,7 +45,7 @@ The four listed tests cover the sequential happy path and the trivial not-found 
 
 **What test/harness is needed**:
 
-Add the following four tests to `crates/gadgetron-kairos/tests/approval_flow.rs`:
+Add the following four tests to `crates/gadgetron-penny/tests/approval_flow.rs`:
 
 ```
 decide_on_timed_out_id_returns_not_found
@@ -64,7 +64,7 @@ n_concurrent_enqueue_decide_no_leak
 
 All four must use `tokio::time::pause()` / `tokio::time::advance()` for the clock-sensitive paths.
 
-**Where it lives**: `crates/gadgetron-kairos/tests/approval_flow.rs` (same file the doc already names).
+**Where it lives**: `crates/gadgetron-penny/tests/approval_flow.rs` (same file the doc already names).
 
 **Doc action**: §16 must name all four additional tests and include the `tokio::time::pause`/`advance` requirement. The `enqueue_timeout_returns_timeout_decision` test spec must explicitly state "uses `tokio::time::pause()` + `advance(self.timeout + Duration::from_millis(1))`".
 
@@ -158,7 +158,7 @@ The current spec uses `assert!` in the implementation body AND says the test "as
 
 **What is missing**:
 
-The golden path — user typing → Kairos session → MCP tool ask → `ApprovalRegistry::enqueue` → SSE emit → HTTP POST → oneshot resolve → tool executes — has no integration test anywhere in the doc. The closest test is `enqueue_and_decide_allow_unblocks_receiver` in `approval_flow.rs`, but that tests only the registry in isolation. No test exercises the chain:
+The golden path — user typing → Penny session → MCP tool ask → `ApprovalRegistry::enqueue` → SSE emit → HTTP POST → oneshot resolve → tool executes — has no integration test anywhere in the doc. The closest test is `enqueue_and_decide_allow_unblocks_receiver` in `approval_flow.rs`, but that tests only the registry in isolation. No test exercises the chain:
 
 1. A fake tool provider with `ask` mode receives a call.
 2. The call blocks on `await_decision`.
@@ -168,15 +168,15 @@ The golden path — user typing → Kairos session → MCP tool ask → `Approva
 6. The tool executes and returns `ToolResult`.
 7. The chat SSE stream continues with the tool result.
 
-The doc's `fake_claude` binary (from `00-overview.md §9`) has a `tool_use` scenario but it talks to the knowledge layer's `FakeMcpServer`. The approval flow is a new layer on top — `fake_claude` emitting a tool call → Kairos intercepting it → ApprovalRegistry → gateway HTTP. This chain is not exercised by any listed test.
+The doc's `fake_claude` binary (from `00-overview.md §9`) has a `tool_use` scenario but it talks to the knowledge layer's `FakeMcpServer`. The approval flow is a new layer on top — `fake_claude` emitting a tool call → Penny intercepting it → ApprovalRegistry → gateway HTTP. This chain is not exercised by any listed test.
 
 **What test/harness is needed**:
 
-A new integration test file: `crates/gadgetron-kairos/tests/approval_flow_e2e.rs`.
+A new integration test file: `crates/gadgetron-penny/tests/approval_flow_e2e.rs`.
 
 Test name: `tool_ask_flow_allow_unblocks_and_tool_executes`
 
-Setup: `KairosFixture` (already specified in `02-kairos-agent.md §18`) extended with:
+Setup: `PennyFixture` (already specified in `02-penny-agent.md §18`) extended with:
 - A `FakeToolProvider` (see B2) with one T2 `ask`-mode tool.
 - `fake_claude` scenario: emit a tool_use for that tool, then emit text after receiving tool result.
 - An HTTP client that listens for the `gadgetron.approval_required` SSE event and immediately POSTs allow.
@@ -190,7 +190,7 @@ Assertions:
 
 A companion test `tool_ask_flow_deny_returns_tool_error` (deny path) and `tool_ask_flow_timeout_returns_timeout_error` (advance clock past timeout) round out the set.
 
-This test lives at `crates/gadgetron-kairos/tests/approval_flow_e2e.rs`, which is a new file not in the `00-overview.md §9.8` table — see M4.
+This test lives at `crates/gadgetron-penny/tests/approval_flow_e2e.rs`, which is a new file not in the `00-overview.md §9.8` table — see M4.
 
 **Doc action**: §16 must add an "Integration — full stack" subsection with the three named tests and the harness shape. The test must be noted as requiring `tokio::time::pause` for the timeout variant.
 
@@ -230,14 +230,14 @@ The doc specifies four test file locations:
 |---|---|
 | `crates/gadgetron-core/src/agent/config_tests.rs` | No |
 | `crates/gadgetron-core/src/agent/tools_tests.rs` | No |
-| `crates/gadgetron-kairos/tests/approval_flow.rs` | No |
+| `crates/gadgetron-penny/tests/approval_flow.rs` | No |
 | `crates/gadgetron-gateway/tests/approvals.rs` | No |
 
-The authoritative table in `00-overview.md §9.8` (14 rows as confirmed by the Round 2 qa review on 2026-04-13) covers knowledge and kairos crates from Phase 2A. The MCP registry doc introduces tests in `gadgetron-core` (new test module), `gadgetron-kairos/tests/` (new file, not listed), and `gadgetron-gateway/tests/` (first appearance of a gateway integration test in Phase 2).
+The authoritative table in `00-overview.md §9.8` (14 rows as confirmed by the Round 2 qa review on 2026-04-13) covers knowledge and penny crates from Phase 2A. The MCP registry doc introduces tests in `gadgetron-core` (new test module), `gadgetron-penny/tests/` (new file, not listed), and `gadgetron-gateway/tests/` (first appearance of a gateway integration test in Phase 2).
 
 `gadgetron-gateway/tests/` does not currently exist as a directory in the project (gateway tests were not part of Phase 1's `harness.md`). The doc must confirm that `gadgetron-gateway` gets a `tests/` directory and that this is additive to (not conflicting with) the `GatewayHarness` in `gadgetron-testing`.
 
-Additionally, the M2 finding requires a fifth new file: `crates/gadgetron-kairos/tests/approval_flow_e2e.rs`.
+Additionally, the M2 finding requires a fifth new file: `crates/gadgetron-penny/tests/approval_flow_e2e.rs`.
 
 **Doc action**: `00-overview.md §9.8` must be updated to add five new rows. Alternatively, if the PM does not want to update the sibling doc from this doc's review, a "Test file delta from §9.8" table must appear in §16 of this doc, explicitly annotated as "supplements `00-overview.md §9.8`". The gateway tests directory creation must be noted.
 
@@ -337,8 +337,8 @@ The following rows must be added to the authoritative table. Until `00-overview.
 |---|---|---|
 | Unit — core agent config | `crates/gadgetron-core/src/agent/config_tests.rs` | 14 tests V1..V14; `#[cfg(unix)]` for V6 |
 | Unit — core agent tools | `crates/gadgetron-core/src/agent/tools_tests.rs` | registry, `build_allowed_tools`, proptest |
-| Integration — approval registry | `crates/gadgetron-kairos/tests/approval_flow.rs` | existing kairos tests/ dir; 8 tests (4 original + 4 new from B1) |
-| Integration — approval flow E2E | `crates/gadgetron-kairos/tests/approval_flow_e2e.rs` | NEW file; 3 tests from M2; requires `tokio::time::pause` |
+| Integration — approval registry | `crates/gadgetron-penny/tests/approval_flow.rs` | existing penny tests/ dir; 8 tests (4 original + 4 new from B1) |
+| Integration — approval flow E2E | `crates/gadgetron-penny/tests/approval_flow_e2e.rs` | NEW file; 3 tests from M2; requires `tokio::time::pause` |
 | Integration — gateway approvals | `crates/gadgetron-gateway/tests/approvals.rs` | NEW directory `crates/gadgetron-gateway/tests/`; 10 tests (5 original + 5 from M5) |
 | Mock — fake tool provider | `crates/gadgetron-testing/src/mocks/mcp/fake_tool_provider.rs` | NEW file in existing mcp/ dir; exported from prelude (B2) |
 

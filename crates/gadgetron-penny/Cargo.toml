@@ -1,9 +1,9 @@
 [package]
-name = "gadgetron-kairos"
+name = "gadgetron-penny"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kairos agent adapter — Claude Code subprocess + McpToolRegistry dispatch"
+description = "Penny agent adapter — Claude Code subprocess + McpToolRegistry dispatch"
 
 [lib]
 path = "src/lib.rs"

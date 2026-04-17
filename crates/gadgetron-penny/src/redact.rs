@@ -1,11 +1,11 @@
 //! Stderr redaction for Claude Code subprocess output (M2).
 //!
-//! Spec: `docs/design/phase2/02-kairos-agent.md §8`.
+//! Spec: `docs/design/phase2/02-penny-agent.md §8`.
 //!
 //! # What this is for
 //!
 //! Claude Code subprocess stderr is captured by `ClaudeCodeSession` and
-//! surfaced in `KairosErrorKind::AgentError.stderr_redacted`. That field
+//! surfaced in `PennyErrorKind::AgentError.stderr_redacted`. That field
 //! eventually reaches the audit log and — in debug logging paths — the
 //! gadgetron operator's tracing subscriber. Both are places a leaked
 //! credential string would be catastrophic.

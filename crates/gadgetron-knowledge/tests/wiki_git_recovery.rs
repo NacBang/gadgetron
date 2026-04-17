@@ -15,7 +15,7 @@ use std::path::Path;
 
 fn setup_repo() -> (tempfile::TempDir, git2::Repository) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let repo = open_or_init(dir.path(), "Kairos Test", "kairos@test.local").expect("init");
+    let repo = open_or_init(dir.path(), "Penny Test", "penny@test.local").expect("init");
     (dir, repo)
 }
 

@@ -1,4 +1,4 @@
-//! gadgetron-kairos — agent adapter: Claude Code subprocess lifecycle,
+//! gadgetron-penny — agent adapter: Claude Code subprocess lifecycle,
 //! MCP tool registry dispatch, OpenAI LlmProvider impl.
 //!
 //! # Phase 2A scope (Path 1 — approval flow deferred to P2B)
@@ -11,19 +11,19 @@
 //!
 //! # Modules (P2A)
 //! - `registry` — `McpToolRegistry` dispatch table, builder/freeze pattern
-//! - `provider` — `KairosProvider: LlmProvider` router registration
+//! - `provider` — `PennyProvider: LlmProvider` router registration
 //! - `session` — `ClaudeCodeSession` subprocess lifecycle (chief-arch B3)
 //! - `stream`   — stream-json → `ChatChunk` translator
 //! - `spawn`    — Command builder with `kill_on_drop(true)`
 //! - `mcp_config` — tempfile M1 (atomic 0600, unix-only)
 //! - `redact`   — `redact_stderr` (M2)
 //! - `config`   — no runtime config here; `AgentConfig` lives in `gadgetron-core`
-//! - `error`    — Local `KairosError` mapped into `GadgetronError::Kairos`
+//! - `error`    — Local `PennyError` mapped into `GadgetronError::Penny`
 //!
 //! # Modules deferred to P2B
 //! - `approval` — `ApprovalRegistry`, `PendingApproval`, cross-process bridge
 //!
-//! See `docs/design/phase2/04-mcp-tool-registry.md` v2 + `02-kairos-agent.md` v4.
+//! See `docs/design/phase2/04-mcp-tool-registry.md` v2 + `02-penny-agent.md` v4.
 
 // Test code uses the `let mut cfg = X::default(); cfg.field = ...;` pattern
 // extensively. See the matching cfg_attr in gadgetron-core/src/lib.rs.
@@ -40,10 +40,10 @@ pub mod session_store;
 pub mod spawn;
 pub mod stream;
 
-pub use home::{prepare_kairos_home, HomeError, KairosHome};
+pub use home::{prepare_penny_home, HomeError, PennyHome};
 pub use mcp_config::{build_config_json, write_config_file};
 pub use mcp_server::serve_stdio;
-pub use provider::{register_with_router, KairosProvider};
+pub use provider::{register_with_router, PennyProvider};
 pub use redact::redact_stderr;
 pub use registry::{McpToolRegistry, McpToolRegistryBuilder};
 pub use session::ClaudeCodeSession;

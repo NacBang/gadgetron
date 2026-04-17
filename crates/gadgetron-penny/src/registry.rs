@@ -1,4 +1,4 @@
-//! `McpToolRegistry` — the MCP tool dispatch table for Kairos.
+//! `McpToolRegistry` — the MCP tool dispatch table for Penny.
 //!
 //! Spec: `docs/design/phase2/04-mcp-tool-registry.md v2 §2.1`.
 //!
@@ -11,7 +11,7 @@
 //!    `McpToolRegistry`. This flips the registry from mutable-startup
 //!    phase to immutable-serving phase.
 //! 3. The frozen registry is wrapped in `Arc` and cloned into
-//!    `AppState` + the Kairos session builder. Per-request dispatch
+//!    `AppState` + the Penny session builder. Per-request dispatch
 //!    is `O(1)` via a `HashMap<String, Arc<dyn McpToolProvider>>`.
 //!
 //! Why not a single mutable-through-lifetime registry? Two reasons:
@@ -93,7 +93,7 @@ impl McpToolRegistryBuilder {
     pub fn freeze(self, cfg: &AgentConfig) -> McpToolRegistry {
         let mut by_tool_name: HashMap<String, Arc<dyn McpToolProvider>> = HashMap::new();
         let mut all_schemas: Vec<ToolSchema> = Vec::new();
-        // Denormalized (tier, category) per tool name so the Kairos
+        // Denormalized (tier, category) per tool name so the Penny
         // audit emitter in session.rs can fire `ToolCallCompleted`
         // events without another registry lookup on the hot path.
         let mut tool_metadata: HashMap<String, ToolMetadata> = HashMap::new();
@@ -148,7 +148,7 @@ pub struct McpToolRegistry {
     /// invoked.
     allowed_names: Arc<HashSet<String>>,
     /// Denormalized `(tier, category)` per tool name. Used by the
-    /// Kairos audit emitter in `session.rs::drive` to fill
+    /// Penny audit emitter in `session.rs::drive` to fill
     /// `ToolCallCompleted` events without walking the provider list
     /// on the hot path.
     tool_metadata: Arc<HashMap<String, ToolMetadata>>,
@@ -215,7 +215,7 @@ impl McpToolRegistry {
     }
 
     /// Cheap `Arc` clone of the `(tool_name → ToolMetadata)` snapshot
-    /// used by `gadgetron-kairos::session::drive` + the stream-level
+    /// used by `gadgetron-penny::session::drive` + the stream-level
     /// audit emitter to fill `ToolCallCompleted` events.
     pub fn tool_metadata_snapshot(&self) -> Arc<HashMap<String, ToolMetadata>> {
         self.tool_metadata.clone()

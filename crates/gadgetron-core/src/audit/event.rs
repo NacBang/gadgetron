@@ -1,10 +1,10 @@
 //! Tool audit event types.
 //!
 //! The `ToolAuditEvent` enum is the wire-format for per-tool-call audit
-//! records emitted from `gadgetron-kairos::stream::event_to_chat_chunks`
+//! records emitted from `gadgetron-penny::stream::event_to_chat_chunks`
 //! and consumed by a concrete persistence backend in `gadgetron-xaas`.
 //! The `ToolAuditEventSink` trait abstracts "where the event goes" so
-//! `gadgetron-kairos` does not have to depend on the persistence layer.
+//! `gadgetron-penny` does not have to depend on the persistence layer.
 //!
 //! Design notes:
 //! - `conversation_id` and `claude_session_uuid` are declared `Option<String>`
@@ -36,7 +36,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolAuditEvent {
     /// One tool invocation finished (success OR error). Emitted from
-    /// the Kairos stream on a `ToolUse` / `ToolResult` boundary.
+    /// the Penny stream on a `ToolUse` / `ToolResult` boundary.
     ToolCallCompleted {
         /// The tool name as seen by the `McpToolRegistry` — e.g.
         /// `"wiki.write"`, `"web.search"`.
@@ -99,7 +99,7 @@ pub enum ToolTier {
     Destructive,
 }
 
-/// Denormalized metadata snapshot used by the Kairos audit emitter to
+/// Denormalized metadata snapshot used by the Penny audit emitter to
 /// look up `(tier, category)` from a bare tool name on each stream-json
 /// `ToolUse` event. Populated by `McpToolRegistryBuilder::freeze` from
 /// every registered provider's `category()` + `tool_schemas()` output.
