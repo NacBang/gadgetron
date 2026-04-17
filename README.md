@@ -249,15 +249,9 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 
 `docs/manual/*` tracks the operator-facing surface on trunk: the stable Phase 1 gateway plus the currently shipped Phase 2A Penny/Web runtime. `docs/design/*` continues to track approved and in-progress implementation work.
 
-### Phase 2A ADRs
-| ADR | Title |
-|-----|-------|
-| [P2A-01](docs/adr/ADR-P2A-01-allowed-tools-enforcement.md) | `--allowed-tools` enforcement verification (Claude Code 2.1.104) |
-| [P2A-02](docs/adr/ADR-P2A-02-dangerously-skip-permissions-risk-acceptance.md) | `--dangerously-skip-permissions` risk acceptance |
-| [P2A-03](docs/adr/ADR-P2A-03-searxng-privacy-disclosure.md) | SearXNG privacy disclosure |
-| [P2A-04](docs/adr/ADR-P2A-04-chat-ui-selection.md) | `gadgetron-web` (assistant-ui) over OpenWebUI |
-| [P2A-05](docs/adr/ADR-P2A-05-agent-centric-control-plane.md) | Agent-Centric Control Plane |
-| [P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md) | **Approval flow deferred to P2B (Path 1 scope cut)** |
+### Architecture Decision Records
+
+7 ACCEPTED ADRs (P2A-01 through P2A-07). See [`docs/adr/README.md`](docs/adr/README.md) for the full index with status, date, and one-line summary of each. New ADRs update that file only — this section intentionally stays link-only to avoid drift.
 
 ## Phase 2A Progress
 
