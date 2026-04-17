@@ -234,96 +234,18 @@ pub fn event_to_chat_chunks_ex(
 ) -> Vec<ChatChunk> {
     match event {
         // --- Token-level streaming (--include-partial-messages) ---
-        StreamJsonEvent::StreamEvent { event: stream_evt } => match stream_evt {
-            RawStreamEvent::ContentBlockDelta { delta } => match delta {
-                ContentBlockDeltaPayload::TextDelta { text } if !text.is_empty() => {
-                    vec![build_chunk(req, Some(text), None)]
-                }
-                ContentBlockDeltaPayload::ThinkingDelta { thinking } if !thinking.is_empty() => {
-                    let formatted = format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "));
-                    vec![build_chunk(req, Some(formatted), None)]
-                }
-                _ => Vec::new(),
-            },
-            RawStreamEvent::Other => Vec::new(),
-        },
+        StreamJsonEvent::StreamEvent { event: stream_evt } => {
+            stream_event_to_chunks(stream_evt, req)
+        }
 
         // --- Claude Code ≥2.1 verbose events ---
         StreamJsonEvent::Assistant { message } => {
-            let mut chunks = Vec::new();
-            for block in message.content {
-                match block {
-                    ContentBlock::Text { text } if !text.is_empty() && !skip_assistant_text => {
-                        chunks.push(build_chunk(req, Some(text), None));
-                    }
-                    ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
-                        // Surface reasoning to the UI as a quoted, italic block.
-                        // Markdown-safe formatting so the browser renders it
-                        // visually distinct from normal output.
-                        let formatted = format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "));
-                        chunks.push(build_chunk(req, Some(formatted), None));
-                    }
-                    ContentBlock::ToolUse { id, name, input } => {
-                        tracing::info!(
-                            target: "penny_audit",
-                            tool_name = %name,
-                            tool_call_id = %id,
-                            "penny_tool_called"
-                        );
-                        // Hide Claude Code's internal scaffolding tools from
-                        // the UI — only MCP-registered tools represent real
-                        // user-visible work. ToolSearch (schema lookups),
-                        // TodoWrite, and a handful of built-ins are noise.
-                        if is_internal_tool(&name) {
-                            continue;
-                        }
-                        // Show the tool call in the UI: name + compact input preview.
-                        // Count in `char`s, not bytes — a byte-cut truncate panics
-                        // in the middle of multi-byte UTF-8 codepoints (hit by
-                        // Korean/CJK tool_result passed back into tool_use in a
-                        // chained call). 120 chars keeps the preview tight
-                        // without the possibility of a mid-codepoint split.
-                        let preview = truncate_chars(&input.to_string(), 120);
-                        let formatted = format!("\n\n🔧 **{}** `{}`\n\n", name, preview);
-                        chunks.push(build_chunk(req, Some(formatted), None));
-                    }
-                    _ => {}
-                }
-            }
-            chunks
+            assistant_message_to_chunks(message, req, skip_assistant_text)
         }
-        StreamJsonEvent::User { message } => {
-            // Surface tool_result outputs so the user sees what the tool returned.
-            let mut chunks = Vec::new();
-            for block in message.content {
-                if let UserContentBlock::ToolResult {
-                    is_error, content, ..
-                } = block
-                {
-                    let text = tool_result_to_text(&content);
-                    if text.is_empty() {
-                        continue;
-                    }
-                    // Hide tool_results that correspond to Claude Code's internal
-                    // tools (ToolSearch produces `<function>...</function>` XML
-                    // describing MCP tool schemas — plumbing, not user-visible
-                    // knowledge output).
-                    if looks_like_internal_tool_result(&text) {
-                        continue;
-                    }
-                    let icon = if is_error { "❌" } else { "✓" };
-                    // Char-count truncate (see `truncate_chars` docstring) — the
-                    // byte-based variant panics mid-codepoint on CJK tool output.
-                    let preview = truncate_chars(&text, 300);
-                    let formatted = format!("{} _{}_ \n\n", icon, preview.replace('\n', " "));
-                    chunks.push(build_chunk(req, Some(formatted), None));
-                }
-            }
-            chunks
-        }
+        StreamJsonEvent::User { message } => user_message_to_chunks(message, req),
         StreamJsonEvent::Result { is_error, .. } => {
             if !is_error {
-                vec![build_chunk(req, None, Some("stop".to_string()))]
+                stop_chunk(req)
             } else {
                 Vec::new()
             }
@@ -346,9 +268,7 @@ pub fn event_to_chat_chunks_ex(
             Vec::new()
         }
         StreamJsonEvent::ToolResult { .. } => Vec::new(),
-        StreamJsonEvent::MessageStop { .. } => {
-            vec![build_chunk(req, None, Some("stop".to_string()))]
-        }
+        StreamJsonEvent::MessageStop { .. } => stop_chunk(req),
         StreamJsonEvent::MessageUsage {
             input_tokens,
             output_tokens,
@@ -362,6 +282,98 @@ pub fn event_to_chat_chunks_ex(
             Vec::new()
         }
     }
+}
+
+fn stream_event_to_chunks(stream_evt: RawStreamEvent, req: &ChatRequest) -> Vec<ChatChunk> {
+    match stream_evt {
+        RawStreamEvent::ContentBlockDelta { delta } => match delta {
+            ContentBlockDeltaPayload::TextDelta { text } if !text.is_empty() => {
+                vec![build_chunk(req, Some(text), None)]
+            }
+            ContentBlockDeltaPayload::ThinkingDelta { thinking } if !thinking.is_empty() => {
+                vec![build_chunk(
+                    req,
+                    Some(format_thinking_block(&thinking)),
+                    None,
+                )]
+            }
+            _ => Vec::new(),
+        },
+        RawStreamEvent::Other => Vec::new(),
+    }
+}
+
+fn assistant_message_to_chunks(
+    message: AssistantMessage,
+    req: &ChatRequest,
+    skip_assistant_text: bool,
+) -> Vec<ChatChunk> {
+    let mut chunks = Vec::new();
+    for block in message.content {
+        match block {
+            ContentBlock::Text { text } if !text.is_empty() && !skip_assistant_text => {
+                chunks.push(build_chunk(req, Some(text), None));
+            }
+            ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
+                chunks.push(build_chunk(
+                    req,
+                    Some(format_thinking_block(&thinking)),
+                    None,
+                ));
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                log_tool_use(&name, &id);
+                if is_internal_tool(&name) {
+                    continue;
+                }
+                let preview = truncate_chars(&input.to_string(), 120);
+                let formatted = format!("\n\n🔧 **{}** `{}`\n\n", name, preview);
+                chunks.push(build_chunk(req, Some(formatted), None));
+            }
+            _ => {}
+        }
+    }
+    chunks
+}
+
+fn user_message_to_chunks(message: UserMessage, req: &ChatRequest) -> Vec<ChatChunk> {
+    let mut chunks = Vec::new();
+    for block in message.content {
+        if let UserContentBlock::ToolResult {
+            is_error, content, ..
+        } = block
+        {
+            let text = tool_result_to_text(&content);
+            if text.is_empty() || looks_like_internal_tool_result(&text) {
+                continue;
+            }
+            let icon = if is_error { "❌" } else { "✓" };
+            let preview = truncate_chars(&text, 300);
+            let formatted = format!("{} _{}_ \n\n", icon, preview.replace('\n', " "));
+            chunks.push(build_chunk(req, Some(formatted), None));
+        }
+    }
+    chunks
+}
+
+fn format_thinking_block(thinking: &str) -> String {
+    // Surface reasoning to the UI as a quoted, italic block.
+    // Markdown-safe formatting so the browser renders it
+    // visually distinct from normal output.
+    format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "))
+}
+
+fn log_tool_use(name: &str, id: &str) {
+    tracing::info!(
+        target: "penny_audit",
+        tool_name = %name,
+        tool_call_id = %id,
+        "penny_tool_called"
+    );
+}
+
+fn stop_chunk(req: &ChatRequest) -> Vec<ChatChunk> {
+    vec![build_chunk(req, None, Some("stop".to_string()))]
 }
 
 /// Claude Code ships built-in scaffolding tools that shouldn't be surfaced to

@@ -22,6 +22,35 @@ use sqlx::Row as _;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+type SharedKeyValidator = Arc<dyn gadgetron_xaas::auth::validator::KeyValidator + Send + Sync>;
+type SharedQuotaEnforcer = Arc<dyn gadgetron_xaas::quota::enforcer::QuotaEnforcer + Send + Sync>;
+type SharedProviderMap = HashMap<String, Arc<dyn LlmProvider + Send + Sync>>;
+type RouterProviderMap = HashMap<String, Arc<dyn LlmProvider>>;
+
+struct DatabaseRuntime {
+    key_validator: SharedKeyValidator,
+    pg_pool: Option<sqlx::PgPool>,
+}
+
+struct ServerRuntimeHandles {
+    audit_writer: Arc<AuditWriter>,
+    audit_handle: tokio::task::JoinHandle<()>,
+    tui_tx: Option<broadcast::Sender<WsMessage>>,
+    tui_thread: Option<std::thread::JoinHandle<()>>,
+    pg_pool: Option<sqlx::PgPool>,
+}
+
+struct AppStateParts {
+    key_validator: SharedKeyValidator,
+    quota_enforcer: SharedQuotaEnforcer,
+    audit_writer: Arc<AuditWriter>,
+    providers: SharedProviderMap,
+    llm_router: Arc<LlmRouter>,
+    pg_pool: Option<sqlx::PgPool>,
+    no_db: bool,
+    tui_tx: Option<broadcast::Sender<WsMessage>>,
+}
+
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
@@ -358,6 +387,67 @@ fn load_penny_registry_from_config(
     Ok(Some(Arc::new(builder.freeze(agent_cfg))))
 }
 
+struct PennyRouterRegistration {
+    agent_cfg: Arc<gadgetron_core::agent::AgentConfig>,
+    registry: Arc<gadgetron_penny::McpToolRegistry>,
+    audit_sink: Arc<dyn gadgetron_core::audit::ToolAuditEventSink>,
+    session_store: Arc<gadgetron_penny::SessionStore>,
+    config_path_for_mcp: PathBuf,
+}
+
+impl PennyRouterRegistration {
+    fn register(self, providers: &mut HashMap<String, Arc<dyn LlmProvider>>) {
+        gadgetron_penny::register_with_router(
+            self.agent_cfg,
+            self.registry,
+            self.audit_sink,
+            self.session_store,
+            providers,
+            Some(self.config_path_for_mcp),
+        );
+    }
+}
+
+fn canonicalize_config_path_for_mcp(config_path: &std::path::Path) -> PathBuf {
+    // Use the canonical absolute TOML path so the MCP-child's cwd doesn't
+    // influence config lookup. Fall back to the as-provided path if
+    // canonicalize fails (e.g. on a filesystem that doesn't support it);
+    // `gadgetron mcp serve --config` will then surface a clear error
+    // instead of silently running without the `[knowledge]` section.
+    config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf())
+}
+
+fn prepare_penny_router_registration(
+    config_path: &std::path::Path,
+    app_config: &AppConfig,
+) -> Result<Option<PennyRouterRegistration>> {
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let Some(registry) = load_penny_registry_from_config(config_path, &app_config.agent)? else {
+        return Ok(None);
+    };
+
+    let agent_cfg = Arc::new(app_config.agent.clone());
+    let audit_sink: Arc<dyn gadgetron_core::audit::ToolAuditEventSink> =
+        Arc::new(gadgetron_core::audit::NoopToolAuditEventSink);
+    let session_store = Arc::new(gadgetron_penny::SessionStore::new(
+        agent_cfg.session_ttl_secs,
+        agent_cfg.session_store_max_entries,
+    ));
+
+    Ok(Some(PennyRouterRegistration {
+        agent_cfg,
+        registry,
+        audit_sink,
+        session_store,
+        config_path_for_mcp: canonicalize_config_path_for_mcp(config_path),
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // PostgreSQL connection helper for CLI commands
 // ---------------------------------------------------------------------------
@@ -646,122 +736,70 @@ async fn key_revoke(pool: &sqlx::PgPool, key_id: Uuid) -> Result<()> {
 // Core serve function
 // ---------------------------------------------------------------------------
 
-/// Pre-check: `--tui` requires a TTY on both stdin and stdout.
-///
-/// Separated from the `std::io::stdin()/stdout()` calls so unit tests can
-/// exercise every (tui_enabled × has_tty) combination without a real TTY.
-///
-/// Returns `Ok(())` when `tui_enabled == false` OR `has_tty == true`.
-/// Returns `Err` with a multi-line actionable message otherwise.
-fn require_tty_for_tui(tui_enabled: bool, has_tty: bool) -> anyhow::Result<()> {
-    if !tui_enabled || has_tty {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "--tui requires an interactive terminal (stdin or stdout is not a TTY).\n\
-         \n  \
-         Cause: stdin/stdout is not connected to a terminal — this happens under systemd,\n  \
-         \x20      CI runners, SSH with -T, IDE task runners, and pipe redirects.\n\
-         \n  \
-         Next steps:\n    \
-         1. Run gadgetron from a regular shell (iTerm, Terminal.app, Alacritty, ...)\n    \
-         2. Remove --tui to run headless — the server is reachable at GET /health\n       \
-            and GET /v1/models once started.\n    \
-         3. For systemd/CI: omit --tui or set tui = false in gadgetron.toml.\n       \
-            See docs/manual/configuration.md for the full option reference."
-    )
+fn resolve_provider_quickstart_endpoint(
+    provider_override: Option<String>,
+    provider_env: Option<String>,
+) -> Option<String> {
+    provider_override.or(provider_env)
 }
 
-/// Run the gateway server.
-///
-/// `no_db`: force no-db mode even when `GADGETRON_DATABASE_URL` is set.
-/// `provider_override`: when Some, skip config file and inject a synthetic vLLM
-/// provider pointing at the given endpoint (gadgetron serve --provider pattern).
-/// Implies no-db mode.
-async fn serve(
+fn resolve_config_path(
     config_path_override: Option<PathBuf>,
-    bind_override: Option<String>,
-    tui_enabled: bool,
-    no_db: bool,
-    provider_override: Option<String>,
-) -> Result<()> {
-    // Step 1: Initialise structured tracing (always pretty for now; future --log-format flag).
-    init_tracing();
+    config_env: Option<String>,
+) -> PathBuf {
+    config_path_override
+        .or_else(|| config_env.map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("gadgetron.toml"))
+}
 
-    // Step 1b: When --provider is set, inject the endpoint as the sole vLLM provider
-    // and skip config file loading entirely (vLLM quick-start pattern).
-    // Print progress so the user knows something is happening.
-    let provider_quickstart_endpoint: Option<String> =
-        provider_override.or_else(|| std::env::var("GADGETRON_PROVIDER").ok());
-
-    // Step 2: Resolve config path.
-    //   Priority: CLI --config > GADGETRON_CONFIG env > default ./gadgetron.toml
-    let config_path: PathBuf = config_path_override
-        .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
-
-    // Load AppConfig; tolerate missing file at run time — we only fail if the
-    // file exists but is malformed. If absent, use built-in defaults (Ollama pattern)
-    // so that `gadgetron serve` works without any setup.
-    let config: AppConfig = if let Some(ref endpoint) = provider_quickstart_endpoint {
+fn load_serve_config(
+    config_path: &std::path::Path,
+    provider_quickstart_endpoint: Option<&str>,
+) -> Result<AppConfig> {
+    if let Some(endpoint) = provider_quickstart_endpoint {
         // --provider mode: build a synthetic config with one vLLM provider.
         // Config file is intentionally bypassed.
         let mut cfg = AppConfig::default();
         cfg.providers.insert(
             "provider".to_string(),
             gadgetron_core::config::ProviderConfig::Vllm {
-                endpoint: endpoint.clone(),
+                endpoint: endpoint.to_string(),
                 api_key: None,
             },
         );
-        cfg
-    } else if config_path.exists() {
-        AppConfig::load(config_path.to_str().unwrap_or("gadgetron.toml"))
-            .with_context(|| format!("failed to load config from {}", config_path.display()))?
-    } else {
-        // No config file found — print user-visible message and use built-in defaults.
-        println!("No config file found — using built-in defaults.");
-        println!("   Create one: gadgetron init");
-        println!();
-        AppConfig::default()
-    };
-
-    // Resolve bind address.
-    // Priority: CLI --bind > GADGETRON_BIND env > config.server.bind
-    let bind_addr = bind_override
-        .or_else(|| std::env::var("GADGETRON_BIND").ok())
-        .unwrap_or_else(|| config.server.bind.clone());
-
-    tracing::info!(bind = %bind_addr, tui = tui_enabled, "gadgetron starting");
-
-    // Step 2.5: TTY pre-check when --tui requested.
-    //
-    // Without this, crossterm's enable_raw_mode() fails inside the TUI thread
-    // with ENXIO ("Device not configured"), a single tracing::warn is emitted,
-    // and the server silently runs headless — a terrible DX when the user
-    // explicitly asked for an interactive dashboard.
-    //
-    // Fail-fast with sysexits.h EX_USAGE (2) matches `gadgetron doctor`.
-    if tui_enabled {
-        use std::io::IsTerminal;
-        let has_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-        if let Err(e) = require_tty_for_tui(tui_enabled, has_tty) {
-            eprintln!("Error: {e}");
-            std::process::exit(2);
-        }
+        return Ok(cfg);
     }
 
-    // Step 3: Determine DB mode.
-    //   Priority: --no-db flag > --provider flag > env/config database_url
-    let use_no_db = no_db
-        || provider_quickstart_endpoint.is_some()
-        || std::env::var("GADGETRON_DATABASE_URL").map_or(true, |s| s.is_empty());
+    if config_path.exists() {
+        return AppConfig::load(config_path.to_str().unwrap_or("gadgetron.toml"))
+            .with_context(|| format!("failed to load config from {}", config_path.display()));
+    }
 
-    // Step 4: PostgreSQL connection pool (skipped in no-db mode).
-    let (key_validator, pg_pool_opt): (
-        Arc<dyn gadgetron_xaas::auth::validator::KeyValidator + Send + Sync>,
-        Option<sqlx::PgPool>,
-    ) = if use_no_db {
+    // No config file found — print user-visible message and use built-in defaults.
+    println!("No config file found — using built-in defaults.");
+    println!("   Create one: gadgetron init");
+    println!();
+    Ok(AppConfig::default())
+}
+
+fn resolve_bind_addr(bind_override: Option<String>, config: &AppConfig) -> String {
+    bind_override
+        .or_else(|| std::env::var("GADGETRON_BIND").ok())
+        .unwrap_or_else(|| config.server.bind.clone())
+}
+
+fn should_use_no_db(
+    no_db_flag: bool,
+    provider_quickstart_endpoint: Option<&str>,
+    database_url_env: Option<&str>,
+) -> bool {
+    no_db_flag
+        || provider_quickstart_endpoint.is_some()
+        || database_url_env.is_none_or(str::is_empty)
+}
+
+async fn init_database_runtime(use_no_db: bool) -> Result<DatabaseRuntime> {
+    let (key_validator, pg_pool): (SharedKeyValidator, Option<sqlx::PgPool>) = if use_no_db {
         // Both eprintln! and tracing::warn! are kept: eprintln! ensures visibility
         // when RUST_LOG=off silences the tracing subscriber. No redundant "WARNING:"
         // prefix — stderr channel and WARN level already imply it.
@@ -807,38 +845,40 @@ async fn serve(
         eprintln!(" done");
         tracing::info!("database migrations applied");
 
-        let kv = Arc::new(PgKeyValidator::new(pool.clone()))
-            as Arc<dyn gadgetron_xaas::auth::validator::KeyValidator + Send + Sync>;
+        let kv = Arc::new(PgKeyValidator::new(pool.clone())) as SharedKeyValidator;
         (kv, Some(pool))
     };
 
-    // Step 5: InMemoryQuotaEnforcer (Phase 1; PostgreSQL-backed is Phase 2).
-    let quota_enforcer = Arc::new(InMemoryQuotaEnforcer)
-        as Arc<dyn gadgetron_xaas::quota::enforcer::QuotaEnforcer + Send + Sync>;
+    Ok(DatabaseRuntime {
+        key_validator,
+        pg_pool,
+    })
+}
 
-    // Step 6: AuditWriter — mpsc channel capacity 4 096.
+fn init_audit_runtime() -> (Arc<AuditWriter>, tokio::task::JoinHandle<()>) {
     let (audit_writer, audit_rx) = AuditWriter::new(4_096);
     let audit_writer = Arc::new(audit_writer);
-
-    // Step 7: Audit consumer task — Phase 1: log to tracing only.
-    //   JoinHandle retained for graceful drain in Step 14.
     let audit_handle = tokio::spawn(audit_consumer_loop(audit_rx));
+    (audit_writer, audit_handle)
+}
 
-    // Step 8: TUI broadcast channel.
-    //   broadcast::channel capacity 1_024: 1_000 QPS ceiling × ~1s drain period + 24 headroom.
-    //   Sender is Clone; the initial Receiver is dropped — TUI thread will call subscribe().
-    let tui_tx: Option<broadcast::Sender<WsMessage>> = if tui_enabled {
+fn init_tui_channel(tui_enabled: bool) -> Option<broadcast::Sender<WsMessage>> {
+    if tui_enabled {
         let (tx, _initial_rx) = broadcast::channel::<WsMessage>(1_024);
         // _initial_rx is dropped immediately.
         // Sender remains valid even with 0 receivers.
         Some(tx)
     } else {
         None
-    };
+    }
+}
 
-    // Step 9: Build providers from config (empty HashMap boots fine).
+fn build_provider_maps(
+    config: &AppConfig,
+    config_path: &std::path::Path,
+) -> Result<(SharedProviderMap, RouterProviderMap)> {
     eprint!("  Checking provider(s)...");
-    let providers_ss = build_providers(&config).context("failed to initialise LLM providers")?;
+    let providers_ss = build_providers(config).context("failed to initialise LLM providers")?;
     eprintln!(" done ({} configured)", providers_ss.len());
     if providers_ss.is_empty() {
         eprintln!("  WARNING: No providers configured.");
@@ -846,76 +886,150 @@ async fn serve(
         eprintln!("           Fix: add [providers.*] to gadgetron.toml or use --provider <url>");
     }
 
-    // Coerce Arc<dyn LlmProvider + Send + Sync> → Arc<dyn LlmProvider> for Router::new.
-    let mut providers_for_router: HashMap<String, Arc<dyn LlmProvider>> = providers_ss
+    let mut providers_for_router: RouterProviderMap = providers_ss
         .iter()
         .map(|(k, v)| (k.clone(), Arc::clone(v) as Arc<dyn LlmProvider>))
         .collect();
 
-    // Step 9a (P2A Penny wiring): if `[knowledge]` is present in the
-    // config file, construct the knowledge layer, register it as a
-    // KnowledgeToolProvider in an McpToolRegistry, and register
-    // PennyProvider as the `"penny"` entry in the router map.
-    //
-    // Silent skip when `[knowledge]` is absent — operators who have not
-    // configured the knowledge layer get a normal non-Penny server.
-    register_penny_if_configured(&config_path, &config, &mut providers_for_router);
+    register_penny_if_configured(config_path, config, &mut providers_for_router);
+    Ok((providers_ss, providers_for_router))
+}
 
-    // Step 10: Build the LLM router.
+fn build_llm_router(providers: RouterProviderMap, config: &AppConfig) -> Arc<LlmRouter> {
     let metrics_store = Arc::new(MetricsStore::new());
-    let llm_router = Arc::new(LlmRouter::new(
-        providers_for_router,
+    Arc::new(LlmRouter::new(
+        providers,
         config.router.clone(),
         metrics_store,
-    ));
+    ))
+}
 
-    // Step 11: Assemble AppState.
-    let state = AppState {
+fn build_app_state(parts: AppStateParts) -> AppState {
+    let AppStateParts {
+        key_validator,
+        quota_enforcer,
+        audit_writer,
+        providers,
+        llm_router,
+        pg_pool,
+        no_db,
+        tui_tx,
+    } = parts;
+
+    AppState {
+        key_validator,
+        quota_enforcer,
+        audit_writer,
+        providers: Arc::new(providers),
+        router: Some(llm_router),
+        pg_pool,
+        no_db,
+        tui_tx,
+    }
+}
+
+fn build_http_app(state: AppState, web_config: &gadgetron_core::config::WebConfig) -> axum::Router {
+    #[cfg(feature = "web-ui")]
+    {
+        build_router_with_web(state, web_config)
+    }
+    #[cfg(not(feature = "web-ui"))]
+    {
+        let _ = web_config;
+        build_router(state)
+    }
+}
+
+fn init_serve_runtime(
+    config: &AppConfig,
+    config_path: &std::path::Path,
+    key_validator: SharedKeyValidator,
+    pg_pool: Option<sqlx::PgPool>,
+    no_db: bool,
+    tui_enabled: bool,
+) -> Result<(axum::Router, ServerRuntimeHandles)> {
+    // Phase 1 keeps quota enforcement in-memory; the DB-backed implementation
+    // lands later without changing the serve orchestration.
+    let quota_enforcer = Arc::new(InMemoryQuotaEnforcer) as SharedQuotaEnforcer;
+    let (audit_writer, audit_handle) = init_audit_runtime();
+    let tui_tx = init_tui_channel(tui_enabled);
+    let (providers_ss, providers_for_router) = build_provider_maps(config, config_path)?;
+    let llm_router = build_llm_router(providers_for_router, config);
+    let state = build_app_state(AppStateParts {
         key_validator,
         quota_enforcer,
         audit_writer: audit_writer.clone(),
-        providers: Arc::new(providers_ss),
-        router: Some(llm_router),
-        pg_pool: pg_pool_opt.clone(),
-        no_db: use_no_db,
+        providers: providers_ss,
+        llm_router,
+        pg_pool: pg_pool.clone(),
+        no_db,
         tui_tx: tui_tx.clone(),
-    };
+    });
+    let tui_thread = spawn_tui_thread(tui_tx.as_ref());
+    let app = build_http_app(state, &config.web);
 
-    // Step 13: TUI thread (only when --tui is active).
-    //
-    // Concurrency decision: `std::thread::spawn` + internal `tokio::runtime::Builder::new_current_thread()`.
-    // Rationale: crossterm's `event::poll` is a blocking syscall. Running on a tokio
-    // worker thread would consume async budget. A dedicated OS thread with its own
-    // single-threaded tokio runtime provides isolation (design §1.3).
-    let tui_thread = if let Some(ref tx) = tui_tx {
-        let rx = tx.subscribe(); // new Receiver from the Sender
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("TUI tokio runtime must build");
-            rt.block_on(async move {
-                let mut app = gadgetron_tui::App::with_channel(rx);
-                if let Err(e) = app.run().await {
-                    tracing::warn!(error = %e, "TUI exited with error");
-                }
-            });
+    Ok((
+        app,
+        ServerRuntimeHandles {
+            audit_writer,
+            audit_handle,
+            tui_tx,
+            tui_thread,
+            pg_pool,
+        },
+    ))
+}
+
+fn spawn_tui_thread(
+    tui_tx: Option<&broadcast::Sender<WsMessage>>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let tx = tui_tx?;
+    let rx = tx.subscribe(); // new Receiver from the Sender
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("TUI tokio runtime must build");
+        rt.block_on(async move {
+            let mut app = gadgetron_tui::App::with_channel(rx);
+            if let Err(e) = app.run().await {
+                tracing::warn!(error = %e, "TUI exited with error");
+            }
         });
-        Some(handle)
-    } else {
-        None
-    };
+    });
+    Some(handle)
+}
 
-    // Step 14: Build the axum Router (Tower middleware stack).
+/// Pre-check: `--tui` requires a TTY on both stdin and stdout.
+///
+/// Separated from the `std::io::stdin()/stdout()` calls so unit tests can
+/// exercise every (tui_enabled × has_tty) combination without a real TTY.
+///
+/// Returns `Ok(())` when `tui_enabled == false` OR `has_tty == true`.
+/// Returns `Err` with a multi-line actionable message otherwise.
+fn require_tty_for_tui(tui_enabled: bool, has_tty: bool) -> anyhow::Result<()> {
+    if !tui_enabled || has_tty {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "--tui requires an interactive terminal (stdin or stdout is not a TTY).\n\
+         \n  \
+         Cause: stdin/stdout is not connected to a terminal — this happens under systemd,\n  \
+         \x20      CI runners, SSH with -T, IDE task runners, and pipe redirects.\n\
+         \n  \
+         Next steps:\n    \
+         1. Run gadgetron from a regular shell (iTerm, Terminal.app, Alacritty, ...)\n    \
+         2. Remove --tui to run headless — the server is reachable at GET /health\n       \
+            and GET /v1/models once started.\n    \
+         3. For systemd/CI: omit --tui or set tui = false in gadgetron.toml.\n       \
+            See docs/manual/configuration.md for the full option reference."
+    )
+}
+
+async fn bind_and_serve(app: axum::Router, bind_addr: &str, config: &AppConfig) -> Result<()> {
     // Print "Starting server..." progress line before binding (matches design §1.4 Stage 3-B).
     eprint!("  Starting server...");
-    #[cfg(feature = "web-ui")]
-    let app = build_router_with_web(state, &config.web);
-    #[cfg(not(feature = "web-ui"))]
-    let app = build_router(state);
-
-    // Step 15: Bind TCP listener.
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
+    let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("failed to bind to {bind_addr}"))?;
 
@@ -925,7 +1039,7 @@ async fn serve(
     // Print startup banner to stdout (matches design §1.4 Stage 3-B).
     print_serve_banner(
         env!("CARGO_PKG_VERSION"),
-        &bind_addr,
+        bind_addr,
         &config
             .providers
             .values()
@@ -933,42 +1047,130 @@ async fn serve(
             .collect::<Vec<_>>(),
     );
 
-    // Step 16: axum::serve with graceful shutdown on SIGTERM or Ctrl-C.
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+    Ok(())
+}
 
-    tracing::info!("axum serve exited — starting drain sequence");
+async fn drain_server_runtime(runtime: ServerRuntimeHandles) {
+    let ServerRuntimeHandles {
+        audit_writer,
+        audit_handle,
+        tui_tx,
+        tui_thread,
+        pg_pool,
+    } = runtime;
 
-    // Step 17: Shutdown drain sequence.
-    //
-    // 17a: Drop TUI broadcast Sender → channel closes → App::drain_updates sees
-    //      TryRecvError::Closed → App sets running=false → TUI render loop exits.
-    //      Must happen AFTER axum drains (no more RequestLog emits possible).
+    // Drop TUI broadcast Sender after axum drains so no new RequestLog emits race with shutdown.
     drop(tui_tx);
 
-    // 17b: Drop the Arc<AuditWriter> held here → internal mpsc::Sender drops →
-    //      audit_consumer_loop's rx.recv() returns None → loop exits naturally.
+    // Drop the final writer Arc so the audit consumer can exit naturally once the channel drains.
     drop(audit_writer);
 
-    // 17c: Wait up to 5 s for the audit consumer to flush (§2.F.4 budget).
     match tokio::time::timeout(Duration::from_secs(5), audit_handle).await {
         Ok(Ok(())) => tracing::info!("audit consumer drained cleanly"),
         Ok(Err(e)) => tracing::warn!(error = %e, "audit consumer task panicked"),
         Err(_) => tracing::warn!("audit consumer drain timed out after 5s — entries may be lost"),
     }
 
-    // 17d: Join TUI thread (blocking — TUI should already be stopped after tui_tx drop).
     if let Some(handle) = tui_thread {
         let _ = handle.join();
     }
 
-    // 17e: Close PG pool gracefully (no-op in no-db mode).
-    if let Some(pool) = pg_pool_opt {
+    if let Some(pool) = pg_pool {
         pool.close().await;
     }
+}
 
+/// Run the gateway server.
+///
+/// `no_db`: force no-db mode even when `GADGETRON_DATABASE_URL` is set.
+/// `provider_override`: when Some, skip config file and inject a synthetic vLLM
+/// provider pointing at the given endpoint (gadgetron serve --provider pattern).
+/// Implies no-db mode.
+async fn serve(
+    config_path_override: Option<PathBuf>,
+    bind_override: Option<String>,
+    tui_enabled: bool,
+    no_db: bool,
+    provider_override: Option<String>,
+) -> Result<()> {
+    // Step 1: Initialise structured tracing (always pretty for now; future --log-format flag).
+    init_tracing();
+
+    // Step 1b: When --provider is set, inject the endpoint as the sole vLLM provider
+    // and skip config file loading entirely (vLLM quick-start pattern).
+    // Print progress so the user knows something is happening.
+    let provider_quickstart_endpoint = resolve_provider_quickstart_endpoint(
+        provider_override,
+        std::env::var("GADGETRON_PROVIDER").ok(),
+    );
+
+    // Step 2: Resolve config path.
+    //   Priority: CLI --config > GADGETRON_CONFIG env > default ./gadgetron.toml
+    let config_path =
+        resolve_config_path(config_path_override, std::env::var("GADGETRON_CONFIG").ok());
+
+    // Load AppConfig; tolerate missing file at run time — we only fail if the
+    // file exists but is malformed. If absent, use built-in defaults (Ollama pattern)
+    // so that `gadgetron serve` works without any setup.
+    let config = load_serve_config(&config_path, provider_quickstart_endpoint.as_deref())?;
+
+    // Resolve bind address.
+    // Priority: CLI --bind > GADGETRON_BIND env > config.server.bind
+    let bind_addr = resolve_bind_addr(bind_override, &config);
+
+    tracing::info!(bind = %bind_addr, tui = tui_enabled, "gadgetron starting");
+
+    // Step 2.5: TTY pre-check when --tui requested.
+    //
+    // Without this, crossterm's enable_raw_mode() fails inside the TUI thread
+    // with ENXIO ("Device not configured"), a single tracing::warn is emitted,
+    // and the server silently runs headless — a terrible DX when the user
+    // explicitly asked for an interactive dashboard.
+    //
+    // Fail-fast with sysexits.h EX_USAGE (2) matches `gadgetron doctor`.
+    if tui_enabled {
+        use std::io::IsTerminal;
+        let has_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        if let Err(e) = require_tty_for_tui(tui_enabled, has_tty) {
+            eprintln!("Error: {e}");
+            std::process::exit(2);
+        }
+    }
+
+    // Step 3: Determine DB mode.
+    //   Priority: --no-db flag > --provider flag > env/config database_url
+    let database_url_env = std::env::var("GADGETRON_DATABASE_URL").ok();
+    let use_no_db = should_use_no_db(
+        no_db,
+        provider_quickstart_endpoint.as_deref(),
+        database_url_env.as_deref(),
+    );
+
+    // Step 4: PostgreSQL connection pool (skipped in no-db mode).
+    let DatabaseRuntime {
+        key_validator,
+        pg_pool: pg_pool_opt,
+    } = init_database_runtime(use_no_db).await?;
+    let (app, runtime) = init_serve_runtime(
+        &config,
+        &config_path,
+        key_validator,
+        pg_pool_opt,
+        use_no_db,
+        tui_enabled,
+    )?;
+
+    // Step 16: axum::serve with graceful shutdown on SIGTERM or Ctrl-C.
+    bind_and_serve(app, &bind_addr, &config).await?;
+
+    tracing::info!("axum serve exited — starting drain sequence");
+
+    // Step 17: Shutdown drain sequence.
+    drain_server_runtime(runtime).await;
     tracing::info!("shutdown complete");
     Ok(())
 }
@@ -1004,11 +1206,8 @@ fn register_penny_if_configured(
     // field — adding one would require cross-crate type sharing
     // (gadgetron-core ↔ gadgetron-knowledge) that's more churn than
     // a ~5 ms second file read.
-    if !config_path.exists() {
-        return;
-    }
-    let registry = match load_penny_registry_from_config(config_path, &app_config.agent) {
-        Ok(Some(registry)) => registry,
+    let registration = match prepare_penny_router_registration(config_path, app_config) {
+        Ok(Some(registration)) => registration,
         Ok(None) => {
             // No [knowledge] section → penny not available.
             return;
@@ -1034,29 +1233,7 @@ fn register_penny_if_configured(
     // for now Penny silently drops tool-call events when the DB is
     // not configured, which preserves the previous tracing-only
     // behavior.
-    let agent_cfg = Arc::new(app_config.agent.clone());
-    let audit_sink: std::sync::Arc<dyn gadgetron_core::audit::ToolAuditEventSink> =
-        std::sync::Arc::new(gadgetron_core::audit::NoopToolAuditEventSink);
-    let session_store = std::sync::Arc::new(gadgetron_penny::SessionStore::new(
-        agent_cfg.session_ttl_secs,
-        agent_cfg.session_store_max_entries,
-    ));
-    // Use the canonical absolute TOML path so the MCP-child's cwd doesn't
-    // influence config lookup. Fall back to the as-provided path if
-    // canonicalize fails (e.g. on a filesystem that doesn't support it);
-    // `gadgetron mcp serve --config` will then surface a clear error
-    // instead of silently running without the `[knowledge]` section.
-    let config_path_for_mcp = config_path
-        .canonicalize()
-        .unwrap_or_else(|_| config_path.to_path_buf());
-    gadgetron_penny::register_with_router(
-        agent_cfg,
-        registry,
-        audit_sink,
-        session_store,
-        providers,
-        Some(config_path_for_mcp),
-    );
+    registration.register(providers);
     tracing::info!(
         model = "penny",
         "penny: registered (KnowledgeToolProvider active; web.search = {})",
@@ -2320,6 +2497,71 @@ wiki_max_page_bytes = 1048576
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn canonicalize_config_path_for_mcp_falls_back_to_original_path() {
+        let missing = PathBuf::from("/definitely/not/present/gadgetron.toml");
+        assert_eq!(canonicalize_config_path_for_mcp(&missing), missing);
+    }
+
+    #[test]
+    fn resolve_provider_quickstart_endpoint_prefers_cli_override() {
+        let resolved = resolve_provider_quickstart_endpoint(
+            Some("http://127.0.0.1:8100".to_string()),
+            Some("http://127.0.0.1:9100".to_string()),
+        );
+        assert_eq!(resolved.as_deref(), Some("http://127.0.0.1:8100"));
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_cli_then_env_then_default() {
+        let cli = PathBuf::from("/tmp/cli.toml");
+        let env = "/tmp/env.toml".to_string();
+
+        assert_eq!(
+            resolve_config_path(Some(cli.clone()), Some(env.clone())),
+            cli
+        );
+        assert_eq!(
+            resolve_config_path(None, Some(env.clone())),
+            PathBuf::from(env)
+        );
+        assert_eq!(
+            resolve_config_path(None, None),
+            PathBuf::from("gadgetron.toml")
+        );
+    }
+
+    #[test]
+    fn load_serve_config_builds_provider_quickstart_config() {
+        let missing = PathBuf::from("/definitely/not/present/gadgetron.toml");
+        let config =
+            load_serve_config(&missing, Some("http://127.0.0.1:8100")).expect("load must work");
+
+        match config.providers.get("provider") {
+            Some(ProviderConfig::Vllm { endpoint, api_key }) => {
+                assert_eq!(endpoint, "http://127.0.0.1:8100");
+                assert!(
+                    api_key.is_none(),
+                    "quickstart path must not inject an API key"
+                );
+            }
+            other => panic!("expected synthetic vllm provider, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_use_no_db_matches_priority_rules() {
+        assert!(should_use_no_db(true, None, Some("postgres://db")));
+        assert!(should_use_no_db(
+            false,
+            Some("http://127.0.0.1:8100"),
+            Some("postgres://db")
+        ));
+        assert!(should_use_no_db(false, None, None));
+        assert!(should_use_no_db(false, None, Some("")));
+        assert!(!should_use_no_db(false, None, Some("postgres://db")));
     }
 
     /// S7-2-T6: `AppConfig::default()` produces bind address "0.0.0.0:8080".
