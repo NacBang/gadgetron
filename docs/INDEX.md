@@ -17,7 +17,7 @@
 | 배포·운영·장애 대응 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis C, F | [`modules/deployment-operations.md`](modules/deployment-operations.md) |
 | 성능·레이턴시 분석 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis H | |
 | Phase 2A active 작업 | [`design/phase2/00-overview.md`](design/phase2/00-overview.md) | [`design/phase2/01..04`](design/phase2/) |
-| 확정된 설계 결정 확인 | [`adr/`](adr/), [`reviews/pm-decisions.md`](reviews/pm-decisions.md) | [`process/04-decision-log.md`](process/04-decision-log.md) |
+| 확정된 설계 결정 확인 | [`adr/README.md`](adr/README.md) (ADR 인덱스) | [`reviews/pm-decisions.md`](reviews/pm-decisions.md), [`process/04-decision-log.md`](process/04-decision-log.md) |
 | 에이전트 역할 조회 | [`agents/`](agents/) | [`process/00-agent-roster.md`](process/00-agent-roster.md), [`AGENTS.md`](../AGENTS.md) |
 | 설계 문서 작성·리뷰 규정 | [`process/01-workflow.md`](process/01-workflow.md) | [`process/02-document-template.md`](process/02-document-template.md), [`process/03-review-rubric.md`](process/03-review-rubric.md) |
 
