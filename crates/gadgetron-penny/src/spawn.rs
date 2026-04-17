@@ -337,20 +337,7 @@ pub fn build_claude_command_with_session(
     Ok(cmd)
 }
 
-/// Env-injectable variant of `build_claude_command` for tests. Does
-/// NOT add `--session-id` / `--resume`; callers that need native
-/// session continuity go through `build_claude_command_with_session`.
-pub fn build_claude_command_with_env(
-    config: &AgentConfig,
-    mcp_config_path: &Path,
-    allowed_tools: &[String],
-    env: &dyn EnvResolver,
-) -> Result<Command, SpawnError> {
-    let mut cmd = Command::new(&config.binary);
-
-    // SEC-B1 — drop inherited environment.
-    cmd.env_clear();
-
+fn apply_base_env_allowlist(cmd: &mut Command, env: &dyn EnvResolver) {
     // Minimum allowlist for Claude Code to function.
     // HOME is NOT optional — without it Claude Code cannot locate
     // `~/.claude/` credentials in the default `claude_max` mode.
@@ -385,7 +372,13 @@ pub fn build_claude_command_with_env(
         "TMPDIR",
         env.get("TMPDIR").unwrap_or_else(|| "/tmp".to_string()),
     );
+}
 
+fn apply_brain_mode_env(
+    cmd: &mut Command,
+    config: &AgentConfig,
+    env: &dyn EnvResolver,
+) -> Result<(), SpawnError> {
     // Brain-mode-dependent env injection.
     match config.brain.mode {
         BrainMode::ClaudeMax => {
@@ -419,6 +412,10 @@ pub fn build_claude_command_with_env(
         }
     }
 
+    Ok(())
+}
+
+fn apply_claude_args(cmd: &mut Command, mcp_config_path: &Path, allowed_tools: &[String]) {
     // Command-line args — see `02-penny-agent.md Appendix B`.
     cmd.arg("-p");
     cmd.arg("--verbose");
@@ -464,6 +461,24 @@ pub fn build_claude_command_with_env(
     // transport's tool_result pairing.
     cmd.arg("--disallowed-tools")
         .arg(PENNY_DISALLOWED_TOOLS.join(","));
+}
+
+/// Env-injectable variant of `build_claude_command` for tests. Does
+/// NOT add `--session-id` / `--resume`; callers that need native
+/// session continuity go through `build_claude_command_with_session`.
+pub fn build_claude_command_with_env(
+    config: &AgentConfig,
+    mcp_config_path: &Path,
+    allowed_tools: &[String],
+    env: &dyn EnvResolver,
+) -> Result<Command, SpawnError> {
+    let mut cmd = Command::new(&config.binary);
+
+    // SEC-B1 — drop inherited environment.
+    cmd.env_clear();
+    apply_base_env_allowlist(&mut cmd, env);
+    apply_brain_mode_env(&mut cmd, config, env)?;
+    apply_claude_args(&mut cmd, mcp_config_path, allowed_tools);
 
     // `current_dir` pin for native-session continuity (ADR-P2A-06
     // addendum item 7 / §5.2.2 load-bearing): Claude Code derives the

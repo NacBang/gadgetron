@@ -66,7 +66,7 @@ use gadgetron_core::message::Role;
 use gadgetron_core::provider::{ChatChunk, ChatRequest};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -102,6 +102,75 @@ enum SpawnMode {
         claude_session_uuid: Uuid,
         _guard: tokio::sync::OwnedMutexGuard<()>,
     },
+}
+
+/// Driver-local execution context derived from `SpawnMode`.
+///
+/// Keeps the branching logic in one place so the hot path can work
+/// with concrete session/audit values instead of repeatedly matching
+/// on `SpawnMode`.
+#[derive(Debug)]
+struct DriverContext {
+    claude_session_mode: ClaudeSessionMode,
+    stdin_mode: StdinMode,
+    audit_conversation_id: Option<String>,
+    audit_session_uuid: Option<String>,
+}
+
+impl DriverContext {
+    fn from_spawn_mode(spawn_mode: &SpawnMode) -> Self {
+        match spawn_mode {
+            SpawnMode::Stateless => Self {
+                claude_session_mode: ClaudeSessionMode::Stateless,
+                stdin_mode: StdinMode::FlattenHistory,
+                audit_conversation_id: None,
+                audit_session_uuid: None,
+            },
+            SpawnMode::FirstTurn {
+                conversation_id,
+                claude_session_uuid,
+                ..
+            } => Self {
+                claude_session_mode: ClaudeSessionMode::First {
+                    session_uuid: *claude_session_uuid,
+                },
+                stdin_mode: StdinMode::NativeFirstTurn,
+                audit_conversation_id: Some(conversation_id.clone()),
+                audit_session_uuid: Some(claude_session_uuid.to_string()),
+            },
+            SpawnMode::ResumeTurn {
+                conversation_id,
+                claude_session_uuid,
+                ..
+            } => Self {
+                claude_session_mode: ClaudeSessionMode::Resume {
+                    session_uuid: *claude_session_uuid,
+                },
+                stdin_mode: StdinMode::NativeResumeTurn,
+                audit_conversation_id: Some(conversation_id.clone()),
+                audit_session_uuid: Some(claude_session_uuid.to_string()),
+            },
+        }
+    }
+}
+
+/// Spawned subprocess handles retained for the full request lifecycle.
+///
+/// The temporary MCP config file must live as long as the subprocess,
+/// so it is owned by this bundle rather than a loose local variable.
+struct SpawnedClaudeProcess {
+    _mcp_tmp: NamedTempFile,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    stderr_handle: tokio::task::JoinHandle<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamLoopOutcome {
+    Eof,
+    TimedOut,
+    ReceiverDropped,
 }
 
 /// One Claude Code subprocess invocation.
@@ -305,6 +374,200 @@ fn emit_tool_audit_if_needed(
     }
 }
 
+fn spawn_claude_process(
+    config: &AgentConfig,
+    allowed_tools: &[String],
+    claude_session_mode: ClaudeSessionMode,
+    penny_home: Option<&PennyHome>,
+    config_path: Option<&std::path::Path>,
+) -> Result<SpawnedClaudeProcess> {
+    // 1. MCP config tempfile (M1 — mkstemp 0600 atomic). `config_path`
+    // is forwarded so the MCP grandchild spawned by Claude Code can find
+    // `[knowledge]` / `[agent]` even though its cwd is pinned to Penny's
+    // neutral workdir (which contains no TOML).
+    let mcp_tmp = write_config_file(config_path).map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::SpawnFailed {
+            reason: format!("mcp tmpfile: {e}"),
+        },
+        message: "failed to create MCP config tmpfile".to_string(),
+    })?;
+
+    // 2. Build the Command (env_clear + allowlist + kill_on_drop + session flag).
+    let mut cmd = build_claude_command_with_session(
+        config,
+        mcp_tmp.path(),
+        allowed_tools,
+        claude_session_mode,
+        &StdEnv,
+    )
+    .map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::SpawnFailed {
+            reason: e.to_string(),
+        },
+        message: format!("failed to build claude command: {e}"),
+    })?;
+
+    // 2b. Penny home isolation — CWD-only. We pin the subprocess cwd to
+    // Penny's neutral workdir so Claude Code's per-project auto-memory
+    // key maps to a Penny-scoped slug (never the operator's real repo).
+    // HOME stays real: Claude Max OAuth on macOS refuses to read the
+    // keychain when HOME ≠ os.homedir() (see `home.rs` docstring for the
+    // full finding). When `penny_home` is None (tests, legacy
+    // constructors) we keep the cwd from `build_claude_command_with_session`.
+    if let Some(home) = penny_home {
+        cmd.current_dir(home.workdir());
+    }
+
+    // 3. Spawn.
+    let mut child: Child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            let kind = if e.kind() == std::io::ErrorKind::NotFound {
+                PennyErrorKind::NotInstalled
+            } else {
+                PennyErrorKind::SpawnFailed {
+                    reason: e.to_string(),
+                }
+            };
+            GadgetronError::Penny {
+                kind,
+                message: "failed to spawn claude subprocess".to_string(),
+            }
+        })?;
+
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+
+    // 4. Concurrent stderr drain (chief-arch B3). Spawned BEFORE we
+    //    start reading stdout so neither pipe can block the other.
+    let stderr_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_end(&mut buf).await;
+        buf
+    });
+
+    Ok(SpawnedClaudeProcess {
+        _mcp_tmp: mcp_tmp,
+        child,
+        stdin,
+        stdout,
+        stderr_handle,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_stdout_until_deadline(
+    stdout: ChildStdout,
+    request: &ChatRequest,
+    tool_metadata: &HashMap<String, ToolMetadata>,
+    audit_sink: &dyn ToolAuditEventSink,
+    tx: &mpsc::Sender<Result<ChatChunk>>,
+    deadline: tokio::time::Instant,
+    audit_conv_id: Option<&str>,
+    audit_session_uuid_ref: Option<&str>,
+) -> Result<StreamLoopOutcome> {
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    // Track whether we've received stream_event deltas
+    // (--include-partial-messages). When true, assistant event text
+    // blocks are duplicates of the already-streamed tokens and must
+    // be suppressed to avoid double-rendering on the client.
+    let mut has_streamed_deltas = false;
+
+    loop {
+        line.clear();
+        tokio::select! {
+            read = reader.read_line(&mut line) => {
+                let n = read.map_err(|e| GadgetronError::Penny {
+                    kind: PennyErrorKind::AgentError {
+                        exit_code: -1,
+                        stderr_redacted: String::new(),
+                    },
+                    message: format!("stdout read error: {e}"),
+                })?;
+                if n == 0 {
+                    return Ok(StreamLoopOutcome::Eof);
+                }
+                match parse_event(&line) {
+                    Ok(Some(event)) => {
+                        if matches!(&event, StreamJsonEvent::StreamEvent { .. }) {
+                            has_streamed_deltas = true;
+                        }
+                        emit_tool_audit_if_needed(
+                            &event,
+                            tool_metadata,
+                            audit_sink,
+                            audit_conv_id,
+                            audit_session_uuid_ref,
+                        );
+                        for chunk in event_to_chat_chunks_ex(event, request, has_streamed_deltas) {
+                            // Back-pressure: if the receiver is gone,
+                            // stop driving — the caller will cleanly
+                            // terminate the subprocess.
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                return Ok(StreamLoopOutcome::ReceiverDropped);
+                            }
+                        }
+                    }
+                    Ok(None) => { /* empty line or unknown variant */ }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "penny_stream",
+                            error = %e,
+                            "stream-json line did not parse; skipping"
+                        );
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Ok(StreamLoopOutcome::TimedOut);
+            }
+        }
+    }
+}
+
+async fn wait_for_child_exit(child: &mut Child) -> Result<std::process::ExitStatus> {
+    child.wait().await.map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::AgentError {
+            exit_code: -1,
+            stderr_redacted: String::new(),
+        },
+        message: format!("child wait error: {e}"),
+    })
+}
+
+async fn collect_stderr(stderr_handle: tokio::task::JoinHandle<Vec<u8>>) -> String {
+    let stderr_bytes = stderr_handle.await.unwrap_or_default();
+    let stderr_raw = String::from_utf8_lossy(&stderr_bytes).to_string();
+    redact_stderr(&stderr_raw)
+}
+
+fn ensure_successful_exit(status: std::process::ExitStatus, stderr_redacted: String) -> Result<()> {
+    if status.success() {
+        return Ok(());
+    }
+
+    let exit_code = status.code().unwrap_or(-1);
+    tracing::warn!(
+        target: "penny_subprocess",
+        exit_code,
+        stderr = %stderr_redacted,
+        "penny subprocess exited with error"
+    );
+    Err(GadgetronError::Penny {
+        kind: PennyErrorKind::AgentError {
+            exit_code,
+            stderr_redacted,
+        },
+        message: "penny subprocess exited with error".to_string(),
+    })
+}
+
 /// Resolve the spawn mode from config, request, and session store.
 /// Single decision point for native session branching.
 ///
@@ -397,117 +660,14 @@ async fn drive(
 ) -> Result<()> {
     // 0. Resolve spawn mode (native session branching).
     let spawn_mode = resolve_spawn_mode(config, request, session_store).await?;
-
-    let (claude_session_mode, stdin_mode) = match &spawn_mode {
-        SpawnMode::Stateless => (ClaudeSessionMode::Stateless, StdinMode::FlattenHistory),
-        SpawnMode::FirstTurn {
-            claude_session_uuid,
-            ..
-        } => (
-            ClaudeSessionMode::First {
-                session_uuid: *claude_session_uuid,
-            },
-            StdinMode::NativeFirstTurn,
-        ),
-        SpawnMode::ResumeTurn {
-            claude_session_uuid,
-            ..
-        } => (
-            ClaudeSessionMode::Resume {
-                session_uuid: *claude_session_uuid,
-            },
-            StdinMode::NativeResumeTurn,
-        ),
-    };
-
-    let (audit_conv_id, audit_session_uuid) = match &spawn_mode {
-        SpawnMode::Stateless => (None, None),
-        SpawnMode::FirstTurn {
-            conversation_id,
-            claude_session_uuid,
-            ..
-        }
-        | SpawnMode::ResumeTurn {
-            conversation_id,
-            claude_session_uuid,
-            ..
-        } => (
-            Some(conversation_id.as_str()),
-            Some(claude_session_uuid.to_string()),
-        ),
-    };
-    let audit_session_uuid_ref = audit_session_uuid.as_deref();
-
-    // 1. MCP config tempfile (M1 — mkstemp 0600 atomic). `config_path`
-    // is forwarded so the MCP grandchild spawned by Claude Code can find
-    // `[knowledge]` / `[agent]` even though its cwd is pinned to Penny's
-    // neutral workdir (which contains no TOML).
-    let mcp_tmp: NamedTempFile =
-        write_config_file(config_path).map_err(|e| GadgetronError::Penny {
-            kind: PennyErrorKind::SpawnFailed {
-                reason: format!("mcp tmpfile: {e}"),
-            },
-            message: "failed to create MCP config tmpfile".to_string(),
-        })?;
-
-    // 2. Build the Command (env_clear + allowlist + kill_on_drop + session flag).
-    let mut cmd = build_claude_command_with_session(
+    let driver_ctx = DriverContext::from_spawn_mode(&spawn_mode);
+    let mut process = spawn_claude_process(
         config,
-        mcp_tmp.path(),
         allowed_tools,
-        claude_session_mode,
-        &StdEnv,
-    )
-    .map_err(|e| GadgetronError::Penny {
-        kind: PennyErrorKind::SpawnFailed {
-            reason: e.to_string(),
-        },
-        message: format!("failed to build claude command: {e}"),
-    })?;
-
-    // 2b. Penny home isolation — CWD-only. We pin the subprocess cwd to
-    // Penny's neutral workdir so Claude Code's per-project auto-memory
-    // key maps to a Penny-scoped slug (never the operator's real repo).
-    // HOME stays real: Claude Max OAuth on macOS refuses to read the
-    // keychain when HOME ≠ os.homedir() (see `home.rs` docstring for the
-    // full finding). When `penny_home` is None (tests, legacy
-    // constructors) we keep the cwd from `build_claude_command_with_session`.
-    if let Some(home) = penny_home {
-        cmd.current_dir(home.workdir());
-    }
-
-    // 3. Spawn.
-    let mut child: Child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            let kind = if e.kind() == std::io::ErrorKind::NotFound {
-                PennyErrorKind::NotInstalled
-            } else {
-                PennyErrorKind::SpawnFailed {
-                    reason: e.to_string(),
-                }
-            };
-            GadgetronError::Penny {
-                kind,
-                message: "failed to spawn claude subprocess".to_string(),
-            }
-        })?;
-
-    let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-
-    // 4. Concurrent stderr drain (chief-arch B3). Spawned BEFORE we
-    //    start reading stdout so neither pipe can block the other.
-    let stderr_handle: tokio::task::JoinHandle<Vec<u8>> = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let mut reader = BufReader::new(stderr);
-        let _ = reader.read_to_end(&mut buf).await;
-        buf
-    });
+        driver_ctx.claude_session_mode,
+        penny_home,
+        config_path,
+    )?;
 
     // 5. Compute the deadline BEFORE writing stdin — per ADR-P2A-06
     //    Implementation status addendum item 5 (B-2 regression). The
@@ -520,129 +680,56 @@ async fn drive(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
     // 6. Feed stdin with mode-appropriate payload and close.
-    feed_stdin_with_mode(stdin, request, stdin_mode).await?;
+    feed_stdin_with_mode(process.stdin, request, driver_ctx.stdin_mode).await?;
 
-    // 7. Stream stdout line-by-line until EOF or timeout.
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let mut timed_out = false;
-    // Track whether we've received stream_event deltas
-    // (--include-partial-messages). When true, assistant event text
-    // blocks are duplicates of the already-streamed tokens and must
-    // be suppressed to avoid double-rendering on the client.
-    let mut has_streamed_deltas = false;
-
-    loop {
-        line.clear();
-        tokio::select! {
-            read = reader.read_line(&mut line) => {
-                let n = read.map_err(|e| GadgetronError::Penny {
-                    kind: PennyErrorKind::AgentError {
-                        exit_code: -1,
-                        stderr_redacted: String::new(),
-                    },
-                    message: format!("stdout read error: {e}"),
-                })?;
-                if n == 0 {
-                    break; // EOF
-                }
-                match parse_event(&line) {
-                    Ok(Some(event)) => {
-                        if matches!(&event, StreamJsonEvent::StreamEvent { .. }) {
-                            has_streamed_deltas = true;
-                        }
-                        emit_tool_audit_if_needed(
-                            &event,
-                            tool_metadata,
-                            audit_sink,
-                            audit_conv_id,
-                            audit_session_uuid_ref,
-                        );
-                        for chunk in event_to_chat_chunks_ex(event, request, has_streamed_deltas) {
-                            // Back-pressure: if the receiver is gone,
-                            // stop driving — subprocess will be killed
-                            // on child drop.
-                            if tx.send(Ok(chunk)).await.is_err() {
-                                let _ = child.start_kill();
-                                let _ = child.wait().await;
-                                let _ =
-                                    tokio::time::timeout(Duration::from_secs(2), stderr_handle)
-                                        .await;
-                                drop(mcp_tmp);
-                                return Ok(());
-                            }
-                        }
-                    }
-                    Ok(None) => { /* empty line or unknown variant */ }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "penny_stream",
-                            error = %e,
-                            "stream-json line did not parse; skipping"
-                        );
-                    }
-                }
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                let _ = child.start_kill();
-                timed_out = true;
-                break;
-            }
+    match stream_stdout_until_deadline(
+        process.stdout,
+        request,
+        tool_metadata,
+        audit_sink,
+        tx,
+        deadline,
+        driver_ctx.audit_conversation_id.as_deref(),
+        driver_ctx.audit_session_uuid.as_deref(),
+    )
+    .await?
+    {
+        StreamLoopOutcome::ReceiverDropped => {
+            let _ = process.child.start_kill();
+            let _ = process.child.wait().await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), process.stderr_handle).await;
+            return Ok(());
         }
-    }
-
-    if timed_out {
-        let _ = child.wait().await;
-        // H4 fix (ADR-P2A-06 addendum item 6): `stderr_handle.await` can
-        // hang indefinitely if Claude Code does not flush stderr on
-        // SIGTERM — the drive task would then never return and the session
-        // stream would never yield the Timeout error to the caller. Bound
-        // the wait at 2 seconds; on elapse the join handle is abandoned
-        // (the spawned drain task is dropped, its BufReader and stderr pipe
-        // are closed, and `kill_on_drop(true)` on the parent Child
-        // eventually SIGKILLs the subprocess as a final safety net).
-        // Regression-locked by `stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop`.
-        let _ = tokio::time::timeout(Duration::from_secs(2), stderr_handle).await;
-        drop(mcp_tmp);
-        return Err(GadgetronError::Penny {
-            kind: PennyErrorKind::Timeout {
-                seconds: timeout_secs,
-            },
-            message: "penny subprocess exceeded request_timeout_secs".to_string(),
-        });
+        StreamLoopOutcome::TimedOut => {
+            let _ = process.child.start_kill();
+            let _ = process.child.wait().await;
+            // H4 fix (ADR-P2A-06 addendum item 6): `stderr_handle.await` can
+            // hang indefinitely if Claude Code does not flush stderr on
+            // SIGTERM — the drive task would then never return and the session
+            // stream would never yield the Timeout error to the caller. Bound
+            // the wait at 2 seconds; on elapse the join handle is abandoned
+            // (the spawned drain task is dropped, its BufReader and stderr pipe
+            // are closed, and `kill_on_drop(true)` on the parent Child
+            // eventually SIGKILLs the subprocess as a final safety net).
+            // Regression-locked by `stderr_handle_timeout_unblocks_drive_task_on_sigterm_noop`.
+            let stderr_handle = process.stderr_handle;
+            let _ = tokio::time::timeout(Duration::from_secs(2), stderr_handle).await;
+            return Err(GadgetronError::Penny {
+                kind: PennyErrorKind::Timeout {
+                    seconds: timeout_secs,
+                },
+                message: "penny subprocess exceeded request_timeout_secs".to_string(),
+            });
+        }
+        StreamLoopOutcome::Eof => {}
     }
 
     // 7. Wait for exit status (NOT wait_with_output).
-    let status = child.wait().await.map_err(|e| GadgetronError::Penny {
-        kind: PennyErrorKind::AgentError {
-            exit_code: -1,
-            stderr_redacted: String::new(),
-        },
-        message: format!("child wait error: {e}"),
-    })?;
+    let status = wait_for_child_exit(&mut process.child).await?;
 
     // 8. Collect stderr from the sink task.
-    let stderr_bytes = stderr_handle.await.unwrap_or_default();
-    let stderr_raw = String::from_utf8_lossy(&stderr_bytes).to_string();
-    let stderr_redacted = redact_stderr(&stderr_raw);
-
-    if !status.success() {
-        let exit_code = status.code().unwrap_or(-1);
-        tracing::warn!(
-            target: "penny_subprocess",
-            exit_code,
-            stderr = %stderr_redacted,
-            "penny subprocess exited with error"
-        );
-        drop(mcp_tmp);
-        return Err(GadgetronError::Penny {
-            kind: PennyErrorKind::AgentError {
-                exit_code,
-                stderr_redacted,
-            },
-            message: "penny subprocess exited with error".to_string(),
-        });
-    }
+    let stderr_redacted = collect_stderr(process.stderr_handle).await;
+    ensure_successful_exit(status, stderr_redacted)?;
 
     // 9. Success: bump session bookkeeping (last_used + turn_count).
     if let Some(store) = session_store {
@@ -651,7 +738,6 @@ async fn drive(
         }
     }
 
-    drop(mcp_tmp);
     Ok(())
 }
 
