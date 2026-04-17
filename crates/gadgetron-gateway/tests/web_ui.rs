@@ -10,9 +10,50 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use axum::http::StatusCode;
+use axum::{body::Body, http::Request};
 use axum_test::TestServer;
 use gadgetron_core::config::WebConfig;
-use gadgetron_gateway::web_csp::{apply_web_headers, translate_config, CSP};
+use gadgetron_gateway::{
+    server::{build_router_with_web, AppState},
+    web_csp::{apply_web_headers, translate_config, CSP},
+};
+use gadgetron_xaas::{
+    audit::writer::AuditWriter, auth::validator::KeyValidator,
+    quota::enforcer::InMemoryQuotaEnforcer,
+};
+use std::{collections::HashMap, sync::Arc};
+use tower::ServiceExt;
+
+struct NoopKeyValidator;
+
+#[async_trait::async_trait]
+impl KeyValidator for NoopKeyValidator {
+    async fn validate(
+        &self,
+        _key_hash: &str,
+    ) -> Result<
+        Arc<gadgetron_xaas::auth::validator::ValidatedKey>,
+        gadgetron_core::error::GadgetronError,
+    > {
+        Err(gadgetron_core::error::GadgetronError::TenantNotFound)
+    }
+
+    async fn invalidate(&self, _key_hash: &str) {}
+}
+
+fn make_state() -> AppState {
+    let (audit_writer, _rx) = AuditWriter::new(16);
+    AppState {
+        key_validator: Arc::new(NoopKeyValidator),
+        quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
+        audit_writer: Arc::new(audit_writer),
+        providers: Arc::new(HashMap::new()),
+        router: None,
+        pg_pool: None,
+        no_db: true,
+        tui_tx: None,
+    }
+}
 
 #[tokio::test]
 async fn apply_web_headers_sets_csp_on_web_subtree() {
@@ -147,4 +188,42 @@ fn web_config_validates_requires_leading_slash() {
 #[test]
 fn web_config_default_validates_ok() {
     assert!(WebConfig::default().validate().is_ok());
+}
+
+#[tokio::test]
+async fn gateway_redirects_web_trailing_slash_to_base_path() {
+    let app = build_router_with_web(make_state(), &WebConfig::default());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/web/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/web")
+    );
+}
+
+#[tokio::test]
+async fn gateway_serves_root_favicon_without_404() {
+    let app = build_router_with_web(make_state(), &WebConfig::default());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }

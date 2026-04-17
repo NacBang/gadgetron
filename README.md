@@ -171,6 +171,12 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 
+# Post-change verification (auto-detect touched crates)
+./verify_cycle.sh changed
+
+# Pre-PR CI parity
+./verify_cycle.sh ci
+
 # Security scan
 cargo audit
 cargo deny check licenses bans advisories
