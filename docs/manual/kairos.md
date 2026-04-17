@@ -86,7 +86,7 @@ max_concurrent_subprocesses = 4
 mode = "claude_max"
 
 [knowledge]
-wiki_path = "/absolute/path/to/wiki"   # 절대 경로 권장 (configuration.md 참고)
+wiki_path = "./.gadgetron/wiki"        # config 파일 디렉터리 기준 상대 경로 지원
 wiki_autocommit = true
 wiki_max_page_bytes = 1048576
 
@@ -199,7 +199,7 @@ mode = "claude_max"
 
 ```toml
 [knowledge]
-wiki_path = "/absolute/path/to/wiki"   # 절대 경로 권장 (configuration.md 참고)
+wiki_path = "./.gadgetron/wiki"        # config 파일 디렉터리 기준 상대 경로 지원
 wiki_autocommit = true
 wiki_max_page_bytes = 1048576
 ```
