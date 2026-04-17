@@ -72,7 +72,8 @@ The `/review`, `/qa`, `/investigate`, `/benchmark`, and `/document-release`
 skills are especially relevant to Gadgetron's workflow — they compose
 cleanly with the existing Phase 2A stabilization-sprint review discipline
 (see `docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md` and the
-`codex:codex-rescue` chief-advisor persona in `.claude/agents/`).
+chief-advisor persona at `docs/agents/codex-chief-advisor.md`; the
+`codex:codex-rescue` gstack skill is the external-opinion entry point).
 
 gstack is **recommended**, not mandatory — contributors who choose not to
 install it should document any ad-hoc browser automation they use so the
