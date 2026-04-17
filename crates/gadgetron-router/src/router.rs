@@ -42,7 +42,7 @@ impl Router {
 
         // Direct-match: if the model name exactly matches a registered
         // provider name, route directly to that provider. This allows
-        // providers like "kairos" to be addressed by model name without
+        // providers like "penny" to be addressed by model name without
         // the routing strategy sending the request to a random provider.
         if self.providers.contains_key(model) {
             return Ok(RoutingDecision {

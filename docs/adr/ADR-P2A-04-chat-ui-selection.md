@@ -13,7 +13,7 @@
 
 ## Context
 
-Phase 2A Kairos MVP design (v3, 2026-04-13) selected **OpenWebUI** as the bundled Web UI, deployed as a sibling Docker container alongside `gadgetron serve`. This ADR revisits that decision after three facts were surfaced on 2026-04-14:
+Phase 2A Penny MVP design (v3, 2026-04-13) selected **OpenWebUI** as the bundled Web UI, deployed as a sibling Docker container alongside `gadgetron serve`. This ADR revisits that decision after three facts were surfaced on 2026-04-14:
 
 1. **OpenWebUI license change (April 2025, v0.6.6+)**: OpenWebUI transitioned from BSD-3 to a custom "Open WebUI License" (with CLA). The new license adds a **branding preservation clause** prohibiting the removal or replacement of "Open WebUI" name, logo, and visual identifiers in any deployment or distribution. Exceptions: ① ≤50 end users in a rolling 30-day window, ② substantive merged code contributors, ③ paid Enterprise license holders. Source: Open WebUI license page + Lobste.rs/HN discussion threads.
 2. **Conflict with Gadgetron brand + distribution model**: Gadgetron's product direction (`docs/00-overview.md §1.2`) is a single-branded product distributed in local / on-prem / cloud forms. A branding preservation clause above 50 users would either force "Open WebUI" branding to appear alongside Gadgetron's, or force acquisition of an enterprise license per deployment. Neither is compatible with shipping a unified Gadgetron product.
@@ -94,7 +94,7 @@ Before merging any `gadgetron-web` code PR, verify:
 3. `grep -r "open.webui\|OpenWebUI" target/release/gadgetron` returns no matches (branding hygiene)
 4. M-W1 unit test: `<script>alert(1)</script>` in an assistant message is rendered as text, not executed
 5. CSP header check: `curl -I http://localhost:8080/web/` contains `Content-Security-Policy: default-src 'self'; ...`
-6. assistant-ui model dropdown populates from `/v1/models` and includes `kairos` when `[kairos]` block is present in `gadgetron.toml`
+6. assistant-ui model dropdown populates from `/v1/models` and includes `penny` when `[penny]` block is present in `gadgetron.toml`
 
 ## Sources
 

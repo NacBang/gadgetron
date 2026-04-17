@@ -5,9 +5,9 @@
 | **Status** | **ACCEPTED** (Part 1 PASS 2026-04-13 behavioral verification; Part 2 VERIFIED TEXT — Option B confirmed) |
 | **Date** | 2026-04-13 |
 | **Author** | security-compliance-lead |
-| **Parent docs** | `docs/design/phase2/00-overview.md` v3 §8 M4; `docs/design/phase2/02-kairos-agent.md` v3 §13 |
-| **Blocks** | ~~P2A implementation~~ — RESOLVED 2026-04-13, kairos impl may proceed |
-| **Owner (action)** | PM — ~~behavioral verification before kairos impl starts~~ COMPLETED |
+| **Parent docs** | `docs/design/phase2/00-overview.md` v3 §8 M4; `docs/design/phase2/02-penny-agent.md` v3 §13 |
+| **Blocks** | ~~P2A implementation~~ — RESOLVED 2026-04-13, penny impl may proceed |
+| **Owner (action)** | PM — ~~behavioral verification before penny impl starts~~ COMPLETED |
 
 ---
 
@@ -15,7 +15,7 @@
 
 ### The threat
 
-Kairos invokes Claude Code as a subprocess using the following invocation pattern
+Penny invokes Claude Code as a subprocess using the following invocation pattern
 (canonical source: `docs/design/phase2/00-overview.md` v2 Appendix B, lines 799-815):
 
 ```bash
@@ -63,7 +63,7 @@ of this combination.
 
 ### The stdin contract question
 
-`docs/design/phase2/02-kairos-agent.md` v2 `feed_stdin()` (around line 405-424)
+`docs/design/phase2/02-penny-agent.md` v2 `feed_stdin()` (around line 405-424)
 assumes that Claude Code `-p` mode accepts message history as JSON
 `{"messages":[...]}` on stdin. The comment in that function explicitly marks this as
 pending verification:
@@ -93,10 +93,10 @@ unit test both depend on which format is correct. This must be confirmed before 
 
 **Status: PENDING VERIFICATION**
 
-Implementation of `gadgetron-kairos` is blocked until this verification is complete.
+Implementation of `gadgetron-penny` is blocked until this verification is complete.
 
 **Verification procedure** (PM action, verbatim from
-`docs/design/phase2/02-kairos-agent.md` v2 §13):
+`docs/design/phase2/02-penny-agent.md` v2 §13):
 
 1. Install Claude Code CLI locally (ensure it is up to date)
 2. Create a throwaway MCP config JSON with one tool (`wiki_get` backed by a test stub)
@@ -123,18 +123,18 @@ Implementation of `gadgetron-kairos` is blocked until this verification is compl
   (data integrity risk) but NOT credential exfiltration (provided `--allowed-tools`
   blocks `Read`/`Bash`)
 - This ADR moves to status ACCEPTED
-- Implementation of `gadgetron-kairos` may proceed
+- Implementation of `gadgetron-penny` may proceed
 
 **FAIL — binary does not enforce; `--allowed-tools` is advisory only:**
 - Document the observed tool call (non-whitelisted tool was invoked) with the
   exact event payload
 - This ADR moves to status ACCEPTED-WITH-FALLBACK and P2A scope expands as follows
-- The fallback plan (described below) MUST be designed before any kairos code is written
+- The fallback plan (described below) MUST be designed before any penny code is written
 
 **Fallback plan if FAIL (sandbox as enforcement layer):**
 
 As specified in `docs/design/phase2/00-overview.md` v2 §8 M4 and
-`docs/design/phase2/02-kairos-agent.md` v2 §13 "If FAIL — sandbox sketch":
+`docs/design/phase2/02-penny-agent.md` v2 §13 "If FAIL — sandbox sketch":
 
 | Approach | Mechanism | Scope |
 |---|---|---|
@@ -143,7 +143,7 @@ As specified in `docs/design/phase2/00-overview.md` v2 §8 M4 and
 | Docker container | Minimal container with only `claude` binary and wiki volume mounted | Linux + macOS (via Docker Desktop) |
 
 **Important**: All three fallback approaches are Linux-only (or require Docker on
-macOS). If the fallback is required, macOS native development of kairos is blocked.
+macOS). If the fallback is required, macOS native development of penny is blocked.
 This scope change MUST be escalated to the user before implementation starts.
 
 The sandbox must deny at minimum:
@@ -155,7 +155,7 @@ The sandbox must deny at minimum:
 
 **Status: PENDING VERIFICATION**
 
-The `feed_stdin` function in `gadgetron-kairos/src/session.rs` MUST be written to
+The `feed_stdin` function in `gadgetron-penny/src/session.rs` MUST be written to
 match the actual contract. The verification must happen before `session.rs` is coded.
 
 **Verification procedure:**
@@ -169,7 +169,7 @@ match the actual contract. The verification must happen before `session.rs` is c
 **Accepted outcomes:**
 
 **VERIFIED JSON** (Option A — current spec assumption):
-- `feed_stdin` remains as specified in `02-kairos-agent.md` v2:
+- `feed_stdin` remains as specified in `02-penny-agent.md` v2:
   ```rust
   let payload = serde_json::json!({ "messages": req.messages });
   ```
@@ -181,7 +181,7 @@ match the actual contract. The verification must happen before `session.rs` is c
 - The conversation turn structure (role alternation) must be encoded as plain text
   (e.g., `User: ...\n\nAssistant: ...\n\nUser: ...`)
 - `feed_stdin_serializes_messages` test is rewritten to match
-- `02-kairos-agent.md` §17 open items table is updated to reflect this resolution
+- `02-penny-agent.md` §17 open items table is updated to reflect this resolution
 
 ---
 
@@ -194,12 +194,12 @@ match the actual contract. The verification must happen before `session.rs` is c
 - Prompt injection from wiki or SearXNG can cause `wiki_write` data corruption (worst
   case: wiki integrity loss), but credential exfiltration via `Read`/`Bash` is blocked
 - This is the explicit risk acceptance boundary documented in M8 (ADR-P2A-02)
-- The `[P2C-SECURITY-REOPEN]` tag in `02-kairos-agent.md` is the mechanism by which
+- The `[P2C-SECURITY-REOPEN]` tag in `02-penny-agent.md` is the mechanism by which
   this posture is formally bounded to single-user P2A
 
 ### If FAIL (enforcement is advisory)
 
-- The current kairos design as specified in v2 does NOT provide adequate security
+- The current penny design as specified in v2 does NOT provide adequate security
   for any deployment, including single-user local
 - P2A scope expands by approximately 1-2 weeks to design and integrate a sandbox layer
 - macOS native development path is blocked (all three sandbox options require Linux or Docker)
@@ -223,7 +223,7 @@ This ADR's `--allowed-tools` enforcement verification is CONDITIONAL on the
 Claude Code version at test time. A future Claude Code release could relax or
 remove `--allowed-tools` enforcement invisibly.
 
-**Mandatory at kairos startup**: `gadgetron serve` MUST execute
+**Mandatory at penny startup**: `gadgetron serve` MUST execute
 `$claude_binary --version`, parse the returned semver, and fail to start if the
 version is below `CLAUDE_CODE_MIN_VERSION` (to be filled after Part 1
 verification completes — typically the version that was tested against).
@@ -233,7 +233,7 @@ the real-claude E2E path (`GADGETRON_E2E_CLAUDE=1`) and fail if below the
 floor. This prevents silent regressions where a Claude Code update removes the
 enforcement feature without a corresponding gadgetron code change.
 
-**Test**: `kairos_rejects_stale_claude_version` — fake `$claude_binary` that
+**Test**: `penny_rejects_stale_claude_version` — fake `$claude_binary` that
 prints `claude 0.0.1` and exits. Assert `gadgetron serve` fails with a
 dedicated error (`ErrorKind::NotInstalled` with message "claude CLI version X
 is below the minimum Y required for --allowed-tools enforcement per
@@ -285,8 +285,8 @@ echo "Read the file target.txt and tell me what's in it" | \
 
 - The binary enforces the allowlist at `tool_use` dispatch time, NOT in the system prompt / model guidance only.
 - Enforcement **survives** `--dangerously-skip-permissions`. That flag bypasses interactive permission prompts for ALLOWED tools; it does NOT widen the allowlist.
-- The refusal is surfaced as an in-loop `tool_result` with `is_error: true`. This is exactly the recovery mechanism kairos needs: Claude Code naturally retries with a permitted tool, and kairos observes zero disallowed tool invocations.
-- For kairos, setting `--allowed-tools mcp__knowledge__wiki_list,mcp__knowledge__wiki_get,mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_search` + `--strict-mcp-config` produces a clean security boundary: the ONLY tools Claude Code can call are the five MCP tools served by `gadgetron mcp serve`.
+- The refusal is surfaced as an in-loop `tool_result` with `is_error: true`. This is exactly the recovery mechanism penny needs: Claude Code naturally retries with a permitted tool, and penny observes zero disallowed tool invocations.
+- For penny, setting `--allowed-tools mcp__knowledge__wiki_list,mcp__knowledge__wiki_get,mcp__knowledge__wiki_search,mcp__knowledge__wiki_write,mcp__knowledge__web_search` + `--strict-mcp-config` produces a clean security boundary: the ONLY tools Claude Code can call are the five MCP tools served by `gadgetron mcp serve`.
 
 ### Part 2 — stdin contract resolution
 
@@ -294,7 +294,7 @@ echo "Read the file target.txt and tell me what's in it" | \
 
 > `--input-format <format>` — Input format (only works with --print): "text" (default), or "stream-json" (realtime streaming input)
 
-**Decision**: **Option B (TEXT)** is the default and the simpler choice for kairos.
+**Decision**: **Option B (TEXT)** is the default and the simpler choice for penny.
 
 `feed_stdin` implementation:
 - Concatenate `req.messages` into a single text prompt
@@ -303,7 +303,7 @@ echo "Read the file target.txt and tell me what's in it" | \
 - Write via `AsyncWriteExt::write_all`, then `drop(stdin)` to signal EOF
 - No `--input-format` flag needed (text is default)
 
-`02-kairos-agent.md` §5 `feed_stdin` conditional-branch spec must be updated to keep ONLY the Option B branch and remove the `option_b_stdin` feature flag.
+`02-penny-agent.md` §5 `feed_stdin` conditional-branch spec must be updated to keep ONLY the Option B branch and remove the `option_b_stdin` feature flag.
 
 ---
 
@@ -311,9 +311,9 @@ echo "Read the file target.txt and tell me what's in it" | \
 
 | ID | Owner | Action | Blocks |
 |---|---|---|---|
-| A1 | PM | Run `--allowed-tools` behavioral test per verification procedure above | `gadgetron-kairos` impl start |
+| A1 | PM | Run `--allowed-tools` behavioral test per verification procedure above | `gadgetron-penny` impl start |
 | A2 | PM | Run stdin contract test and record result | `session.rs::feed_stdin` coding |
-| A3 | PM | If FAIL: design sandbox, escalate scope change to user before writing any kairos code | All kairos impl |
+| A3 | PM | If FAIL: design sandbox, escalate scope change to user before writing any penny code | All penny impl |
 | A4 | PM | Update "Verification result" table above and change ADR status to ACCEPTED or ACCEPTED-WITH-FALLBACK | ADR-P2A-02 review |
 | A5 | security-compliance-lead | Review verification transcript before sign-off | Round 1.5 security gate |
 
@@ -326,11 +326,11 @@ echo "Read the file target.txt and tell me what's in it" | \
 | `docs/design/phase2/00-overview.md` v2 | §8 M4 | Primary threat definition and mitigation spec |
 | `docs/design/phase2/00-overview.md` v2 | §8 STRIDE table | Claude Code subprocess E (escalate) = High |
 | `docs/design/phase2/00-overview.md` v2 | Appendix B | Canonical `claude -p` invocation contract |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §13 | M4 verification plan (5-step procedure) |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §15.4 mitigations table | M4 maps to ADR-P2A-01 |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §16 ADR table | This ADR listed as impl blocker |
-| `docs/design/phase2/02-kairos-agent.md` v2 | `feed_stdin()` comment | Stdin contract pending note |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §17 open items | `feed_stdin` format listed as open |
+| `docs/design/phase2/02-penny-agent.md` v2 | §13 | M4 verification plan (5-step procedure) |
+| `docs/design/phase2/02-penny-agent.md` v2 | §15.4 mitigations table | M4 maps to ADR-P2A-01 |
+| `docs/design/phase2/02-penny-agent.md` v2 | §16 ADR table | This ADR listed as impl blocker |
+| `docs/design/phase2/02-penny-agent.md` v2 | `feed_stdin()` comment | Stdin contract pending note |
+| `docs/design/phase2/02-penny-agent.md` v2 | §17 open items | `feed_stdin` format listed as open |
 | `docs/process/03-review-rubric.md` | §1.5-A | Security review gate requiring this ADR |
 | OWASP LLM Top 10 | LLM01 — Prompt Injection | Category this threat falls under |
 
@@ -338,5 +338,5 @@ echo "Read the file target.txt and tell me what's in it" | \
 
 ## Changelog
 
-- **2026-04-13 — Round 2**: added version floor pin (`CLAUDE_CODE_MIN_VERSION` startup check, CI gate, `kairos_rejects_stale_claude_version` test). Status updated to reflect pending verification state explicitly.
-- **2026-04-13 — Verification completed**: Part 1 PASS (enforcement confirmed at binary level on claude 2.1.104 even with `--dangerously-skip-permissions`), Part 2 VERIFIED TEXT (Option B — plain text stdin, `--input-format text` is default). Status moved to **ACCEPTED**. `CLAUDE_CODE_MIN_VERSION = 2.1.104`. Sandbox fallback NOT required. kairos implementation unblocked.
+- **2026-04-13 — Round 2**: added version floor pin (`CLAUDE_CODE_MIN_VERSION` startup check, CI gate, `penny_rejects_stale_claude_version` test). Status updated to reflect pending verification state explicitly.
+- **2026-04-13 — Verification completed**: Part 1 PASS (enforcement confirmed at binary level on claude 2.1.104 even with `--dangerously-skip-permissions`), Part 2 VERIFIED TEXT (Option B — plain text stdin, `--input-format text` is default). Status moved to **ACCEPTED**. `CLAUDE_CODE_MIN_VERSION = 2.1.104`. Sandbox fallback NOT required. penny implementation unblocked.

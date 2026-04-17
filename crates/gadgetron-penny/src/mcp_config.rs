@@ -1,6 +1,6 @@
 //! MCP config JSON tempfile writer (M1).
 //!
-//! Spec: `docs/design/phase2/02-kairos-agent.md §7`.
+//! Spec: `docs/design/phase2/02-penny-agent.md §7`.
 //!
 //! Every Claude Code subprocess invocation writes a fresh JSON tempfile
 //! pointing at the `gadgetron mcp serve` stdio subcommand. Claude Code
@@ -21,7 +21,7 @@
 
 #[cfg(not(unix))]
 compile_error!(
-    "gadgetron-kairos requires a Unix target (uses mkstemp via the tempfile crate). \
+    "gadgetron-penny requires a Unix target (uses mkstemp via the tempfile crate). \
      Windows / WASI support lands in Phase 2D per the P2A scope."
 );
 
@@ -39,7 +39,7 @@ use tempfile::NamedTempFile;
 /// When `config_path` is supplied, it is appended to the child's argv as
 /// `--config <abs>`, so the `gadgetron mcp serve` grandchild finds the
 /// `[knowledge]` / `[agent]` TOML regardless of its cwd (Claude Code pins
-/// the child cwd to `~/.gadgetron/kairos/work/`, which never contains a
+/// the child cwd to `~/.gadgetron/penny/work/`, which never contains a
 /// `gadgetron.toml`). Callers pass the same TOML path used by
 /// `gadgetron serve`.
 ///

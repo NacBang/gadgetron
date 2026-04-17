@@ -4,7 +4,7 @@
 > **Author**: PM (Claude)
 > **Date**: 2026-04-14 (v2)
 > **Parent**: `docs/design/phase2/00-overview.md` v3 (partial supersede 2026-04-14)
-> **Siblings**: `docs/design/phase2/01-knowledge-layer.md` v3, `docs/design/phase2/02-kairos-agent.md` v3
+> **Siblings**: `docs/design/phase2/01-knowledge-layer.md` v3, `docs/design/phase2/02-penny-agent.md` v3
 > **Drives**: D-20260414-02, ADR-P2A-04
 > **Supersedes**: `docs/design/phase2/00-overview.md §8` "OpenWebUI" threat model row, Appendix C docker-compose
 > **Review provenance (v1 → v2)**: dx-product-lead (4 B, 7 NB, 5 N) + security-compliance-lead (7 B, 9 NB + GDPR gap) + qa-test-architect (5 B, 3 NB, 2 DET, 5 N) + chief-architect (5 B, 6 NB, 6 DET, 6 NIT). v2 addresses **every blocker and every determinism item** from all four reviewers. See `docs/reviews/phase2/round2-*-web-v1.md` for the full review files. Non-blockers and nits are tracked in Appendix C2 with disposition.
@@ -129,7 +129,7 @@ crates/gadgetron-web/
     │   │   ├── api-key-input.tsx    # masked + Show/Hide + cold-start banner
     │   │   └── model-picker.tsx     # empty-list inline guidance
     │   └── layout/
-    │       ├── header.tsx           # "Gadgetron Kairos" branding
+    │       ├── header.tsx           # "Gadgetron Penny" branding
     │       ├── status-badge.tsx
     │       └── banner.tsx           # shared banner component for DX-W-B1
     ├── lib/
@@ -1227,9 +1227,9 @@ export function MarkdownRenderer({ content }: Props) {
 | Empty API key on save | User pressed Save with no input | Inline below input: "Enter a key first. Generate one with `gadgetron key create --tenant-id default`." | Focus returns to input |
 | `/v1/models` returns empty `data: []` | No providers in `gadgetron.toml` | Inline in model picker: "No models available. Check that `gadgetron.toml` contains at least one provider block. See `docs/manual/configuration.md`." | Link to manual |
 | `AppError('unauthorized')` (401) on chat | Invalid or revoked API key | Redirect to `/settings?error=key_invalid` (no localStorage clear, DX-W-NB1). Red banner: "Your API key was rejected (401). Please enter a new one." | Clear button + paste new key |
-| `AppError('http_error', status=503)` | Upstream provider down or kairos `claude` not installed | Inline: "The model is unavailable (503). Check that Claude Code is running." | Retry button |
-| `AppError('http_error', status=504)` | Kairos request timeout | Inline: "The request timed out. Try a simpler prompt or raise `request_timeout_secs`." | Retry button |
-| `AppError('http_error', status=422)` + `wiki_credential_blocked` | Credential pattern blocked | Inline: "Kairos refused to write a secret to the wiki. Remove the secret and retry." | Retry button |
+| `AppError('http_error', status=503)` | Upstream provider down or penny `claude` not installed | Inline: "The model is unavailable (503). Check that Claude Code is running." | Retry button |
+| `AppError('http_error', status=504)` | Penny request timeout | Inline: "The request timed out. Try a simpler prompt or raise `request_timeout_secs`." | Retry button |
+| `AppError('http_error', status=422)` + `wiki_credential_blocked` | Credential pattern blocked | Inline: "Penny refused to write a secret to the wiki. Remove the secret and retry." | Retry button |
 | `AppError('no_stream_body')` | Gateway returned non-streaming body | Inline: "Gateway did not return a stream — check server logs." | Reload page |
 | `TypeError` (fetch network) | Server down / offline | Offline banner: "Can't reach Gadgetron (http://localhost:8080)." | Auto-retry exponential, max 5 |
 | Fallback UI served (build-time npm absent) | Binary built without Node (tracing::warn! at startup) | Banner: "Gadgetron Web UI is running in fallback mode — rebuild with Node 20.19.0 to enable the full UI. See docs/manual/installation.md Headless build section." | Rebuild + reinstall |
@@ -1571,7 +1571,7 @@ Gated by `GADGETRON_E2E_WEB=1` + `GADGETRON_TEST_KEY=gad_live_...`.
 | 5 | `ASSET_URL=$(curl -sf http://localhost:8080/web/ \| grep -oP '/_next/static/[^"]+\.js' \| head -1); curl -sI "http://localhost:8080${ASSET_URL}"` → `content-type: application/javascript`, `cache-control: ...immutable` (QA-W-DET2 — dynamic hash extraction) |
 | 6 | `curl -sI /v1/models -H "Authorization: Bearer $GADGETRON_TEST_KEY"` → 200, NO CSP header |
 | 7 | `grep -r "open.webui\|OpenWebUI" target/release/gadgetron` → no matches (branding hygiene) |
-| 8 | `curl -sf -H "Authorization: Bearer $GADGETRON_TEST_KEY" http://localhost:8080/v1/models \| jq -e '.data \| map(.id) \| index("kairos")'` → exit 0 (kairos model present, QA-W-B4 + ADR check 6) |
+| 8 | `curl -sf -H "Authorization: Bearer $GADGETRON_TEST_KEY" http://localhost:8080/v1/models \| jq -e '.data \| map(.id) \| index("penny")'` → exit 0 (penny model present, QA-W-B4 + ADR check 6) |
 | 9 (Vitest) | XSS guard — Vitest+happy-dom unit test `app/chat-xss.test.tsx` (part of the `web-frontend` CI job, NOT the shell e2e). Renders a mock assistant message containing `<script>alert(1)</script>` via `<MarkdownRenderer>` and asserts: (a) happy-dom does not execute scripts, (b) `DOMPurify.sanitize` output does NOT contain a `<script>` tag, (c) DOM text content includes the literal `&lt;script&gt;` as escaped text. QA-W-NB4 — this row is categorized under E2E because it covers an e2e acceptance criterion (ADR-P2A-04 check 4), but the runner is Vitest, not `web_smoke.sh`. |
 
 ### Manual QA (`docs/manual/web.md` — new file, DX-W-B4)
@@ -1707,7 +1707,7 @@ Mirrors `docs/design/phase2/00-overview.md §10` structure. See §19.1 for the C
 
 ### Reference to `00-overview.md §10`
 
-All Phase 2A single-user compliance controls from `00-overview.md §10` continue to apply to kairos-layer processing. This section (§25) covers only the **browser / frontend** controls added by `gadgetron-web`.
+All Phase 2A single-user compliance controls from `00-overview.md §10` continue to apply to penny-layer processing. This section (§25) covers only the **browser / frontend** controls added by `gadgetron-web`.
 
 ---
 
@@ -1839,8 +1839,8 @@ If `gadgetron.toml` `[server].bind_addr` is NOT `127.0.0.1`/`::1` AND TLS is not
 **All 21 blockers addressed**:
 - DX-W-B1 → §17 (3 new error rows)
 - DX-W-B2 → §20 (correct headless build command, installation.md section)
-- DX-W-B3 → Deferred to P2B (Option C) — `01-knowledge-layer.md §1.1` and `kairos.md §1` updated to remove ambiguity
-- DX-W-B4 → `docs/manual/web.md` stub created, `docs/manual/README.md` entry added, `kairos.md` 연관 문서 link added
+- DX-W-B3 → Deferred to P2B (Option C) — `01-knowledge-layer.md §1.1` and `penny.md §1` updated to remove ambiguity
+- DX-W-B4 → `docs/manual/web.md` stub created, `docs/manual/README.md` entry added, `penny.md` 연관 문서 link added
 - SEC-W-B1 → §16 (DOMPurify 3.2.4 frozen config + 13 tests)
 - SEC-W-B2 → §8 + Appendix B (Trusted Types + inline-styles-audit.md)
 - SEC-W-B3 → §18 (csp_connect_src deleted; deferred to P2C)
@@ -1851,7 +1851,7 @@ If `gadgetron.toml` `[server].bind_addr` is NOT `127.0.0.1`/`::1` AND TLS is not
 - QA-W-B1 → §9 + §22 + §23 (Vitest + happy-dom, pinned)
 - QA-W-B2 → §6 + §22 (path_strategy + 1024 cases)
 - QA-W-B3 → §4 + §22 (BuildEnv extraction + 5 tests)
-- QA-W-B4 → §22 (e2e steps 8 + 9 for kairos + XSS)
+- QA-W-B4 → §22 (e2e steps 8 + 9 for penny + XSS)
 - QA-W-B5 → §22 + §23 (bundle_size.rs test + du check; open item #2 resolved)
 - CA-W-B1 → §5 (axum 0.8 `/{*path}` syntax)
 - CA-W-B2 → §3 (dropped http/bytes; axum re-exports)
@@ -1921,7 +1921,7 @@ v2 received **APPROVE WITH MINOR** from all four reviewers (dx / security / qa /
 
 **v2.1 disposition for v2 non-blockers/nits not addressed**: all remaining items from all four v1 + v2 reviews are tracked for the first code PR review. None block TDD start.
 
-*End of 03-gadgetron-web.md Draft v2.1. 2026-04-14. v1 (21 B + 8 DET) + v2 (10 mechanical fixes) addressed. All four Round 1.5/2/3 reviewers APPROVE WITH MINOR. Security Round 1.5 CLOSED. Ready for TDD scaffolding (tasks #3 → #6 → #7 → kairos track).*
+*End of 03-gadgetron-web.md Draft v2.1. 2026-04-14. v1 (21 B + 8 DET) + v2 (10 mechanical fixes) addressed. All four Round 1.5/2/3 reviewers APPROVE WITH MINOR. Security Round 1.5 CLOSED. Ready for TDD scaffolding (tasks #3 → #6 → #7 → penny track).*
 
 ---
 

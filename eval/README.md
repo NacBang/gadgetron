@@ -1,6 +1,6 @@
-# Kairos eval harness
+# Penny eval harness
 
-Minimal automated evaluator for the Kairos assistant plane. Runs scenarios
+Minimal automated evaluator for the Penny assistant plane. Runs scenarios
 from `scenarios.yaml` against a live `gadgetron serve` and writes a markdown
 report under `reports/`.
 
@@ -39,5 +39,5 @@ Edit `scenarios.yaml`. Each entry supports:
   - `finish_reason`
   - `tool_calls_contain` — every listed tool must appear in the tool_use stream
   - `text_contains_any` — any one substring in the assistant text
-  - `page_path` — path under `wiki_path` that Kairos should create
+  - `page_path` — path under `wiki_path` that Penny should create
   - `page_contains` / `page_contains_any` — substrings in the created page

@@ -741,7 +741,7 @@ pub fn service() -> Router
 - The STRIDE table (§21) is tight and correctly centers the two real risks: assistant-markdown XSS and build-time supply chain. The two new mitigations M-W5 (path traversal) and M-W6 (basePath drift) are both legitimate and spec-bound.
 - §19 supply-chain hygiene (`npm ci --ignore-scripts`, license allow-list, pinned `package-lock.json`) is exactly the right level of detail for M-W3 and goes beyond what I'd have required as a blocker.
 - The CSP string in Appendix B is defensible: `script-src 'self'` strict, `style-src 'self' 'unsafe-inline'` acknowledged trade-off, `frame-ancestors 'none'` clickjacking defense, `upgrade-insecure-requests` for P2C TLS.
-- Manual QA checklist (§22 bottom) is concrete and actionable — that's exactly the `docs/manual/web.md` sibling to `kairos.md` that D-20260414-02 called out.
+- Manual QA checklist (§22 bottom) is concrete and actionable — that's exactly the `docs/manual/web.md` sibling to `penny.md` that D-20260414-02 called out.
 - `--features web-ui` + `default = ["web-ui"]` is correct for "on by default, opt-out for headless" per the decision log, and the headless CI job in §23 enforces it.
 - The decision to roll custom SPA-fallback + per-asset cache headers instead of `tower_http::services::ServeDir` is the right call — immutable-hashed-asset caching is not something `ServeDir` does well, and the path-traversal story is simpler when we own it.
 

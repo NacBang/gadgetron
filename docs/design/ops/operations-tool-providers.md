@@ -4,7 +4,7 @@
 > **상태**: Draft
 > **작성일**: 2026-04-15
 > **최종 업데이트**: 2026-04-15
-> **관련 크레이트**: `gadgetron-core`, `gadgetron-kairos`, `gadgetron-gateway`, `gadgetron-xaas`, `gadgetron-scheduler`, `gadgetron-node`, future `gadgetron-infra`, future `gadgetron-scheduler-tools`, future `gadgetron-cluster`
+> **관련 크레이트**: `gadgetron-core`, `gadgetron-penny`, `gadgetron-gateway`, `gadgetron-xaas`, `gadgetron-scheduler`, `gadgetron-node`, future `gadgetron-infra`, future `gadgetron-scheduler-tools`, future `gadgetron-cluster`
 > **Phase**: [P2C] / [P3] / [P4]
 > **관련 문서**: `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/04-mcp-tool-registry.md`, `docs/architecture/platform-architecture.md`
 
@@ -427,7 +427,7 @@ Implementation should follow the smallest authority expansion that still produce
 administrator / user
         │
         ▼
-KairosProvider / CollaborationCoordinator
+PennyProvider / CollaborationCoordinator
         │
         ▼
 McpToolRegistry
@@ -449,7 +449,7 @@ McpToolRegistry
 
 - `gadgetron-core`
   - shared traits / enums / value objects only
-- `gadgetron-kairos`
+- `gadgetron-penny`
   - registry + orchestration only
 - `gadgetron-infra`
   - in-process runtime tool family

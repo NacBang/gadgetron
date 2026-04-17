@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kairos evaluation harness.
+"""Penny evaluation harness.
 
 Runs a scenario list against a live `gadgetron serve` instance:
 
@@ -40,7 +40,7 @@ EVAL_ROOT = pathlib.Path(__file__).resolve().parent
 SCENARIOS_FILE = EVAL_ROOT / "scenarios.yaml"
 REPORTS_DIR = EVAL_ROOT / "reports"
 
-# Matches the decorated tool_use lines Kairos emits into stream content, e.g.
+# Matches the decorated tool_use lines Penny emits into stream content, e.g.
 #   🔧 **mcp__knowledge__wiki_write** `{...}`
 TOOL_USE_RE = re.compile(r"\*\*(mcp__[A-Za-z0-9_]+|WebSearch|WebFetch)\*\*")
 
@@ -83,7 +83,7 @@ def load_scenarios() -> list[dict]:
 def stream_chat(server: str, key: str, prompt: str, timeout_s: int) -> StreamResult:
     url = server.rstrip("/") + "/v1/chat/completions"
     payload = {
-        "model": "kairos",
+        "model": "penny",
         "stream": True,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -232,7 +232,7 @@ OUTCOME_BADGES = {
 def format_report(results: list[ScenarioResult], server: str) -> str:
     now = dt.datetime.now().isoformat(timespec="seconds")
     lines = [
-        f"# Kairos eval report — {now}",
+        f"# Penny eval report — {now}",
         "",
         f"Server: `{server}`",
         "",
@@ -281,7 +281,7 @@ def format_report(results: list[ScenarioResult], server: str) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run Kairos eval scenarios.")
+    ap = argparse.ArgumentParser(description="Run Penny eval scenarios.")
     ap.add_argument("--server", default="http://127.0.0.1:8080")
     ap.add_argument("--scenario", help="Run only this scenario id")
     ap.add_argument(

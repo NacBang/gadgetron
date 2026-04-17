@@ -1,5 +1,5 @@
 - id: wiki-roundtrip
-  description: Kairos writes a page, then reads it back verbatim.
+  description: Penny writes a page, then reads it back verbatim.
   timeout_s: 120
   prompt: |
     wiki.write 로 eval/smoke 페이지를 만들고, 내용은 다음 두 줄 그대로 해줘:
@@ -76,8 +76,8 @@
   description: >-
     Direct `web.search` MCP tool invocation. Verifies the SearXNG round-trip
     works end-to-end without relying on any wiki-first search fallback.
-    Separately, guards against Kairos silently substituting Claude Code's
-    built-in `WebSearch` — `KAIROS_DISALLOWED_TOOLS` blocks that surface
+    Separately, guards against Penny silently substituting Claude Code's
+    built-in `WebSearch` — `PENNY_DISALLOWED_TOOLS` blocks that surface
     at spawn time so the MCP path is the only route.
   timeout_s: 120
   prompt: |
@@ -92,7 +92,7 @@
 - id: manycoresoft-explain
   description: >-
     Narrative answer path. With the built-in WebSearch blocked via
-    `KAIROS_DISALLOWED_TOOLS`, Kairos reliably falls back to the MCP
+    `PENNY_DISALLOWED_TOOLS`, Penny reliably falls back to the MCP
     `web.search` when no wiki page exists, so this scenario now passes
     without the pre-seeded `manycoresoft.md` page that previously made
     it flaky. The stream drop bug this scenario was born to catch is
@@ -115,7 +115,7 @@
     Full research → save chain: `web.search` → `wiki.write`. Requires
     `[knowledge.search]` wired to a running SearXNG. The prompt enumerates
     the tool calls as numbered steps and makes "end without calling
-    wiki.write" an explicit failure case, because Kairos has a bias toward
+    wiki.write" an explicit failure case, because Penny has a bias toward
     reporting findings inline when given looser instructions.
   timeout_s: 300
   prompt: |

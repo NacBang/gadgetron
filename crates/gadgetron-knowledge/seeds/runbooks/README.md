@@ -93,7 +93,7 @@ confidence = "medium"
 
 - 매 분기: stale runbook 확인 (`gadgetron wiki audit`, 90일 이상 미수정)
 - 실제 장애 대응 후: 런북대로 동작했는지 확인, 틀린 부분 업데이트
-- Kairos가 런북 따르는 대화를 보면 절차 검증 기회
+- Penny가 런북 따르는 대화를 보면 절차 검증 기회
 
 ## 관련
 

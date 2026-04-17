@@ -21,7 +21,7 @@ const COMMANDS: Array<{ cmd: string; desc: string; example?: string }> = [
   {
     cmd: "/wiki list",
     desc: "위키 페이지 목록 요청",
-    example: "Kairos가 wiki.list 도구를 호출합니다.",
+    example: "Penny가 wiki.list 도구를 호출합니다.",
   },
   {
     cmd: "/wiki search <쿼리>",
@@ -31,7 +31,7 @@ const COMMANDS: Array<{ cmd: string; desc: string; example?: string }> = [
   {
     cmd: "/wiki get <페이지>",
     desc: "특정 페이지 읽기",
-    example: "/wiki get kairos/usage",
+    example: "/wiki get penny/usage",
   },
   {
     cmd: "/wiki delete <페이지>",
@@ -87,9 +87,9 @@ export function SlashHelpDialog({
 
 /**
  * Parse a user-typed message. Returns:
- *   - { kind: "chat", text }           → send as-is to Kairos
+ *   - { kind: "chat", text }           → send as-is to Penny
  *   - { kind: "local", command }       → handle locally (help / clear)
- *   - { kind: "reframe", text }        → rewrite as natural language for Kairos
+ *   - { kind: "reframe", text }        → rewrite as natural language for Penny
  */
 export type ParsedInput =
   | { kind: "chat"; text: string }
@@ -151,7 +151,7 @@ export function parseInput(raw: string): ParsedInput {
       }
     }
     default:
-      // Unknown command — send as-is (let Kairos decide).
+      // Unknown command — send as-is (let Penny decide).
       return { kind: "chat", text: raw };
   }
 }

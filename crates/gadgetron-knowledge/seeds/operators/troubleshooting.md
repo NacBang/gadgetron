@@ -21,10 +21,10 @@ plugin_version = "0.3.0"
 2. 틀리면 `gadgetron key create`로 재발급 후 재시도
 3. no-db 모드에서는 `gad_live_*` 형식만 확인, 검증은 느슨함
 
-### `404 The model "kairos" does not exist`
+### `404 The model "penny" does not exist`
 
-**증상**: 서버 로그에 `vLLM stream error 404: The model 'kairos' does not exist.`
-**원인**: Router가 `kairos` 요청을 vLLM provider로 라우팅함 (direct-match 없음).
+**증상**: 서버 로그에 `vLLM stream error 404: The model 'penny' does not exist.`
+**원인**: Router가 `penny` 요청을 vLLM provider로 라우팅함 (direct-match 없음).
 **대응**: v0.3.0-demo 이후 버전으로 업그레이드. Router의 direct-match (PR #31) 포함되어 있어야 함.
 
 ### `422 Unprocessable Entity`
@@ -39,9 +39,9 @@ plugin_version = "0.3.0"
 **원인**: 요청이 4 MiB 초과 (SEC-M2).
 **대응**: 대화 히스토리가 너무 길면 새 conversation_id로 시작. 파일 업로드는 P2B.
 
-## Kairos 에러
+## Penny 에러
 
-### `kairos_not_installed`
+### `penny_not_installed`
 
 **증상**: "The Claude Code CLI (`claude`) was not found on the server."
 **원인**: `agent.binary`가 spawn의 고정 PATH에서 찾아지지 않음.
@@ -52,7 +52,7 @@ plugin_version = "0.3.0"
 binary = "/Users/<name>/.local/bin/claude"
 ```
 
-### `kairos_agent_error` + exit_code=1
+### `penny_agent_error` + exit_code=1
 
 **서브케이스 1**: stderr에 `--output-format=stream-json requires --verbose`
 - **원인**: Claude Code 2.0.x (구버전). P2A는 2.1.104+ 전제.
@@ -66,7 +66,7 @@ binary = "/Users/<name>/.local/bin/claude"
 - **원인**: 원인 불명. stderr가 redact된 뒤 빈 문자열로 남을 수도.
 - **대응**: `RUST_LOG=debug`로 서버 재시작 후 재현. raw stderr는 서버 로그에 기록됨.
 
-### `kairos_timeout`
+### `penny_timeout`
 
 **증상**: 504 timeout after 300s.
 **원인**: Claude Code subprocess가 제한시간 초과.
@@ -77,7 +77,7 @@ binary = "/Users/<name>/.local/bin/claude"
 ### `wiki_conflict`
 
 **증상**: "A wiki page could not be saved because it was modified by another process"
-**원인**: git index 충돌. 보통 외부에서 수동 수정 + Kairos 동시 쓰기.
+**원인**: git index 충돌. 보통 외부에서 수동 수정 + Penny 동시 쓰기.
 **대응**:
 ```sh
 cd <wiki_path>
@@ -97,7 +97,7 @@ git add . && git commit -m "manual resolve"
 
 **증상**: "The requested wiki page path is invalid"
 **원인**: 경로에 `..`, 절대 경로, 특수문자 포함.
-**대응**: [`kairos/conventions.md`](../kairos/conventions.md) 이름 규칙 준수.
+**대응**: [`penny/conventions.md`](../penny/conventions.md) 이름 규칙 준수.
 
 ### `wiki_credential_blocked`
 
@@ -116,9 +116,9 @@ lsof -ti :8080 | xargs kill   # 점유 프로세스 종료
 # 또는 gadgetron.toml의 [server].bind 포트 변경
 ```
 
-### Kairos 등록 안 됨
+### Penny 등록 안 됨
 
-**증상**: `/v1/models`에 `kairos`가 없음.
+**증상**: `/v1/models`에 `penny`가 없음.
 **원인**: `[agent]` 또는 `[knowledge]` 섹션이 config에 없거나 잘못됨.
 **대응**: `gadgetron.example.toml` 대비해서 섹션 존재 확인.
 
@@ -126,7 +126,7 @@ lsof -ti :8080 | xargs kill   # 점유 프로세스 종료
 
 ```sh
 # 디버그 로그로 서버 시작
-RUST_LOG=debug,gadgetron_kairos=trace ./target/release/gadgetron serve --config gadgetron.toml --no-db 2>&1 | tee /tmp/gadgetron.log
+RUST_LOG=debug,gadgetron_penny=trace ./target/release/gadgetron serve --config gadgetron.toml --no-db 2>&1 | tee /tmp/gadgetron.log
 
 # 위키 변경 이력
 (cd <wiki_path> && git log --oneline -20)
@@ -139,10 +139,10 @@ ps aux | grep claude
 
 이 페이지에 없는 이슈를 마주쳤다면:
 
-1. 해결 후 "이 이슈 트러블슈팅에 추가해줘" Kairos에게 요청
-2. Kairos가 템플릿에 맞춰 `operators/troubleshooting.md` 또는 별도 `operators/<문제>-<대응>.md`로 저장
+1. 해결 후 "이 이슈 트러블슈팅에 추가해줘" Penny에게 요청
+2. Penny가 템플릿에 맞춰 `operators/troubleshooting.md` 또는 별도 `operators/<문제>-<대응>.md`로 저장
 
 ## 관련
 
 - [`operators/getting-started.md`](./getting-started.md) — 초기 설정
-- [`kairos/usage.md`](../kairos/usage.md) — Kairos 자체
+- [`penny/usage.md`](../penny/usage.md) — Penny 자체

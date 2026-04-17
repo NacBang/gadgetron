@@ -3,7 +3,7 @@ name = "gadgetron-knowledge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Knowledge layer for Kairos — wiki store, web search proxy, MCP server"
+description = "Knowledge layer for Penny — wiki store, web search proxy, MCP server"
 
 [dependencies]
 gadgetron-core = { workspace = true }

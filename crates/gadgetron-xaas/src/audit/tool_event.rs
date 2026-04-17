@@ -46,7 +46,7 @@ impl ToolAuditEventSink for ToolAuditEventWriter {
         if self.tx.try_send(event).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
-                target: "kairos_audit",
+                target: "penny_audit",
                 "tool audit event dropped — channel full"
             );
         }

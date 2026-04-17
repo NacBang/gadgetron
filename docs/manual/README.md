@@ -1,6 +1,6 @@
 # Gadgetron Operator Manual
 
-Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A assistant and collaboration features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose the Kairos assistant runtime plus the embedded Web UI when configured.
+Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A assistant and collaboration features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose the Penny assistant runtime plus the embedded Web UI when configured.
 
 This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning policy is documented in `docs/process/06-versioning-policy.md`.
 
@@ -17,9 +17,9 @@ This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |
 | [auth.md](auth.md) | API key format, how auth works, scope system |
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
-| [kairos.md](kairos.md) | **Phase 2A**: Kairos 협업 에이전트 런타임 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
+| [penny.md](penny.md) | **Phase 2A**: Penny 협업 에이전트 런타임 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
 | [web.md](web.md) | **Phase 2A**: Gadgetron Web UI — `http://localhost:8080/web` 채팅 UI 설정, Origin 격리, 키 회전, 헤드리스 빌드 |
-| [evaluation.md](evaluation.md) | **Phase 2A**: Kairos 평가 하네스 — 시나리오 기반 자동 검증 (`eval/run_eval.py`), SearXNG 설정, CI 게이트 연동 |
+| [evaluation.md](evaluation.md) | **Phase 2A**: Penny 평가 하네스 — 시나리오 기반 자동 검증 (`eval/run_eval.py`), SearXNG 설정, CI 게이트 연동 |
 
 ---
 
@@ -46,8 +46,8 @@ This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The
 - `gadgetron key list --tenant-id <uuid>` and `gadgetron key revoke --key-id <uuid>`
 - `gadgetron init` — generate an annotated `gadgetron.toml`
 - `gadgetron doctor` — check configuration, database connectivity, provider reachability, and `/health`
-- `gadgetron mcp serve` — stdio MCP server used by the Kairos subprocess bridge and available for manual smoke tests
-- `kairos` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
+- `gadgetron mcp serve` — stdio MCP server used by the Penny subprocess bridge and available for manual smoke tests
+- `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
 - Embedded Web UI at `/web` when built with the default `web-ui` feature and `[web].enabled = true`
 - `gadgetron-testing` crate — `FakeLlmProvider` and `FailingProvider` for use in unit and integration tests
 
@@ -65,5 +65,5 @@ This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The
 - Audit log PostgreSQL persistence
 - Full TUI keyboard navigation and scrolling
 - Docker image (future)
-- `gadgetron kairos ...` convenience subcommands such as `kairos init`
+- `gadgetron penny ...` convenience subcommands such as `penny init`
 - Interactive approval flow for agent write/destructive tools (deferred to Phase 2B)

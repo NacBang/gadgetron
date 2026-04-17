@@ -144,7 +144,7 @@ function useTypewriterText(text: string, running: boolean): string {
  */
 function autoCloseFences(s: string): string {
   // Cheap exact-string count. Indented fences aren't common enough in
-  // Kairos output to warrant a regex; if they appear we simply don't
+  // Penny output to warrant a regex; if they appear we simply don't
   // auto-close and accept the flash on those lines.
   let count = 0;
   let idx = s.indexOf("```");

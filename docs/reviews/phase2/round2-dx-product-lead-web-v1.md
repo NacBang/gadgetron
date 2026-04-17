@@ -13,7 +13,7 @@
 
 **REVISE**
 
-The doc is architecturally coherent and represents a strong first draft. The core onboarding story (`gadgetron serve` + browse to `/web` + paste key) is correctly threaded through §12, §13, and the `kairos.md` §2–§5 update. However, four issues constitute blockers: two gap the onboarding story for a first-time user before they have any key, one leaves a `--docker` flag in a partially-defined state that breaks the `kairos init` contract already locked in `01-knowledge-layer.md §1.1`, and one is a missing manual page that the doc's own pre-merge gate (`Appendix C`) requires to exist before code lands. Non-blockers are actionable and fixable in a follow-up.
+The doc is architecturally coherent and represents a strong first draft. The core onboarding story (`gadgetron serve` + browse to `/web` + paste key) is correctly threaded through §12, §13, and the `penny.md` §2–§5 update. However, four issues constitute blockers: two gap the onboarding story for a first-time user before they have any key, one leaves a `--docker` flag in a partially-defined state that breaks the `penny init` contract already locked in `01-knowledge-layer.md §1.1`, and one is a missing manual page that the doc's own pre-merge gate (`Appendix C`) requires to exist before code lands. Non-blockers are actionable and fixable in a follow-up.
 
 ---
 
@@ -23,11 +23,11 @@ The doc is architecturally coherent and represents a strong first draft. The cor
 |---|---|---|
 | User touchpoint walkthrough | PARTIAL | §12 covers the happy path but misses the "no key yet" cold-start edge case |
 | Error message 3-element test | PARTIAL | §17 matrix gaps documented below (DX-W-B1) |
-| CLI flag conventions | PARTIAL | `--docker` in `kairos.md §1` is struckthrough but unresolved (DX-W-B3) |
+| CLI flag conventions | PARTIAL | `--docker` in `penny.md §1` is struckthrough but unresolved (DX-W-B3) |
 | API response shape | PASS | OpenAI-compat surface unchanged; error shape inherits gateway |
 | Config fields | PASS | All 3 `[web]` fields have doc comment + default + env override |
 | Defaults safety | PASS | `enabled = true`, CSP strict default, `base_path = "/web"` all reasonable |
-| 5-minute path | PARTIAL | Steps 3–5 of `kairos.md` assume a pre-existing key; cold-start user has no key until step 3 |
+| 5-minute path | PARTIAL | Steps 3–5 of `penny.md` assume a pre-existing key; cold-start user has no key until step 3 |
 | Runbook playbook | FAIL | No oncall runbook entry for `/web` 500 (fallback UI served) or CSP breakage (DX-W-NB3) |
 | Backward compat | PASS | No existing CLI flags changed |
 | i18n readiness | PARTIAL | Hardcoded English+Korean inline acknowledged (Open item #10); acceptable for P2A |
@@ -46,7 +46,7 @@ The doc is architecturally coherent and represents a strong first draft. The cor
 
 2. **Save attempt with empty API key field.** §13 `setApiKey("")` returns `{ok: false, reason: 'invalid_format'}`. The UX response is unspecified in §17. "Invalid format" is technically correct for an empty string but useless as user guidance ("invalid format" suggests the key exists but is wrong; the user may not realize they have not yet created one).
 
-3. **`/v1/models` fetch returns an empty list.** This happens when `gadgetron.toml` has no providers configured or `[kairos]` is absent. §12 step 2 says "populate model picker dropdown" but does not specify what the dropdown shows when `data: []`. A new user completing the quick start (`kairos init` generates a config with `[kairos]`) should see `kairos` immediately. If the server is running without the kairos block they see a blank picker with no guidance.
+3. **`/v1/models` fetch returns an empty list.** This happens when `gadgetron.toml` has no providers configured or `[penny]` is absent. §12 step 2 says "populate model picker dropdown" but does not specify what the dropdown shows when `data: []`. A new user completing the quick start (`penny init` generates a config with `[penny]`) should see `penny` immediately. If the server is running without the penny block they see a blank picker with no guidance.
 
 **Impact**: All three trigger in the onboarding sequence of every new user (cold start, no prior config).
 
@@ -89,11 +89,11 @@ Additionally, ADR-P2A-04 §Mitigations M-W4 says this is "Documented in `docs/ma
 
 ---
 
-### DX-W-B3 — `kairos init --docker` flag is in limbo and breaks the `§1.1` stdout contract
+### DX-W-B3 — `penny init --docker` flag is in limbo and breaks the `§1.1` stdout contract
 
-**Section**: `docs/manual/kairos.md §1` (Quick Start step 1), `docs/design/phase2/01-knowledge-layer.md §1.1`
+**Section**: `docs/manual/penny.md §1` (Quick Start step 1), `docs/design/phase2/01-knowledge-layer.md §1.1`
 
-**Issue**: `kairos.md §1` contains:
+**Issue**: `penny.md §1` contains:
 
 > ~~`--docker`~~: D-20260414-02로 OpenWebUI 번들이 제거되면서 `--docker` 플래그는 **SearXNG-only 모드**로 재정의될 예정입니다 (`03-gadgetron-web.md` 확정 대기). 당분간 SearXNG는 수동으로 기동하십시오.
 
@@ -104,17 +104,17 @@ This means `--docker` is:
 
 The `§1.1` stdout contract is locked as an implementation determinism requirement. If `--docker` now means "SearXNG-only", the stdout content and exit code described in `§1.1` are wrong. If `--docker` is being removed entirely, the flag needs a deprecation `[WARN]` path in the contract. Neither is resolved.
 
-This ambiguity cannot carry into TDD: the test that asserts `kairos init --docker` stdout content will be written against `§1.1`'s current spec, which may be immediately obsolete.
+This ambiguity cannot carry into TDD: the test that asserts `penny init --docker` stdout content will be written against `§1.1`'s current spec, which may be immediately obsolete.
 
 **Fix**: `03-gadgetron-web.md` must resolve the `--docker` flag before this doc passes Round 1.5. Options:
 
-A. **Retain `--docker` as SearXNG-only**: add a new §1.1 failure/option path for `--docker` that outputs the SearXNG docker-compose snippet (not the full OpenWebUI compose). Update `kairos.md §1` to remove the strikethrough and describe the new behavior.
+A. **Retain `--docker` as SearXNG-only**: add a new §1.1 failure/option path for `--docker` that outputs the SearXNG docker-compose snippet (not the full OpenWebUI compose). Update `penny.md §1` to remove the strikethrough and describe the new behavior.
 
-B. **Remove `--docker` entirely**: add a `[WARN]` output path to §1.1: "`--docker` is no longer supported. Start SearXNG manually (see `docs/manual/kairos.md §2`). Exiting." Exit code 0 (graceful deprecation).
+B. **Remove `--docker` entirely**: add a `[WARN]` output path to §1.1: "`--docker` is no longer supported. Start SearXNG manually (see `docs/manual/penny.md §2`). Exiting." Exit code 0 (graceful deprecation).
 
-C. **Defer `--docker` to P2B**: mark it as a known Open item in both `01-knowledge-layer.md` and `03-gadgetron-web.md`, and remove the strikethrough from `kairos.md` (replace with a "not yet implemented" note). This is the safest option for not breaking `§1.1` before the flag is re-specified.
+C. **Defer `--docker` to P2B**: mark it as a known Open item in both `01-knowledge-layer.md` and `03-gadgetron-web.md`, and remove the strikethrough from `penny.md` (replace with a "not yet implemented" note). This is the safest option for not breaking `§1.1` before the flag is re-specified.
 
-The PM must make a decision and update both `01-knowledge-layer.md §1.1` and `kairos.md §1` before TDD starts.
+The PM must make a decision and update both `01-knowledge-layer.md §1.1` and `penny.md §1` before TDD starts.
 
 ---
 
@@ -128,23 +128,23 @@ The PM must make a decision and update both `01-knowledge-layer.md §1.1` and `k
 
 Appendix C lists as a pre-merge gate:
 
-> `docs/manual/web.md` written and cross-linked from `docs/manual/kairos.md §5` and `docs/manual/README.md`
+> `docs/manual/web.md` written and cross-linked from `docs/manual/penny.md §5` and `docs/manual/README.md`
 
-`docs/manual/web.md` does not currently exist. `docs/manual/README.md` does not have an entry for it (the table ends at `kairos.md`). The §22 checklist items are the minimum viable content for this page — they describe the manual QA flow — but the page itself needs to exist as a proper manual document, not just a checklist embedded in the design doc.
+`docs/manual/web.md` does not currently exist. `docs/manual/README.md` does not have an entry for it (the table ends at `penny.md`). The §22 checklist items are the minimum viable content for this page — they describe the manual QA flow — but the page itself needs to exist as a proper manual document, not just a checklist embedded in the design doc.
 
 This is a blocker because:
 1. The pre-merge gate cannot be satisfied by a checklist in the design doc — it must be a standalone manual page.
 2. `docs/manual/README.md` has no entry for the Web UI at all, leaving a gap for any operator who consults the manual index.
-3. `kairos.md §5` ("첫 대화") cross-references `/web` extensively but has no `연관 문서` link to a `web.md` equivalent.
+3. `penny.md §5` ("첫 대화") cross-references `/web` extensively but has no `연관 문서` link to a `web.md` equivalent.
 
 **Fix**:
 
-1. Create `docs/manual/web.md` as a stub (minimum: title, status, the §22 manual QA checklist, and a "see also" link to `kairos.md`). This unblocks the pre-merge gate check.
+1. Create `docs/manual/web.md` as a stub (minimum: title, status, the §22 manual QA checklist, and a "see also" link to `penny.md`). This unblocks the pre-merge gate check.
 2. Add a row to `docs/manual/README.md`:
 
    | `web.md` | Gadgetron Web UI: browser setup, API key configuration, model selection, troubleshooting |
 
-3. Add `docs/manual/web.md` to the `연관 문서` table in `kairos.md`.
+3. Add `docs/manual/web.md` to the `연관 문서` table in `penny.md`.
 
 This is a doc-authoring task for the PM or ux-interface-lead; it does not require implementation to proceed. The stub can be written now.
 
@@ -263,7 +263,7 @@ Confirm with security-compliance-lead that no required dep (assistant-ui, shiki,
 
 ### DX-W-NB6 — `gadgetron doctor` has no check for `/web` availability
 
-**Section**: Not mentioned in `03-gadgetron-web.md`; relevant to `docs/manual/kairos.md §1` flow
+**Section**: Not mentioned in `03-gadgetron-web.md`; relevant to `docs/manual/penny.md §1` flow
 
 **Issue**: `gadgetron doctor` (Phase 1, `docs/manual/README.md`) checks config, database, and provider reachability. After Phase 2A, a natural check for the Web UI would be: is `/web/` returning 200? Is the title `<title>Gadgetron`? This would close the loop on the ADR-P2A-04 Verification item 2 ("curl http://localhost:8080/web/ returns HTML 200 and the `<title>` contains 'Gadgetron'").
 
@@ -272,7 +272,7 @@ Currently, if an operator builds with `--no-default-features` by accident and th
 **Recommended fix**: Add a Phase 2A `gadgetron doctor` check:
 
 ```
-[ok] Web UI: http://localhost:8080/web → 200 (title: Gadgetron Kairos)
+[ok] Web UI: http://localhost:8080/web → 200 (title: Gadgetron Penny)
 ```
 
 or if headless:
@@ -313,18 +313,18 @@ If assistant-ui has not yet stabilized these APIs, escalate to Open item #7 stat
 ### DX-W-N1 — Terminology inconsistency: "Gadgetron Web UI" vs "gadgetron-web" vs "/web"
 
 **Occurrence**: Throughout the doc, three terms are used interchangeably for the same concept:
-- "Gadgetron Web UI" (§18, §23 comments, kairos.md)
+- "Gadgetron Web UI" (§18, §23 comments, penny.md)
 - "gadgetron-web" (§1, §2, crate name)
 - "/web" (the URL mount point)
 
-The doc header, `kairos.md §4`, and `docs/manual/README.md` use all three in proximity. For a user reading the troubleshooting section, "gadgetron-web is not serving" vs "the Web UI is not available" vs "GET /web returns 404" all mean different things to diagnose.
+The doc header, `penny.md §4`, and `docs/manual/README.md` use all three in proximity. For a user reading the troubleshooting section, "gadgetron-web is not serving" vs "the Web UI is not available" vs "GET /web returns 404" all mean different things to diagnose.
 
 Proposal: Adopt the following conventions:
 - **"`gadgetron-web`"** — always refers to the Rust crate
 - **"Gadgetron Web UI"** or **"the Web UI"** — the user-facing product (what users open in a browser)
 - **"`/web`"** — the URL path exclusively, always in code font
 
-Apply consistently in §17, §18, §20, §22, and kairos.md.
+Apply consistently in §17, §18, §20, §22, and penny.md.
 
 ---
 
@@ -376,9 +376,9 @@ Proposal: Split the test file into `web_ui_enabled.rs` (requires feature) and `w
 
 ---
 
-### DX-W-N5 — `kairos.md` "변경 이력" (changelog) entry missing for 2026-04-14 OpenWebUI removal
+### DX-W-N5 — `penny.md` "변경 이력" (changelog) entry missing for 2026-04-14 OpenWebUI removal
 
-**Occurrence**: `docs/manual/kairos.md` bottom "변경 이력" section
+**Occurrence**: `docs/manual/penny.md` bottom "변경 이력" section
 
 The changelog only has a `2026-04-13 — v3 매뉴얼 초안` entry. The 2026-04-14 session made material changes: Docker prerequisite note rewritten, §5 (첫 대화) steps rewritten to use gadgetron-web, `--docker` flag status changed. These changes should have a changelog entry like:
 
@@ -397,11 +397,11 @@ The following gaps were found during the manual cross-reference check:
 |---|---|---|
 | `docs/manual/web.md` does not exist but is referenced in §22, Appendix C, and is a pre-merge gate | `03-gadgetron-web.md §22`, `Appendix C` | Blocker (DX-W-B4) |
 | `docs/manual/README.md` has no entry for `web.md` | `docs/manual/README.md` | Blocker (DX-W-B4) |
-| `kairos.md` "연관 문서" table has no link to `web.md` | `docs/manual/kairos.md` (bottom) | Blocker (DX-W-B4) |
-| `--docker` flag behavior unresolved between `01-knowledge-layer.md §1.1` and `kairos.md §1` | Both | Blocker (DX-W-B3) |
+| `penny.md` "연관 문서" table has no link to `web.md` | `docs/manual/penny.md` (bottom) | Blocker (DX-W-B4) |
+| `--docker` flag behavior unresolved between `01-knowledge-layer.md §1.1` and `penny.md §1` | Both | Blocker (DX-W-B3) |
 | `docs/manual/installation.md` does not yet have a "Headless build" section despite §20 and M-W4 referencing it | `docs/manual/installation.md` | Blocker (DX-W-B2) |
 | `00-overview.md §8` threat model still has the notice "to be rewritten in `03-gadgetron-web.md`" — the §21 STRIDE content in this doc supersedes it but the supersede cross-link in `00-overview.md` header does not yet name `03-gadgetron-web.md §21` | `docs/design/phase2/00-overview.md` header | Non-blocker |
-| `gadgetron doctor` has no `/web` availability check; ADR-P2A-04 Verification item 2 is a manual `curl` check with no automation path | `docs/manual/kairos.md §1`, ADR-P2A-04 | Non-blocker (DX-W-NB6) |
+| `gadgetron doctor` has no `/web` availability check; ADR-P2A-04 Verification item 2 is a manual `curl` check with no automation path | `docs/manual/penny.md §1`, ADR-P2A-04 | Non-blocker (DX-W-NB6) |
 
 ---
 
@@ -427,8 +427,8 @@ Items #1, #2, #3, #4, #5, #7, #9 are not DX-blocking — they are UX, performanc
 |---|---|---|
 | DX-W-B1 | Add 3 missing error rows to §17: cold-start no-key, empty save, empty model list | PM / ux-interface-lead |
 | DX-W-B2 | Fix §20 headless build command and create `docs/manual/installation.md` "Headless build" section | PM + chief-architect (feature flag topology) |
-| DX-W-B3 | Resolve `--docker` flag status; update `01-knowledge-layer.md §1.1` stdout contract and `kairos.md §1` | PM (requires user decision on `--docker` fate) |
-| DX-W-B4 | Create `docs/manual/web.md` stub; add to `docs/manual/README.md`; link from `kairos.md` | PM / ux-interface-lead |
+| DX-W-B3 | Resolve `--docker` flag status; update `01-knowledge-layer.md §1.1` stdout contract and `penny.md §1` | PM (requires user decision on `--docker` fate) |
+| DX-W-B4 | Create `docs/manual/web.md` stub; add to `docs/manual/README.md`; link from `penny.md` | PM / ux-interface-lead |
 
 ### Should fix before first code PR lands (Non-blockers)
 
@@ -439,7 +439,7 @@ Items #1, #2, #3, #4, #5, #7, #9 are not DX-blocking — they are UX, performanc
 | DX-W-NB3 | Add runtime warning for fallback UI being served; add troubleshooting row | PM |
 | DX-W-NB4 | Specify `enabled = false` router behavior in §18 | PM |
 | DX-W-NB5 | Add `--ignore-scripts` to `build.rs` `npm ci` call | Implementer (post-security-lead confirm) |
-| DX-W-NB6 | Track `gadgetron doctor` web check as §24 Open item; stub in `kairos.md` troubleshooting | PM |
+| DX-W-NB6 | Track `gadgetron doctor` web check as §24 Open item; stub in `penny.md` troubleshooting | PM |
 | DX-W-NB7 | Pin `@assistant-ui/react` version; confirm API surface; update Open item #6 to resolved | PM (before TDD) |
 
 ### Optional polish (Nits)
@@ -450,7 +450,7 @@ Items #1, #2, #3, #4, #5, #7, #9 are not DX-blocking — they are UX, performanc
 | DX-W-N2 | Improve build.rs panic messages for `npm run build` → missing `web/out/` case | Implementer |
 | DX-W-N3 | Spec save-confirmation "Saved." toast in §12 | PM |
 | DX-W-N4 | Clarify CI `rust-headless` job scope re: `web_ui` test file | PM |
-| DX-W-N5 | Add 2026-04-14 changelog entry to `kairos.md` | PM |
+| DX-W-N5 | Add 2026-04-14 changelog entry to `penny.md` | PM |
 
 ---
 

@@ -1,11 +1,11 @@
-//! `KairosProvider` — the `LlmProvider` impl that routes
-//! `/v1/chat/completions?model=kairos` to `ClaudeCodeSession`.
+//! `PennyProvider` — the `LlmProvider` impl that routes
+//! `/v1/chat/completions?model=penny` to `ClaudeCodeSession`.
 //!
-//! Spec: `docs/design/phase2/02-kairos-agent.md §4 + §11`.
+//! Spec: `docs/design/phase2/02-penny-agent.md §4 + §11`.
 //!
 //! # What this module does
 //!
-//! - Implements `gadgetron_core::provider::LlmProvider` so Kairos
+//! - Implements `gadgetron_core::provider::LlmProvider` so Penny
 //!   sits alongside OpenAI/Anthropic/vLLM/Ollama in the router's
 //!   provider map.
 //! - `chat_stream` is the hot path — constructs a `ClaudeCodeSession`
@@ -13,7 +13,7 @@
 //! - `chat` (non-streaming) aggregates the `chat_stream` output into
 //!   a single `ChatResponse`. The gateway uses this for clients that
 //!   do not pass `stream: true`.
-//! - `models` returns a single `ModelInfo { id: "kairos", .. }` so
+//! - `models` returns a single `ModelInfo { id: "penny", .. }` so
 //!   clients can discover the model via `/v1/models`.
 //! - `health` is a best-effort readiness check — currently just
 //!   verifies the configured `claude` binary is reachable via
@@ -25,7 +25,7 @@
 //! Claude Code is NOT an HTTP provider — it's a local subprocess
 //! spawned per request with stdio pipes. None of the existing
 //! `gadgetron-provider` impls (openai, anthropic, etc.) fit the
-//! shape, so Kairos is a dedicated crate with a dedicated provider
+//! shape, so Penny is a dedicated crate with a dedicated provider
 //! impl that bypasses HTTP entirely.
 
 use std::pin::Pin;
@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use gadgetron_core::agent::config::AgentConfig;
 use gadgetron_core::audit::{NoopToolAuditEventSink, ToolAuditEventSink};
-use gadgetron_core::error::{GadgetronError, KairosErrorKind, Result};
+use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::{Content, Message, Role};
 use gadgetron_core::provider::{
     ChatChunk, ChatRequest, ChatResponse, Choice, LlmProvider, ModelInfo, Usage,
@@ -45,24 +45,24 @@ use crate::registry::McpToolRegistry;
 use crate::session::ClaudeCodeSession;
 use crate::session_store::SessionStore;
 
-/// The Kairos `LlmProvider`.
+/// The Penny `LlmProvider`.
 ///
 /// Holds the operator-facing `AgentConfig` (binary path, brain mode,
 /// timeout), a frozen `McpToolRegistry` from which every request
 /// derives its `--allowed-tools` list, and an `Arc<dyn ToolAuditEventSink>`
 /// that receives `ToolCallCompleted` events on each tool-use boundary
 /// (ADR-P2A-06 Implementation status addendum item 1).
-pub struct KairosProvider {
+pub struct PennyProvider {
     config: Arc<AgentConfig>,
     registry: Arc<McpToolRegistry>,
     audit_sink: Arc<dyn ToolAuditEventSink>,
     session_store: Arc<SessionStore>,
-    /// Kairos workspace (see `crate::home`). When `None`, sessions spawn
+    /// Penny workspace (see `crate::home`). When `None`, sessions spawn
     /// with the caller's current working directory — which means Claude
     /// Code's per-project auto-memory will key to that cwd. Production
     /// `register_with_router` always supplies one so the cwd pins to
-    /// `~/.gadgetron/kairos/work/`.
-    kairos_home: Option<Arc<crate::home::KairosHome>>,
+    /// `~/.gadgetron/penny/work/`.
+    penny_home: Option<Arc<crate::home::PennyHome>>,
     /// Absolute path to the `gadgetron.toml` used by `gadgetron serve`.
     /// Passed into the MCP config JSON so the `gadgetron mcp serve`
     /// grandchild Claude Code spawns can locate `[knowledge]` / `[agent]`
@@ -71,7 +71,7 @@ pub struct KairosProvider {
     config_path: Option<std::path::PathBuf>,
 }
 
-impl KairosProvider {
+impl PennyProvider {
     /// Construct a provider with an explicit audit sink. The caller
     /// (`gadgetron-cli::main` in production, tests in unit/integration
     /// context) chooses whether to plug in a real writer
@@ -86,21 +86,21 @@ impl KairosProvider {
         Self::new_with_home(config, registry, audit_sink, session_store, None)
     }
 
-    /// Variant that accepts an isolated Kairos home. Production wiring
+    /// Variant that accepts an isolated Penny home. Production wiring
     /// (`register_with_router`) calls this.
     pub fn new_with_home(
         config: Arc<AgentConfig>,
         registry: Arc<McpToolRegistry>,
         audit_sink: Arc<dyn ToolAuditEventSink>,
         session_store: Arc<SessionStore>,
-        kairos_home: Option<Arc<crate::home::KairosHome>>,
+        penny_home: Option<Arc<crate::home::PennyHome>>,
     ) -> Self {
         Self::new_with_home_and_config_path(
             config,
             registry,
             audit_sink,
             session_store,
-            kairos_home,
+            penny_home,
             None,
         )
     }
@@ -113,7 +113,7 @@ impl KairosProvider {
         registry: Arc<McpToolRegistry>,
         audit_sink: Arc<dyn ToolAuditEventSink>,
         session_store: Arc<SessionStore>,
-        kairos_home: Option<Arc<crate::home::KairosHome>>,
+        penny_home: Option<Arc<crate::home::PennyHome>>,
         config_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
@@ -121,7 +121,7 @@ impl KairosProvider {
             registry,
             audit_sink,
             session_store,
-            kairos_home,
+            penny_home,
             config_path,
         }
     }
@@ -138,11 +138,11 @@ impl KairosProvider {
 
     /// The model id this provider exposes via `/v1/models` and
     /// matches on when routing.
-    pub const MODEL_ID: &'static str = "kairos";
+    pub const MODEL_ID: &'static str = "penny";
 }
 
 #[async_trait]
-impl LlmProvider for KairosProvider {
+impl LlmProvider for PennyProvider {
     /// Non-streaming chat completion. Delegates to `chat_stream` and
     /// aggregates the chunks into a single `ChatResponse`. Content is
     /// concatenated from every `delta.content` in order; the finish
@@ -170,7 +170,7 @@ impl LlmProvider for KairosProvider {
         }
 
         Ok(ChatResponse {
-            id: last_id.unwrap_or_else(|| "chatcmpl-kairos-unknown".to_string()),
+            id: last_id.unwrap_or_else(|| "chatcmpl-penny-unknown".to_string()),
             object: "chat.completion".to_string(),
             created,
             model,
@@ -206,13 +206,13 @@ impl LlmProvider for KairosProvider {
             tool_metadata,
             self.audit_sink.clone(),
             Some(self.session_store.clone()),
-            self.kairos_home.clone(),
+            self.penny_home.clone(),
             self.config_path.clone(),
         );
         session.run()
     }
 
-    /// Returns a single-element catalog advertising the `kairos`
+    /// Returns a single-element catalog advertising the `penny`
     /// model. The `owned_by` field is fixed to `"gadgetron"` — the
     /// OpenAI-compat clients render it in the model picker.
     async fn models(&self) -> Result<Vec<ModelInfo>> {
@@ -228,7 +228,7 @@ impl LlmProvider for KairosProvider {
     }
 
     /// Readiness check: verify the configured `claude` binary is
-    /// present on disk. Returns `Err(KairosErrorKind::NotInstalled)`
+    /// present on disk. Returns `Err(PennyErrorKind::NotInstalled)`
     /// if it's missing. Does NOT actually invoke the binary — that
     /// would add startup latency and could fail spuriously under
     /// network contention for OAuth checks.
@@ -241,8 +241,8 @@ impl LlmProvider for KairosProvider {
         // the error.
         let path = std::path::Path::new(&self.config.binary);
         if path.is_absolute() && !path.exists() {
-            return Err(GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            return Err(GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 message: format!("configured claude binary not found: {}", self.config.binary),
             });
         }
@@ -250,14 +250,14 @@ impl LlmProvider for KairosProvider {
     }
 }
 
-/// Register `KairosProvider` in a router provider map under the
-/// model id `"kairos"`. Called once at startup from `gadgetron-cli::main`
+/// Register `PennyProvider` in a router provider map under the
+/// model id `"penny"`. Called once at startup from `gadgetron-cli::main`
 /// after `AgentConfig` is loaded and the `McpToolRegistry` is frozen.
 ///
-/// Prepares Kairos's persistent workspace at `~/.gadgetron/kairos/`
+/// Prepares Penny's persistent workspace at `~/.gadgetron/penny/`
 /// (idempotent) as a side-effect — every subsequent chat request spawns
-/// Claude Code with its cwd pinned to `…/kairos/work/`, so auto-memory
-/// maps to a Kairos-scoped slug instead of whatever directory the server
+/// Claude Code with its cwd pinned to `…/penny/work/`, so auto-memory
+/// maps to a Penny-scoped slug instead of whatever directory the server
 /// happens to be running from. A failure to prepare the workspace logs
 /// a warning and registers the provider anyway; sessions fall back to
 /// the server's current cwd (per-project memory may then replay).
@@ -269,16 +269,16 @@ pub fn register_with_router(
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
     config_path: Option<std::path::PathBuf>,
 ) {
-    let kairos_home = match std::env::var("HOME") {
+    let penny_home = match std::env::var("HOME") {
         Ok(real_home) => {
             let root = crate::home::default_home_root(std::path::Path::new(&real_home));
-            match crate::home::prepare_kairos_home(&root) {
+            match crate::home::prepare_penny_home(&root) {
                 Ok(home) => Some(Arc::new(home)),
                 Err(e) => {
                     tracing::warn!(
-                        target: "kairos_home",
+                        target: "penny_home",
                         error = ?e,
-                        "failed to prepare Kairos workspace — Claude Code will run with the operator's repo as cwd (per-project memory may replay)"
+                        "failed to prepare Penny workspace — Claude Code will run with the operator's repo as cwd (per-project memory may replay)"
                     );
                     None
                 }
@@ -286,22 +286,22 @@ pub fn register_with_router(
         }
         Err(_) => {
             tracing::warn!(
-                target: "kairos_home",
-                "HOME env var not set — cannot locate Kairos workspace"
+                target: "penny_home",
+                "HOME env var not set — cannot locate Penny workspace"
             );
             None
         }
     };
-    let provider = KairosProvider::new_with_home_and_config_path(
+    let provider = PennyProvider::new_with_home_and_config_path(
         config,
         registry,
         audit_sink,
         session_store,
-        kairos_home,
+        penny_home,
         config_path,
     );
     providers.insert(
-        KairosProvider::MODEL_ID.to_string(),
+        PennyProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,
     );
 }
@@ -321,7 +321,7 @@ mod tests {
 
     fn test_request() -> ChatRequest {
         ChatRequest {
-            model: "kairos".to_string(),
+            model: "penny".to_string(),
             messages: vec![Message::user("hi")],
             temperature: None,
             max_tokens: None,
@@ -334,33 +334,33 @@ mod tests {
     }
 
     #[test]
-    fn model_id_is_kairos() {
-        assert_eq!(KairosProvider::MODEL_ID, "kairos");
+    fn model_id_is_penny() {
+        assert_eq!(PennyProvider::MODEL_ID, "penny");
     }
 
     #[tokio::test]
-    async fn models_returns_single_kairos_entry() {
+    async fn models_returns_single_penny_entry() {
         let cfg = Arc::new(AgentConfig::default());
-        let provider = KairosProvider::new_without_audit(cfg, empty_registry());
+        let provider = PennyProvider::new_without_audit(cfg, empty_registry());
         let models = provider.models().await.unwrap();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "kairos");
+        assert_eq!(models[0].id, "penny");
         assert_eq!(models[0].object, "model");
         assert_eq!(models[0].owned_by, "gadgetron");
     }
 
     #[test]
-    fn name_is_kairos() {
+    fn name_is_penny() {
         let cfg = Arc::new(AgentConfig::default());
-        let provider = KairosProvider::new_without_audit(cfg, empty_registry());
-        assert_eq!(provider.name(), "kairos");
+        let provider = PennyProvider::new_without_audit(cfg, empty_registry());
+        assert_eq!(provider.name(), "penny");
     }
 
     // Helper that constructs a provider with explicit audit sink — used
     // by the register_with_router regression test.
-    fn with_sink(cfg: Arc<AgentConfig>) -> KairosProvider {
+    fn with_sink(cfg: Arc<AgentConfig>) -> PennyProvider {
         let store = Arc::new(SessionStore::new(86_400, 10_000));
-        KairosProvider::new(
+        PennyProvider::new(
             cfg,
             empty_registry(),
             Arc::new(NoopToolAuditEventSink),
@@ -372,10 +372,10 @@ mod tests {
     async fn health_fails_on_missing_absolute_binary() {
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude".into();
-        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
+        let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry());
         match provider.health().await {
-            Err(GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            Err(GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 ..
             }) => {}
             other => panic!("expected NotInstalled, got {other:?}"),
@@ -386,10 +386,10 @@ mod tests {
     async fn health_passes_for_bare_command_even_if_missing() {
         // Bare command path → no stat check, so health returns Ok.
         // A real missing binary surfaces later on `spawn()` via
-        // `KairosErrorKind::NotInstalled`.
+        // `PennyErrorKind::NotInstalled`.
         let mut cfg = AgentConfig::default();
         cfg.binary = "nonexistent-bare-claude-command-xyz".into();
-        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
+        let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry());
         assert!(provider.health().await.is_ok());
     }
 
@@ -397,13 +397,13 @@ mod tests {
     async fn chat_stream_yields_error_when_binary_missing() {
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude".into();
-        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
+        let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry());
         let mut stream = provider.chat_stream(test_request());
         let first = stream.next().await.expect("must yield one item");
         let err = first.expect_err("must be error");
         match err {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 ..
             } => {}
             other => panic!("wrong variant: {other:?}"),
@@ -418,12 +418,12 @@ mod tests {
         // asserting the call returns Err with NotInstalled.
         let mut cfg = AgentConfig::default();
         cfg.binary = "/definitely/does/not/exist/claude".into();
-        let provider = KairosProvider::new_without_audit(Arc::new(cfg), empty_registry());
+        let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry());
         let result = provider.chat(test_request()).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 ..
             } => {}
             other => panic!("wrong variant: {other:?}"),
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn register_with_router_inserts_under_kairos_key() {
+    fn register_with_router_inserts_under_penny_key() {
         let cfg = Arc::new(AgentConfig::default());
         let reg = empty_registry();
         let sink: Arc<dyn ToolAuditEventSink> = Arc::new(NoopToolAuditEventSink);
@@ -440,8 +440,8 @@ mod tests {
             std::collections::HashMap::new();
         register_with_router(cfg, reg, sink, store, &mut map, None);
         assert_eq!(map.len(), 1);
-        assert!(map.contains_key("kairos"));
-        assert_eq!(map.get("kairos").unwrap().name(), "kairos");
+        assert!(map.contains_key("penny"));
+        assert_eq!(map.get("penny").unwrap().name(), "penny");
         // also exercise the with_sink helper so it doesn't warn as unused
         let _ = with_sink(Arc::new(AgentConfig::default()));
     }

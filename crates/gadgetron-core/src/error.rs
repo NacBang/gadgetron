@@ -39,15 +39,15 @@ impl fmt::Display for NodeErrorKind {
     }
 }
 
-/// Kairos agent subsystem error kinds (Phase 2).
+/// Penny agent subsystem error kinds (Phase 2).
 ///
 /// Nested variant pattern matching `DatabaseErrorKind` and `NodeErrorKind`
 /// — avoids a flat explosion of `GadgetronError` variants.
 ///
-/// Corresponds to `GadgetronError::Kairos { kind, message }`. HTTP dispatch
+/// Corresponds to `GadgetronError::Penny { kind, message }`. HTTP dispatch
 /// is handled centrally; see `GadgetronError::http_status_code`.
 ///
-/// # Subprocess kinds (P2A, 02-kairos-agent.md v4)
+/// # Subprocess kinds (P2A, 02-penny-agent.md v4)
 /// - `NotInstalled`, `SpawnFailed`, `AgentError`, `Timeout`
 ///
 /// # MCP tool dispatch kinds (P2A, 04-mcp-tool-registry.md v2 §10.1)
@@ -59,20 +59,20 @@ impl fmt::Display for NodeErrorKind {
 ///   compatibility of the enum surface.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KairosErrorKind {
+pub enum PennyErrorKind {
     /// Claude Code binary not found on PATH (`which` failed). HTTP 503.
     NotInstalled,
     /// Claude Code subprocess spawn failed for reasons other than binary
     /// absence (permissions, resource limits, etc.). HTTP 503.
     SpawnFailed { reason: String },
     /// Claude Code subprocess exited with non-zero status mid-stream.
-    /// `stderr_redacted` is ALREADY redacted via `gadgetron_kairos::redact_stderr`
+    /// `stderr_redacted` is ALREADY redacted via `gadgetron_penny::redact_stderr`
     /// per 00-overview §8 M2. HTTP 500.
     AgentError {
         exit_code: i32,
         stderr_redacted: String,
     },
-    /// Subprocess wallclock exceeded `kairos.request_timeout_secs`. HTTP 504.
+    /// Subprocess wallclock exceeded `penny.request_timeout_secs`. HTTP 504.
     Timeout { seconds: u64 },
 
     // ---- MCP tool dispatch kinds (04 v2 §10.1) ----
@@ -105,25 +105,25 @@ pub enum KairosErrorKind {
     // ---- Native session kinds (ADR-P2A-06 addendum item 7 / §5.2.9) ----
     /// Client requested `conversation_id` but the `SessionStore` has no
     /// entry under `session_mode = NativeOnly`. Client must start a new
-    /// conversation with a fresh id. HTTP 404, `kairos_session_not_found`.
+    /// conversation with a fresh id. HTTP 404, `penny_session_not_found`.
     SessionNotFound { conversation_id: String },
     /// Two concurrent requests for the same `conversation_id`; the second
     /// request timed out waiting for the per-session mutex. Client should
     /// retry after the first request completes. HTTP 429,
-    /// `kairos_session_concurrent`.
+    /// `penny_session_concurrent`.
     SessionConcurrent { conversation_id: String },
     /// Claude Code reported that the session UUID is unrecognized (for
     /// example after a manual jsonl delete), or the jsonl file is
     /// corrupted. The store entry is removed; the next request with the
     /// same `conversation_id` falls through the first-turn branch and
-    /// creates a fresh session. HTTP 500, `kairos_session_corrupted`.
+    /// creates a fresh session. HTTP 500, `penny_session_corrupted`.
     SessionCorrupted {
         conversation_id: String,
         reason: String,
     },
 }
 
-impl fmt::Display for KairosErrorKind {
+impl fmt::Display for PennyErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotInstalled => write!(f, "not_installed"),
@@ -230,12 +230,12 @@ pub enum GadgetronError {
         message: String,
     },
 
-    /// Kairos agent subsystem error (Phase 2). Subprocess spawn/run failures,
+    /// Penny agent subsystem error (Phase 2). Subprocess spawn/run failures,
     /// timeouts. Never contains raw subprocess stderr — only post-redaction
-    /// content per M2. Added by `docs/design/phase2/02-kairos-agent.md` §9.
-    #[error("Kairos error ({kind}): {message}")]
-    Kairos {
-        kind: KairosErrorKind,
+    /// content per M2. Added by `docs/design/phase2/02-penny-agent.md` §9.
+    #[error("Penny error ({kind}): {message}")]
+    Penny {
+        kind: PennyErrorKind,
         message: String,
     },
 
@@ -275,20 +275,20 @@ impl GadgetronError {
                 NodeErrorKind::InvalidMigProfile => "node_invalid_mig_profile",
                 _ => "node_error",
             },
-            Self::Kairos { kind, .. } => match kind {
-                KairosErrorKind::NotInstalled => "kairos_not_installed",
-                KairosErrorKind::SpawnFailed { .. } => "kairos_spawn_failed",
-                KairosErrorKind::AgentError { .. } => "kairos_agent_error",
-                KairosErrorKind::Timeout { .. } => "kairos_timeout",
-                KairosErrorKind::ToolUnknown { .. } => "kairos_tool_unknown",
-                KairosErrorKind::ToolDenied { .. } => "kairos_tool_denied",
-                KairosErrorKind::ToolRateLimited { .. } => "kairos_tool_rate_limited",
-                KairosErrorKind::ToolApprovalTimeout { .. } => "kairos_tool_approval_timeout",
-                KairosErrorKind::ToolInvalidArgs { .. } => "kairos_tool_invalid_args",
-                KairosErrorKind::ToolExecution { .. } => "kairos_tool_execution",
-                KairosErrorKind::SessionNotFound { .. } => "kairos_session_not_found",
-                KairosErrorKind::SessionConcurrent { .. } => "kairos_session_concurrent",
-                KairosErrorKind::SessionCorrupted { .. } => "kairos_session_corrupted",
+            Self::Penny { kind, .. } => match kind {
+                PennyErrorKind::NotInstalled => "penny_not_installed",
+                PennyErrorKind::SpawnFailed { .. } => "penny_spawn_failed",
+                PennyErrorKind::AgentError { .. } => "penny_agent_error",
+                PennyErrorKind::Timeout { .. } => "penny_timeout",
+                PennyErrorKind::ToolUnknown { .. } => "penny_tool_unknown",
+                PennyErrorKind::ToolDenied { .. } => "penny_tool_denied",
+                PennyErrorKind::ToolRateLimited { .. } => "penny_tool_rate_limited",
+                PennyErrorKind::ToolApprovalTimeout { .. } => "penny_tool_approval_timeout",
+                PennyErrorKind::ToolInvalidArgs { .. } => "penny_tool_invalid_args",
+                PennyErrorKind::ToolExecution { .. } => "penny_tool_execution",
+                PennyErrorKind::SessionNotFound { .. } => "penny_session_not_found",
+                PennyErrorKind::SessionConcurrent { .. } => "penny_session_concurrent",
+                PennyErrorKind::SessionCorrupted { .. } => "penny_session_corrupted",
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => "wiki_invalid_path",
@@ -304,7 +304,7 @@ impl GadgetronError {
     /// Returns a user-visible error message.
     ///
     /// Return type changed from `&'static str` to `String` in Phase 2 to
-    /// support runtime interpolation of values (Kairos timeout seconds,
+    /// support runtime interpolation of values (Penny timeout seconds,
     /// Wiki page size limits, etc.). Existing variants `.to_string()` their
     /// static literals — zero semantic change for callers.
     pub fn error_message(&self) -> String {
@@ -321,39 +321,39 @@ impl GadgetronError {
             Self::HotSwapFailed(_) => "Model hot-swap failed. The previous model version remains active.".to_string(),
             Self::Database { .. } => "A database error occurred. Check PostgreSQL connectivity and disk space.".to_string(),
             Self::Node { .. } => "A node-level error occurred. Check GPU availability and NVML driver status.".to_string(),
-            // Kairos variants — NEVER includes the `stderr_redacted` field content.
-            // Enforced by test `kairos_agent_error_message_does_not_contain_stderr`.
+            // Penny variants — NEVER includes the `stderr_redacted` field content.
+            // Enforced by test `penny_agent_error_message_does_not_contain_stderr`.
             //
             // Tool-dispatch variants (04 v2 §10.1) are safe to interpolate
             // because their content comes from the MCP server, not subprocess
             // stderr. Provider authors are instructed to keep reason strings
             // operator-readable and non-sensitive.
-            Self::Kairos { kind, .. } => match kind {
-                KairosErrorKind::NotInstalled =>
-                    "The Kairos assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`.".to_string(),
-                KairosErrorKind::SpawnFailed { .. } =>
-                    "The Kairos assistant is not available. The server could not start the Claude Code process. Run `gadgetron serve` with `RUST_LOG=gadgetron_kairos=debug` for spawn diagnostics, or check `journalctl -u gadgetron` for spawn errors.".to_string(),
-                KairosErrorKind::AgentError { .. } =>
-                    "The Kairos assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator.".to_string(),
-                KairosErrorKind::Timeout { seconds } =>
-                    format!("The Kairos assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request."),
-                KairosErrorKind::ToolUnknown { name } =>
+            Self::Penny { kind, .. } => match kind {
+                PennyErrorKind::NotInstalled =>
+                    "The Penny assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`.".to_string(),
+                PennyErrorKind::SpawnFailed { .. } =>
+                    "The Penny assistant is not available. The server could not start the Claude Code process. Run `gadgetron serve` with `RUST_LOG=gadgetron_penny=debug` for spawn diagnostics, or check `journalctl -u gadgetron` for spawn errors.".to_string(),
+                PennyErrorKind::AgentError { .. } =>
+                    "The Penny assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator.".to_string(),
+                PennyErrorKind::Timeout { seconds } =>
+                    format!("The Penny assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request."),
+                PennyErrorKind::ToolUnknown { name } =>
                     format!("The agent requested tool {name:?}, which is not registered on this server. This usually means a version mismatch between the agent's cached tool manifest and the live MCP registry. Restart `gadgetron serve` to refresh the manifest."),
-                KairosErrorKind::ToolDenied { reason } =>
+                PennyErrorKind::ToolDenied { reason } =>
                     format!("A tool call was denied by policy: {reason}. Check your `[agent.tools.*]` configuration in `gadgetron.toml`."),
-                KairosErrorKind::ToolRateLimited { tool, remaining, limit } =>
+                PennyErrorKind::ToolRateLimited { tool, remaining, limit } =>
                     format!("Tool {tool:?} is rate-limited ({remaining}/{limit} calls remaining this hour). Wait and retry, or increase `[agent.tools.destructive].max_per_hour` in `gadgetron.toml`."),
-                KairosErrorKind::ToolApprovalTimeout { secs } =>
+                PennyErrorKind::ToolApprovalTimeout { secs } =>
                     format!("A tool call required user approval but none arrived within {secs} seconds. (Approval flow is not functional in Phase 2A — this error indicates a misconfiguration or a forward-compat P2B path.)"),
-                KairosErrorKind::ToolInvalidArgs { reason } =>
+                PennyErrorKind::ToolInvalidArgs { reason } =>
                     format!("The agent passed invalid arguments to a tool: {reason}. This is an agent-side bug; try rephrasing your request."),
-                KairosErrorKind::ToolExecution { reason } =>
+                PennyErrorKind::ToolExecution { reason } =>
                     format!("A tool failed to execute: {reason}. Check server logs for details."),
-                KairosErrorKind::SessionNotFound { conversation_id } =>
+                PennyErrorKind::SessionNotFound { conversation_id } =>
                     format!("Conversation {conversation_id:?} is not known to this server. The conversation may have expired or been evicted from the session store. Start a new conversation without a conversation_id, or with a fresh id."),
-                KairosErrorKind::SessionConcurrent { conversation_id } =>
+                PennyErrorKind::SessionConcurrent { conversation_id } =>
                     format!("Conversation {conversation_id:?} is already serving another request. Wait for the current turn to finish, then retry."),
-                KairosErrorKind::SessionCorrupted { conversation_id, .. } =>
+                PennyErrorKind::SessionCorrupted { conversation_id, .. } =>
                     format!("Conversation {conversation_id:?} session state is unreadable. The session has been discarded; retry with the same conversation_id to start a fresh session."),
             },
             // Wiki variants — always safe to surface to clients
@@ -389,14 +389,14 @@ impl GadgetronError {
             Self::HotSwapFailed(_) => "api_error",
             Self::Database { .. } => "server_error",
             Self::Node { .. } => "server_error",
-            Self::Kairos { kind, .. } => match kind {
+            Self::Penny { kind, .. } => match kind {
                 // Tool-dispatch variants get OpenAI-taxonomy-aligned types so
                 // SDK clients can `match` on the shape (invalid_request_error
                 // vs permission_error vs quota_error).
-                KairosErrorKind::ToolDenied { .. } => "permission_error",
-                KairosErrorKind::ToolInvalidArgs { .. } => "invalid_request_error",
-                KairosErrorKind::ToolRateLimited { .. } => "quota_error",
-                KairosErrorKind::ToolApprovalTimeout { .. } => "server_error",
+                PennyErrorKind::ToolDenied { .. } => "permission_error",
+                PennyErrorKind::ToolInvalidArgs { .. } => "invalid_request_error",
+                PennyErrorKind::ToolRateLimited { .. } => "quota_error",
+                PennyErrorKind::ToolApprovalTimeout { .. } => "server_error",
                 _ => "server_error",
             },
             Self::Wiki { kind, .. } => match kind {
@@ -431,19 +431,19 @@ impl GadgetronError {
                 NodeErrorKind::InvalidMigProfile => 400,
                 _ => 500,
             },
-            Self::Kairos { kind, .. } => match kind {
-                KairosErrorKind::NotInstalled | KairosErrorKind::SpawnFailed { .. } => 503,
-                KairosErrorKind::AgentError { .. } => 500,
-                KairosErrorKind::Timeout { .. } => 504,
-                KairosErrorKind::ToolUnknown { .. } => 500,
-                KairosErrorKind::ToolDenied { .. } => 403,
-                KairosErrorKind::ToolRateLimited { .. } => 429,
-                KairosErrorKind::ToolApprovalTimeout { .. } => 504,
-                KairosErrorKind::ToolInvalidArgs { .. } => 400,
-                KairosErrorKind::ToolExecution { .. } => 500,
-                KairosErrorKind::SessionNotFound { .. } => 404,
-                KairosErrorKind::SessionConcurrent { .. } => 429,
-                KairosErrorKind::SessionCorrupted { .. } => 500,
+            Self::Penny { kind, .. } => match kind {
+                PennyErrorKind::NotInstalled | PennyErrorKind::SpawnFailed { .. } => 503,
+                PennyErrorKind::AgentError { .. } => 500,
+                PennyErrorKind::Timeout { .. } => 504,
+                PennyErrorKind::ToolUnknown { .. } => 500,
+                PennyErrorKind::ToolDenied { .. } => 403,
+                PennyErrorKind::ToolRateLimited { .. } => 429,
+                PennyErrorKind::ToolApprovalTimeout { .. } => 504,
+                PennyErrorKind::ToolInvalidArgs { .. } => 400,
+                PennyErrorKind::ToolExecution { .. } => 500,
+                PennyErrorKind::SessionNotFound { .. } => 404,
+                PennyErrorKind::SessionConcurrent { .. } => 429,
+                PennyErrorKind::SessionCorrupted { .. } => 500,
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => 400,
@@ -464,10 +464,10 @@ pub type Result<T> = std::result::Result<T, GadgetronError>;
 // ---------------------------------------------------------------------------
 
 /// Maps an `McpError` from the MCP dispatch boundary into a
-/// `GadgetronError::Kairos` variant so the gateway can render HTTP + SSE
+/// `GadgetronError::Penny` variant so the gateway can render HTTP + SSE
 /// responses through the single user-facing error path per D-13.
 ///
-/// Called at the `KairosProvider::chat_stream` seam when a tool call
+/// Called at the `PennyProvider::chat_stream` seam when a tool call
 /// returns `Err`. The `message` field is a generic one-line summary; the
 /// `kind` holds the structured payload that `error_message()`,
 /// `http_status_code()`, and `error_code()` consume.
@@ -475,24 +475,24 @@ impl From<crate::agent::tools::McpError> for GadgetronError {
     fn from(err: crate::agent::tools::McpError) -> Self {
         use crate::agent::tools::McpError;
         let kind = match err {
-            McpError::UnknownTool(name) => KairosErrorKind::ToolUnknown { name },
-            McpError::Denied { reason } => KairosErrorKind::ToolDenied { reason },
+            McpError::UnknownTool(name) => PennyErrorKind::ToolUnknown { name },
+            McpError::Denied { reason } => PennyErrorKind::ToolDenied { reason },
             McpError::RateLimited {
                 tool,
                 remaining,
                 limit,
-            } => KairosErrorKind::ToolRateLimited {
+            } => PennyErrorKind::ToolRateLimited {
                 tool,
                 remaining,
                 limit,
             },
-            McpError::ApprovalTimeout { secs } => KairosErrorKind::ToolApprovalTimeout { secs },
-            McpError::InvalidArgs(reason) => KairosErrorKind::ToolInvalidArgs { reason },
-            McpError::Execution(reason) => KairosErrorKind::ToolExecution { reason },
+            McpError::ApprovalTimeout { secs } => PennyErrorKind::ToolApprovalTimeout { secs },
+            McpError::InvalidArgs(reason) => PennyErrorKind::ToolInvalidArgs { reason },
+            McpError::Execution(reason) => PennyErrorKind::ToolExecution { reason },
         };
         // Generic summary — the kind carries the structured detail.
         let message = format!("tool dispatch error: {kind}");
-        GadgetronError::Kairos { kind, message }
+        GadgetronError::Penny { kind, message }
     }
 }
 
@@ -562,41 +562,41 @@ mod tests {
             .error_code(),
             "node_invalid_mig_profile"
         );
-        // Phase 2: Kairos kinds
+        // Phase 2: Penny kinds
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 message: "".into(),
             }
             .error_code(),
-            "kairos_not_installed"
+            "penny_not_installed"
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::SpawnFailed { reason: "x".into() },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::SpawnFailed { reason: "x".into() },
                 message: "".into(),
             }
             .error_code(),
-            "kairos_spawn_failed"
+            "penny_spawn_failed"
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::AgentError {
+            GadgetronError::Penny {
+                kind: PennyErrorKind::AgentError {
                     exit_code: 42,
                     stderr_redacted: "[REDACTED:anthropic_key]".into()
                 },
                 message: "".into(),
             }
             .error_code(),
-            "kairos_agent_error"
+            "penny_agent_error"
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::Timeout { seconds: 300 },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::Timeout { seconds: 300 },
                 message: "".into(),
             }
             .error_code(),
-            "kairos_timeout"
+            "penny_timeout"
         );
         // Phase 2: Wiki kinds
         assert_eq!(
@@ -698,19 +698,19 @@ mod tests {
             GadgetronError::Routing("".into()).error_type(),
             "server_error"
         );
-        // Phase 2: Kairos subprocess kinds = server_error
+        // Phase 2: Penny subprocess kinds = server_error
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 message: "".into(),
             }
             .error_type(),
             "server_error"
         );
-        // Phase 2: Kairos tool-dispatch kinds (04 v2 §10.1)
+        // Phase 2: Penny tool-dispatch kinds (04 v2 §10.1)
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolDenied {
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolDenied {
                     reason: "never".into()
                 },
                 message: "".into(),
@@ -719,8 +719,8 @@ mod tests {
             "permission_error"
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolInvalidArgs {
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolInvalidArgs {
                     reason: "missing path".into()
                 },
                 message: "".into(),
@@ -729,8 +729,8 @@ mod tests {
             "invalid_request_error"
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolRateLimited {
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolRateLimited {
                     tool: "x".into(),
                     remaining: 0,
                     limit: 3
@@ -741,8 +741,8 @@ mod tests {
             "quota_error"
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::ToolUnknown { name: "x".into() },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::ToolUnknown { name: "x".into() },
                 message: "".into(),
             }
             .error_type(),
@@ -848,26 +848,26 @@ mod tests {
             .http_status_code(),
             500
         );
-        // Phase 2: Kairos HTTP codes
+        // Phase 2: Penny HTTP codes
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 message: "".into(),
             }
             .http_status_code(),
             503
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::SpawnFailed { reason: "".into() },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::SpawnFailed { reason: "".into() },
                 message: "".into(),
             }
             .http_status_code(),
             503
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::AgentError {
+            GadgetronError::Penny {
+                kind: PennyErrorKind::AgentError {
                     exit_code: 1,
                     stderr_redacted: "".into()
                 },
@@ -877,8 +877,8 @@ mod tests {
             500
         );
         assert_eq!(
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::Timeout { seconds: 300 },
+            GadgetronError::Penny {
+                kind: PennyErrorKind::Timeout { seconds: 300 },
                 message: "".into(),
             }
             .http_status_code(),
@@ -997,8 +997,8 @@ mod tests {
                 message: "".into(),
             },
             // Phase 2 additions
-            GadgetronError::Kairos {
-                kind: KairosErrorKind::NotInstalled,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::NotInstalled,
                 message: "".into(),
             },
             GadgetronError::Wiki {
@@ -1011,13 +1011,13 @@ mod tests {
         assert_eq!(variants.len(), 14);
     }
 
-    /// M2 enforcement — 02-kairos-agent.md §9: the user-visible error message
+    /// M2 enforcement — 02-penny-agent.md §9: the user-visible error message
     /// must NEVER contain the `stderr_redacted` field content, regardless of
     /// what that field holds. Generic string only.
     #[test]
-    fn kairos_agent_error_message_does_not_contain_stderr() {
-        let err = GadgetronError::Kairos {
-            kind: KairosErrorKind::AgentError {
+    fn penny_agent_error_message_does_not_contain_stderr() {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::AgentError {
                 exit_code: 42,
                 stderr_redacted: "sensitive-token-leaked-here-abc123def456".into(),
             },
@@ -1033,15 +1033,15 @@ mod tests {
             "user-visible message must NOT echo stderr_redacted content, got: {msg}"
         );
         // And the message must still be meaningful
-        assert!(msg.contains("Kairos") || msg.contains("assistant"));
+        assert!(msg.contains("Penny") || msg.contains("assistant"));
     }
 
-    /// Kairos Timeout message must interpolate the configured timeout seconds
+    /// Penny Timeout message must interpolate the configured timeout seconds
     /// so the user knows what the limit actually was.
     #[test]
-    fn kairos_timeout_message_interpolates_seconds() {
-        let err = GadgetronError::Kairos {
-            kind: KairosErrorKind::Timeout { seconds: 300 },
+    fn penny_timeout_message_interpolates_seconds() {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::Timeout { seconds: 300 },
             message: "".into(),
         };
         assert!(err.error_message().contains("300"));
@@ -1079,17 +1079,17 @@ mod tests {
         assert!(msg.contains("pem_private_key"));
     }
 
-    /// `KairosErrorKind::Display` produces the expected snake_case token.
+    /// `PennyErrorKind::Display` produces the expected snake_case token.
     #[test]
-    fn kairos_error_kind_display() {
+    fn penny_error_kind_display() {
         assert_eq!(
-            format!("{}", KairosErrorKind::NotInstalled),
+            format!("{}", PennyErrorKind::NotInstalled),
             "not_installed"
         );
         assert_eq!(
             format!(
                 "{}",
-                KairosErrorKind::SpawnFailed {
+                PennyErrorKind::SpawnFailed {
                     reason: "ignored".into()
                 }
             ),
@@ -1098,7 +1098,7 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                KairosErrorKind::AgentError {
+                PennyErrorKind::AgentError {
                     exit_code: 1,
                     stderr_redacted: "ignored".into()
                 }
@@ -1106,7 +1106,7 @@ mod tests {
             "agent_error"
         );
         assert_eq!(
-            format!("{}", KairosErrorKind::Timeout { seconds: 300 }),
+            format!("{}", PennyErrorKind::Timeout { seconds: 300 }),
             "timeout"
         );
     }
@@ -1117,7 +1117,7 @@ mod tests {
     fn from_mcp_unknown_tool_maps_to_tool_unknown_kind() {
         let err: GadgetronError =
             crate::agent::tools::McpError::UnknownTool("wiki.ghost".into()).into();
-        assert_eq!(err.error_code(), "kairos_tool_unknown");
+        assert_eq!(err.error_code(), "penny_tool_unknown");
         assert_eq!(err.http_status_code(), 500);
         let msg = err.error_message();
         assert!(msg.contains("wiki.ghost"), "msg: {msg}");
@@ -1129,7 +1129,7 @@ mod tests {
             reason: "tool disabled by policy (never)".into(),
         }
         .into();
-        assert_eq!(err.error_code(), "kairos_tool_denied");
+        assert_eq!(err.error_code(), "penny_tool_denied");
         assert_eq!(err.http_status_code(), 403);
         assert!(err.error_message().contains("disabled by policy"));
     }
@@ -1142,7 +1142,7 @@ mod tests {
             limit: 3,
         }
         .into();
-        assert_eq!(err.error_code(), "kairos_tool_rate_limited");
+        assert_eq!(err.error_code(), "penny_tool_rate_limited");
         assert_eq!(err.http_status_code(), 429);
         let msg = err.error_message();
         assert!(msg.contains("infra.deploy_model"));
@@ -1153,7 +1153,7 @@ mod tests {
     fn from_mcp_approval_timeout_maps_to_504() {
         let err: GadgetronError =
             crate::agent::tools::McpError::ApprovalTimeout { secs: 60 }.into();
-        assert_eq!(err.error_code(), "kairos_tool_approval_timeout");
+        assert_eq!(err.error_code(), "penny_tool_approval_timeout");
         assert_eq!(err.http_status_code(), 504);
         assert!(err.error_message().contains("60"));
     }
@@ -1162,7 +1162,7 @@ mod tests {
     fn from_mcp_invalid_args_maps_to_400() {
         let err: GadgetronError =
             crate::agent::tools::McpError::InvalidArgs("missing field 'path'".into()).into();
-        assert_eq!(err.error_code(), "kairos_tool_invalid_args");
+        assert_eq!(err.error_code(), "penny_tool_invalid_args");
         assert_eq!(err.http_status_code(), 400);
         assert!(err.error_message().contains("missing field"));
     }
@@ -1171,25 +1171,25 @@ mod tests {
     fn from_mcp_execution_maps_to_500() {
         let err: GadgetronError =
             crate::agent::tools::McpError::Execution("SearXNG returned 502".into()).into();
-        assert_eq!(err.error_code(), "kairos_tool_execution");
+        assert_eq!(err.error_code(), "penny_tool_execution");
         assert_eq!(err.http_status_code(), 500);
         assert!(err.error_message().contains("SearXNG"));
     }
 
     #[test]
-    fn kairos_tool_variants_display_tokens() {
+    fn penny_tool_variants_display_tokens() {
         assert_eq!(
-            format!("{}", KairosErrorKind::ToolUnknown { name: "x".into() }),
+            format!("{}", PennyErrorKind::ToolUnknown { name: "x".into() }),
             "tool_unknown"
         );
         assert_eq!(
-            format!("{}", KairosErrorKind::ToolDenied { reason: "x".into() }),
+            format!("{}", PennyErrorKind::ToolDenied { reason: "x".into() }),
             "tool_denied"
         );
         assert_eq!(
             format!(
                 "{}",
-                KairosErrorKind::ToolRateLimited {
+                PennyErrorKind::ToolRateLimited {
                     tool: "x".into(),
                     remaining: 0,
                     limit: 3
@@ -1198,18 +1198,18 @@ mod tests {
             "tool_rate_limited"
         );
         assert_eq!(
-            format!("{}", KairosErrorKind::ToolApprovalTimeout { secs: 60 }),
+            format!("{}", PennyErrorKind::ToolApprovalTimeout { secs: 60 }),
             "tool_approval_timeout"
         );
         assert_eq!(
             format!(
                 "{}",
-                KairosErrorKind::ToolInvalidArgs { reason: "x".into() }
+                PennyErrorKind::ToolInvalidArgs { reason: "x".into() }
             ),
             "tool_invalid_args"
         );
         assert_eq!(
-            format!("{}", KairosErrorKind::ToolExecution { reason: "x".into() }),
+            format!("{}", PennyErrorKind::ToolExecution { reason: "x".into() }),
             "tool_execution"
         );
     }

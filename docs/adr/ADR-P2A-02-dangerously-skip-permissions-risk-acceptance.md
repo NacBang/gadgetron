@@ -5,7 +5,7 @@
 | **Status** | ACCEPTED (P2A single-user scope only) (v3 — Round 2 review addressed) |
 | **Date** | 2026-04-13 |
 | **Author** | security-compliance-lead |
-| **Parent docs** | `docs/design/phase2/00-overview.md` v2 §8 M8; `docs/design/phase2/02-kairos-agent.md` v2 §15.3 |
+| **Parent docs** | `docs/design/phase2/00-overview.md` v2 §8 M8; `docs/design/phase2/02-penny-agent.md` v2 §15.3 |
 | **Conditioned on** | ADR-P2A-01 PASS — this acceptance is invalidated if `--allowed-tools` enforcement fails |
 | **P2C gate** | `[P2C-SECURITY-REOPEN]` — this acceptance explicitly does NOT extend to multi-user deployments |
 
@@ -24,7 +24,7 @@ mode, interactive confirmation is structurally incompatible because there is no 
 `--dangerously-skip-permissions` is the explicit opt-in that tells Claude Code to
 execute tool calls without confirmation in `-p` mode.
 
-Kairos requires `-p` mode because:
+Penny requires `-p` mode because:
 1. Claude Code is a subprocess spawned per HTTP request, with stdin/stdout piped to
    the Gadgetron process (no TTY)
 2. The response must stream back to the client in real time (no human in the loop)
@@ -85,14 +85,14 @@ a multi-user or cloud deployment:
 
 | Factor | P2A single-user | P2C multi-user |
 |---|---|---|
-| Who can trigger a Kairos request | The user themselves | Any authenticated tenant |
+| Who can trigger a Penny request | The user themselves | Any authenticated tenant |
 | Who owns the wiki | The user | A shared or per-tenant store |
 | Worst case of wiki corruption | User corrupts their own data | Tenant A corrupts Tenant B's data |
 | Credential exposure surface | User's own credentials (already accessible on their machine) | Cross-tenant credential leakage |
 | Interactive confirmation alternative | User is the operator; consent is expressed at config time | Per-request confirmation or RBAC required |
 | Audit log custody | User's own machine | Shared or operator-controlled |
 
-The user has already consented to this risk by setting `[kairos]` section in
+The user has already consented to this risk by setting `[penny]` section in
 `gadgetron.toml` and running `gadgetron serve`. The act of configuration is the
 consent mechanism.
 
@@ -121,12 +121,12 @@ loss. Accepted because:
 - Git history (`wiki_write` auto-commits) provides recovery capability
 - The user can audit and revert via standard `git` commands
 
-Source: `docs/design/phase2/02-kairos-agent.md` v2 §15.3 STRIDE table,
+Source: `docs/design/phase2/02-penny-agent.md` v2 §15.3 STRIDE table,
 `ClaudeCodeSession` row.
 
 **Accepted risk B — no interactive confirmation**
 Claude Code will execute tool calls without prompting the user. Accepted because:
-- The user has consented at configuration time by enabling the `[kairos]` section
+- The user has consented at configuration time by enabling the `[penny]` section
 - P2A is single-user; the user is simultaneously operator and data subject
 - `--allowed-tools` restricts the callable surface to five knowledge tools
   (conditioned on ADR-P2A-01 PASS)
@@ -148,7 +148,7 @@ enforcement holds:
   (these tools are not on the whitelist and the binary blocks them)
 
 If ADR-P2A-01 returns FAIL, this acceptance is INVALID and must be reopened with
-the sandbox fallback plan in place before any kairos implementation proceeds.
+the sandbox fallback plan in place before any penny implementation proceeds.
 
 ### Conditionality
 
@@ -183,7 +183,7 @@ P2C MUST NOT inherit this ADR. A new ADR is required before P2C multi-user
 implementation begins.
 
 This tag also appears at the relevant locations in:
-- `docs/design/phase2/02-kairos-agent.md` v2 §15.3 (security lead review F2)
+- `docs/design/phase2/02-penny-agent.md` v2 §15.3 (security lead review F2)
 - `docs/design/phase2/00-overview.md` v2 §8 M8
 
 ---
@@ -196,19 +196,19 @@ This tag also appears at the relevant locations in:
   as a non-configurable argument (not exposed in `gadgetron.toml`)
 - The flag is not user-configurable because removing it breaks the non-interactive
   pipeline. If a user wants interactive confirmation, they run `claude` directly
-- `config.rs::KairosConfig` does NOT have a `dangerously_skip_permissions: bool`
+- `config.rs::PennyConfig` does NOT have a `dangerously_skip_permissions: bool`
   field; the flag is hard-coded in spawn logic
 - The test `build_claude_command_has_expected_args` in `spawn.rs` verifies
   `--dangerously-skip-permissions` is present in every subprocess invocation
 
 ### For documentation
 
-- `docs/manual/kairos.md` (P2A pre-merge requirement) MUST include a plain-language
+- `docs/manual/penny.md` (P2A pre-merge requirement) MUST include a plain-language
   note explaining what `--dangerously-skip-permissions` means and why it is used
 - The note must NOT be buried — it should appear in the security/privacy section
   alongside the Disclosure 2 (SearXNG) text required by ADR-P2A-03
 - The note must not alarm users unnecessarily but must be factually accurate:
-  Kairos runs in automated mode and executes tool calls without asking per-call;
+  Penny runs in automated mode and executes tool calls without asking per-call;
   this is why the wiki and web search tools are the only ones available
 
 ### For future phases
@@ -216,9 +216,9 @@ This tag also appears at the relevant locations in:
 - P2B (stream resumption, session history) must not expand `--allowed-tools` scope
   without a new security review
 - P2C (multi-user) requires a full threat model re-evaluation and a new ADR before
-  any multi-user kairos feature is implemented
+  any multi-user penny feature is implemented
 - If Claude Code removes or changes `--dangerously-skip-permissions` in a future
-  CLI version, the kairos spawn logic must be updated and this ADR reviewed
+  CLI version, the penny spawn logic must be updated and this ADR reviewed
 
 ---
 
@@ -256,10 +256,10 @@ level is de facto limited by their filesystem ACLs.
 | `docs/design/phase2/00-overview.md` v2 | §8 M8 | Primary source for P2A risk acceptance |
 | `docs/design/phase2/00-overview.md` v2 | §8 STRIDE table, Claude Code row | E (escalate) = High baseline threat |
 | `docs/design/phase2/00-overview.md` v2 | §8 deployment modes | P2A vs P2C deployment context |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §15.3 STRIDE table | Per-component threat analysis |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §15.4 mitigations table | M8 maps to this ADR |
-| `docs/design/phase2/02-kairos-agent.md` v2 | §16 ADR table | Listed as impl blocker |
-| `docs/design/phase2/02-kairos-agent.md` v2 | `spawn.rs` build function | Hard-coded flag location |
+| `docs/design/phase2/02-penny-agent.md` v2 | §15.3 STRIDE table | Per-component threat analysis |
+| `docs/design/phase2/02-penny-agent.md` v2 | §15.4 mitigations table | M8 maps to this ADR |
+| `docs/design/phase2/02-penny-agent.md` v2 | §16 ADR table | Listed as impl blocker |
+| `docs/design/phase2/02-penny-agent.md` v2 | `spawn.rs` build function | Hard-coded flag location |
 | `docs/adr/ADR-P2A-01-allowed-tools-enforcement.md` | Part 1 | Conditioned PASS required for this acceptance |
 | `docs/design/phase2/00-overview.md` v2 | §10 Compliance (GDPR/SOC2) | P2C GDPR obligations listed |
 | OWASP LLM Top 10 | LLM02 — Insecure Output Handling | Secondary category |

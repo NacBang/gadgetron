@@ -2,7 +2,7 @@
 //!
 //! P2A (Path 1) introduces a tool-level audit stream distinct from the
 //! request-level `AuditEntry` in `gadgetron-xaas`. The types live here so
-//! every consumer (the sink producer in `gadgetron-kairos`, the concrete
+//! every consumer (the sink producer in `gadgetron-penny`, the concrete
 //! writer in `gadgetron-xaas`, and the composition root in
 //! `gadgetron-cli`) can depend on a common vocabulary without pulling in
 //! the persistence layer's dependencies.

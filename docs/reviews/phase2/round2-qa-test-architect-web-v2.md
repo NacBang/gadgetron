@@ -67,12 +67,12 @@ Note: The §4 pseudocode comment says `// or more cleanly, the build_logic modul
 
 ---
 
-### QA-W-B4 — E2E steps 8 (kairos model list) + 9 (XSS non-execution)
+### QA-W-B4 — E2E steps 8 (penny model list) + 9 (XSS non-execution)
 
 **Status**: VERIFIED RESOLVED (with one structural observation — see QA-W-NB4 below)
 
 Evidence:
-- §22 E2E table row 8: `curl -sf -H "Authorization: Bearer $GADGETRON_TEST_KEY" http://localhost:8080/v1/models | jq -e '.data | map(.id) | index("kairos")'` → exit 0. This is the exact `jq` expression required by v1. The ADR-P2A-04 §Verification item 6 (kairos model list) is now automated.
+- §22 E2E table row 8: `curl -sf -H "Authorization: Bearer $GADGETRON_TEST_KEY" http://localhost:8080/v1/models | jq -e '.data | map(.id) | index("penny")'` → exit 0. This is the exact `jq` expression required by v1. The ADR-P2A-04 §Verification item 6 (penny model list) is now automated.
 - §22 E2E table row 9 specifies a Vitest+happy-dom test in `app/chat-xss.test.tsx` with three assertions: (a) no `alert` fires, (b) sanitizer output does not contain `<script>` tag, (c) DOM has `&lt;script&gt;` as text. ADR-P2A-04 §Verification item 4 (XSS rendered as text) is now automated.
 - The e2e script is gated on `GADGETRON_E2E_WEB=1` + `GADGETRON_TEST_KEY=gad_live_...` (§22 E2E preamble). The v1 nit QA-W-N4 is resolved — `GADGETRON_E2E_WEB: "1"` appears in the CI job `env:` block (§23).
 
@@ -204,7 +204,7 @@ Additionally, `app/chat-xss.test.tsx` is absent from the §2 file tree. The `app
 | QA-W-B1 | Blocker (v1) | — | VERIFIED RESOLVED | Vitest + happy-dom + vi.stubGlobal fully specified in §9, §22, §23 |
 | QA-W-B2 | Blocker (v1) | — | VERIFIED RESOLVED | path_strategy() 16-candidate + ProptestConfig::with_cases(1024) + PROPTEST_SEED=42 |
 | QA-W-B3 | Blocker (v1) | — | VERIFIED RESOLVED | BuildEnv + build_logic::run() extracted; 5-test plan in §22 |
-| QA-W-B4 | Blocker (v1) | — | VERIFIED RESOLVED | E2E step 8 (kairos jq check) + step 9 (XSS Vitest test) present |
+| QA-W-B4 | Blocker (v1) | — | VERIFIED RESOLVED | E2E step 8 (penny jq check) + step 9 (XSS Vitest test) present |
 | QA-W-B5 | Blocker (v1) | — | VERIFIED RESOLVED | bundle_size.rs + du CI gate + open item #2 closed at 3 MB |
 | QA-W-DET1 | Determinism (v1) | — | VERIFIED RESOLVED | data-testid="gadgetron-root" in layout.tsx + §10 + §22 integration test |
 | QA-W-DET2 | Determinism (v1) | — | VERIFIED RESOLVED | E2E step 5 uses dynamic grep-oP hash extraction |

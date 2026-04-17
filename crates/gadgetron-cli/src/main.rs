@@ -128,7 +128,7 @@ enum Commands {
     /// Run the Model Context Protocol (MCP) stdio server.
     ///
     /// This subcommand is invoked by Claude Code as a child process via
-    /// the `--mcp-config` JSON file that Kairos writes per request.
+    /// the `--mcp-config` JSON file that Penny writes per request.
     /// It reads JSON-RPC 2.0 messages from stdin, dispatches tool calls
     /// through the registered `McpToolProvider`s (currently just
     /// `KnowledgeToolProvider` from `[knowledge]`), and writes responses
@@ -136,7 +136,7 @@ enum Commands {
     ///
     /// Not intended for direct operator use. `gadgetron serve` is the
     /// user-facing entry point; the mcp serve subcommand exists only as
-    /// the child-side of the Kairos subprocess bridge.
+    /// the child-side of the Penny subprocess bridge.
     Mcp {
         #[command(subcommand)]
         command: McpCmd,
@@ -273,7 +273,7 @@ async fn main() -> Result<()> {
 ///
 /// Reads the `[knowledge]` section from the config file, builds a
 /// `KnowledgeToolProvider`, freezes it into an `McpToolRegistry`, and
-/// calls `gadgetron_kairos::serve_stdio(registry)` to handle the
+/// calls `gadgetron_penny::serve_stdio(registry)` to handle the
 /// JSON-RPC 2.0 message loop on stdin/stdout.
 ///
 /// Exits cleanly on stdin EOF. Errors in config loading or provider
@@ -309,7 +309,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
 
     // Resolve relative `wiki_path` against the config file's directory
     // so the MCP grandchild process finds the wiki regardless of its
-    // inherited cwd (Claude Code pins cwd to Kairos's neutral workdir).
+    // inherited cwd (Claude Code pins cwd to Penny's neutral workdir).
     if let Some(config_dir) = config_path.parent() {
         knowledge_cfg.resolve_relative_paths(config_dir);
     }
@@ -332,7 +332,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
         .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
 
-    let mut builder = gadgetron_kairos::McpToolRegistryBuilder::new();
+    let mut builder = gadgetron_penny::McpToolRegistryBuilder::new();
     builder
         .register(Arc::new(provider))
         .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
@@ -342,7 +342,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     let registry = Arc::new(builder.freeze(&agent_cfg));
 
     // Drive the stdio loop until EOF.
-    gadgetron_kairos::serve_stdio(registry)
+    gadgetron_penny::serve_stdio(registry)
         .await
         .map_err(|e| anyhow::anyhow!("mcp stdio server error: {e}"))?;
 
@@ -843,14 +843,14 @@ async fn serve(
         .map(|(k, v)| (k.clone(), Arc::clone(v) as Arc<dyn LlmProvider>))
         .collect();
 
-    // Step 9a (P2A Kairos wiring): if `[knowledge]` is present in the
+    // Step 9a (P2A Penny wiring): if `[knowledge]` is present in the
     // config file, construct the knowledge layer, register it as a
     // KnowledgeToolProvider in an McpToolRegistry, and register
-    // KairosProvider as the `"kairos"` entry in the router map.
+    // PennyProvider as the `"penny"` entry in the router map.
     //
     // Silent skip when `[knowledge]` is absent — operators who have not
-    // configured the knowledge layer get a normal non-Kairos server.
-    register_kairos_if_configured(&config_path, &config, &mut providers_for_router);
+    // configured the knowledge layer get a normal non-Penny server.
+    register_penny_if_configured(&config_path, &config, &mut providers_for_router);
 
     // Step 10: Build the LLM router.
     let metrics_store = Arc::new(MetricsStore::new());
@@ -969,23 +969,23 @@ async fn serve(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Phase 2A Kairos registration — P2A Step 22
+// Phase 2A Penny registration — P2A Step 22
 // ---------------------------------------------------------------------------
 
-/// Build the knowledge layer + McpToolRegistry + KairosProvider and
-/// register it into the router's provider map under the `"kairos"`
+/// Build the knowledge layer + McpToolRegistry + PennyProvider and
+/// register it into the router's provider map under the `"penny"`
 /// key, IF the operator has a `[knowledge]` section in their
 /// gadgetron.toml.
 ///
-/// Silent no-op when `[knowledge]` is absent — non-Kairos operators
+/// Silent no-op when `[knowledge]` is absent — non-Penny operators
 /// get a standard server with no knowledge-layer behavior.
 ///
 /// Errors (malformed `[knowledge]`, wiki init failure, etc.) are
-/// surfaced via `tracing::error!` and the Kairos provider is skipped,
+/// surfaced via `tracing::error!` and the Penny provider is skipped,
 /// NOT propagated — the server still starts with the other providers.
 /// This matches the Phase 1 tolerance model for individual provider
 /// construction failures.
-fn register_kairos_if_configured(
+fn register_penny_if_configured(
     config_path: &std::path::Path,
     app_config: &AppConfig,
     providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
@@ -1004,7 +1004,7 @@ fn register_kairos_if_configured(
             tracing::error!(
                 path = %config_path.display(),
                 error = %e,
-                "kairos: cannot re-read config file; skipping knowledge layer"
+                "penny: cannot re-read config file; skipping knowledge layer"
             );
             return;
         }
@@ -1014,13 +1014,13 @@ fn register_kairos_if_configured(
         match gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw) {
             Ok(Some(cfg)) => cfg,
             Ok(None) => {
-                // No [knowledge] section → kairos not available.
+                // No [knowledge] section → penny not available.
                 return;
             }
             Err(e) => {
                 tracing::error!(
                     error = %e,
-                    "kairos: [knowledge] section malformed; skipping"
+                    "penny: [knowledge] section malformed; skipping"
                 );
                 return;
             }
@@ -1028,13 +1028,13 @@ fn register_kairos_if_configured(
 
     // Resolve relative wiki_path against the config file's directory so
     // the in-process knowledge provider uses the same path as the MCP
-    // grandchild (spawn.rs pins cwd to Kairos workdir).
+    // grandchild (spawn.rs pins cwd to Penny workdir).
     if let Some(config_dir) = config_path.parent() {
         knowledge_cfg.resolve_relative_paths(config_dir);
     }
 
     if let Err(e) = knowledge_cfg.validate() {
-        tracing::error!(error = %e, "kairos: [knowledge] validation failed; skipping");
+        tracing::error!(error = %e, "penny: [knowledge] validation failed; skipping");
         return;
     }
 
@@ -1042,7 +1042,7 @@ fn register_kairos_if_configured(
     let provider = match gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!(error = ?e, "kairos: KnowledgeToolProvider::new failed; skipping");
+            tracing::error!(error = ?e, "penny: KnowledgeToolProvider::new failed; skipping");
             return;
         }
     };
@@ -1050,14 +1050,14 @@ fn register_kairos_if_configured(
     // Freeze the registry with the single P2A provider. The `[agent]`
     // config is captured at freeze time so `dispatch()` can enforce L3
     // defense-in-depth (ADR-P2A-06 Implementation status addendum item 3).
-    let mut builder = gadgetron_kairos::McpToolRegistryBuilder::new();
+    let mut builder = gadgetron_penny::McpToolRegistryBuilder::new();
     if let Err(e) = builder.register(Arc::new(provider)) {
-        tracing::error!(error = ?e, "kairos: registry.register failed; skipping");
+        tracing::error!(error = ?e, "penny: registry.register failed; skipping");
         return;
     }
     let registry = Arc::new(builder.freeze(&app_config.agent));
 
-    // Register KairosProvider under the "kairos" model id in the
+    // Register PennyProvider under the "penny" model id in the
     // router map. The existing provider map already holds concrete
     // OpenAI/Anthropic/vLLM/etc entries; this adds one more.
     //
@@ -1065,13 +1065,13 @@ fn register_kairos_if_configured(
     // the real `ToolAuditEventWriter` lives in `gadgetron-xaas` and
     // is connected to the DB writer loop there. The composition root
     // for that wiring lands with the broader `AppState` audit plumbing;
-    // for now Kairos silently drops tool-call events when the DB is
+    // for now Penny silently drops tool-call events when the DB is
     // not configured, which preserves the previous tracing-only
     // behavior.
     let agent_cfg = Arc::new(app_config.agent.clone());
     let audit_sink: std::sync::Arc<dyn gadgetron_core::audit::ToolAuditEventSink> =
         std::sync::Arc::new(gadgetron_core::audit::NoopToolAuditEventSink);
-    let session_store = std::sync::Arc::new(gadgetron_kairos::SessionStore::new(
+    let session_store = std::sync::Arc::new(gadgetron_penny::SessionStore::new(
         agent_cfg.session_ttl_secs,
         agent_cfg.session_store_max_entries,
     ));
@@ -1083,7 +1083,7 @@ fn register_kairos_if_configured(
     let config_path_for_mcp = config_path
         .canonicalize()
         .unwrap_or_else(|_| config_path.to_path_buf());
-    gadgetron_kairos::register_with_router(
+    gadgetron_penny::register_with_router(
         agent_cfg,
         registry,
         audit_sink,
@@ -1092,9 +1092,9 @@ fn register_kairos_if_configured(
         Some(config_path_for_mcp),
     );
     tracing::info!(
-        model = "kairos",
-        "kairos: registered (KnowledgeToolProvider active; web.search = {})",
-        if providers.get("kairos").is_some() {
+        model = "penny",
+        "penny: registered (KnowledgeToolProvider active; web.search = {})",
+        if providers.get("penny").is_some() {
             "configured_via_knowledge_section"
         } else {
             "none"

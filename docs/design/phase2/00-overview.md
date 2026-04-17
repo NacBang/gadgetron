@@ -5,7 +5,7 @@
 > **Date**: 2026-04-13 (v3) · 2026-04-14 (partial supersede)
 > **Supersedes**: Draft v2 (addressed Round 0 chief-architect + Round 1.5 dx/security + Round 2 qa feedback)
 >
-> ⚠ **2026-04-15 partial supersede notice**: The canonical product framing now lives in `docs/design/ops/agentic-cluster-collaboration.md`. This document should be read as the **Phase 2A assistant-plane scope document**, not the whole product definition. Sections still mentioning legacy `[kairos]`, `gadgetron kairos init`, `key create --no-db`, or `rmcp` are historical unless explicitly updated below. OpenWebUI-related content remains superseded by `docs/process/04-decision-log.md` **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md`.
+> ⚠ **2026-04-15 partial supersede notice**: The canonical product framing now lives in `docs/design/ops/agentic-cluster-collaboration.md`. This document should be read as the **Phase 2A assistant-plane scope document**, not the whole product definition. Sections still mentioning legacy `[penny]`, `gadgetron penny init`, `key create --no-db`, or `rmcp` are historical unless explicitly updated below. OpenWebUI-related content remains superseded by `docs/process/04-decision-log.md` **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md`.
 
 ## Table of Contents
 
@@ -38,9 +38,9 @@ This document is narrower than that statement. It defines **Phase 2A's assistant
 
 | Plane | Status | Scope in this document | Primary consumers |
 |---|---|---|---|
-| **Operations Plane** | Done — Phase 1 substrate | existing gateway / quota / audit / scheduler / node capabilities that Kairos builds on | operators, API clients |
+| **Operations Plane** | Done — Phase 1 substrate | existing gateway / quota / audit / scheduler / node capabilities that Penny builds on | operators, API clients |
 | **Execution Plane** | Done — Phase 1 substrate | provider routing, deployment, scheduling, workload execution substrate | operators, SDK users |
-| **Assistant Plane** | Phase 2 target | Claude Code-backed Kairos runtime + knowledge layer + web UI chat + tool registry seam | administrators, users via Web UI chat |
+| **Assistant Plane** | Phase 2 target | Claude Code-backed Penny runtime + knowledge layer + web UI chat + tool registry seam | administrators, users via Web UI chat |
 
 The assistant plane is **not** a separate product detached from infrastructure. It is the first human-facing entry point into the broader collaboration platform.
 
@@ -69,21 +69,21 @@ This inverts a common pattern where Rust code drives a step-by-step pipeline (`f
 
 **Explicit non-goal:** we are NOT building a custom agent framework in Rust. No `context.rs` / `briefing.rs` / `memory.rs` / `dispatch.rs` with procedural logic. Those concerns belong inside the Claude Code agent loop, invoked on demand via MCP tools.
 
-### Crate seam — kairos as an `LlmProvider` (revised per chief-architect A1)
+### Crate seam — penny as an `LlmProvider` (revised per chief-architect A1)
 
-`gadgetron-kairos` does **not** introduce a new dispatch branch in `gadgetron-gateway`. Instead, it implements the existing `LlmProvider` trait from `gadgetron-core` and registers itself in the router under the name `kairos`. The gateway dispatch path is unchanged: `chat_completions_handler` → `router.chat_stream(req)` → router looks up provider by model name → kairos returns a `Pin<Box<dyn Stream<Item = Result<ChatChunk, GadgetronError>> + Send>>` that the existing `chat_chunk_to_sse` adapter in `gadgetron-gateway::sse` turns into SSE frames.
+`gadgetron-penny` does **not** introduce a new dispatch branch in `gadgetron-gateway`. Instead, it implements the existing `LlmProvider` trait from `gadgetron-core` and registers itself in the router under the name `penny`. The gateway dispatch path is unchanged: `chat_completions_handler` → `router.chat_stream(req)` → router looks up provider by model name → penny returns a `Pin<Box<dyn Stream<Item = Result<ChatChunk, GadgetronError>> + Send>>` that the existing `chat_chunk_to_sse` adapter in `gadgetron-gateway::sse` turns into SSE frames.
 
-Zero new dependencies in gateway. Zero new dispatch code. Kairos is just another provider from the router's perspective.
+Zero new dependencies in gateway. Zero new dispatch code. Penny is just another provider from the router's perspective.
 
 ### Flow
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │  Web UI (`gadgetron-web` — assistant-ui, embedded in binary)  │
-│  User opens http://localhost:8080/web ; selects "kairos"      │
+│  User opens http://localhost:8080/web ; selects "penny"      │
 └──────────────────────────────┬────────────────────────────────┘
                                │ POST /v1/chat/completions
-                               │   model="kairos", stream=true
+                               │   model="penny", stream=true
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
 │  gadgetron-gateway (unchanged)                                │
@@ -94,12 +94,12 @@ Zero new dependencies in gateway. Zero new dispatch code. Kairos is just another
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
 │  gadgetron-router (unchanged)                                 │
-│  providers["kairos"].chat_stream(req)                         │
+│  providers["penny"].chat_stream(req)                         │
 └──────────────────────────────┬────────────────────────────────┘
                                │
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  gadgetron-kairos (NEW) — impl LlmProvider                    │
+│  gadgetron-penny (NEW) — impl LlmProvider                    │
 │  Consuming `ClaudeCodeSession::run(req) -> Stream<ChatChunk>` │
 │  Builds `claude -p` command; writes MCP config tmpfile        │
 │  Spawns subprocess, feeds messages via stdin                  │
@@ -141,7 +141,7 @@ Minimum viable assistant-plane entry point. Richer operations-plane toolization 
 | Wiki MCP server | Manual JSON-RPC 2.0 stdio transport via `gadgetron mcp serve`; 4 wiki tools (list/get/search/write) + optional `web.search` |
 | Web search | SearXNG instance URL in config; single MCP tool `web.search` |
 | Claude Code subprocess | `claude -p --output-format=stream-json --mcp-config=<tmp>`; stdin = message history JSON |
-| Provider integration | `gadgetron-kairos` implements `LlmProvider`; registered in router as `"kairos"`. Gateway unchanged. |
+| Provider integration | `gadgetron-penny` implements `LlmProvider`; registered in router as `"penny"`. Gateway unchanged. |
 | Web UI | **`gadgetron-web` crate** (NEW, P2A) — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT) + Next.js + Tailwind, built to `web/dist/`, embedded in the Rust binary via `include_dir!`, mounted at `/web` by `gadgetron-gateway` under feature `web-ui`. BYOK auth: user pastes Gadgetron API key into the UI's settings page. **Supersedes prior OpenWebUI sibling-process plan (D-20260414-02).** |
 | Storage | Local filesystem only, path configurable |
 | Session | Stateless per request — OpenAI `messages` array forwarded as Claude conversation history |
@@ -171,13 +171,13 @@ Minimum viable assistant-plane entry point. Richer operations-plane toolization 
 
 ### Acceptance criteria
 1. User opens `http://localhost:8080/web` (served by `gadgetron-web`), pastes Gadgetron API key in the settings page
-2. User selects "kairos" model in the `gadgetron-web` model dropdown (populated from `/v1/models`)
+2. User selects "penny" model in the `gadgetron-web` model dropdown (populated from `/v1/models`)
 3. User sends a Korean or English message
-4. Kairos spawns `claude -p`, which uses wiki and `web.search` MCP tools as needed
+4. Penny spawns `claude -p`, which uses wiki and `web.search` MCP tools as needed
 5. Streaming response appears in `gadgetron-web` chat within 2s TTFB
 6. User can create new wiki pages via a conversational request ("이 내용을 wiki에 저장해")
 7. Wiki directory is a valid git repo with timestamped auto-commits
-8. Existing Phase 1 `/v1/chat/completions` with non-kairos models (vllm, sglang, etc.) still works unchanged
+8. Existing Phase 1 `/v1/chat/completions` with non-penny models (vllm, sglang, etc.) still works unchanged
 
 ---
 
@@ -228,7 +228,7 @@ Steps:
    # max_results = 10
    TOML
    ```
-   `gadgetron init` does not yet emit `[agent]` / `[knowledge]` for you, and trunk has no `gadgetron kairos init` subcommand. Phase 2A operators prepare the config file directly.
+   `gadgetron init` does not yet emit `[agent]` / `[knowledge]` for you, and trunk has no `gadgetron penny init` subcommand. Phase 2A operators prepare the config file directly.
 
    **2b. (Optional — SearXNG only)** If you want the `web.search` MCP tool, start a local SearXNG instance (Docker or native) and uncomment `[knowledge.search]`. `gadgetron-web` itself is served in-process by `gadgetron serve` — no compose file needed for the Web UI.
 
@@ -242,12 +242,12 @@ Steps:
    ```sh
    ./target/release/gadgetron serve --config gadgetron.toml --no-db
    ```
-   This one command serves the OpenAI-compat API on `:8080/v1`, the `gadgetron-web` UI on `:8080/web`, and the kairos provider under the hood. No sibling containers required.
+   This one command serves the OpenAI-compat API on `:8080/v1`, the `gadgetron-web` UI on `:8080/web`, and the penny provider under the hood. No sibling containers required.
 
 5. **Chat**
    - Browse to `http://localhost:8080/web`
    - Open Settings, paste the Gadgetron API key from step 3
-   - Model dropdown → pick **`kairos`**
+   - Model dropdown → pick **`penny`**
    - Type: "wiki에서 README를 찾아서 요약해"
    - Response streams in; the assistant reads the starter page via `wiki.get` MCP tool and returns a summary
 
@@ -279,17 +279,17 @@ gadgetron-knowledge/           ← leaf domain crate, no downstream deps
 ```
 
 ```
-gadgetron-kairos/              ← agent adapter crate; impl LlmProvider
+gadgetron-penny/              ← agent adapter crate; impl LlmProvider
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
-│   ├── provider.rs      # `KairosProvider: LlmProvider` — trait impl; factory function
+│   ├── provider.rs      # `PennyProvider: LlmProvider` — trait impl; factory function
 │   ├── session.rs       # `ClaudeCodeSession::run(self, req) -> impl Stream<ChatChunk>`
 │   │                    # owned, consuming — no Arc<Mutex<>> on stdin/stdout
 │   ├── stream.rs        # stream-json stdout → ChatChunk translator
 │   ├── mcp_config.rs    # write tmpfile via `tempfile` crate (0600 perms)
 │   ├── redact.rs        # `redact_stderr(raw: &str) -> String` — strip high-entropy secrets
-│   └── config.rs        # KairosConfig + toml schema
+│   └── config.rs        # PennyConfig + toml schema
 ```
 
 ### Added (NEW P2A crate per D-20260414-02)
@@ -310,30 +310,30 @@ gadgetron-web/                 ← Web UI crate, embedded static assets
 See D-20260414-02 and `docs/design/phase2/03-gadgetron-web.md` (upcoming) for Cargo.toml, build pipeline, XSS hardening, threat model, and the `web-ui` feature flag on `gadgetron-gateway`.
 
 ### Modified crates
-- `gadgetron-core` — `AppConfig` gains `[knowledge]`, `[agent]`, and `[agent.brain]` sections; legacy `[kairos]` is accepted only as a migration input; `GadgetronError` gains 2 nested variants (see §12)
+- `gadgetron-core` — `AppConfig` gains `[knowledge]`, `[agent]`, and `[agent.brain]` sections; legacy `[penny]` is accepted only as a migration input; `GadgetronError` gains 2 nested variants (see §12)
 - `gadgetron-cli` — gains `mcp serve` subcommand (stdio MCP server, delegates to `gadgetron-knowledge::mcp::serve`)
-- `gadgetron-router` — registers kairos provider by name from config (minimal wiring — same pattern as existing provider registration)
+- `gadgetron-router` — registers penny provider by name from config (minimal wiring — same pattern as existing provider registration)
 - `gadgetron-gateway` — gains Cargo feature `web-ui` (default on). When enabled, mounts `gadgetron_web::service()` under `/web` via `router.nest_service`. No new dispatch paths on `/v1/*`.
-- Workspace `Cargo.toml` — **3 new members** (`gadgetron-knowledge`, `gadgetron-kairos`, `gadgetron-web`)
+- Workspace `Cargo.toml` — **3 new members** (`gadgetron-knowledge`, `gadgetron-penny`, `gadgetron-web`)
 
 **Explicit non-change:** `gadgetron-gateway` HTTP dispatch paths on `/v1/*` are unchanged. No new handlers, no new `/v1/*` routes. The `web-ui` feature adds a *static* asset mount only.
 
 ### MCP server lifecycle (per-request, not shared)
 
-Each kairos chat request writes a fresh MCP config tmpfile and spawns `claude -p` with that config. Claude Code reads the config, spawns `gadgetron mcp serve` as its own stdio child, talks MCP over that stdio, then exits when done. The `gadgetron mcp serve` child exits when its parent (Claude Code) exits.
+Each penny chat request writes a fresh MCP config tmpfile and spawns `claude -p` with that config. Claude Code reads the config, spawns `gadgetron mcp serve` as its own stdio child, talks MCP over that stdio, then exits when done. The `gadgetron mcp serve` child exits when its parent (Claude Code) exits.
 
 This is per-request, not a shared long-lived MCP server. Reason: stdio transport is not multiplexed; one Claude Code ↔ one `gadgetron mcp serve` is a clean 1:1 relationship. A long-lived shared server would require an IPC socket + multiplexing layer, which is out of scope.
 
 ### Why two crates, not one
-- `gadgetron-knowledge` is the **knowledge layer**. It has no dependency on Claude Code, MCP consumers, or chat endpoints. It can be reused by a future non-kairos consumer (e.g., a standalone CLI `gadgetron wiki search ...`).
-- `gadgetron-kairos` is the **agent adapter**. It depends on `gadgetron-knowledge` for MCP tool names and on Claude Code as an external binary.
+- `gadgetron-knowledge` is the **knowledge layer**. It has no dependency on Claude Code, MCP consumers, or chat endpoints. It can be reused by a future non-penny consumer (e.g., a standalone CLI `gadgetron wiki search ...`).
+- `gadgetron-penny` is the **agent adapter**. It depends on `gadgetron-knowledge` for MCP tool names and on Claude Code as an external binary.
 - Separating them keeps `gadgetron-knowledge` testable in isolation.
 
 ---
 
 ## 6. Configuration Schema
 
-New sections in `gadgetron.toml`. Canonical Phase 2A config uses `[agent]` + `[agent.brain]` + `[knowledge]`. Legacy `[kairos]` is accepted only via migration and is not the recommended authoring surface.
+New sections in `gadgetron.toml`. Canonical Phase 2A config uses `[agent]` + `[agent.brain]` + `[knowledge]`. Legacy `[penny]` is accepted only via migration and is not the recommended authoring surface.
 
 ```toml
 [knowledge]
@@ -346,7 +346,7 @@ wiki_path = "./.gadgetron/wiki"
 wiki_autocommit = true
 
 # Git author for auto-commits. Default: auto-detected from user's `git config user.name/email`.
-# Fallback if git config is not set: "Kairos <kairos@gadgetron.local>" with a startup warning.
+# Fallback if git config is not set: "Penny <penny@gadgetron.local>" with a startup warning.
 # env: GADGETRON_KNOWLEDGE_WIKI_GIT_AUTHOR
 # wiki_git_author = "Your Name <you@example.com>"
 
@@ -402,7 +402,7 @@ mode = "claude_max"
 - `searxng_url` if set must be a valid URL
 - `request_timeout_secs` must be in `[10, 3600]`
 - `agent.max_concurrent_subprocesses` must be in `[1, 32]`
-- `agent.brain` must be a valid table; legacy `[kairos]` conflicts with `[agent.*]` are startup errors
+- `agent.brain` must be a valid table; legacy `[penny]` conflicts with `[agent.*]` are startup errors
 
 ---
 
@@ -467,7 +467,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 
 | Component | S (spoof) | T (tamper) | R (repudiate) | I (disclose) | D (DoS) | E (escalate) | Highest unmitigated risk |
 |---|---|---|---|---|---|---|---|
-| `gadgetron-kairos` (subprocess mgr) | Low — inherits gateway auth | Medium — MCP config tmpfile TOCTOU (see M1) | Low | **High** — stderr may contain sensitive content (see M2) | Low | Low | stderr leak into audit/HTTP response |
+| `gadgetron-penny` (subprocess mgr) | Low — inherits gateway auth | Medium — MCP config tmpfile TOCTOU (see M1) | Low | **High** — stderr may contain sensitive content (see M2) | Low | Low | stderr leak into audit/HTTP response |
 | `gadgetron-knowledge` (wiki MCP) | Low | Medium — path traversal (mitigated by M3) | Low | Medium — wiki content permanent in git | Low | Low | Symlink race or unicode normalization bypass |
 | Claude Code subprocess | N/A | **High** — prompt injection via wiki/SearXNG can cause arbitrary `wiki.write` calls | Low | **High** — model reasons over potentially hostile content | Low — SIGTERM on timeout | **High** — `--dangerously-skip-permissions` bypasses interactive confirmation | `--allowed-tools` enforcement level (see M4) |
 | SearXNG | Low | Low | Low | **High** — query history in SearXNG logs; user has no control | Medium — unavailability blocks `web.search` | Low | Query log exposure at SearXNG host |
@@ -478,16 +478,16 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 **M1 — MCP config tmpfile race (TOCTOU)**
 - **Risk**: `/tmp/gadgetron-mcp-<req>.json` is world-readable/writable; another local process could swap contents between write and Claude Code read.
 - **Mitigation**: Use the `tempfile` crate. `NamedTempFile::new_in()` creates the file in a process-owned temp directory with random name. Explicitly `chmod 0600` before writing. Close the file handle only after Claude Code is spawned with the path. This binds lifetime to the subprocess.
-- **Spec location**: `gadgetron-kairos/src/mcp_config.rs` + `02-kairos-agent.md` must show the exact `tempfile` API call.
+- **Spec location**: `gadgetron-penny/src/mcp_config.rs` + `02-penny-agent.md` must show the exact `tempfile` API call.
 
 **M2 — stderr secret leakage**
 - **Risk**: Claude Code stderr can contain OAuth refresh diagnostics, tool call arguments with wiki/search content, or fragments of ambient state. Raw stderr reaching audit log or HTTP 500 response = secret leak.
-- **Mitigation**: `gadgetron-kairos/src/redact.rs::redact_stderr(raw: &str) -> String` — strips substrings matching these patterns before any logging or error variant construction:
+- **Mitigation**: `gadgetron-penny/src/redact.rs::redact_stderr(raw: &str) -> String` — strips substrings matching these patterns before any logging or error variant construction:
   - `sk-ant-[a-zA-Z0-9_-]{40,}` (Anthropic API keys)
   - `gad_(live|test)_[a-f0-9]{32}` (Gadgetron API keys)
   - `Bearer\s+[A-Za-z0-9._-]+` (generic bearer tokens)
   - Any 20+ char high-entropy base64-ish string preceded by `token`, `secret`, `key`, `auth`
-- **Error variant shape**: `KairosErrorKind::AgentError { exit_code: i32, stderr_redacted: String }` — only the redacted form is ever stored.
+- **Error variant shape**: `PennyErrorKind::AgentError { exit_code: i32, stderr_redacted: String }` — only the redacted form is ever stored.
 - **HTTP response policy**: the HTTP 500 response body contains a generic message only; `stderr_redacted` is written to audit log but NEVER echoed to the client. Unit test enforces this.
 
 **M3 — Wiki path traversal**
@@ -506,7 +506,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 
 **M4 — `--allowed-tools` enforcement verification**
 - **Risk**: If `--allowed-tools` is advisory only (instructs the model but does not enforce at the binary level), then `--dangerously-skip-permissions` + prompt injection can cause Claude Code to invoke arbitrary tools (Read, Bash, Edit, Write), enabling credential exfiltration.
-- **Mitigation**: **BEFORE implementation starts**, verify via Claude Code docs and a behavioral test that `--allowed-tools` is enforced at tool-invocation time (i.e., the binary rejects non-whitelisted tool calls regardless of what the model outputs). This verification result must be cited in `02-kairos-agent.md` with a link to the docs and/or the test that confirmed it.
+- **Mitigation**: **BEFORE implementation starts**, verify via Claude Code docs and a behavioral test that `--allowed-tools` is enforced at tool-invocation time (i.e., the binary rejects non-whitelisted tool calls regardless of what the model outputs). This verification result must be cited in `02-penny-agent.md` with a link to the docs and/or the test that confirmed it.
 - **If enforcement cannot be confirmed**: the design adds a process-level sandbox as the actual enforcement layer — seccomp/AppArmor profile denying network egress outside allow-listed endpoints, filesystem writes restricted to `wiki_path`. This adds non-trivial Linux-only work; flag as a P2A blocker if so.
 
 **M5 — `wiki.write` content policy**
@@ -515,7 +515,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 - **Git commit message policy**: auto-commit messages are abstract — `"auto-commit: <page-name> <ISO8601 timestamp>"`. No request IDs, no user query content, no response content.
 
 **M6 — `tools_called` audit policy**
-- Audit field `tools_called: Vec<String>` records tool **names only** (`wiki.search`, `wiki.write`, `web.search`), never arguments. Arguments can contain wiki content, search queries, or PII. Detail spec (`02-kairos-agent.md`) enforces this at the struct level — `tools_called` is `Vec<String>`, not `Vec<(String, serde_json::Value)>`.
+- Audit field `tools_called: Vec<String>` records tool **names only** (`wiki.search`, `wiki.write`, `web.search`), never arguments. Arguments can contain wiki content, search queries, or PII. Detail spec (`02-penny-agent.md`) enforces this at the struct level — `tools_called` is `Vec<String>`, not `Vec<(String, serde_json::Value)>`.
 
 **M7 — SearXNG risk acceptance**
 - SearXNG proxies queries to Google/Bing/DDG/Brave. The external search engines receive the queries (though SearXNG anonymizes headers). User queries are not persisted by Gadgetron; they are persisted by SearXNG according to its own logging config.
@@ -527,7 +527,7 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
   - Prompt injection from SearXNG results or malicious wiki pages can cause `wiki.write` calls that corrupt or pollute the wiki. Worst case = wiki data integrity loss, not credential exfiltration (provided M4 holds).
   - `--dangerously-skip-permissions` removes interactive confirmation; acceptable because the user is the operator and has consented via config.
   - Audit logs stay on local filesystem; no remote log aggregation in P2A.
-- This risk acceptance is **explicitly scoped to P2A single-user**. P2C multi-user deployments MUST re-evaluate — the P2A trust model does not transfer. A `[P2C-SECURITY-REOPEN]` tag in `02-kairos-agent.md` marks each assumption that breaks for multi-user.
+- This risk acceptance is **explicitly scoped to P2A single-user**. P2C multi-user deployments MUST re-evaluate — the P2A trust model does not transfer. A `[P2C-SECURITY-REOPEN]` tag in `02-penny-agent.md` marks each assumption that breaks for multi-user.
 
 ### Deployment modes
 
@@ -540,21 +540,21 @@ This section is formal per `docs/process/03-review-rubric.md §1.5-A`.
 
 ### Audit logging (updated)
 
-Kairos extends the existing Phase 1 `AuditEntry` struct with these fields:
+Penny extends the existing Phase 1 `AuditEntry` struct with these fields:
 
 | Field | Type | Source | Purpose |
 |-------|------|--------|---------|
 | `request_id` | `String` (UUIDv4) | Gateway request middleware (existing Phase 1) | Forensic correlation with HTTP access log, tracing span, and error replay |
-| `kairos_dispatched` | `bool` | Set by router when `model == "kairos"` | Distinguishes kairos path from other providers |
+| `penny_dispatched` | `bool` | Set by router when `model == "penny"` | Distinguishes penny path from other providers |
 | `tools_called` | `Vec<String>` | Accumulated in `ClaudeCodeSession` via in-memory `Arc<Mutex<Vec<String>>>` field, written to the audit entry at session end | Post-facto review of which MCP tools a given request invoked (SOC2 CC7.2 anomaly triage) |
 | `subprocess_duration_ms` | `i64` | Measured from spawn to final stream close | Performance and load analysis |
 | `subprocess_exit_code` | `Option<i32>` | From `Child::wait()` | Distinguishes clean exit from error/signal termination |
 
 **Accumulation mechanism for `tools_called`**: `ClaudeCodeSession` holds a `tool_log: Arc<Mutex<Vec<String>>>`. The stdout parsing task, on each `tool_use` event, does `self.tool_log.lock().push(tool_name.clone())` (names only — arguments discarded). At session end, the parent `provider.rs` reads `Arc::try_unwrap(session.tool_log).unwrap().into_inner().unwrap()` and writes the vector into the `AuditEntry` via the existing audit writer. The tracing `info!` event in §6.2 is additional (for live observability), NOT the persistence mechanism.
 
-**Test**: `audit_entry_contains_request_id_and_tool_names` — send a request, assert persisted AuditEntry has both `request_id` and the tool names (see `02-kairos-agent.md §14 testing strategy`).
+**Test**: `audit_entry_contains_request_id_and_tool_names` — send a request, assert persisted AuditEntry has both `request_id` and the tool names (see `02-penny-agent.md §14 testing strategy`).
 
-- `KairosErrorKind::AgentError.stderr_redacted` is included in audit at INFO/WARN level only, NEVER in HTTP response body
+- `PennyErrorKind::AgentError.stderr_redacted` is included in audit at INFO/WARN level only, NEVER in HTTP response body
 - Wiki writes are additionally audited in git history via `git log`
 
 ### ADRs required before P2A impl begins
@@ -574,13 +574,13 @@ Per `docs/process/03-review-rubric.md §2` and qa-test-architect Round 2.
 | Layer | Location | Purpose |
 |---|---|---|
 | Unit | `crates/gadgetron-knowledge/src/**/*.rs` `#[cfg(test)]` | Pure functions + in-process |
-| Unit | `crates/gadgetron-kairos/src/**/*.rs` `#[cfg(test)]` | Subprocess-free logic (stream parser, redact, mcp_config builder) |
+| Unit | `crates/gadgetron-penny/src/**/*.rs` `#[cfg(test)]` | Subprocess-free logic (stream parser, redact, mcp_config builder) |
 | **MCP protocol conformance** | `crates/gadgetron-knowledge/tests/mcp_conformance.rs` | **NEW** — manual JSON-RPC 2.0 stdio peer talks to our server, round-trips `tools/list` and `tools/call` |
-| **OpenAI SSE shape conformance** | `crates/gadgetron-kairos/tests/sse_conformance.rs` | **NEW** — `insta` snapshot of byte-level SSE output for canned stream-json input |
-| Integration (no subprocess) | `crates/gadgetron-kairos/tests/` | Fake MCP server + fake-claude binary |
-| Integration (subprocess) | `crates/gadgetron-testing/tests/kairos_integration.rs` | Full provider registration + real router + fake-claude binary |
-| E2E (real Claude Code) | `crates/gadgetron-testing/tests/kairos_e2e.rs` | Real `claude` binary, temp wiki, gated by `GADGETRON_E2E_CLAUDE=1` + `#[ignore]` |
-| Load / perf | `crates/gadgetron-kairos/benches/` | `criterion` stream-json → SSE (<10 µs/chunk) + `kairos_concurrent_spawn` (N fake-claude subprocesses in parallel — measures TTFB distribution and RSS peak) |
+| **OpenAI SSE shape conformance** | `crates/gadgetron-penny/tests/sse_conformance.rs` | **NEW** — `insta` snapshot of byte-level SSE output for canned stream-json input |
+| Integration (no subprocess) | `crates/gadgetron-penny/tests/` | Fake MCP server + fake-claude binary |
+| Integration (subprocess) | `crates/gadgetron-testing/tests/penny_integration.rs` | Full provider registration + real router + fake-claude binary |
+| E2E (real Claude Code) | `crates/gadgetron-testing/tests/penny_e2e.rs` | Real `claude` binary, temp wiki, gated by `GADGETRON_E2E_CLAUDE=1` + `#[ignore]` |
+| Load / perf | `crates/gadgetron-penny/benches/` | `criterion` stream-json → SSE (<10 µs/chunk) + `penny_concurrent_spawn` (N fake-claude subprocesses in parallel — measures TTFB distribution and RSS peak) |
 | Snapshots | `crates/gadgetron-testing/snapshots/` | `insta` snapshot files for SSE + MCP wire |
 | Fixtures | `crates/gadgetron-testing/tests/fixtures/stream_json/` | Real Claude Code stream-json captures |
 
@@ -590,7 +590,7 @@ Per qa Round 2 A3 (blocker). Shell script fails on Windows CI and cannot reprodu
 
 - **Location**: `crates/gadgetron-testing/src/bin/fake_claude.rs`
 - **Build**: `cargo build -p gadgetron-testing --bin fake-claude`
-- **Usage**: tests set `kairos.claude_binary` config field to the built binary path
+- **Usage**: tests set `penny.claude_binary` config field to the built binary path
 - **Supported scenarios** (each via command-line flag):
   - `--scenario=simple_text` — emits a fixed stream-json sequence ending in `message_stop`
   - `--scenario=tool_use` — emits a `tool_use` event for `wiki.get`, waits for stdin tool result, continues with more text, ends
@@ -617,24 +617,24 @@ Per qa Round 2 A6. Subprocess tests are inherently racy (scheduler, OS buffering
 
 ### `GADGETRON_E2E_CLAUDE` gate — operation policy
 
-- **Gate mechanism**: E2E tests in `kairos_e2e.rs` use `#[ignore]` by default. To run, set env and use `--ignored`:
+- **Gate mechanism**: E2E tests in `penny_e2e.rs` use `#[ignore]` by default. To run, set env and use `--ignored`:
   ```sh
-  GADGETRON_E2E_CLAUDE=1 cargo test --test kairos_e2e -- --ignored
+  GADGETRON_E2E_CLAUDE=1 cargo test --test penny_e2e -- --ignored
   ```
 - **Who runs these**: developers locally only for P2A. No CI job. CI coverage comes from the fake-claude Rust binary integration tests, not from real Claude Code.
 - **Nightly CI (future, P2B+)**: a nightly job may run these once `claude login` can be reliably provisioned in CI (requires careful secret management; not in P2A scope).
 
-### `KairosE2EFixture` shape sketch
+### `PennyE2EFixture` shape sketch
 
 ```rust
-pub struct KairosE2EFixture {
+pub struct PennyE2EFixture {
     pub gw: GatewayHarness,         // existing Phase 1 harness, reused
     pub wiki_tmpdir: TempDir,       // ephemeral wiki for this test
     pub fake_mcp_server: FakeMcpServer,  // in-process stdio MCP peer, canned responses
     pub claude_binary: PathBuf,     // points at target/debug/fake-claude
 }
 
-impl KairosE2EFixture {
+impl PennyE2EFixture {
     pub async fn new() -> Self { ... }
     pub async fn send_chat(&self, msg: &str) -> Vec<ChatChunk> { ... }
     pub async fn teardown(self) { ... }
@@ -656,18 +656,18 @@ Per qa Round 2 A10.
 | Test type | Path |
 |---|---|
 | Unit — knowledge | `crates/gadgetron-knowledge/src/**/*.rs` inside `#[cfg(test)] mod tests` |
-| Unit — kairos | `crates/gadgetron-kairos/src/**/*.rs` inside `#[cfg(test)] mod tests` |
+| Unit — penny | `crates/gadgetron-penny/src/**/*.rs` inside `#[cfg(test)] mod tests` |
 | Integration — knowledge | `crates/gadgetron-knowledge/tests/*.rs` |
-| Integration — kairos | `crates/gadgetron-kairos/tests/*.rs` |
-| E2E (kairos + gateway + real claude, gated) | `crates/gadgetron-testing/tests/kairos_e2e.rs` |
+| Integration — penny | `crates/gadgetron-penny/tests/*.rs` |
+| E2E (penny + gateway + real claude, gated) | `crates/gadgetron-testing/tests/penny_e2e.rs` |
 | MCP conformance | `crates/gadgetron-knowledge/tests/mcp_conformance.rs` |
-| SSE conformance | `crates/gadgetron-kairos/tests/sse_conformance.rs` |
+| SSE conformance | `crates/gadgetron-penny/tests/sse_conformance.rs` |
 | Git recovery | `crates/gadgetron-knowledge/tests/wiki_git_recovery.rs` |
-| Benchmarks | `crates/gadgetron-kairos/benches/*.rs` |
+| Benchmarks | `crates/gadgetron-penny/benches/*.rs` |
 | Fixtures | `crates/gadgetron-testing/tests/fixtures/stream_json/*.jsonl` |
 | Snapshots — cross-crate | `crates/gadgetron-testing/snapshots/*.snap` |
 | Snapshots — knowledge-local | `crates/gadgetron-knowledge/tests/snapshots/*.snap` |
-| Snapshots — kairos-local | `crates/gadgetron-kairos/tests/snapshots/*.snap` |
+| Snapshots — penny-local | `crates/gadgetron-penny/tests/snapshots/*.snap` |
 | Fake binaries | `crates/gadgetron-testing/src/bin/fake_claude.rs` |
 | Mocks | `crates/gadgetron-testing/src/mocks/mcp/*.rs` |
 
@@ -681,12 +681,12 @@ Per security-compliance-lead Round 1.5 SEC-8.
 
 **P2A — single-user local deployment:**
 - Wiki content = user's own personal data. User is simultaneously data subject and data controller. No GDPR controller-processor relationship. No Art 28 DPA needed.
-- SearXNG proxies queries to external search engines. The **external search engines** receive (anonymized) queries. This is a disclosure the user must be aware of. User manual `docs/manual/kairos.md` (P2A pre-merge requirement) documents this plainly.
+- SearXNG proxies queries to external search engines. The **external search engines** receive (anonymized) queries. This is a disclosure the user must be aware of. User manual `docs/manual/penny.md` (P2A pre-merge requirement) documents this plainly.
 - No PII processing by Gadgetron itself beyond storage on local disk.
 
 **P2C — multi-user on-premise:**
 - Operator becomes data controller; users are data subjects. A Data Processing Assessment is REQUIRED before shared knowledge features are enabled.
-- `P2C-SECURITY-REOPEN` tag in `02-kairos-agent.md` must list GDPR obligations that activate.
+- `P2C-SECURITY-REOPEN` tag in `02-penny-agent.md` must list GDPR obligations that activate.
 
 ### SOC2
 
@@ -697,19 +697,19 @@ Per security-compliance-lead Round 1.5 SEC-8.
 
 ### User-facing disclosures (pre-merge manual requirements)
 
-`docs/manual/kairos.md` (pre-merge requirement for P2A) MUST include BOTH of the following disclosures:
+`docs/manual/penny.md` (pre-merge requirement for P2A) MUST include BOTH of the following disclosures:
 
 #### Disclosure 1 — Wiki git history is permanent
 
-> **Permanence note**: Every wiki page you (or Kairos on your behalf) write is committed to a local git repository at `~/.gadgetron/wiki/`. Git history is **permanent**. If you accidentally write a secret (API key, password, private note you later regret) into a wiki page, editing or deleting the page does NOT remove it from git history — the old version remains accessible via `git log`. Removing content from git history requires explicitly rewriting history with `git filter-repo` or BFG Repo-Cleaner, which is destructive and cannot be undone.
+> **Permanence note**: Every wiki page you (or Penny on your behalf) write is committed to a local git repository at `~/.gadgetron/wiki/`. Git history is **permanent**. If you accidentally write a secret (API key, password, private note you later regret) into a wiki page, editing or deleting the page does NOT remove it from git history — the old version remains accessible via `git log`. Removing content from git history requires explicitly rewriting history with `git filter-repo` or BFG Repo-Cleaner, which is destructive and cannot be undone.
 >
 > **Never write secrets into wiki pages.** Treat the wiki as a permanent, append-only ledger. If you need to record something sensitive that you expect to delete later, store it outside the wiki (e.g., a password manager).
 
 #### Disclosure 2 — Web search is proxied through SearXNG to external engines
 
-> **Privacy note**: Web search via Kairos proxies your queries through SearXNG to Google, Bing, DuckDuckGo, and Brave (depending on SearXNG configuration). Queries are anonymized at the SearXNG layer, but the search engines receive the query text. SearXNG may log queries depending on its own configuration. Gadgetron itself does not store your search queries. If you need stricter privacy, disable `web.search` by leaving `searxng_url` unset in your config.
+> **Privacy note**: Web search via Penny proxies your queries through SearXNG to Google, Bing, DuckDuckGo, and Brave (depending on SearXNG configuration). Queries are anonymized at the SearXNG layer, but the search engines receive the query text. SearXNG may log queries depending on its own configuration. Gadgetron itself does not store your search queries. If you need stricter privacy, disable `web.search` by leaving `searxng_url` unset in your config.
 
-Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-kairos` code PR merges to `main` without these paragraphs present in `docs/manual/kairos.md` (Korean and English versions).
+Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-penny` code PR merges to `main` without these paragraphs present in `docs/manual/penny.md` (Korean and English versions).
 
 ### `gadgetron-web` API key handling (post D-20260414-02)
 
@@ -721,10 +721,10 @@ Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-kairos` c
 
 ## 11. Observability
 
-- Reuse existing `metrics_middleware` — already captures `/v1/chat/completions` latency; kairos dispatch path is transparent to it (kairos is just another provider)
-- New trace spans: `kairos::provider::chat_stream`, `kairos::session::spawn`, `kairos::stream::parse`
+- Reuse existing `metrics_middleware` — already captures `/v1/chat/completions` latency; penny dispatch path is transparent to it (penny is just another provider)
+- New trace spans: `penny::provider::chat_stream`, `penny::session::spawn`, `penny::stream::parse`
 - Log Claude Code stderr at `debug` level with `request_id` correlation tag **after `redact_stderr` per M2** — the same `request_id` that appears in the persisted `AuditEntry.request_id` field
-- TUI Requests panel shows kairos requests alongside normal chat completions (no TUI changes needed)
+- TUI Requests panel shows penny requests alongside normal chat completions (no TUI changes needed)
 
 ---
 
@@ -736,7 +736,7 @@ Follow the existing `Database { kind, message }` / `Node { kind, message }` patt
 
 ```rust
 #[non_exhaustive]
-pub enum KairosErrorKind {
+pub enum PennyErrorKind {
     NotInstalled,                                    // claude binary not on PATH
     SpawnFailed { reason: String },                  // binary found but spawn failed
     AgentError { exit_code: i32, stderr_redacted: String },  // non-zero exit; stderr already redacted per M2
@@ -754,7 +754,7 @@ pub enum WikiErrorKind {
 // Canonical definition: `docs/design/phase2/01-knowledge-layer.md` §8.1.
 
 // In GadgetronError:
-//   Kairos { kind: KairosErrorKind, message: String }
+//   Penny { kind: PennyErrorKind, message: String }
 //   Wiki { kind: WikiErrorKind, message: String }
 ```
 
@@ -764,10 +764,10 @@ Variant count: 12 → 14 (still `#[non_exhaustive]`; test `all_twelve_variants_e
 
 | `kind` | HTTP | `code` | `type` | User-visible `message` (verbatim) |
 |---|---|---|---|---|
-| `KairosErrorKind::NotInstalled` | 503 | `kairos_not_installed` | `server_error` | "The Kairos assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`." |
-| `KairosErrorKind::SpawnFailed` | 503 | `kairos_spawn_failed` | `server_error` | "The Kairos assistant is not available. The server could not start the Claude Code process. Check server logs for details." |
-| `KairosErrorKind::AgentError` | 500 | `kairos_agent_error` | `server_error` | "The Kairos assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator." |
-| `KairosErrorKind::Timeout` | 504 | `kairos_timeout` | `server_error` | "The Kairos assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request." |
+| `PennyErrorKind::NotInstalled` | 503 | `penny_not_installed` | `server_error` | "The Penny assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`." |
+| `PennyErrorKind::SpawnFailed` | 503 | `penny_spawn_failed` | `server_error` | "The Penny assistant is not available. The server could not start the Claude Code process. Check server logs for details." |
+| `PennyErrorKind::AgentError` | 500 | `penny_agent_error` | `server_error` | "The Penny assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator." |
+| `PennyErrorKind::Timeout` | 504 | `penny_timeout` | `server_error` | "The Penny assistant did not respond in time (limit: {seconds}s). Your request may have been too complex. Try a shorter or simpler request." |
 | `WikiErrorKind::Conflict` | 409 | `wiki_conflict` | `invalid_request_error` | "A wiki page could not be saved because it was modified by another process (path: {path}). Resolve the git conflict in the wiki directory, then retry." |
 | `WikiErrorKind::PageTooLarge` | 413 | `wiki_page_too_large` | `invalid_request_error` | "The wiki page exceeds the maximum size ({bytes} > {limit} bytes). Split the content into multiple pages." |
 | `WikiErrorKind::PathEscape` | 400 | `wiki_invalid_path` | `invalid_request_error` | "The requested wiki page path is invalid. Page paths must not contain `..`, absolute paths, or special characters." |
@@ -778,7 +778,7 @@ Variant count: 12 → 14 (still `#[non_exhaustive]`; test `all_twelve_variants_e
 
 ### Error-to-HTTP Translation
 
-- `GadgetronError::Kairos { kind, message }` → use existing `error_code` / `error_type` / `http_status_code` pattern from Phase 1, matching on `kind`
+- `GadgetronError::Penny { kind, message }` → use existing `error_code` / `error_type` / `http_status_code` pattern from Phase 1, matching on `kind`
 - `GadgetronError::Wiki { kind, message }` → same
 - Reuses existing OpenAI-compat error envelope from `gadgetron-gateway::error::to_openai_response`
 
@@ -793,9 +793,9 @@ MCP tool errors (wiki not found, search failure) are returned to Claude Code as 
 | Phase | 기간 | Deliverable |
 |---|---|---|
 | **P1.5** | 1주 | v0.1.0-phase1 tag, `docs/00-overview.md` 상방 반영, `docs/design/phase2/` 설계 3종 완결 (00 + 01 + 02), Korean manual section draft |
-| **P2A — Kairos MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 자체 빌드, 단일 바이너리 embed)**. Acceptance criteria §3. (D-20260414-02) |
+| **P2A — Penny MVP** | 4주 | 단일 유저 + md/git wiki + SearXNG + Claude Code + **`gadgetron-web` (assistant-ui, 자체 빌드, 단일 바이너리 embed)**. Acceptance criteria §3. (D-20260414-02) |
 | **P2B — Rich Knowledge** | 4주 | SQLite + sqlite-vec 벡터 검색 + 텍스트/PDF ingest + 대화 auto-ingest hook |
-| **P2C — Multi + Storage** | 4주 | KairosManager per-tenant isolation + object_store (Local/S3/GCS) + SharedKnowledge 머지 seams + reopen security threat model |
+| **P2C — Multi + Storage** | 4주 | PennyManager per-tenant isolation + object_store (Local/S3/GCS) + SharedKnowledge 머지 seams + reopen security threat model |
 | **P2D — Media & Polish** | 4주 | Image(CLIP)/Audio(Whisper)/Video ingest + runtime skills + 운영 배포 |
 
 Each phase exit criteria: design doc → cross-review 통과 → TDD impl → manual QA → **매뉴얼 반영 (Korean + English)** → PR merged to `main`.
@@ -809,7 +809,7 @@ Each phase exit criteria: design doc → cross-review 통과 → TDD impl → ma
 3. **SearXNG bundling** — RESOLVED: bundle SearXNG in compose but config accepts external URL for users who already run one.
 4. **Q4**: ~~P2A 4-week timeline~~ — withdrawn 2026-04-13. Phase 2A proceeds at PM-set sprint cadence. Strategic deviations (scope/architecture/lock-in/trade-off) escalated per `feedback_pm_decision_authority`.
 5. **`rmcp` SDK status verification** — RESOLVED (deferred to P2B+; `01-knowledge-layer.md §6` uses manual stdio fallback as the P2A default). No action required for P2A.
-6. **M4 `--allowed-tools` enforcement** — **RESOLVED 2026-04-13**. Behavioral test on `claude 2.1.104` confirmed enforcement at the binary level, surviving `--dangerously-skip-permissions`. Stdin contract verified as Option B (plain text, `--input-format text` default). ADR-P2A-01 is **ACCEPTED**; `CLAUDE_CODE_MIN_VERSION = 2.1.104`. kairos implementation is unblocked. Full transcript in `docs/adr/ADR-P2A-01-allowed-tools-enforcement.md` §Verification result.
+6. **M4 `--allowed-tools` enforcement** — **RESOLVED 2026-04-13**. Behavioral test on `claude 2.1.104` confirmed enforcement at the binary level, surviving `--dangerously-skip-permissions`. Stdin contract verified as Option B (plain text, `--input-format text` default). ADR-P2A-01 is **ACCEPTED**; `CLAUDE_CODE_MIN_VERSION = 2.1.104`. penny implementation is unblocked. Full transcript in `docs/adr/ADR-P2A-01-allowed-tools-enforcement.md` §Verification result.
 
 ---
 
@@ -819,7 +819,7 @@ Completed through v3 cycle:
 - ✅ Q1 (Web UI) resolved 2026-04-13 as OpenWebUI → **re-resolved 2026-04-14 as `gadgetron-web` (assistant-ui)** per D-20260414-02
 - ✅ Q4 (timeline) resolved 2026-04-13
 - ✅ `01-knowledge-layer.md` v3 detailed spec
-- ✅ `02-kairos-agent.md` v3 detailed spec (patched to v4 on 2026-04-14 for agent-centric alignment)
+- ✅ `02-penny-agent.md` v3 detailed spec (patched to v4 on 2026-04-14 for agent-centric alignment)
 - ✅ Round 1.5 + Round 2 cross-reviews (4 agents each) — all blockers resolved in v3
 - ✅ ADR-P2A-01, P2A-02, P2A-03 authored and v3-patched; P2A-01 **ACCEPTED** after behavioral verification
 - ✅ Q6 M4 `--allowed-tools` behavioral verification — PASS on claude 2.1.104
@@ -827,13 +827,13 @@ Completed through v3 cycle:
 - ✅ **2026-04-14** — ADR-P2A-05 Agent-Centric Control Plane + `04-mcp-tool-registry.md` v1 (PM authored)
 - ✅ **2026-04-14** — Round 1.5 dx, Round 1.5 security, Round 2 qa, Round 3 chief-architect on `04 v1`: all **BLOCK**, 24 combined blockers
 - ✅ **2026-04-14** — **ADR-P2A-06** authored: interactive approval flow deferred to Phase 2B (Path 1 scope cut)
-- ✅ **2026-04-14** — `04 v2` authored (Path 1 scope), `02-kairos-agent.md v4` alignment patch, `ADR-P2A-05` amended, `gadgetron-kairos` crate scaffolded
+- ✅ **2026-04-14** — `04 v2` authored (Path 1 scope), `02-penny-agent.md v4` alignment patch, `ADR-P2A-05` amended, `gadgetron-penny` crate scaffolded
 
 ### Remaining P2A pre-impl work
 
-1. Draft **Korean manual section** `docs/manual/kairos.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md` rule. Update §15.1 "brain model" to reference `[agent.brain]` instead of `[kairos]`.
+1. Draft **Korean manual section** `docs/manual/penny.md` — required before any P2A code PR merges to main per `feedback_manual_before_push.md` rule. Update §15.1 "brain model" to reference `[agent.brain]` instead of `[penny]`.
 2. **NEW (D-20260414-03)**: Author `docs/design/database/backend-trait.md` — `DatabaseBackend` trait, profile selector, SQLite backport plan. Not a P2A blocker — target before P2B entry.
-3. `gadgetron kairos init` patch to emit full `[agent]` section (DX-MCP-B1 live item)
+3. `gadgetron penny init` patch to emit full `[agent]` section (DX-MCP-B1 live item)
 
 ### P2A TDD order — Path 1 (approval flow deferred to P2B per ADR-P2A-06)
 
@@ -847,41 +847,41 @@ TDD Red → Green → Refactor. Each step is a PR; cross-crate PRs are fine but 
 5. `gadgetron-knowledge::search::searxng` — SearXNG JSON API client (per 01 v3)
 
 **Phase 2 — Agent control plane scaffold (core types already landed)**
-6. `gadgetron-core` migration pass: `AppConfig::load` pre-deserialize hook to rewrite `[kairos]` → `[agent.brain]` per `04 v2 §11.1` + `v0_1_x_kairos_config_loads_with_deprecation_warning` test
+6. `gadgetron-core` migration pass: `AppConfig::load` pre-deserialize hook to rewrite `[penny]` → `[agent.brain]` per `04 v2 §11.1` + `v0_1_x_penny_config_loads_with_deprecation_warning` test
 7. `gadgetron-core::agent::config` — add `request_timeout_secs` and `max_concurrent_subprocesses` fields on `AgentConfig` (migration targets); add P2A-stage check rejecting `mode = "gadgetron_local"` at `validate()`; add `EnvResolver` injection for V11 testability (QA-MCP-M3)
-8. `gadgetron-core` error extension: 6 new `KairosErrorKind::Tool*` variants + `From<McpError> for GadgetronError` conversions per `04 v2 §10.1`
+8. `gadgetron-core` error extension: 6 new `PennyErrorKind::Tool*` variants + `From<McpError> for GadgetronError` conversions per `04 v2 §10.1`
 9. `gadgetron-core::agent::tools` startup warning emitter: when any `WriteToolsConfig.*` field resolves to `Ask`, emit `tracing::warn!("agent.tools.{field}=ask has no effect in Phase 2A — approval flow is deferred to P2B per ADR-P2A-06")`
 
 **Phase 3 — MCP registry + knowledge provider**
-10. `gadgetron-kairos::registry::{McpToolRegistryBuilder, McpToolRegistry}` builder/freeze pattern per `04 v2 §2.1`
+10. `gadgetron-penny::registry::{McpToolRegistryBuilder, McpToolRegistry}` builder/freeze pattern per `04 v2 §2.1`
 11. `gadgetron-knowledge::mcp::KnowledgeToolProvider` — first `McpToolProvider` implementation
 12. `gadgetron-knowledge::tests::mcp_conformance` — `tools/list` / `tools/call` / unknown-tool conformance tests
 13. `gadgetron-testing::mocks::mcp::fake_tool_provider::FakeToolProvider` — per `04 v2 §16` (QA-MCP-B2 live item)
-14. `gadgetron-kairos::tests::registry` — builder + freeze + dispatch + `build_allowed_tools` tests (including 2 proptests)
+14. `gadgetron-penny::tests::registry` — builder + freeze + dispatch + `build_allowed_tools` tests (including 2 proptests)
 
-**Phase 4 — Kairos subprocess lifecycle (02-kairos-agent.md v4)**
-15. `gadgetron-kairos::mcp_config` — tempfile (M1, unix 0600 atomic)
-16. `gadgetron-kairos::spawn` — Command builder with `kill_on_drop(true)` + env allowlist (per 02 v4 §5.1)
-17. `gadgetron-kairos::redact` — `redact_stderr` (M2, per 02 v4 §8)
-18. `gadgetron-kairos::session` — `ClaudeCodeSession` subprocess lifecycle (consuming `run()`)
-19. `gadgetron-kairos::stream` — stream-json → `ChatChunk` translator (per 02 v4 §6)
-20. `gadgetron-kairos::provider::KairosProvider` — `LlmProvider` impl + `register_with_router`
-21. `gadgetron-kairos::tests::sse_conformance` + `subprocess_determinism` + `redact_stderr` + `mcp_config_tmpfile` per 02 v4 §14
+**Phase 4 — Penny subprocess lifecycle (02-penny-agent.md v4)**
+15. `gadgetron-penny::mcp_config` — tempfile (M1, unix 0600 atomic)
+16. `gadgetron-penny::spawn` — Command builder with `kill_on_drop(true)` + env allowlist (per 02 v4 §5.1)
+17. `gadgetron-penny::redact` — `redact_stderr` (M2, per 02 v4 §8)
+18. `gadgetron-penny::session` — `ClaudeCodeSession` subprocess lifecycle (consuming `run()`)
+19. `gadgetron-penny::stream` — stream-json → `ChatChunk` translator (per 02 v4 §6)
+20. `gadgetron-penny::provider::PennyProvider` — `LlmProvider` impl + `register_with_router`
+21. `gadgetron-penny::tests::sse_conformance` + `subprocess_determinism` + `redact_stderr` + `mcp_config_tmpfile` per 02 v4 §14
 
 **Phase 5 — CLI + gateway wiring**
 
-> **Ordering note (2026-04-15)**: Step 22 previously preceded Step 23, but `mcp_config.rs` hardcodes `["mcp", "serve"]` as the argv it writes into the tempfile for Claude Code to invoke. Without Step 23 in place, the assembled CLI from Step 22 would spawn a `gadgetron mcp serve` subcommand that does not exist. Step 23 is therefore implemented **first**; Step 22 then composes the main registry and binds `KairosProvider` on top of a CLI that already exposes the subcommand.
+> **Ordering note (2026-04-15)**: Step 22 previously preceded Step 23, but `mcp_config.rs` hardcodes `["mcp", "serve"]` as the argv it writes into the tempfile for Claude Code to invoke. Without Step 23 in place, the assembled CLI from Step 22 would spawn a `gadgetron mcp serve` subcommand that does not exist. Step 23 is therefore implemented **first**; Step 22 then composes the main registry and binds `PennyProvider` on top of a CLI that already exposes the subcommand.
 
 22. `gadgetron-cli::mcp_serve` — new `gadgetron mcp serve` subcommand (stdio MCP server dispatching via `McpToolRegistry`). Standalone test: invoke the binary with `mcp serve`, pipe a `tools/list` JSON-RPC request on stdin, assert the registered tool names on stdout.
-23. `gadgetron-cli::bin::gadgetron` — compose `McpToolRegistryBuilder` + all providers in `main()`, pass frozen registry to `KairosProvider`, register `KairosProvider` with the router. Depends on Step 22 so that `mcp_config.rs` can assume `gadgetron mcp serve` is a valid argv.
-24. `gadgetron-cli::kairos_init` — patch to emit full `[agent]` section (DX-MCP-B1)
+23. `gadgetron-cli::bin::gadgetron` — compose `McpToolRegistryBuilder` + all providers in `main()`, pass frozen registry to `PennyProvider`, register `PennyProvider` with the router. Depends on Step 22 so that `mcp_config.rs` can assume `gadgetron mcp serve` is a valid argv.
+24. `gadgetron-cli::penny_init` — patch to emit full `[agent]` section (DX-MCP-B1)
 25. `gadgetron-cli::features` — declare `web-ui`, `agent-read`, `agent-write`, `agent-destructive`, `infra-tools`, `scheduler-tools`, `slurm`, `k8s` per `04 v2 §6.1` + `headless_build_strips_write_tools` test
 26. `gadgetron-gateway` — no new handlers on `/v1/*` beyond existing. `/v1/approvals/{id}` is **NOT** in P2A.
 
 **Phase 6 — Integration + E2E**
-27. `gadgetron-testing::tests::kairos_integration` — full provider registration + real router + fake-claude binary (per 02 v4 §14)
-28. `gadgetron-testing::tests::kairos_e2e` — real `claude` binary, 5 assertions from 02 v4 §14.5 (gated by `GADGETRON_E2E_CLAUDE=1`)
-29. `gadgetron-web` Web UI smoke test — `/web` serves, `kairos` appears in `/v1/models` list
+27. `gadgetron-testing::tests::penny_integration` — full provider registration + real router + fake-claude binary (per 02 v4 §14)
+28. `gadgetron-testing::tests::penny_e2e` — real `claude` binary, 5 assertions from 02 v4 §14.5 (gated by `GADGETRON_E2E_CLAUDE=1`)
+29. `gadgetron-web` Web UI smoke test — `/web` serves, `penny` appears in `/v1/models` list
 
 **Deferred to Phase 2B** (tracked in ADR-P2A-06 §Phase 2B):
 - `ApprovalRegistry`, `PendingApproval`, cross-process bridge (SEC-MCP-B1)
@@ -897,12 +897,12 @@ TDD Red → Green → Refactor. Each step is a PR; cross-crate PRs are fine but 
 A natural alternative is to build a Rust-native agent loop:
 
 ```rust
-pub struct Kairos {
+pub struct Penny {
     wiki: WikiStore,
     llm: Arc<dyn LlmProvider>,
 }
 
-impl Kairos {
+impl Penny {
     async fn respond(&self, user_msg: &str) -> String {
         let context = self.wiki.search(user_msg).await?;
         let prompt = format_prompt(user_msg, &context);
@@ -924,7 +924,7 @@ The tradeoff: we become dependent on Claude Code as an external binary and its o
 
 ## Appendix B — Claude Code Invocation Contract
 
-How exactly does Kairos invoke Claude Code?
+How exactly does Penny invoke Claude Code?
 
 ```bash
 claude \
@@ -944,8 +944,8 @@ mcp__knowledge__wiki.search,mcp__knowledge__wiki.write,mcp__knowledge__web.searc
 - `--allowedTools`: whitelist — only our knowledge tools are permitted. **M4 verified 2026-04-13 on claude 2.1.104 — enforcement is at the binary level and survives `--dangerously-skip-permissions`. ADR-P2A-01 is ACCEPTED.** `CLAUDE_CODE_MIN_VERSION = 2.1.104` is the startup-check floor.
 - `--strict-mcp-config`: REQUIRED — makes Claude Code use ONLY the MCP servers in our tempfile, ignoring any ambient `~/.claude/mcp_servers.json`. Load-bearing for M4: without this flag, an operator's user-level MCP config could add tools outside the allowlist.
 - `--dangerously-skip-permissions`: required for `-p` mode to skip interactive confirmation prompts; the allowlist above is still enforced. ADR-P2A-02 documents the risk acceptance.
-- `$claude_model`: if `kairos.claude_model` is set, pass `--model <value>`
-- Stdin: **plain text prompt** — concatenated conversation history as `User: ...\n\nAssistant: ...\n\n`. `--input-format text` is the default; no flag needed. See `02-kairos-agent.md §5 feed_stdin` for the exact format.
+- `$claude_model`: if `penny.claude_model` is set, pass `--model <value>`
+- Stdin: **plain text prompt** — concatenated conversation history as `User: ...\n\nAssistant: ...\n\n`. `--input-format text` is the default; no flag needed. See `02-penny-agent.md §5 feed_stdin` for the exact format.
 
 **Subprocess environment (SEC-B1 — env allowlist, NOT default inheritance):**
 - `tokio::process::Command` calls `cmd.env_clear()` first, then adds ONLY these vars:
@@ -953,9 +953,9 @@ mcp__knowledge__wiki.search,mcp__knowledge__wiki.write,mcp__knowledge__web.searc
   - `PATH` set to `/usr/local/bin:/usr/bin:/bin` (explicit allowlist, not operator's PATH)
   - `LANG`, `LC_ALL` (UTF-8 handling; inherited if set, else `en_US.UTF-8`)
   - `TMPDIR` (subprocess tempfile creation; inherited if set, else `/tmp`)
-  - `ANTHROPIC_BASE_URL` ONLY if `kairos.claude_base_url` is set in config
+  - `ANTHROPIC_BASE_URL` ONLY if `penny.claude_base_url` is set in config
 - ALL other env vars — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DATABASE_URL`, `AWS_*`, `SSH_AUTH_SOCK`, `CARGO_REGISTRY_TOKEN`, and anything else — are EXPLICITLY EXCLUDED from the subprocess. Claude Code uses `~/.claude/` credentials only.
-- Rationale: prevent silent credential exfiltration. See `02-kairos-agent.md §5.1` for the `build_claude_command` implementation and the `build_claude_command_env_does_not_inherit_api_key` regression test.
+- Rationale: prevent silent credential exfiltration. See `02-penny-agent.md §5.1` for the `build_claude_command` implementation and the `build_claude_command_env_does_not_inherit_api_key` regression test.
 
 **Subprocess ownership (per chief-architect Round 3):**
 - `ClaudeCodeSession` is an owned struct that holds `tokio::process::Child`, `ChildStdin`, `ChildStdout`
@@ -990,10 +990,10 @@ Set `[knowledge.search].searxng_url = "http://127.0.0.1:8888"` in `gadgetron.tom
 **User experience:**
 1. Browse to `http://localhost:8080/web`
 2. Open Settings → paste the Gadgetron API key from `gadgetron key create`
-3. Model dropdown (populated by `gadgetron-web` from `/v1/models`) → pick `kairos`
-4. Start chatting. Each message is `POST /v1/chat/completions` (same origin, bearer auth from localStorage) routed to the kairos provider.
+3. Model dropdown (populated by `gadgetron-web` from `/v1/models`) → pick `penny`
+4. Start chatting. Each message is `POST /v1/chat/completions` (same origin, bearer auth from localStorage) routed to the penny provider.
 
-**No external chat UI or docker-compose required.** The existing `list_models_handler` already includes `kairos` once the provider is registered — `gadgetron-web` consumes the same `/v1/models` endpoint as any third-party client.
+**No external chat UI or docker-compose required.** The existing `list_models_handler` already includes `penny` once the provider is registered — `gadgetron-web` consumes the same `/v1/models` endpoint as any third-party client.
 
 See `docs/design/phase2/03-gadgetron-web.md` (upcoming) for crate layout, build pipeline (`cargo xtask build-web` or `build.rs` + `npm run build`), and threat-model rewrite.
 
@@ -1008,18 +1008,18 @@ This document v2 incorporates the following review rounds (2026-04-13):
 | chief-architect | Round 0 (scaffolding) + Round 3 (Rust idiom) | REVISE | A1 LlmProvider seam, A2 nested errors, A3 per-request MCP, Round 3 advisories (owned session, POSIX sh, serde_yaml→toml) |
 | dx-product-lead | Round 1.5 usability | REVISE | A1-A9 all addressed in §3/§4/§6/§12 |
 | security-compliance-lead | Round 1.5 security | REVISE | SEC-1 threat model §8, SEC-2 M4, SEC-3 M2 redact, SEC-4 M1 tempfile, SEC-5 wiki_max_page_bytes + M5, SEC-6 M6 tools_called names only, SEC-7 manual warning (P2A pre-merge requirement), SEC-8 §10 compliance, SEC-9 M3 proptest corpus, SEC-10 P2C reopen tag |
-| qa-test-architect | Round 2 testability | REVISE | A1 MCP conformance, A2 SSE conformance, A3 Rust fake-claude, A4 KairosE2EFixture, A5 proptest, A6 determinism, A7 E2E gate, A8 concurrent spawn load, A9 file location table, A10 git recovery |
+| qa-test-architect | Round 2 testability | REVISE | A1 MCP conformance, A2 SSE conformance, A3 Rust fake-claude, A4 PennyE2EFixture, A5 proptest, A6 determinism, A7 E2E gate, A8 concurrent spawn load, A9 file location table, A10 git recovery |
 
 **Round 2 (2026-04-13) — v3 fixes:**
 
 | Reviewer | Verdict | Items resolved in v3 |
 |---|---|---|
 | chief-architect | APPROVE WITH MINOR | 3 compile-error blockers resolved in v3 (CA-B1..B3), 4 nits + 4 determinism items addressed |
-| dx-product-lead | APPROVE WITH MINOR | 3 blockers resolved (DX-B1..B3 — key create flag, kairos init --docker confusion, CredentialBlocked error table), nits + determinism items addressed |
+| dx-product-lead | APPROVE WITH MINOR | 3 blockers resolved (DX-B1..B3 — key create flag, penny init --docker confusion, CredentialBlocked error table), nits + determinism items addressed |
 | security-compliance-lead | REVISE | 4 new blockers resolved in v3: SEC-B1 (env_clear allowlist), SEC-B2 (request_id + tools_called accumulation), SEC-B3 (claude_binary validation — in 02), SEC-B4 (redact_stderr ReDoS cap — in 02); CC9.2 nit addressed; ADR adjustments applied (P2A-01 version floor, P2A-02 non-root precondition, P2A-03 prompt-injection cross-ref) |
 | qa-test-architect | APPROVE WITH MINOR | 0 blockers; 2 non-blocking items (NB-1, NB-2) + 2 determinism defects (DET-1, DET-2) + audit log stub body addressed |
 
-Next round: v3 of this doc is ready for final ratification before `01-knowledge-layer.md` and `02-kairos-agent.md` detail specs move to implementation.
+Next round: v3 of this doc is ready for final ratification before `01-knowledge-layer.md` and `02-penny-agent.md` detail specs move to implementation.
 
 ---
 

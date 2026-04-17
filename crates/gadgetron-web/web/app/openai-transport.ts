@@ -8,7 +8,7 @@
 // expects its own UIMessageChunk wire format. This class connects the two while
 // preserving assistant-ui's tool / reasoning / data part support.
 //
-// Sprint A3: additionally, Kairos's server-side stream.rs wraps Claude Code's
+// Sprint A3: additionally, Penny's server-side stream.rs wraps Claude Code's
 // `thinking`, `tool_use`, and `tool_result` events into OpenAI SSE delta.content
 // with distinctive prefixes:
 //   "> 💭 _<text>_"                  → thinking (reasoning)
@@ -177,7 +177,7 @@ export class OpenAIChatTransport<
         // Emit a synthetic tool-call frame so assistant-ui's ToolCallMessagePart
         // can render it. AI SDK v6's tool lifecycle is start/delta/end for
         // input and separate output frames; we collapse everything at once
-        // because Kairos only exposes the final call in the prose markers.
+        // because Penny only exposes the final call in the prose markers.
         controller.enqueue({
           type: "tool-input-start",
           toolCallId: segId,
@@ -341,7 +341,7 @@ function tryParseJson(raw: string): unknown {
 
 /**
  * Split a buffer of assistant content into semantic segments by scanning for
- * Kairos's wire-format markers.
+ * Penny's wire-format markers.
  *
  * Patterns (anchored at line start):
  *   THINKING:       /^> 💭 _(.*?)_\n?/m   — single-line preferred; we tolerate multi-line

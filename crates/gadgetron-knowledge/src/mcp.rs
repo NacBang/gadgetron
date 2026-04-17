@@ -163,7 +163,7 @@ fn schema_wiki_list() -> ToolSchema {
     ToolSchema {
         name: "wiki.list".into(),
         tier: Tier::Read,
-        description: "List all pages in the Kairos wiki. Returns page names \
+        description: "List all pages in the Penny wiki. Returns page names \
             (use forward slashes for subdirectories). Call wiki.list first to \
             discover what pages exist before searching or fetching by name."
             .into(),

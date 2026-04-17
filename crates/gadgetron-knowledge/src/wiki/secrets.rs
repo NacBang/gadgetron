@@ -9,7 +9,7 @@
 //!   represent unambiguous high-severity credentials.
 //! - **AUDIT** patterns emit a `wiki_write_secret_suspected` tracing warning
 //!   but do NOT block. Higher false-positive rate; blocking would frustrate
-//!   legitimate Kairos use (e.g. pasting commands into wiki notes).
+//!   legitimate Penny use (e.g. pasting commands into wiki notes).
 //!
 //! Once AUDIT-only patterns are written, the content is permanent in git
 //! history (see `00-overview.md §10 SEC-7 Disclosure 1`). The operator is

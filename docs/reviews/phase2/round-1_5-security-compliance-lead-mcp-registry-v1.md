@@ -69,7 +69,7 @@ None of these are specified, and each has materially different security properti
 **References.**
 - `00-overview.md §8 B3` — grandchild process boundary
 - `01-knowledge-layer.md §6.1` — `serve_stdio` stdio contract
-- `02-kairos-agent.md §13` — `claude -p` invocation (no callback channel documented)
+- `02-penny-agent.md §13` — `claude -p` invocation (no callback channel documented)
 - CWE-923 Improper Restriction of Communication Channel
 - CWE-918 SSRF (if loopback HTTP is the answer)
 
@@ -220,7 +220,7 @@ Related issue: **ANTHROPIC_API_KEY disclosure boundary**.
 
 Claude Code CLI has a `claude --debug` mode that (per observed behavior on `claude 2.1.104` in ADR-P2A-01's test) logs extensive diagnostic information. The doc does not analyze:
 
-1. Does `claude --debug` print `ANTHROPIC_API_KEY` to stderr? If yes, this goes straight to `KairosProvider::spawn` stderr capture, which goes to `redact_stderr()` (`02-kairos-agent.md` M2). But `redact_stderr` only strips `sk-ant-*` and `gad_*` patterns — a 32-byte hex-encoded random token matches NEITHER pattern and will leak into audit logs.
+1. Does `claude --debug` print `ANTHROPIC_API_KEY` to stderr? If yes, this goes straight to `PennyProvider::spawn` stderr capture, which goes to `redact_stderr()` (`02-penny-agent.md` M2). But `redact_stderr` only strips `sk-ant-*` and `gad_*` patterns — a 32-byte hex-encoded random token matches NEITHER pattern and will leak into audit logs.
 2. `/proc/$pid/environ` on Linux is readable by the same user (and root). For a single-user desktop this is in scope (same user = operator), but for Docker deployments (`00-overview.md` Deployment modes table, "Docker" row) the token is visible via `docker inspect` if env is not explicitly scrubbed.
 3. Claude Code may pass env vars through to its own subprocesses (`gadgetron mcp serve` in particular). Does the MCP server process inherit `ANTHROPIC_API_KEY` from its grandparent gadgetron-serve → claude → gadgetron-mcp-serve? If yes, the token is now in 3 process environments and visible in 3 places in `/proc`.
 
@@ -231,12 +231,12 @@ Claude Code CLI has a `claude --debug` mode that (per observed behavior on `clau
 2. §12 add "**Disclosure boundary analysis**" subsection:
    - `redact_stderr` MUST extend its pattern list to include `gadgetron_brain_token_[0-9a-f]{64}` or similar (specify the exact pattern and add to `redact_stderr` test fixtures).
    - The token format should have a recognizable prefix (e.g. `gad_brain_<hex>`) so it matches `gad_*` existing redaction; specify this and update M2 pattern list in 00-overview §8.
-   - `KairosProvider::spawn` MUST NOT propagate `ANTHROPIC_API_KEY` to `gadgetron mcp serve` subprocess. Use explicit `Command::env_clear().envs(allowlist)`. Spec the allowlist.
+   - `PennyProvider::spawn` MUST NOT propagate `ANTHROPIC_API_KEY` to `gadgetron mcp serve` subprocess. Use explicit `Command::env_clear().envs(allowlist)`. Spec the allowlist.
    - Docker deployment mode MUST document that `ANTHROPIC_API_KEY` is rotated on every container restart and recommends `docker inspect` audit in `deployment-operations.md`.
 3. Unit tests: `startup_token_is_32_bytes_os_rng`, `mcp_serve_does_not_inherit_anthropic_api_key`, `redact_stderr_strips_startup_token`.
 4. A risk acceptance entry in M8 (`00-overview.md §8`) for the `/proc/$pid/environ` single-user-local case.
 
-**Cross-ref.** `crates/gadgetron-xaas/src/auth/key_gen.rs:25` (canonical OsRng pattern), `crates/gadgetron-kairos` (future — `redact_stderr` extension).
+**Cross-ref.** `crates/gadgetron-xaas/src/auth/key_gen.rs:25` (canonical OsRng pattern), `crates/gadgetron-penny` (future — `redact_stderr` extension).
 
 ---
 
@@ -276,7 +276,7 @@ Six unresolved questions:
 **Remediation.**
 1. Add §7.1 "Sanitization contract" with:
    - Definition: "sanitized" means (a) the credential patterns in M5 (`00-overview.md §8`) are replaced with `<redacted>`, AND (b) string values longer than 256 chars are truncated to `<first-128>...<last-64>`, AND (c) nested objects/arrays deeper than 4 levels are replaced with `"<...>"`.
-   - Enforcement location: `gadgetron-kairos::approval::sanitize_args(&mut serde_json::Value)` — called by the MCP server BEFORE `enqueue`.
+   - Enforcement location: `gadgetron-penny::approval::sanitize_args(&mut serde_json::Value)` — called by the MCP server BEFORE `enqueue`.
    - Applies to `args` field in `PendingApproval`, the SSE payload, the `<ApprovalCard>` render path, AND the input to `args_digest`.
 2. Clarify digest semantics: `args_digest = sha256(serde_json::to_vec(&sanitized_args))`. Document that the audit row alone is forensically insufficient to recover the plaintext — it is a fingerprint only.
 3. `rationale` MUST go through the same sanitization (credential patterns + length cap), and the `rationale_digest` should be computed AFTER sanitization, same as `args_digest`.
@@ -331,7 +331,7 @@ Seven race conditions:
 
 6. **`rate_limit_remaining` storage is never specified.** `PendingApproval.rate_limit_remaining: Option<u32>` is passed in by the caller but the doc does not say WHERE the rate-limit counter lives, HOW it decrements on `enqueue` vs `decide`, whether it increments back on `Deny`/`Timeout`, or whether it resets. §5 V5 says `max_per_hour > 0` at validation — but the counter implementation is absent. In-process only? Per-tenant? Per-request? Survives restart? Clock drift — what if `SystemTime::now()` jumps backward between two counter checks?
 
-7. **Heartbeat interference.** §7 "Heartbeat: While waiting for a decision, the Kairos provider emits `: keepalive\n\n` SSE comment frames every 15 seconds". If the heartbeat task and the `decide()` task race on the same SSE channel sender, tokio `mpsc` ordering is preserved, but if the channel is `broadcast` the order is not guaranteed. The doc does not say which one.
+7. **Heartbeat interference.** §7 "Heartbeat: While waiting for a decision, the Penny provider emits `: keepalive\n\n` SSE comment frames every 15 seconds". If the heartbeat task and the `decide()` task race on the same SSE channel sender, tokio `mpsc` ordering is preserved, but if the channel is `broadcast` the order is not guaranteed. The doc does not say which one.
 
 **Why this blocks.** These are not theoretical — an in-process approval channel that loses wakeups is a silent DoS vector (every T2 approval occasionally times out, giving the agent a false "user denied" signal, which teaches the LLM to avoid legitimate tools, degrading service). Under adversarial conditions (SEC-MCP-B8 flood), the race frequency increases and the DoS becomes reliable.
 
@@ -485,7 +485,7 @@ Alternative scenario: a provider uses Tier enum from an older version of `gadget
 
 ### SEC-MCP-M2 — `McpError::Denied { reason }` reaches `tool_result` unredacted; reason strings from MCP server can leak internal state
 
-**Finding.** §3 Mode definitions: *"`never` — MCP server immediately returns `McpError::Denied { reason }`"*. The `McpError` is translated to `ToolResult { is_error: true, content: ... }` at the MCP dispatch boundary, which flows through the stream-json pipeline (`02-kairos-agent.md §6`), ultimately reaching the SSE stream → browser and the audit log.
+**Finding.** §3 Mode definitions: *"`never` — MCP server immediately returns `McpError::Denied { reason }`"*. The `McpError` is translated to `ToolResult { is_error: true, content: ... }` at the MCP dispatch boundary, which flows through the stream-json pipeline (`02-penny-agent.md §6`), ultimately reaching the SSE stream → browser and the audit log.
 
 If `reason` is sourced from a code path that includes environmental state (e.g., `"tool X requires feature flag Y which is disabled because config path Z was set to false"`), the attacker-observable tool result reveals internal Gadgetron configuration state. CWE-209.
 
@@ -497,7 +497,7 @@ If `reason` is sourced from a code path that includes environmental state (e.g.,
 
 ### SEC-MCP-M3 — Audit log `stderr_redacted` extension for `startup_token` is not specified; token can leak via `redact_stderr` gap
 
-**Finding.** `02-kairos-agent.md` M2 `redact_stderr` pattern list:
+**Finding.** `02-penny-agent.md` M2 `redact_stderr` pattern list:
 - `sk-ant-[a-zA-Z0-9_-]{40,}` (Anthropic)
 - `gad_(live|test)_[a-f0-9]{32}` (Gadgetron)
 - `Bearer\s+[A-Za-z0-9._-]+`
@@ -507,7 +507,7 @@ The new `startup_token` (SEC-MCP-B5) format is not specified in this doc. If it 
 
 **Remediation.**
 1. §12 spec: `startup_token` format is `gad_brain_[a-f0-9]{64}` so it matches a new pattern `gad_brain_[a-f0-9]{64}` in `redact_stderr`.
-2. Cross-reference: update `02-kairos-agent.md §8` M2 pattern list to include this new pattern.
+2. Cross-reference: update `02-penny-agent.md §8` M2 pattern list to include this new pattern.
 3. Test: `redact_stderr_strips_gad_brain_token`.
 
 ---
@@ -545,7 +545,7 @@ The existing code (`config.rs:427-430`) has an `ExtraConfirmation::Env` variant 
 
 ### SEC-MCP-M6 — Audit log `tools_called` field (existing) vs new `ToolCallCompleted` event: double-accounting risk
 
-**Finding.** `00-overview.md §8` and `02-kairos-agent.md` specify `AuditEntry.tools_called: Vec<String>` — a names-only list accumulated during a session. The new `ToolCallCompleted` event (§10) records individual tool calls with outcome and latency. These two capture the same events but with different schemas; if both are written for the same call, auditors see double counts.
+**Finding.** `00-overview.md §8` and `02-penny-agent.md` specify `AuditEntry.tools_called: Vec<String>` — a names-only list accumulated during a session. The new `ToolCallCompleted` event (§10) records individual tool calls with outcome and latency. These two capture the same events but with different schemas; if both are written for the same call, auditors see double counts.
 
 **Remediation.**
 1. §10 add a "Migration from legacy `tools_called` field" subsection: *"The `AuditEntry.tools_called` field is superseded by `ToolAuditEvent::ToolCallCompleted`. Phase 2A writes both during a transition window; Phase 2B removes `tools_called`. Auditors should prefer `ToolCallCompleted` for forensics."*
@@ -569,7 +569,7 @@ A user distracted by a convincing rationale may instinctively click before readi
 
 ### SEC-MCP-N4 — SSE `heartbeat: keepalive` is not specified as a reserved SSE event type
 
-§7: *"Kairos provider emits `: keepalive\n\n` SSE comment frames"*. The `:` prefix is an SSE comment, not an event. The doc calls it "comment frames" — correct. But some frontend clients discard comments entirely; verify `03-gadgetron-web.md §?` SSE parser handles them without raising errors.
+§7: *"Penny provider emits `: keepalive\n\n` SSE comment frames"*. The `:` prefix is an SSE comment, not an event. The doc calls it "comment frames" — correct. But some frontend clients discard comments entirely; verify `03-gadgetron-web.md §?` SSE parser handles them without raising errors.
 
 ### SEC-MCP-N5 — `[agent.brain].external_proxy` mode has no URL validation
 
@@ -638,7 +638,7 @@ This doc creates new assets, new trust boundaries, and new attack surfaces that 
 
 | Dep | Target doc | Reason |
 |---|---|---|
-| D1 | `02-kairos-agent.md` | `feed_stdin` text mode (ADR-P2A-01 VERIFIED TEXT) has no `tool_use → tool_result` round trip analysis. Approval flow assumes `-p` mode pauses on MCP tool call — ADR-P2A-01 verified enforcement but NOT pause semantics. A paused tool call on stdio, with NO way for the MCP server to delay its response beyond (what?) seconds, may be killed by Claude Code's own internal timeout. This is SEC-MCP-B12 (promoted from N to B because it is load-bearing) — VERIFY that Claude Code `-p` mode accepts a slow MCP tool response (say, 60s) without killing the subprocess or the MCP stream. Add as a new behavioral test to ADR-P2A-01 verification record: "Part 3 — slow MCP tool response tolerance". |
+| D1 | `02-penny-agent.md` | `feed_stdin` text mode (ADR-P2A-01 VERIFIED TEXT) has no `tool_use → tool_result` round trip analysis. Approval flow assumes `-p` mode pauses on MCP tool call — ADR-P2A-01 verified enforcement but NOT pause semantics. A paused tool call on stdio, with NO way for the MCP server to delay its response beyond (what?) seconds, may be killed by Claude Code's own internal timeout. This is SEC-MCP-B12 (promoted from N to B because it is load-bearing) — VERIFY that Claude Code `-p` mode accepts a slow MCP tool response (say, 60s) without killing the subprocess or the MCP stream. Add as a new behavioral test to ADR-P2A-01 verification record: "Part 3 — slow MCP tool response tolerance". |
 | D2 | `03-gadgetron-web.md` | `<ApprovalCard>` rationale DOMPurify pipeline (SEC-MCP-M4) + localStorage XSS guard (SEC-MCP-M1) + SSE `gadgetron.approval_required` event schema (implies SEC-W review re-verification). |
 | D3 | `00-overview.md §8` | M5 `redact_stderr` pattern list extension to include `gad_brain_*` (SEC-MCP-B5). M8 risk acceptance additions for approval bridge (B7), rate limit restart volatility (SEC-MCP-B7/B8), `/proc/$pid/environ` on Docker (SEC-MCP-B5). |
 | D4 | `ADR-P2A-01` | Part 3 verification for slow MCP tool response (see D1 above). |

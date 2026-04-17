@@ -74,7 +74,7 @@
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  에이전트 (Claude Code / Kairos)                  │
+│  에이전트 (Claude Code / Penny)                  │
 │  - 대화 중 "wiki-worthy?" 매 턴 판단              │
 │  - create / append / update 제안                  │
 │  - 검색 결과 해석 + 답변 생성                      │
@@ -576,7 +576,7 @@ COMMIT;
 
 **구현 위치**: 에이전트 시스템 프롬프트. Rust 크레이트 코드 아님.
 
-**경로**: `crates/gadgetron-kairos/src/session.rs`에서 subprocess 시작 시 system message에 포함되는 프롬프트 텍스트.
+**경로**: `crates/gadgetron-penny/src/session.rs`에서 subprocess 시작 시 system message에 포함되는 프롬프트 텍스트.
 
 ### 프롬프트 지침 (한국어)
 
@@ -743,7 +743,7 @@ stale_threshold_days = 90                # gadgetron wiki audit의 낡은 페이
 | 6 | `wiki/search` 하이브리드로 교체 | gadgetron-knowledge | 8 integ tests (§17.5) |
 | 7 | `gadgetron reindex` CLI 서브커맨드 | gadgetron-cli | 4 integ tests (§17.6) |
 | 8 | `gadgetron wiki audit` CLI 서브커맨드 | gadgetron-cli | 3 integ tests |
-| 9 | 시스템 프롬프트 지식 추출 지침 (에이전트/프롬프트 레이어, Rust 아님) | gadgetron-kairos | E2E 테스트 (수동) |
+| 9 | 시스템 프롬프트 지식 추출 지침 (에이전트/프롬프트 레이어, Rust 아님) | gadgetron-penny | E2E 테스트 (수동) |
 | 10 | `gadgetron init` 템플릿 + 매뉴얼 업데이트 | gadgetron-cli, docs | 문서 확인 |
 
 각 단계는 독립 PR로 land 가능. TDD: Red → Green → Refactor.
