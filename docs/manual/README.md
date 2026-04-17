@@ -65,5 +65,6 @@ This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The
 - Audit log PostgreSQL persistence
 - Full TUI keyboard navigation and scrolling
 - Docker image (future)
-- `gadgetron penny ...` convenience subcommands such as `penny init`
+- Assistant-specific bootstrap convenience commands (there is no
+  `gadgetron penny ...` subcommand family on trunk)
 - Interactive approval flow for agent write/destructive tools (deferred to Phase 2B)

@@ -273,7 +273,7 @@ impl KnowledgeConfig {
 
     /// Validates at load time. Rules:
     /// - `wiki_path` parent must exist (wiki_path itself may not —
-    ///   `gadgetron penny init` creates it on first start).
+    ///   the knowledge layer initializes the repo lazily on first use).
     /// - `wiki_max_page_bytes` must be in [1, 100 MiB]
     /// - Nested `search` config (if present) passes its own validate.
     pub fn validate(&self) -> Result<(), String> {
