@@ -6,26 +6,22 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
-
   fmt:
     name: Format
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -33,9 +29,10 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -44,6 +41,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16
@@ -62,16 +60,17 @@ jobs:
       DATABASE_URL: postgresql://gadgetron_test:gadgetron_test@localhost:5432/gadgetron_test
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
   security-scan:
     name: Security
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check advisories licenses bans
