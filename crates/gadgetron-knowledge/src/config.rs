@@ -6,13 +6,152 @@
 //!
 //! - `KnowledgeConfig` — the toml surface under `[knowledge]`. Includes
 //!   `wiki_path`, `wiki_autocommit`, `wiki_git_author`, `wiki_max_page_bytes`,
-//!   and an optional nested `[knowledge.search]` `SearchConfig`.
+//!   optional nested `[knowledge.search]` / `[knowledge.embedding]`
+//!   sections, and a `[knowledge.reindex]` policy block.
 //! - `WikiConfig` — the internal runtime config consumed by `Wiki::open`.
 //!   Derived from `KnowledgeConfig::to_wiki_config()` after git-author
 //!   auto-detection.
 
+use gadgetron_core::agent::config::{EnvResolver, StdEnv};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Configuration for the semantic embedding subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    /// Provider name. P2A supports only `openai_compat`.
+    #[serde(default = "default_embedding_provider")]
+    pub provider: String,
+
+    /// Base URL for the provider. Requests POST to `{base_url}/embeddings`.
+    #[serde(default = "default_embedding_base_url")]
+    pub base_url: String,
+
+    /// Name of the environment variable that stores the embedding API key.
+    #[serde(default = "default_embedding_api_key_env")]
+    pub api_key_env: String,
+
+    /// Embedding model name.
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+
+    /// Expected embedding dimension.
+    #[serde(default = "default_embedding_dimension")]
+    pub dimension: usize,
+
+    /// Whether wiki writes wait for embedding/index work.
+    #[serde(default)]
+    pub write_mode: EmbeddingWriteMode,
+
+    /// Per-request timeout in seconds.
+    #[serde(default = "default_embedding_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingWriteMode {
+    #[default]
+    Async,
+    Sync,
+}
+
+fn default_embedding_provider() -> String {
+    "openai_compat".to_string()
+}
+fn default_embedding_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+fn default_embedding_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".to_string()
+}
+fn default_embedding_dimension() -> usize {
+    1536
+}
+fn default_embedding_timeout_secs() -> u64 {
+    30
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_embedding_provider(),
+            base_url: default_embedding_base_url(),
+            api_key_env: default_embedding_api_key_env(),
+            model: default_embedding_model(),
+            dimension: default_embedding_dimension(),
+            write_mode: EmbeddingWriteMode::default(),
+            timeout_secs: default_embedding_timeout_secs(),
+        }
+    }
+}
+
+impl EmbeddingConfig {
+    pub fn validate(&self) -> Result<reqwest::Url, String> {
+        self.validate_with_env(&StdEnv)
+    }
+
+    pub fn validate_with_env(&self, env: &dyn EnvResolver) -> Result<reqwest::Url, String> {
+        if self.provider != "openai_compat" {
+            return Err(format!(
+                "knowledge.embedding.provider currently supports only \"openai_compat\"; got {:?}",
+                self.provider
+            ));
+        }
+        if !(1..=8192).contains(&self.dimension) {
+            return Err(format!(
+                "knowledge.embedding.dimension must be in [1, 8192]; got {}",
+                self.dimension
+            ));
+        }
+        if !(1..=300).contains(&self.timeout_secs) {
+            return Err(format!(
+                "knowledge.embedding.timeout_secs must be in [1, 300]; got {}",
+                self.timeout_secs
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err("knowledge.embedding.model must not be empty".to_string());
+        }
+        if self.api_key_env.trim().is_empty() {
+            return Err("knowledge.embedding.api_key_env must not be empty".to_string());
+        }
+
+        let url = reqwest::Url::parse(&self.base_url).map_err(|e| {
+            format!(
+                "knowledge.embedding.base_url must be a valid URL: {e} \
+                 (got {val:?})",
+                val = self.base_url
+            )
+        })?;
+        match url.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(format!(
+                    "knowledge.embedding.base_url scheme must be http or https; got {other:?}"
+                ))
+            }
+        }
+
+        let Some(value) = env.get(&self.api_key_env) else {
+            return Err(format!(
+                "knowledge.embedding.api_key_env {:?} is not set in the environment",
+                self.api_key_env
+            ));
+        };
+        if value.trim().is_empty() {
+            return Err(format!(
+                "knowledge.embedding.api_key_env {:?} is set but empty",
+                self.api_key_env
+            ));
+        }
+
+        Ok(url)
+    }
+}
 
 /// Configuration for the web search subsystem.
 ///
@@ -153,6 +292,58 @@ mod tests {
     }
 }
 
+/// Startup / audit policy for semantic wiki indexing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReindexConfig {
+    /// Run reindex automatically when the server boots.
+    #[serde(default = "default_true")]
+    pub on_startup: bool,
+
+    /// Startup behavior. `async` remains the default P2A choice.
+    #[serde(default)]
+    pub on_startup_mode: ReindexStartupMode,
+
+    /// Age threshold used by `gadgetron wiki audit`.
+    #[serde(default = "default_stale_threshold_days")]
+    pub stale_threshold_days: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReindexStartupMode {
+    #[default]
+    Async,
+    Sync,
+    Incremental,
+    Full,
+}
+
+fn default_stale_threshold_days() -> u16 {
+    90
+}
+
+impl Default for ReindexConfig {
+    fn default() -> Self {
+        Self {
+            on_startup: default_true(),
+            on_startup_mode: ReindexStartupMode::default(),
+            stale_threshold_days: default_stale_threshold_days(),
+        }
+    }
+}
+
+impl ReindexConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=3650).contains(&self.stale_threshold_days) {
+            return Err(format!(
+                "knowledge.reindex.stale_threshold_days must be in [1, 3650]; got {}",
+                self.stale_threshold_days
+            ));
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // KnowledgeConfig — toml surface under `[knowledge]`
 // ---------------------------------------------------------------------------
@@ -228,6 +419,16 @@ pub struct KnowledgeConfig {
     /// MCP tool is omitted from the `KnowledgeToolProvider` manifest.
     #[serde(default)]
     pub search: Option<SearchConfig>,
+
+    /// Optional embedding/index configuration. Left unset until semantic
+    /// indexing is explicitly enabled.
+    #[serde(default)]
+    pub embedding: Option<EmbeddingConfig>,
+
+    /// Reindex and audit policy. Defaults stay active even when semantic
+    /// indexing is not yet wired into runtime calls.
+    #[serde(default)]
+    pub reindex: ReindexConfig,
 }
 
 fn default_true() -> bool {
@@ -277,6 +478,13 @@ impl KnowledgeConfig {
     /// - `wiki_max_page_bytes` must be in [1, 100 MiB]
     /// - Nested `search` config (if present) passes its own validate.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_env(&StdEnv)
+    }
+
+    /// Same as `validate`, but with an injected environment resolver so
+    /// tests can exercise `embedding.api_key_env` without mutating the
+    /// process-global environment.
+    pub fn validate_with_env(&self, env: &dyn EnvResolver) -> Result<(), String> {
         let parent = self.wiki_path.parent().ok_or_else(|| {
             format!(
                 "wiki_path must not be the filesystem root: {}",
@@ -300,6 +508,13 @@ impl KnowledgeConfig {
             sc.validate()
                 .map_err(|e| format!("knowledge.search: {e}"))?;
         }
+        if let Some(ec) = &self.embedding {
+            ec.validate_with_env(env)
+                .map_err(|e| format!("knowledge.embedding: {e}"))?;
+        }
+        self.reindex
+            .validate()
+            .map_err(|e| format!("knowledge.reindex: {e}"))?;
         Ok(())
     }
 
@@ -380,6 +595,7 @@ pub struct WikiConfig {
 #[cfg(test)]
 mod knowledge_config_tests {
     use super::*;
+    use gadgetron_core::agent::config::FakeEnv;
 
     #[test]
     fn parse_author_valid() {
@@ -414,6 +630,8 @@ mod knowledge_config_tests {
             wiki_git_author: Some("Test <test@example.com>".into()),
             wiki_max_page_bytes: 1024,
             search: None,
+            embedding: None,
+            reindex: ReindexConfig::default(),
         };
         assert!(cfg.validate().is_ok());
     }
@@ -426,6 +644,8 @@ mod knowledge_config_tests {
             wiki_git_author: None,
             wiki_max_page_bytes: 1024,
             search: None,
+            embedding: None,
+            reindex: ReindexConfig::default(),
         };
         assert!(cfg.validate().is_err());
     }
@@ -439,6 +659,8 @@ mod knowledge_config_tests {
             wiki_git_author: None,
             wiki_max_page_bytes: 200_000_000, // 200 MiB
             search: None,
+            embedding: None,
+            reindex: ReindexConfig::default(),
         };
         assert!(cfg.validate().is_err());
     }
@@ -452,11 +674,87 @@ mod knowledge_config_tests {
             wiki_git_author: Some("Penny <k@g.local>".into()),
             wiki_max_page_bytes: 2048,
             search: None,
+            embedding: None,
+            reindex: ReindexConfig::default(),
         };
         let wc = cfg.to_wiki_config().unwrap();
         assert_eq!(wc.git_author_name, "Penny");
         assert_eq!(wc.git_author_email, "k@g.local");
         assert_eq!(wc.max_page_bytes, 2048);
         assert!(!wc.autocommit);
+    }
+
+    #[test]
+    fn embedding_config_validates_with_injected_env() {
+        let env = FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
+        let parsed = EmbeddingConfig::default()
+            .validate_with_env(&env)
+            .expect("valid config");
+        assert_eq!(parsed.scheme(), "https");
+    }
+
+    #[test]
+    fn embedding_config_rejects_missing_api_key_env() {
+        let env = FakeEnv::new();
+        let err = EmbeddingConfig::default()
+            .validate_with_env(&env)
+            .expect_err("missing env must fail");
+        assert!(err.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn embedding_config_rejects_invalid_dimension() {
+        let env = FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
+        let cfg = EmbeddingConfig {
+            dimension: 0,
+            ..EmbeddingConfig::default()
+        };
+        let err = cfg
+            .validate_with_env(&env)
+            .expect_err("dimension 0 must fail");
+        assert!(err.contains("dimension"));
+    }
+
+    #[test]
+    fn reindex_config_rejects_out_of_range_stale_threshold() {
+        let cfg = ReindexConfig {
+            stale_threshold_days: 0,
+            ..ReindexConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn knowledge_config_extracts_embedding_and_reindex_sections() {
+        let raw = r#"
+[knowledge]
+wiki_path = "/tmp/wiki"
+wiki_autocommit = true
+wiki_max_page_bytes = 1048576
+
+[knowledge.embedding]
+provider = "openai_compat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "text-embedding-3-small"
+dimension = 2
+write_mode = "sync"
+timeout_secs = 45
+
+[knowledge.reindex]
+on_startup = false
+on_startup_mode = "full"
+stale_threshold_days = 30
+"#;
+
+        let cfg = KnowledgeConfig::extract_from_toml_str(raw)
+            .expect("parse")
+            .expect("knowledge section");
+        let embedding = cfg.embedding.expect("embedding section");
+        assert_eq!(embedding.provider, "openai_compat");
+        assert_eq!(embedding.dimension, 2);
+        assert_eq!(embedding.write_mode, EmbeddingWriteMode::Sync);
+        assert_eq!(cfg.reindex.on_startup_mode, ReindexStartupMode::Full);
+        assert_eq!(cfg.reindex.stale_threshold_days, 30);
     }
 }

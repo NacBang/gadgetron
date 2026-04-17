@@ -1680,6 +1680,30 @@ request_timeout_ms = 30000
 [router.default_strategy]
 # Routing strategy: round_robin | cost_optimal | latency_optimal | fallback | weighted
 type = "round_robin"
+
+# ---------------------------------------------------------------------------
+# Knowledge layer — Penny wiki storage + optional semantic indexing.
+# ---------------------------------------------------------------------------
+
+# [knowledge]
+# wiki_path = "./.gadgetron/wiki"
+# wiki_autocommit = true
+# wiki_git_author = "Penny <penny@gadgetron.local>"
+# wiki_max_page_bytes = 1048576
+
+# [knowledge.embedding]
+# provider = "openai_compat"
+# base_url = "https://api.openai.com/v1"
+# api_key_env = "OPENAI_API_KEY"
+# model = "text-embedding-3-small"
+# dimension = 1536
+# write_mode = "async"
+# timeout_secs = 30
+
+# [knowledge.reindex]
+# on_startup = true
+# on_startup_mode = "async"
+# stale_threshold_days = 90
 "#;
 
 // ---------------------------------------------------------------------------
@@ -2384,6 +2408,14 @@ mod tests {
         assert!(
             content.contains("round_robin"),
             "output must contain round_robin strategy"
+        );
+        assert!(
+            content.contains("[knowledge.embedding]"),
+            "output must include commented knowledge.embedding example"
+        );
+        assert!(
+            content.contains("[knowledge.reindex]"),
+            "output must include commented knowledge.reindex example"
         );
 
         // Cleanup
