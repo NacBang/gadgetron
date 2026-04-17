@@ -16,11 +16,13 @@
 //! See `docs/design/phase2/01-knowledge-layer.md` for the full design.
 
 pub mod config;
+pub mod embedding;
 pub mod error;
 pub mod mcp;
 pub mod search;
 pub mod wiki;
 
+pub use embedding::{EmbeddingError, EmbeddingProvider, OpenAiCompatEmbedding};
 pub use error::{SearchError, WikiError};
 pub use gadgetron_core::error::WikiErrorKind;
 pub use mcp::KnowledgeToolProvider;

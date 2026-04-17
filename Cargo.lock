@@ -1117,6 +1117,7 @@ name = "gadgetron-knowledge"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "gadgetron-core",
  "git2",
