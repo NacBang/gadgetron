@@ -679,7 +679,7 @@ impl SessionStore {
 
 #### 5.2.5 Session lifecycle branches (`session.rs`)
 
-`ClaudeCodeSession` (currently at `crates/gadgetron-penny/src/session.rs:77-82`) gains a private helper on its driver:
+`ClaudeCodeSession` (currently at `crates/gadgetron-penny/src/session.rs:177` after the #56 runtime split) gains a private helper on its driver:
 
 ```rust
 enum SpawnMode {
@@ -811,7 +811,7 @@ async fn feed_stdin_new_user_turn_only(mut stdin: ChildStdin, req: &ChatRequest)
 
 #### 5.2.7 `spawn.rs` — `ClaudeSessionMode` parameter
 
-`build_claude_command` (`crates/gadgetron-penny/src/spawn.rs:115-209`) gains an additional parameter:
+`build_claude_command` (`crates/gadgetron-penny/src/spawn.rs:299` after the #56 runtime split; peer variants `build_claude_command_with_session` / `build_claude_command_with_env` live alongside) gains an additional parameter:
 
 ```rust
 pub enum ClaudeSessionMode {
