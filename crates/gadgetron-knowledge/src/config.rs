@@ -95,6 +95,41 @@ impl EmbeddingConfig {
     }
 
     pub fn validate_with_env(&self, env: &dyn EnvResolver) -> Result<reqwest::Url, String> {
+        self.validate_shape()?;
+        let Some(value) = env.get(&self.api_key_env) else {
+            return Err(format!(
+                "knowledge.embedding.api_key_env {:?} is not set in the environment",
+                self.api_key_env
+            ));
+        };
+        if value.trim().is_empty() {
+            return Err(format!(
+                "knowledge.embedding.api_key_env {:?} is set but empty",
+                self.api_key_env
+            ));
+        }
+
+        reqwest::Url::parse(&self.base_url).map_err(|e| {
+            format!(
+                "knowledge.embedding.base_url must be a valid URL: {e} \
+                 (got {val:?})",
+                val = self.base_url
+            )
+        })
+    }
+
+    pub fn validate_without_env(&self) -> Result<reqwest::Url, String> {
+        self.validate_shape()?;
+        reqwest::Url::parse(&self.base_url).map_err(|e| {
+            format!(
+                "knowledge.embedding.base_url must be a valid URL: {e} \
+                 (got {val:?})",
+                val = self.base_url
+            )
+        })
+    }
+
+    fn validate_shape(&self) -> Result<(), String> {
         if self.provider != "openai_compat" {
             return Err(format!(
                 "knowledge.embedding.provider currently supports only \"openai_compat\"; got {:?}",
@@ -135,21 +170,7 @@ impl EmbeddingConfig {
                 ))
             }
         }
-
-        let Some(value) = env.get(&self.api_key_env) else {
-            return Err(format!(
-                "knowledge.embedding.api_key_env {:?} is not set in the environment",
-                self.api_key_env
-            ));
-        };
-        if value.trim().is_empty() {
-            return Err(format!(
-                "knowledge.embedding.api_key_env {:?} is set but empty",
-                self.api_key_env
-            ));
-        }
-
-        Ok(url)
+        Ok(())
     }
 }
 
@@ -485,6 +506,24 @@ impl KnowledgeConfig {
     /// tests can exercise `embedding.api_key_env` without mutating the
     /// process-global environment.
     pub fn validate_with_env(&self, env: &dyn EnvResolver) -> Result<(), String> {
+        self.validate_common()?;
+        if let Some(ec) = &self.embedding {
+            ec.validate_with_env(env)
+                .map_err(|e| format!("knowledge.embedding: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_without_embedding_env(&self) -> Result<(), String> {
+        self.validate_common()?;
+        if let Some(ec) = &self.embedding {
+            ec.validate_without_env()
+                .map_err(|e| format!("knowledge.embedding: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn validate_common(&self) -> Result<(), String> {
         let parent = self.wiki_path.parent().ok_or_else(|| {
             format!(
                 "wiki_path must not be the filesystem root: {}",
@@ -507,10 +546,6 @@ impl KnowledgeConfig {
         if let Some(sc) = &self.search {
             sc.validate()
                 .map_err(|e| format!("knowledge.search: {e}"))?;
-        }
-        if let Some(ec) = &self.embedding {
-            ec.validate_with_env(env)
-                .map_err(|e| format!("knowledge.embedding: {e}"))?;
         }
         self.reindex
             .validate()
@@ -703,6 +738,14 @@ mod knowledge_config_tests {
     }
 
     #[test]
+    fn embedding_config_validate_without_env_allows_missing_api_key() {
+        let parsed = EmbeddingConfig::default()
+            .validate_without_env()
+            .expect("shape-only validation should succeed");
+        assert_eq!(parsed.scheme(), "https");
+    }
+
+    #[test]
     fn embedding_config_rejects_invalid_dimension() {
         let env = FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
         let cfg = EmbeddingConfig {
@@ -756,5 +799,22 @@ stale_threshold_days = 30
         assert_eq!(embedding.write_mode, EmbeddingWriteMode::Sync);
         assert_eq!(cfg.reindex.on_startup_mode, ReindexStartupMode::Full);
         assert_eq!(cfg.reindex.stale_threshold_days, 30);
+    }
+
+    #[test]
+    fn knowledge_config_validate_without_embedding_env_allows_audit_use_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = KnowledgeConfig {
+            wiki_path: tmp.path().join("wiki"),
+            wiki_autocommit: true,
+            wiki_git_author: Some("Penny <penny@gadgetron.local>".into()),
+            wiki_max_page_bytes: 1024 * 1024,
+            search: None,
+            embedding: Some(EmbeddingConfig::default()),
+            reindex: ReindexConfig::default(),
+        };
+
+        cfg.validate_without_embedding_env()
+            .expect("audit/local wiki ops should not require embedding env presence");
     }
 }

@@ -18,11 +18,17 @@
 pub mod config;
 pub mod embedding;
 pub mod error;
+pub mod maintenance;
 pub mod mcp;
 pub mod search;
+mod semantic;
 pub mod wiki;
 
 pub use embedding::{EmbeddingError, EmbeddingProvider, OpenAiCompatEmbedding};
 pub use error::{SearchError, WikiError};
 pub use gadgetron_core::error::WikiErrorKind;
+pub use maintenance::{
+    audit_wiki, run_reindex, MaintenanceError, ReindexAction, ReindexActionKind, ReindexMode,
+    ReindexOptions, ReindexReport, StalePage, WikiAuditReport,
+};
 pub use mcp::KnowledgeToolProvider;

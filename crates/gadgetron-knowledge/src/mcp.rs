@@ -1,68 +1,48 @@
 //! MCP tool provider for the knowledge layer.
 //!
 //! Implements `gadgetron_core::agent::tools::McpToolProvider` for the
-//! `"knowledge"` category. Exposes five tools:
-//!
-//! - `wiki.list` — T1 Read — list all pages
-//! - `wiki.get` — T1 Read — fetch a page by name
-//! - `wiki.search` — T1 Read — full-text search
-//! - `wiki.write` — T2 Write — create or overwrite a page
-//! - `web.search` — T1 Read — optional, present only when
-//!   `KnowledgeConfig.search` is configured
-//!
-//! Spec: `docs/design/phase2/01-knowledge-layer.md §6.2 + §6.3`.
-//!
-//! # Error mapping
-//!
-//! Every method returns `Result<ToolResult, McpError>` per the trait
-//! contract. `WikiError` values are mapped to generic `McpError`
-//! variants at the boundary so:
-//!
-//! - Raw user input does not leak back through the error text
-//! - Request-specific details (`bytes`/`limit` for PageTooLarge,
-//!   `pattern` name for CredentialBlocked) DO surface — they're
-//!   operator-actionable, not attacker-useful
-//! - Path-traversal attempts map to `McpError::InvalidArgs` with a
-//!   fixed string (no path echo)
-//! - Git corruption and I/O errors map to `McpError::Execution` with
-//!   a generic "storage error" message
-//!
-//! # Web search
-//!
-//! `web.search` is registered only when `KnowledgeConfig.search` is set
-//! at construction time. Providers with no search configured simply
-//! omit the tool from their manifest — the agent never sees it. This
-//! is preferred over runtime checks because Claude Code caches the
-//! tool list from the manifest.
+//! `"knowledge"` category. Exposes wiki CRUD/search plus optional
+//! `web.search`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use gadgetron_core::agent::config::{EnvResolver, StdEnv};
 use gadgetron_core::agent::tools::{McpError, McpToolProvider, Tier, ToolResult, ToolSchema};
 use gadgetron_core::error::WikiErrorKind;
+use serde::Serialize;
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
-use crate::config::KnowledgeConfig;
+use crate::config::{EmbeddingWriteMode, KnowledgeConfig};
 use crate::error::{SearchError, WikiError};
 use crate::search::{SearxngClient, WebSearch};
-use crate::wiki::Wiki;
+use crate::semantic::{normalize_page_content, SemanticBackend, SemanticSearchHit};
+use crate::wiki::{Wiki, WikiSearchHit};
 
 /// The concrete `McpToolProvider` for knowledge-layer tools.
 pub struct KnowledgeToolProvider {
     wiki: Arc<Wiki>,
     web_search: Option<Arc<dyn WebSearch>>,
+    semantic: Option<Arc<SemanticBackend>>,
     max_search_results: usize,
 }
 
 impl KnowledgeToolProvider {
     /// Build the provider from a validated `KnowledgeConfig`.
     ///
-    /// - Opens/initializes the wiki repo at `config.wiki_path`.
-    /// - Constructs a `SearxngClient` if `config.search` is set.
-    /// - Records `config.search.max_results` as the cap for
-    ///   `wiki.search` and `web.search` result counts (both tools
-    ///   share the cap for operator simplicity).
-    pub fn new(config: KnowledgeConfig) -> Result<Self, WikiError> {
+    /// `pg_pool` is optional so the same config can still expose keyword-only
+    /// wiki tools when semantic indexing is configured but PostgreSQL is not
+    /// reachable in the current process.
+    pub fn new(config: KnowledgeConfig, pg_pool: Option<PgPool>) -> Result<Self, WikiError> {
+        Self::new_with_env(config, pg_pool, &StdEnv)
+    }
+
+    pub fn new_with_env(
+        config: KnowledgeConfig,
+        pg_pool: Option<PgPool>,
+        env: &dyn EnvResolver,
+    ) -> Result<Self, WikiError> {
         let wiki_config = config.to_wiki_config().map_err(|msg| {
             WikiError::kind_with_message(
                 WikiErrorKind::GitCorruption {
@@ -93,9 +73,13 @@ impl KnowledgeToolProvider {
             None => (None, 10),
         };
 
+        let semantic =
+            SemanticBackend::from_config(pg_pool, config.embedding.as_ref(), env)?.map(Arc::new);
+
         Ok(Self {
             wiki,
             web_search,
+            semantic,
             max_search_results,
         })
     }
@@ -108,17 +92,23 @@ impl KnowledgeToolProvider {
         web_search: Option<Arc<dyn WebSearch>>,
         max_search_results: usize,
     ) -> Self {
+        Self::with_components_and_semantic(wiki, web_search, None, max_search_results)
+    }
+
+    pub(crate) fn with_components_and_semantic(
+        wiki: Arc<Wiki>,
+        web_search: Option<Arc<dyn WebSearch>>,
+        semantic: Option<Arc<SemanticBackend>>,
+        max_search_results: usize,
+    ) -> Self {
         Self {
             wiki,
             web_search,
+            semantic,
             max_search_results: max_search_results.max(1),
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// McpToolProvider impl
-// ---------------------------------------------------------------------------
 
 #[async_trait]
 impl McpToolProvider for KnowledgeToolProvider {
@@ -145,19 +135,15 @@ impl McpToolProvider for KnowledgeToolProvider {
         match name {
             "wiki.list" => self.call_wiki_list().await,
             "wiki.get" => self.call_wiki_get(args),
-            "wiki.search" => self.call_wiki_search(args),
-            "wiki.write" => self.call_wiki_write(args),
-            "wiki.delete" => self.call_wiki_delete(args),
-            "wiki.rename" => self.call_wiki_rename(args),
+            "wiki.search" => self.call_wiki_search(args).await,
+            "wiki.write" => self.call_wiki_write(args).await,
+            "wiki.delete" => self.call_wiki_delete(args).await,
+            "wiki.rename" => self.call_wiki_rename(args).await,
             "web.search" => self.call_web_search(args).await,
             other => Err(McpError::UnknownTool(other.to_string())),
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tool schemas
-// ---------------------------------------------------------------------------
 
 fn schema_wiki_list() -> ToolSchema {
     ToolSchema {
@@ -201,19 +187,18 @@ fn schema_wiki_search() -> ToolSchema {
     ToolSchema {
         name: "wiki.search".into(),
         tier: Tier::Read,
-        description: "Search wiki pages by keyword when you don't know the \
-            exact page name. Returns up to max_results matching pages with a \
-            relevance score. Use wiki.get when you know the exact page name."
+        description: "Semantic + keyword search over the wiki. Returns pages \
+            ranked by relevance with a short snippet."
             .into(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "minLength": 1, "maxLength": 512 },
-                "max_results": {
+                "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 50,
-                    "default": 5
+                    "default": 10
                 }
             },
             "required": ["query"],
@@ -311,10 +296,6 @@ fn schema_web_search() -> ToolSchema {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tool dispatch — WikiError → McpError mapping
-// ---------------------------------------------------------------------------
-
 impl KnowledgeToolProvider {
     async fn call_wiki_list(&self) -> Result<ToolResult, McpError> {
         let entries = self.wiki.list().map_err(map_wiki_err_generic)?;
@@ -340,18 +321,33 @@ impl KnowledgeToolProvider {
         }
     }
 
-    fn call_wiki_search(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_search(&self, args: Value) -> Result<ToolResult, McpError> {
         let query = required_string_arg(&args, "query")?;
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
-            .unwrap_or(5)
-            .min(50);
-        let hits = self
-            .wiki
-            .search(&query, max_results)
-            .map_err(map_wiki_err_generic)?;
+        let limit = parse_search_limit(&args);
+
+        let hits = match &self.semantic {
+            Some(semantic) => match semantic.hybrid_search(&query, limit).await {
+                Ok(hits) => semantic_hits_to_payload(hits),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "knowledge_semantic",
+                        error = ?error,
+                        "hybrid wiki.search failed; falling back to keyword-only search"
+                    );
+                    keyword_hits_to_payload(
+                        self.wiki
+                            .search(&query, limit)
+                            .map_err(map_wiki_err_generic)?,
+                    )
+                }
+            },
+            None => keyword_hits_to_payload(
+                self.wiki
+                    .search(&query, limit)
+                    .map_err(map_wiki_err_generic)?,
+            ),
+        };
+
         Ok(ToolResult {
             content: json!({
                 "query": query,
@@ -361,49 +357,145 @@ impl KnowledgeToolProvider {
         })
     }
 
-    fn call_wiki_write(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_write(&self, args: Value) -> Result<ToolResult, McpError> {
         let name = required_string_arg(&args, "name")?;
-        let content = required_string_arg(&args, "content")?;
+        let raw_content = required_string_arg(&args, "content")?;
+        let content = if self.semantic.is_some() {
+            normalize_page_content(&raw_content).map_err(|e| map_wiki_err_write(e, &name))?
+        } else {
+            raw_content
+        };
+
         match self.wiki.write(&name, &content) {
-            Ok(result) => Ok(ToolResult {
-                content: json!({
-                    "name": result.name,
-                    "bytes": result.bytes,
-                    "commit_oid": result.commit_oid,
-                }),
-                is_error: false,
-            }),
+            Ok(result) => {
+                if let Some(semantic) = &self.semantic {
+                    let semantic = semantic.clone();
+                    let page_name = result.name.clone();
+                    match semantic.write_mode() {
+                        EmbeddingWriteMode::Sync => {
+                            if let Err(error) = semantic.index_page(&page_name, &content).await {
+                                tracing::warn!(
+                                    target: "knowledge_semantic",
+                                    page = %page_name,
+                                    error = ?error,
+                                    "semantic index update failed after wiki.write"
+                                );
+                            }
+                        }
+                        EmbeddingWriteMode::Async => spawn_semantic_task(async move {
+                            if let Err(error) = semantic.index_page(&page_name, &content).await {
+                                tracing::warn!(
+                                    target: "knowledge_semantic",
+                                    page = %page_name,
+                                    error = ?error,
+                                    "semantic index update failed after wiki.write"
+                                );
+                            }
+                        }),
+                    }
+                }
+
+                Ok(ToolResult {
+                    content: json!({
+                        "name": result.name,
+                        "bytes": result.bytes,
+                        "commit_oid": result.commit_oid,
+                    }),
+                    is_error: false,
+                })
+            }
             Err(e) => Err(map_wiki_err_write(e, &name)),
         }
     }
 
-    fn call_wiki_delete(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_delete(&self, args: Value) -> Result<ToolResult, McpError> {
         let name = required_string_arg(&args, "name")?;
         match self.wiki.delete(&name) {
-            Ok(archive_path) => Ok(ToolResult {
-                content: json!({
-                    "name": name,
-                    "archived_to": archive_path,
-                    "message": "soft-deleted; archived copy preserved in _archived/",
-                }),
-                is_error: false,
-            }),
+            Ok(archive_path) => {
+                if let Some(semantic) = &self.semantic {
+                    let semantic = semantic.clone();
+                    let page_name = name.clone();
+                    match semantic.write_mode() {
+                        EmbeddingWriteMode::Sync => {
+                            if let Err(error) = semantic.delete_page(&page_name).await {
+                                tracing::warn!(
+                                    target: "knowledge_semantic",
+                                    page = %page_name,
+                                    error = ?error,
+                                    "semantic delete cleanup failed after wiki.delete"
+                                );
+                            }
+                        }
+                        EmbeddingWriteMode::Async => spawn_semantic_task(async move {
+                            if let Err(error) = semantic.delete_page(&page_name).await {
+                                tracing::warn!(
+                                    target: "knowledge_semantic",
+                                    page = %page_name,
+                                    error = ?error,
+                                    "semantic delete cleanup failed after wiki.delete"
+                                );
+                            }
+                        }),
+                    }
+                }
+
+                Ok(ToolResult {
+                    content: json!({
+                        "name": name,
+                        "archived_to": archive_path,
+                        "message": "soft-deleted; archived copy preserved in _archived/",
+                    }),
+                    is_error: false,
+                })
+            }
             Err(e) => Err(map_wiki_err_read(e, &name)),
         }
     }
 
-    fn call_wiki_rename(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_rename(&self, args: Value) -> Result<ToolResult, McpError> {
         let from = required_string_arg(&args, "from")?;
         let to = required_string_arg(&args, "to")?;
         match self.wiki.rename(&from, &to) {
-            Ok(result) => Ok(ToolResult {
-                content: json!({
-                    "from": from,
-                    "to": result.name,
-                    "commit_oid": result.commit_oid,
-                }),
-                is_error: false,
-            }),
+            Ok(result) => {
+                if let Some(semantic) = &self.semantic {
+                    let semantic = semantic.clone();
+                    let from_page = from.clone();
+                    let to_page = result.name.clone();
+                    match semantic.write_mode() {
+                        EmbeddingWriteMode::Sync => {
+                            if let Err(error) = semantic.rename_page(&from_page, &to_page).await {
+                                tracing::warn!(
+                                    target: "knowledge_semantic",
+                                    from = %from_page,
+                                    to = %to_page,
+                                    error = ?error,
+                                    "semantic rename cleanup failed after wiki.rename"
+                                );
+                            }
+                        }
+                        EmbeddingWriteMode::Async => spawn_semantic_task(async move {
+                            if let Err(error) = semantic.rename_page(&from_page, &to_page).await {
+                                tracing::warn!(
+                                    target: "knowledge_semantic",
+                                    from = %from_page,
+                                    to = %to_page,
+                                    error = ?error,
+                                    "semantic rename cleanup failed after wiki.rename"
+                                );
+                            }
+                        }),
+                    }
+                }
+
+                Ok(ToolResult {
+                    content: json!({
+                        "from": from,
+                        "to": result.name,
+                        "commit_oid": result.commit_oid,
+                    }),
+                    is_error: false,
+                })
+            }
             Err(e) => Err(map_wiki_err_write(e, &to)),
         }
     }
@@ -431,6 +523,52 @@ impl KnowledgeToolProvider {
     }
 }
 
+fn spawn_semantic_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SearchHitPayload {
+    page_name: String,
+    score: f32,
+    section: Option<String>,
+    snippet: Option<String>,
+}
+
+fn semantic_hits_to_payload(hits: Vec<SemanticSearchHit>) -> Vec<SearchHitPayload> {
+    hits.into_iter()
+        .map(|hit| SearchHitPayload {
+            page_name: hit.page_name,
+            score: hit.score,
+            section: hit.section,
+            snippet: hit.snippet,
+        })
+        .collect()
+}
+
+fn keyword_hits_to_payload(hits: Vec<WikiSearchHit>) -> Vec<SearchHitPayload> {
+    hits.into_iter()
+        .map(|hit| SearchHitPayload {
+            page_name: hit.name,
+            score: hit.score,
+            section: None,
+            snippet: hit.snippet,
+        })
+        .collect()
+}
+
+fn parse_search_limit(args: &Value) -> usize {
+    args.get("limit")
+        .and_then(|v| v.as_u64())
+        .or_else(|| args.get("max_results").and_then(|v| v.as_u64()))
+        .map(|n| n as usize)
+        .unwrap_or(10)
+        .clamp(1, 50)
+}
+
 fn required_string_arg(args: &Value, field: &str) -> Result<String, McpError> {
     match args.get(field) {
         Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
@@ -446,9 +584,6 @@ fn required_string_arg(args: &Value, field: &str) -> Result<String, McpError> {
     }
 }
 
-/// Map a `WikiError` from a read/list/search operation to `McpError`.
-/// `WikiErrorKind` is `#[non_exhaustive]` — the default arm covers
-/// future variants.
 fn map_wiki_err_generic(err: WikiError) -> McpError {
     match err.kind_ref() {
         Some(WikiErrorKind::PathEscape { .. }) => McpError::InvalidArgs("invalid page path".into()),
@@ -456,9 +591,6 @@ fn map_wiki_err_generic(err: WikiError) -> McpError {
     }
 }
 
-/// Map a `WikiError` from `Wiki::read`. Missing files come through as
-/// `WikiError::Io(NotFound)` which should be surfaced distinctly so the
-/// agent can react (try wiki.list, try a different name).
 fn map_wiki_err_read(err: WikiError, name: &str) -> McpError {
     match err {
         WikiError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -468,13 +600,6 @@ fn map_wiki_err_read(err: WikiError, name: &str) -> McpError {
     }
 }
 
-/// Map a `WikiError` from `Wiki::write`. Surfaces the specific
-/// operator-actionable variants (size limit, credential block) with
-/// structured details.
-///
-/// `WikiErrorKind` is `#[non_exhaustive]`; the default arm maps any
-/// future variant to `Execution("wiki storage error")` until this
-/// function is explicitly updated.
 fn map_wiki_err_write(err: WikiError, _name: &str) -> McpError {
     match err.kind_ref() {
         Some(WikiErrorKind::PathEscape { .. }) => McpError::InvalidArgs("invalid page path".into()),
@@ -503,9 +628,15 @@ fn map_search_err(err: SearchError) -> McpError {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::{Hash, Hasher};
+
     use super::*;
-    use crate::config::WikiConfig;
+    use crate::embedding::{EmbeddingError, EmbeddingProvider};
+    use async_trait::async_trait;
+    use gadgetron_testing::harness::pg::PgHarness;
     use tempfile::TempDir;
+
+    use crate::config::WikiConfig;
 
     fn fresh_provider_no_search() -> (TempDir, KnowledgeToolProvider) {
         let dir = tempfile::tempdir().unwrap();
@@ -521,6 +652,67 @@ mod tests {
         (dir, provider)
     }
 
+    #[derive(Clone)]
+    struct FakeEmbeddingProvider {
+        dimension: usize,
+    }
+
+    impl FakeEmbeddingProvider {
+        fn new(dimension: usize) -> Self {
+            Self { dimension }
+        }
+
+        fn embed_one(&self, text: &str) -> Vec<f32> {
+            let mut out = vec![0.0; self.dimension];
+            for token in crate::wiki::tokenize(text) {
+                let idx = stable_hash(&token) % self.dimension;
+                out[idx] += 1.0;
+            }
+            out
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for FakeEmbeddingProvider {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            Ok(texts.iter().map(|text| self.embed_one(text)).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
+
+        fn model_name(&self) -> &str {
+            "fake-test-embedding"
+        }
+    }
+
+    fn stable_hash(text: &str) -> usize {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish() as usize
+    }
+
+    async fn semantic_pg_available() -> bool {
+        let admin_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://localhost:5432/postgres".to_string());
+        let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        else {
+            return false;
+        };
+
+        let available: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT default_version FROM pg_available_extensions WHERE name = 'vector'",
+        )
+        .fetch_optional(&pool)
+        .await;
+        pool.close().await;
+        matches!(available, Ok(Some(_)))
+    }
+
     #[test]
     fn category_is_knowledge() {
         let (_dir, p) = fresh_provider_no_search();
@@ -531,9 +723,6 @@ mod tests {
     fn tool_schemas_no_search_has_six_tools() {
         let (_dir, p) = fresh_provider_no_search();
         let schemas = p.tool_schemas();
-        // list/get/search/write/delete/rename. The search subcat adds a
-        // seventh (`web.search`) only when `[knowledge.search]` is
-        // configured, which `fresh_provider_no_search` deliberately omits.
         assert_eq!(schemas.len(), 6);
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
         for expected in [
@@ -553,6 +742,20 @@ mod tests {
     }
 
     #[test]
+    fn wiki_search_schema_uses_limit_field() {
+        let (_dir, p) = fresh_provider_no_search();
+        let schema = p
+            .tool_schemas()
+            .into_iter()
+            .find(|s| s.name == "wiki.search")
+            .expect("wiki.search schema");
+        assert!(schema.input_schema["properties"].get("limit").is_some());
+        assert!(schema.input_schema["properties"]
+            .get("max_results")
+            .is_none());
+    }
+
+    #[test]
     fn wiki_list_tier_is_read_wiki_write_tier_is_write() {
         let (_dir, p) = fresh_provider_no_search();
         let schemas = p.tool_schemas();
@@ -563,7 +766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wiki_write_then_get_round_trips_content() {
+    async fn wiki_write_then_get_round_trips_content_without_semantic_mode() {
         let (_dir, p) = fresh_provider_no_search();
         let write_result = p
             .call(
@@ -591,9 +794,6 @@ mod tests {
         let result = p.call("wiki.list", json!({})).await.unwrap();
         let pages = result.content["pages"].as_array().unwrap();
         let names: Vec<&str> = pages.iter().filter_map(|v| v.as_str()).collect();
-        // A fresh wiki is seeded with README / operator / runbook pages at
-        // `Wiki::open` time (see `seeds/`). Assert that our two writes appear
-        // in addition to the seeds rather than pinning an exact page count.
         assert!(names.contains(&"a"), "expected 'a' in {names:?}");
         assert!(names.contains(&"b"), "expected 'b' in {names:?}");
         assert!(pages.len() >= 2);
@@ -615,11 +815,12 @@ mod tests {
         .await
         .unwrap();
         let result = p
-            .call("wiki.search", json!({"query": "quarterly"}))
+            .call("wiki.search", json!({"query": "quarterly", "limit": 10}))
             .await
             .unwrap();
         let hits = result.content["hits"].as_array().unwrap();
         assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["page_name"], "notes");
     }
 
     #[tokio::test]
@@ -742,5 +943,101 @@ mod tests {
             McpError::Denied { reason } => assert!(reason.contains("not configured")),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn semantic_write_sync_indexes_into_postgres_and_searches_by_page_name() {
+        if !semantic_pg_available().await {
+            eprintln!("skipping semantic pg test: vector extension is unavailable");
+            return;
+        }
+        let harness = PgHarness::new().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = WikiConfig {
+            root: dir.path().join("wiki"),
+            autocommit: true,
+            git_author_name: "Test".into(),
+            git_author_email: "test@example.local".into(),
+            max_page_bytes: 1024 * 1024,
+        };
+        let wiki = Arc::new(Wiki::open(cfg).unwrap());
+        let semantic = Arc::new(SemanticBackend::new(
+            harness.pool.clone(),
+            Arc::new(FakeEmbeddingProvider::new(1536)) as Arc<dyn EmbeddingProvider>,
+            EmbeddingWriteMode::Sync,
+        ));
+        let provider =
+            KnowledgeToolProvider::with_components_and_semantic(wiki, None, Some(semantic), 10);
+
+        provider
+            .call(
+                "wiki.write",
+                json!({
+                    "name": "incidents/fan-boot",
+                    "content": "# Fan Boot\n\n## Symptom\n\nGPU fan error during boot.\n\n## Fix\n\nReseat the power cable."
+                }),
+            )
+            .await
+            .expect("write");
+
+        let chunk_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM wiki_chunks WHERE page_name = $1")
+                .bind("incidents/fan-boot")
+                .fetch_one(&harness.pool)
+                .await
+                .expect("count chunks");
+        assert!(chunk_count > 0, "expected indexed chunks");
+
+        let result = provider
+            .call("wiki.search", json!({"query": "fan boot gpu", "limit": 5}))
+            .await
+            .expect("search");
+        let hits = result.content["hits"].as_array().expect("hits array");
+        assert!(!hits.is_empty(), "semantic search should return a hit");
+        assert_eq!(hits[0]["page_name"], "incidents/fan-boot");
+
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn knowledge_provider_new_with_env_enables_semantic_when_pool_and_key_exist() {
+        if !semantic_pg_available().await {
+            eprintln!("skipping semantic pg test: vector extension is unavailable");
+            return;
+        }
+        let harness = PgHarness::new().await;
+        let dir = tempfile::tempdir().unwrap();
+        let raw = format!(
+            r#"
+[knowledge]
+wiki_path = "{}"
+wiki_autocommit = true
+
+[knowledge.embedding]
+provider = "openai_compat"
+base_url = "https://example.invalid/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "text-embedding-3-small"
+dimension = 1536
+write_mode = "sync"
+timeout_secs = 5
+"#,
+            dir.path().join("wiki").display()
+        );
+        let cfg = KnowledgeConfig::extract_from_toml_str(&raw)
+            .expect("parse")
+            .expect("knowledge cfg");
+        let env = gadgetron_core::agent::config::FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
+        let provider =
+            KnowledgeToolProvider::new_with_env(cfg, Some(harness.pool.clone()), &env).unwrap();
+
+        let schema = provider
+            .tool_schemas()
+            .into_iter()
+            .find(|s| s.name == "wiki.search")
+            .expect("search schema");
+        assert!(schema.input_schema["properties"].get("limit").is_some());
+
+        harness.cleanup().await;
     }
 }

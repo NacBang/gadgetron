@@ -28,6 +28,7 @@ compile_error!(
 use std::io::Write;
 use std::path::Path;
 
+use gadgetron_core::agent::config::{EnvResolver, StdEnv};
 use tempfile::NamedTempFile;
 
 /// Build the JSON document that Claude Code consumes via `--mcp-config`.
@@ -46,6 +47,13 @@ use tempfile::NamedTempFile;
 /// Lifted out of the tempfile writer so tests can round-trip it without
 /// touching the filesystem.
 pub fn build_config_json(config_path: Option<&Path>) -> serde_json::Value {
+    build_config_json_with_env(config_path, &StdEnv)
+}
+
+fn build_config_json_with_env(
+    config_path: Option<&Path>,
+    env: &dyn EnvResolver,
+) -> serde_json::Value {
     let gadgetron_bin = std::env::current_exe()
         .ok()
         .and_then(|p| p.canonicalize().ok())
@@ -57,12 +65,24 @@ pub fn build_config_json(config_path: Option<&Path>) -> serde_json::Value {
         args.push("--config".to_string());
         args.push(abs.to_string_lossy().into_owned());
     }
+    let mut knowledge = serde_json::Map::from_iter([
+        (
+            "command".to_string(),
+            serde_json::Value::String(gadgetron_bin),
+        ),
+        (
+            "args".to_string(),
+            serde_json::Value::Array(args.into_iter().map(serde_json::Value::String).collect()),
+        ),
+    ]);
+
+    if let Some(env_map) = knowledge_server_env(config_path, env) {
+        knowledge.insert("env".to_string(), serde_json::Value::Object(env_map));
+    }
+
     serde_json::json!({
         "mcpServers": {
-            "knowledge": {
-                "command": gadgetron_bin,
-                "args": args
-            }
+            "knowledge": knowledge
         }
     })
 }
@@ -87,9 +107,51 @@ pub fn write_config_file(config_path: Option<&Path>) -> std::io::Result<NamedTem
     Ok(tmpfile)
 }
 
+fn knowledge_server_env(
+    config_path: Option<&Path>,
+    env: &dyn EnvResolver,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+
+    if let Some(db_url) = env
+        .get("GADGETRON_DATABASE_URL")
+        .filter(|value| !value.trim().is_empty())
+    {
+        out.insert(
+            "GADGETRON_DATABASE_URL".to_string(),
+            serde_json::Value::String(db_url),
+        );
+    }
+
+    if let Some(api_key_env_name) = embedding_api_key_env_name(config_path) {
+        if let Some(api_key) = env
+            .get(&api_key_env_name)
+            .filter(|value| !value.trim().is_empty())
+        {
+            out.insert(api_key_env_name, serde_json::Value::String(api_key));
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn embedding_api_key_env_name(config_path: Option<&Path>) -> Option<String> {
+    let path = config_path?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cfg = gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
+        .ok()
+        .flatten()?;
+    cfg.embedding.map(|embedding| embedding.api_key_env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gadgetron_core::agent::config::FakeEnv;
     use std::os::unix::fs::MetadataExt;
 
     #[test]
@@ -117,6 +179,56 @@ mod tests {
                 .map(|a| a.len()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn build_config_json_includes_per_server_env_when_available() {
+        let tmp = NamedTempFile::with_prefix("gadgetron-toml-").expect("tmp");
+        std::fs::write(
+            tmp.path(),
+            r#"
+[knowledge]
+wiki_path = "/tmp/wiki"
+
+[knowledge.embedding]
+api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .expect("write config");
+        let env = FakeEnv::new()
+            .with("GADGETRON_DATABASE_URL", "postgres://local/db")
+            .with("OPENAI_API_KEY", "sk-test");
+
+        let v = build_config_json_with_env(Some(tmp.path()), &env);
+        let server_env = v["mcpServers"]["knowledge"]["env"]
+            .as_object()
+            .expect("env object");
+        assert_eq!(
+            server_env["GADGETRON_DATABASE_URL"]
+                .as_str()
+                .expect("db url"),
+            "postgres://local/db"
+        );
+        assert_eq!(
+            server_env["OPENAI_API_KEY"].as_str().expect("api key"),
+            "sk-test"
+        );
+    }
+
+    #[test]
+    fn build_config_json_omits_env_block_when_nothing_is_forwarded() {
+        let tmp = NamedTempFile::with_prefix("gadgetron-toml-").expect("tmp");
+        std::fs::write(
+            tmp.path(),
+            r#"
+[knowledge]
+wiki_path = "/tmp/wiki"
+"#,
+        )
+        .expect("write config");
+
+        let v = build_config_json_with_env(Some(tmp.path()), &FakeEnv::new());
+        assert!(v["mcpServers"]["knowledge"].get("env").is_none());
     }
 
     #[test]
