@@ -4,7 +4,7 @@
 > **Review round**: 1.5 re-review (v2 blocker verification)
 > **Doc reviewed**: `docs/design/phase2/03-gadgetron-web.md` Draft v2 (2026-04-14)
 > **Review date**: 2026-04-14
-> **Prior review**: `docs/reviews/phase2/round2-dx-product-lead-web-v1.md` (4 B, 7 NB, 5 N)
+> **Prior review**: `docs/archive/reviews/phase2/round2-dx-product-lead-web-v1.md` (4 B, 7 NB, 5 N; archived)
 > **Scope**: Verify all 4 v1 blockers resolved; verify selected non-blockers addressed; flag new issues introduced by v2.
 
 ---

@@ -6,7 +6,7 @@
 > **최종 업데이트**: 2026-04-15
 > **관련 크레이트**: `gadgetron-cli`, `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-penny`
 > **Phase**: [P2A] / [P2B]
-> **관련 문서**: `docs/design/usability/sprint7-cli-init-nodb.md`, `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md`, `docs/design/phase2/04-mcp-tool-registry.md`
+> **관련 문서**: `docs/archive/phase1/sprint7-cli-init-nodb.md` (Phase 1 기반, archived), `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/00-overview.md`, `docs/design/phase2/04-mcp-tool-registry.md`
 
 ---
 
@@ -382,8 +382,8 @@ This preserves D-12 boundaries:
 
 ### 3.3 타 문서와의 계약
 
-- `docs/design/usability/sprint7-cli-init-nodb.md`
-  - remains canonical for `gateway` bootstrap
+- `docs/archive/phase1/sprint7-cli-init-nodb.md` (archived)
+  - Phase 1 canonical reference for `gateway` bootstrap; superseded by trunk manual once `init --profile assistant` ships
 - `docs/manual/configuration.md`
   - must be updated to say `init --profile assistant` is the recommended assistant entry path once implemented
 - `docs/manual/penny.md`
