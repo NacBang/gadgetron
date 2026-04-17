@@ -2,7 +2,22 @@
 
 Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A assistant and collaboration features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose the Penny assistant runtime plus the embedded Web UI when configured.
 
-This manual tracks the operator-facing surface on workspace trunk (`0.2.0`). The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning policy is documented in `docs/process/06-versioning-policy.md`.
+## Source-of-truth scope
+
+This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.2.0`). If a behaviour is described here, it exists in the binary you can `cargo build` from `main`.
+
+The contract vs. neighbouring doc clusters:
+
+| Doc cluster | What it describes | When it disagrees with `manual/` |
+|---|---|---|
+| [`docs/manual/`](./) (this) | Shipped behaviour on trunk | Wins. |
+| [`docs/design/phase2/`](../design/phase2/) | Approved-but-not-yet-shipped design | Forward-looking; not trunk state. |
+| [`docs/architecture/platform-architecture.md`](../architecture/platform-architecture.md) | Cross-cutting integration view (any phase) | Describes intent; `manual/` describes reality. |
+| [`docs/modules/*.md`](../modules/) | Per-domain detailed spec | Describes the full design target, not the current trunk cut. |
+
+New operator-visible behaviour must land in the relevant `manual/*.md` page **in the same PR** that ships the code. If it isn't documented here, an operator has no way to discover it.
+
+The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning policy is documented in [`docs/process/06-versioning-policy.md`](../process/06-versioning-policy.md). A document-wide reader map sits in [`docs/INDEX.md`](../INDEX.md).
 
 ---
 
