@@ -1,6 +1,6 @@
 # Gadgetron Operator Manual
 
-Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A assistant and collaboration features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose the Penny assistant runtime plus the embedded Web UI when configured.
+Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional Phase 2A knowledge and collaboration features. It fronts OpenAI, Anthropic, Gemini, Ollama, vLLM, and SGLang providers, and can expose Penny plus the embedded Web UI when configured.
 
 ## Source-of-truth scope
 
@@ -32,7 +32,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |
 | [auth.md](auth.md) | API key format, how auth works, scope system |
 | [troubleshooting.md](troubleshooting.md) | Common errors and their fixes |
-| [penny.md](penny.md) | **Phase 2A**: Penny 협업 에이전트 런타임 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
+| [penny.md](penny.md) | **Phase 2A**: Penny 런타임 (Claude Code + 위키 + SearXNG) — 설치, 설정, 프라이버시 고지, 트러블슈팅 |
 | [web.md](web.md) | **Phase 2A**: Gadgetron Web UI — `http://localhost:8080/web` 채팅 UI 설정, Origin 격리, 키 회전, 헤드리스 빌드 |
 | [evaluation.md](evaluation.md) | **Phase 2A**: Penny 평가 하네스 — 시나리오 기반 자동 검증 (`eval/run_eval.py`), SearXNG 설정, CI 게이트 연동 |
 

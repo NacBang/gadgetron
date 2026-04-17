@@ -1,13 +1,13 @@
-# `docs/agents/` — 개발 협업 에이전트 역할 정의
+# `docs/agents/` — 개발 협업 역할 정의
 
-이 디렉터리는 **Gadgetron을 개발하는 AI 코딩 도구(= 개발 협업 에이전트)** 가 수행하는 전문가 역할의 정의 파일을 모은다.
+이 디렉터리는 **Gadgetron을 개발하는 AI 코딩 세션** 이 수행하는 전문가 역할의 정의 파일을 모은다.
 
-**주의**: 여기서 말하는 "에이전트" 는 **Penny(제품 런타임 에이전트)** 가 아니다. 두 용어의 층위 구분은 [`AGENTS.md`](../../AGENTS.md) §`Penny vs. 이 파일의 "에이전트"` 에 있다.
+**주의**: 여기 모인 역할은 **Penny** (출시 바이너리에서 동작하는 제품 런타임) 와는 다른 층위다. 두 층위의 구분은 [`AGENTS.md`](../../AGENTS.md) §`Penny vs. 이 파일` 에 있다.
 
 | 층위 | 대상 | SSOT |
 |---|---|---|
-| 제품 런타임 에이전트 | **Penny** | [`docs/design/phase2/02-penny-agent.md`](../design/phase2/02-penny-agent.md) |
-| 개발 협업 에이전트 | PM + 아래 전문가 역할 | 이 디렉터리 (`docs/agents/*.md`) |
+| 제품 런타임 | **Penny** | [`docs/design/phase2/02-penny-agent.md`](../design/phase2/02-penny-agent.md) |
+| 개발 협업 | PM + 아래 전문가 역할 | 이 디렉터리 (`docs/agents/*.md`) |
 
 ---
 

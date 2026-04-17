@@ -12,7 +12,7 @@
 | "Gadgetron이 뭐 하는 제품인지 5분에" | [`00-overview.md`](00-overview.md) §1–2 | [`README.md`](../README.md) |
 | 단일 바이너리 실행·설정 | [`manual/quickstart.md`](manual/quickstart.md) | [`manual/configuration.md`](manual/configuration.md), [`manual/troubleshooting.md`](manual/troubleshooting.md) |
 | OpenAI API 사용자 / SDK 호출 | [`manual/api-reference.md`](manual/api-reference.md) | [`manual/auth.md`](manual/auth.md) |
-| Penny 에이전트 쓰기 | [`manual/penny.md`](manual/penny.md) | [`design/phase2/02-penny-agent.md`](design/phase2/02-penny-agent.md) |
+| Penny 쓰기 | [`manual/penny.md`](manual/penny.md) | [`design/phase2/02-penny-agent.md`](design/phase2/02-penny-agent.md) |
 | 크레이트/모듈 구현 작업 | [`modules/`](modules/) 해당 모듈 + [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis B | [`design/phase2/`](design/phase2/) active work |
 | 배포·운영·장애 대응 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis C, F | [`modules/deployment-operations.md`](modules/deployment-operations.md) |
 | 성능·레이턴시 분석 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis H | |

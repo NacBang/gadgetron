@@ -1,8 +1,8 @@
 # Gadgetron
 
-Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes) under an agent called **Penny**, and extends its capabilities through **MCP plugins**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
+Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes), **Penny** drives it on the user's behalf, and capabilities are extended through **MCP plugins**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
 
-**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: knowledge layer, Penny agent runtime, and embedded Web UI. Interactive approval flow is deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
+**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: knowledge layer, Penny runtime, and embedded Web UI. Interactive approval flow is deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
 
 ## How it works
 
@@ -10,7 +10,7 @@ Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge l
   user request
        │
        ▼
-  ┌─── Penny (agent) ───┐
+  ┌─────── Penny ───────┐
   │                     │
   │  1. query knowledge │
   │  2. web-search if   │
@@ -25,7 +25,7 @@ Details: [`docs/00-overview.md`](docs/00-overview.md) §1 for the product narrat
 
 ## Features
 
-### Penny — the Gadgetron agent (Phase 2A)
+### Penny (Phase 2A)
 
 - **Runtime** — Claude Code CLI + Claude Opus by default (OAuth via `claude_max`, or explicit Anthropic API key). Per [`02-penny-agent.md v4`](docs/design/phase2/02-penny-agent.md).
 - **Replaceable** — point Penny at any other cloud model (OpenAI / Gemini …) or a local model (vLLM / SGLang / Ollama). Same trait abstraction, same UX.
