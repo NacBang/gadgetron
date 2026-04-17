@@ -3,7 +3,7 @@
 **Date**: 2026-04-14
 **Reviewer**: @qa-test-architect
 **Scope**: `docs/design/phase2/03-gadgetron-web.md` Draft v2 (PM authored 2026-04-14)
-**Baseline**: v1 review `docs/reviews/phase2/round2-qa-test-architect-web-v1.md` (5 blockers QA-W-B1..B5, 2 determinism items QA-W-DET1/DET2, 3 non-blockers QA-W-NB1..NB3)
+**Baseline**: v1 review `docs/archive/reviews/phase2/round2-qa-test-architect-web-v1.md` (5 blockers QA-W-B1..B5, 2 determinism items QA-W-DET1/DET2, 3 non-blockers QA-W-NB1..NB3; archived)
 
 ---
 

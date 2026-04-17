@@ -816,7 +816,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Hotfix: 413 response shape (docs/design/polish/hotfix-error-shape-findings.md)
+    // Hotfix: 413 response shape (docs/archive/phase1/hotfix-error-shape-findings.md)
     // ------------------------------------------------------------------
 
     /// `format_body_limit` renders the runtime `MAX_BODY_BYTES` as a

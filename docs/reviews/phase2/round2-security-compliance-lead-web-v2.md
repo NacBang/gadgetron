@@ -3,7 +3,7 @@
 **Reviewer**: security-compliance-lead
 **Date**: 2026-04-14
 **Scope**: `docs/design/phase2/03-gadgetron-web.md` Draft v2 (PM authored 2026-04-14)
-**Predecessor**: `docs/reviews/phase2/round2-security-compliance-lead-web-v1.md` (7 blockers, 9 non-blockers, GDPR gap)
+**Predecessor**: `docs/archive/reviews/phase2/round2-security-compliance-lead-web-v1.md` (7 blockers, 9 non-blockers, GDPR gap; archived)
 **Drives**: ADR-P2A-04, D-20260414-02
 **Review basis**: `docs/process/03-review-rubric.md §1.5-A`, OWASP Top 10 (2021), OWASP ASVS L2, OWASP LLM Top 10, CSP Level 3 spec, CWE-22/79/80/829/1021
 
@@ -414,7 +414,7 @@ Hand-off:
 
 - ADR-P2A-04 §Mitigations — M-W1..M-W7 referenced throughout v2 (M-W7 is new in v2 for reverse-proxy api-base drift)
 - `docs/design/phase2/00-overview.md §10` — Phase 2A compliance mapping; v2 §25 is a sibling
-- `docs/reviews/phase2/round2-security-compliance-lead-web-v1.md` — v1 review (this doc verifies)
+- `docs/archive/reviews/phase2/round2-security-compliance-lead-web-v1.md` — v1 review (this doc verifies; archived)
 - `docs/process/04-decision-log.md` D-20260411-12 — Phase 1 PgKeyValidator LRU invalidation (referenced by §13 compromise recovery)
 - `docs/process/04-decision-log.md` D-20260414-02 — OpenWebUI → assistant-ui decision
 - OWASP Trusted Types cheat sheet

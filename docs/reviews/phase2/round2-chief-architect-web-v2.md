@@ -3,7 +3,7 @@
 **Date**: 2026-04-14
 **Scope**: `docs/design/phase2/03-gadgetron-web.md` Draft v2 (PM authored 2026-04-14)
 **Reviewer role**: Round 3 — Rust idiom + crate seam + implementation determinism
-**Predecessor**: `docs/reviews/phase2/round2-chief-architect-web-v1.md` (REVISE — 5 B / 6 NB / 6 DET / 6 NIT)
+**Predecessor**: `docs/archive/reviews/phase2/round2-chief-architect-web-v1.md` (REVISE — 5 B / 6 NB / 6 DET / 6 NIT; archived)
 **Decision anchors**: D-12, D-20260412-02, D-20260414-02, D-20260411-13, ADR-P2A-04
 **This is the load-bearing sign-off gate before TDD start.**
 

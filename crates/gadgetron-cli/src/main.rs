@@ -1738,7 +1738,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Hotfix: --tui TTY pre-check
-    // (docs/design/polish/hotfix-tui-tty-precheck.md)
+    // (docs/archive/phase1/hotfix-tui-tty-precheck.md)
     // ------------------------------------------------------------------
 
     #[test]

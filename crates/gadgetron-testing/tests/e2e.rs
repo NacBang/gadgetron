@@ -1,6 +1,6 @@
 // E2E integration tests for gadgetron-gateway.
 //
-// Scenarios 1-7 per docs/design/testing/sprint5-e2e-bench-tui.md §2.6.
+// Scenarios 1-7 per docs/archive/phase1/sprint5-e2e-bench-tui.md §2.6.
 //
 // Each test:
 //   1. Spins up a local PostgreSQL test database (PgHarness::new()).
