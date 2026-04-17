@@ -76,7 +76,7 @@ use crate::mcp_config::write_config_file;
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
 use crate::spawn::{build_claude_command_with_session, ClaudeSessionMode};
-use crate::stream::{event_to_chat_chunks, parse_event, StreamJsonEvent};
+use crate::stream::{event_to_chat_chunks_ex, parse_event, StreamJsonEvent};
 
 /// Bound on the in-flight chunk channel. Small values are fine for
 /// P2A — Claude Code emits chunks faster than HTTP can drain them
@@ -526,6 +526,11 @@ async fn drive(
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     let mut timed_out = false;
+    // Track whether we've received stream_event deltas
+    // (--include-partial-messages). When true, assistant event text
+    // blocks are duplicates of the already-streamed tokens and must
+    // be suppressed to avoid double-rendering on the client.
+    let mut has_streamed_deltas = false;
 
     loop {
         line.clear();
@@ -543,6 +548,9 @@ async fn drive(
                 }
                 match parse_event(&line) {
                     Ok(Some(event)) => {
+                        if matches!(&event, StreamJsonEvent::StreamEvent { .. }) {
+                            has_streamed_deltas = true;
+                        }
                         emit_tool_audit_if_needed(
                             &event,
                             tool_metadata,
@@ -550,7 +558,7 @@ async fn drive(
                             audit_conv_id,
                             audit_session_uuid_ref,
                         );
-                        for chunk in event_to_chat_chunks(event, request) {
+                        for chunk in event_to_chat_chunks_ex(event, request, has_streamed_deltas) {
                             // Back-pressure: if the receiver is gone,
                             // stop driving — subprocess will be killed
                             // on child drop.

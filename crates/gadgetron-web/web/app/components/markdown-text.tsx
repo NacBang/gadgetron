@@ -70,32 +70,14 @@ export function MarkdownText({
 }
 
 /**
- * Typewriter reveal of `text`. Exposes one animation frame's worth of
- * codepoints at a time while the stream is active, then keeps revealing
- * anything still unread after the stream closes (so the user sees the
- * tail of the answer even if the server finished early).
+ * Adaptive text reveal. Two modes depending on how `text` grows:
  *
- * # Why
- *
- * Claude Code's `stream-json` wire format emits the assistant message as
- * one or two large events, not token-by-token. Rendering those straight
- * to the DOM causes the bubble to "teleport" into existence — technically
- * streaming, perceptually static. Reveal-in-frame brings the UX back to
- * the ChatGPT / Claude feel.
- *
- * # Reveal schedule
- *
- * Per animation frame (~60 Hz) we advance by a *step* proportional to
- * the remaining backlog. The math:
- *
- * - `backlog = chars.length - shown`
- * - `step = clamp(2, floor(backlog / 30), 60)`
- *
- * That gives ~120 codepoints/sec on a steady stream (2 cp × 60 fps),
- * graceful acceleration when the server is already ahead (every 30
- * unread codepoints adds 1 cp/frame), and a hard ceiling of 60 cp/frame
- * so a very long backlog (e.g. resumed/replayed transcript) still
- * flushes in under a second without freezing the thread.
+ * - **Token streaming** (small deltas, < 40 chars): show immediately.
+ *   No artificial delay — the natural token arrival pace IS the
+ *   typewriter effect.
+ * - **Bulk dump** (large delta, >= 40 chars): rAF-paced reveal so a
+ *   replayed transcript or a single large "assistant" event doesn't
+ *   teleport into existence.
  *
  * Codepoint-safe: we iterate `Array.from(text)` (USV iterator), not byte
  * or UTF-16 code-unit slicing, so emoji and combined Korean syllables
@@ -104,18 +86,26 @@ export function MarkdownText({
 function useTypewriterText(text: string, running: boolean): string {
   const chars = useMemo(() => Array.from(text), [text]);
   const [shown, setShown] = useState(() => chars.length);
+  const prevLenRef = useRef(chars.length);
   const runningRef = useRef(running);
   runningRef.current = running;
 
   useEffect(() => {
-    // If `text` shrank (rare — new turn in same part, etc.) clamp shown.
-    if (shown > chars.length) {
+    const delta = chars.length - prevLenRef.current;
+    prevLenRef.current = chars.length;
+
+    if (chars.length < shown) {
+      // Text shrank (rare — new turn, etc.) — clamp.
+      setShown(chars.length);
+    } else if (delta > 0 && delta < 40) {
+      // Token-level streaming — show immediately, no typewriter.
       setShown(chars.length);
     }
+    // Large delta (>= 40): leave shown where it is so the rAF loop
+    // below handles the reveal animation.
   }, [chars.length, shown]);
 
   useEffect(() => {
-    // If we're already caught up, nothing to do.
     if (shown >= chars.length) return;
 
     let raf = 0;
@@ -125,12 +115,9 @@ function useTypewriterText(text: string, running: boolean): string {
       setShown((prev) => {
         if (prev >= chars.length) return prev;
         const backlog = chars.length - prev;
-        // Slower while actively streaming (keeps the cursor visible as a
-        // pacing element). Once the server signals done, fast-forward so
-        // we don't leave the user staring at a frozen partial answer.
         const step = runningRef.current
-          ? Math.min(Math.max(2, Math.floor(backlog / 30)), 60)
-          : Math.min(Math.max(8, Math.floor(backlog / 6)), 200);
+          ? Math.min(Math.max(6, Math.floor(backlog / 10)), 80)
+          : Math.min(Math.max(20, Math.floor(backlog / 4)), 300);
         return Math.min(prev + step, chars.length);
       });
       raf = requestAnimationFrame(tick);

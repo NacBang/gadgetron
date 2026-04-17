@@ -92,6 +92,17 @@ pub enum StreamJsonEvent {
         #[serde(default)]
         output_tokens: u32,
     },
+
+    // --- Token-level streaming (--include-partial-messages) ---
+    /// `type: "stream_event"` — wraps Anthropic API-level streaming
+    /// events (`content_block_delta`, `message_start`, etc.). Emitted
+    /// when `--include-partial-messages` is passed to Claude Code.
+    /// The inner `event.type = "content_block_delta"` carries
+    /// individual token deltas for real-time streaming.
+    #[serde(rename = "stream_event")]
+    StreamEvent {
+        event: RawStreamEvent,
+    },
 }
 
 /// The `message` field inside a `type: "assistant"` event.
@@ -153,6 +164,32 @@ pub struct MessageDelta {
     pub stop_reason: Option<String>,
 }
 
+/// Anthropic API streaming event nested inside `type: "stream_event"`.
+/// Only `content_block_delta` is relevant for text streaming; all other
+/// sub-types are forwarded as `Other` (forward-compat).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum RawStreamEvent {
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        delta: ContentBlockDeltaPayload,
+    },
+    #[serde(other)]
+    Other,
+}
+
+/// Delta payload inside a `content_block_delta` stream event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlockDeltaPayload {
+    #[serde(rename = "text_delta")]
+    TextDelta { text: String },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
+    #[serde(other)]
+    Other,
+}
+
 /// Parse a single stream-json line.
 ///
 /// Behavior:
@@ -178,6 +215,8 @@ pub fn parse_event(line: &str) -> Result<Option<StreamJsonEvent>, serde_json::Er
 ///
 /// The number of chunks per event:
 ///
+/// - `StreamEvent(content_block_delta/text_delta)` → 1 chunk (token streaming)
+/// - `Assistant` text blocks → 1 chunk per block (skipped when `skip_assistant_text`)
 /// - `MessageDelta` with text → 1 chunk
 /// - `MessageDelta` without text → 0 chunks
 /// - `ToolUse` → 0 chunks (name logged to audit; never surfaced)
@@ -185,13 +224,45 @@ pub fn parse_event(line: &str) -> Result<Option<StreamJsonEvent>, serde_json::Er
 /// - `MessageStop` → 1 chunk with `finish_reason = "stop"`
 /// - `MessageUsage` → 0 chunks (audit-only, no client surface in P2A)
 pub fn event_to_chat_chunks(event: StreamJsonEvent, req: &ChatRequest) -> Vec<ChatChunk> {
+    event_to_chat_chunks_ex(event, req, false)
+}
+
+/// Extended variant used by `session.rs` when `--include-partial-messages`
+/// is active. When `skip_assistant_text` is true, text blocks inside
+/// `Assistant` events are suppressed because they duplicate the tokens
+/// already streamed via `StreamEvent` deltas.
+pub fn event_to_chat_chunks_ex(
+    event: StreamJsonEvent,
+    req: &ChatRequest,
+    skip_assistant_text: bool,
+) -> Vec<ChatChunk> {
     match event {
+        // --- Token-level streaming (--include-partial-messages) ---
+        StreamJsonEvent::StreamEvent { event: stream_evt } => match stream_evt {
+            RawStreamEvent::ContentBlockDelta { delta } => match delta {
+                ContentBlockDeltaPayload::TextDelta { text } if !text.is_empty() => {
+                    vec![build_chunk(req, Some(text), None)]
+                }
+                ContentBlockDeltaPayload::ThinkingDelta { thinking }
+                    if !thinking.is_empty() =>
+                {
+                    let formatted =
+                        format!("> 💭 _{}_\n\n", thinking.replace('\n', "\n> "));
+                    vec![build_chunk(req, Some(formatted), None)]
+                }
+                _ => Vec::new(),
+            },
+            RawStreamEvent::Other => Vec::new(),
+        },
+
         // --- Claude Code ≥2.1 verbose events ---
         StreamJsonEvent::Assistant { message } => {
             let mut chunks = Vec::new();
             for block in message.content {
                 match block {
-                    ContentBlock::Text { text } if !text.is_empty() => {
+                    ContentBlock::Text { text }
+                        if !text.is_empty() && !skip_assistant_text =>
+                    {
                         chunks.push(build_chunk(req, Some(text), None));
                     }
                     ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
