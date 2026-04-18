@@ -1,18 +1,18 @@
-//! `McpToolRegistry` — the MCP tool dispatch table for Penny.
+//! `GadgetRegistry` — the MCP tool dispatch table for Penny.
 //!
-//! Spec: `docs/design/phase2/04-mcp-tool-registry.md v2 §2.1`.
+//! Spec: `docs/design/phase2/04-gadget-registry.md v2 §2.1`.
 //!
 //! # Lifecycle (builder/freeze pattern)
 //!
-//! 1. `main()` constructs `McpToolRegistryBuilder::new()` and calls
-//!    `register()` for each concrete `McpToolProvider` implementation:
+//! 1. `main()` constructs `GadgetRegistryBuilder::new()` and calls
+//!    `register()` for each concrete `GadgetProvider` implementation:
 //!    `KnowledgeToolProvider` in P2A, `InfraToolProvider` in P2C, etc.
 //! 2. `builder.freeze()` consumes the builder and returns an immutable
-//!    `McpToolRegistry`. This flips the registry from mutable-startup
+//!    `GadgetRegistry`. This flips the registry from mutable-startup
 //!    phase to immutable-serving phase.
 //! 3. The frozen registry is wrapped in `Arc` and cloned into
 //!    `AppState` + the Penny session builder. Per-request dispatch
-//!    is `O(1)` via a `HashMap<String, Arc<dyn McpToolProvider>>`.
+//!    is `O(1)` via a `HashMap<String, Arc<dyn GadgetProvider>>`.
 //!
 //! Why not a single mutable-through-lifetime registry? Two reasons:
 //!
@@ -27,18 +27,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gadgetron_core::agent::config::{AgentConfig, ToolMode};
+use gadgetron_core::agent::config::{AgentConfig, GadgetMode};
 use gadgetron_core::agent::tools::{
-    ensure_tool_name_allowed, McpError, McpToolProvider, Tier, ToolResult, ToolSchema,
+    ensure_tool_name_allowed, GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
 };
-use gadgetron_core::audit::ToolMetadata;
+use gadgetron_core::audit::GadgetMetadata;
 
 /// Mutable builder. Lives in `main()` until all providers are registered.
-pub struct McpToolRegistryBuilder {
-    providers: Vec<Arc<dyn McpToolProvider>>,
+pub struct GadgetRegistryBuilder {
+    providers: Vec<Arc<dyn GadgetProvider>>,
 }
 
-impl McpToolRegistryBuilder {
+impl GadgetRegistryBuilder {
     pub fn new() -> Self {
         Self {
             providers: Vec::new(),
@@ -52,12 +52,12 @@ impl McpToolRegistryBuilder {
     /// Providers whose `is_available()` returns `false` are silently
     /// skipped — this is how feature-gated providers (compile-time or
     /// runtime) opt out without returning an error.
-    pub fn register(&mut self, provider: Arc<dyn McpToolProvider>) -> Result<(), McpError> {
+    pub fn register(&mut self, provider: Arc<dyn GadgetProvider>) -> Result<(), GadgetError> {
         if !provider.is_available() {
             return Ok(());
         }
         let category = provider.category();
-        for schema in provider.tool_schemas() {
+        for schema in provider.gadget_schemas() {
             ensure_tool_name_allowed(&schema.name, category)?;
         }
         self.providers.push(provider);
@@ -76,9 +76,9 @@ impl McpToolRegistryBuilder {
     ///
     /// The `cfg` argument is captured at freeze time to precompute the
     /// `allowed_names` set used by `dispatch()` for L3 defense-in-depth
-    /// (per `04-mcp-tool-registry.md §6 L3` and ADR-P2A-06 Implementation
+    /// (per `04-gadget-registry.md §6 L3` and ADR-P2A-06 Implementation
     /// status addendum item 3). A caller that bypasses
-    /// `build_allowed_tools` — for example a direct `gadgetron mcp serve`
+    /// `build_allowed_tools` — for example a direct `gadgetron gadget serve`
     /// consumer — cannot reach a `Never`/`Ask`-mode tool because
     /// `dispatch()` checks the precomputed set before routing to the
     /// provider. The registry becomes stale if `cfg` changes at runtime;
@@ -90,19 +90,19 @@ impl McpToolRegistryBuilder {
     /// `all_schemas` vec retains both entries so operators see the
     /// duplicate in `/v1/tools` (future P2B endpoint). The test
     /// `duplicate_tool_name_last_wins_in_dispatch` locks this in.
-    pub fn freeze(self, cfg: &AgentConfig) -> McpToolRegistry {
-        let mut by_tool_name: HashMap<String, Arc<dyn McpToolProvider>> = HashMap::new();
-        let mut all_schemas: Vec<ToolSchema> = Vec::new();
+    pub fn freeze(self, cfg: &AgentConfig) -> GadgetRegistry {
+        let mut by_tool_name: HashMap<String, Arc<dyn GadgetProvider>> = HashMap::new();
+        let mut all_schemas: Vec<GadgetSchema> = Vec::new();
         // Denormalized (tier, category) per tool name so the Penny
         // audit emitter in session.rs can fire `ToolCallCompleted`
         // events without another registry lookup on the hot path.
-        let mut tool_metadata: HashMap<String, ToolMetadata> = HashMap::new();
+        let mut tool_metadata: HashMap<String, GadgetMetadata> = HashMap::new();
         for provider in self.providers.into_iter() {
             let category = provider.category().to_string();
-            for schema in provider.tool_schemas() {
+            for schema in provider.gadget_schemas() {
                 tool_metadata.insert(
                     schema.name.clone(),
-                    ToolMetadata {
+                    GadgetMetadata {
                         tier: schema.tier.into(),
                         category: category.clone(),
                     },
@@ -121,7 +121,7 @@ impl McpToolRegistryBuilder {
             .filter(|schema| tool_is_enabled(schema, cfg))
             .map(|schema| schema.name.clone())
             .collect();
-        McpToolRegistry {
+        GadgetRegistry {
             by_tool_name,
             all_schemas: Arc::from(all_schemas.into_boxed_slice()),
             allowed_names: Arc::new(allowed_names),
@@ -130,7 +130,7 @@ impl McpToolRegistryBuilder {
     }
 }
 
-impl Default for McpToolRegistryBuilder {
+impl Default for GadgetRegistryBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -138,27 +138,27 @@ impl Default for McpToolRegistryBuilder {
 
 /// Immutable dispatch table. Cheap to clone (internal `Arc`s).
 #[derive(Clone)]
-pub struct McpToolRegistry {
-    by_tool_name: HashMap<String, Arc<dyn McpToolProvider>>,
-    all_schemas: Arc<[ToolSchema]>,
+pub struct GadgetRegistry {
+    by_tool_name: HashMap<String, Arc<dyn GadgetProvider>>,
+    all_schemas: Arc<[GadgetSchema]>,
     /// Precomputed set of tool names whose tier × mode resolves to
     /// "operator-allowed" under the config passed to `freeze()`. Used
     /// by `dispatch()` for L3 defense-in-depth. Tools NOT in this set
-    /// are rejected with `McpError::Denied` before the provider is
+    /// are rejected with `GadgetError::Denied` before the provider is
     /// invoked.
     allowed_names: Arc<HashSet<String>>,
     /// Denormalized `(tier, category)` per tool name. Used by the
     /// Penny audit emitter in `session.rs::drive` to fill
     /// `ToolCallCompleted` events without walking the provider list
     /// on the hot path.
-    tool_metadata: Arc<HashMap<String, ToolMetadata>>,
+    tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
 }
 
-impl McpToolRegistry {
+impl GadgetRegistry {
     /// All registered tool schemas, flattened. Includes duplicates
     /// (see `freeze` notes). Callers that need unique names should
     /// dedupe on `schema.name`.
-    pub fn all_schemas(&self) -> &[ToolSchema] {
+    pub fn all_schemas(&self) -> &[GadgetSchema] {
         &self.all_schemas
     }
 
@@ -174,16 +174,16 @@ impl McpToolRegistry {
     /// Build the `--allowed-tools` list passed to `claude -p`.
     /// Filters the full schema set per `AgentConfig`:
     ///
-    /// - `Tier::Read` → always included (V1 forces read = Auto)
-    /// - `Tier::Write` → included iff the matching subcategory is not
-    ///   `ToolMode::Never`. P2A-specific: the subcategory → tool mapping
+    /// - `GadgetTier::Read` → always included (V1 forces read = Auto)
+    /// - `GadgetTier::Write` → included iff the matching subcategory is not
+    ///   `GadgetMode::Never`. P2A-specific: the subcategory → tool mapping
     ///   is based on the tool name prefix:
     ///   - `wiki.*` → `write.wiki_write`
     ///   - `infra.*` → `write.infra_write` (P2C tools, not yet live)
     ///   - `scheduler.*` → `write.scheduler_write` (P3, not yet live)
     ///   - `provider.*` → `write.provider_mutate` (P2C, not yet live)
     ///   - anything else → `write.default_mode`
-    /// - `Tier::Destructive` → included iff `destructive.enabled = true`
+    /// - `GadgetTier::Destructive` → included iff `destructive.enabled = true`
     ///   (always false in P2A per V5). Under Path 1 this branch is
     ///   effectively dead code — the filter never emits a T3 tool — but
     ///   the logic is in place for P2B when approval flow lands.
@@ -214,21 +214,21 @@ impl McpToolRegistry {
         self.allowed_names.contains(name)
     }
 
-    /// Cheap `Arc` clone of the `(tool_name → ToolMetadata)` snapshot
+    /// Cheap `Arc` clone of the `(tool_name → GadgetMetadata)` snapshot
     /// used by `gadgetron-penny::session::drive` + the stream-level
     /// audit emitter to fill `ToolCallCompleted` events.
-    pub fn tool_metadata_snapshot(&self) -> Arc<HashMap<String, ToolMetadata>> {
+    pub fn tool_metadata_snapshot(&self) -> Arc<HashMap<String, GadgetMetadata>> {
         self.tool_metadata.clone()
     }
 
     /// Dispatch a tool call to the provider that owns it.
     ///
-    /// **L3 gate (defense-in-depth)**: per `04-mcp-tool-registry.md §6 L3`
+    /// **L3 gate (defense-in-depth)**: per `04-gadget-registry.md §6 L3`
     /// and ADR-P2A-06 Implementation status addendum item 3, this method
     /// re-checks the operator config even though `build_allowed_tools`
     /// already filtered the names Claude Code sees in `--allowed-tools`.
     /// A caller that bypasses that flag — for example a direct
-    /// `gadgetron mcp serve` stdio consumer, or a Claude Code
+    /// `gadgetron gadget serve` stdio consumer, or a Claude Code
     /// `--dangerously-skip-permissions` bypass — cannot reach a
     /// `Never`/`Ask`-mode tool because the precomputed `allowed_names`
     /// set is consulted BEFORE the provider is invoked.
@@ -240,13 +240,13 @@ impl McpToolRegistry {
     ///
     /// The returned `Result` is the raw MCP surface; callers that need
     /// an HTTP response use `GadgetronError::from(err)` via the
-    /// `From<McpError>` impl in `gadgetron-core` to get the mapped
+    /// `From<GadgetError>` impl in `gadgetron-core` to get the mapped
     /// status code + error message.
     pub async fn dispatch(
         &self,
         name: &str,
         args: serde_json::Value,
-    ) -> Result<ToolResult, McpError> {
+    ) -> Result<GadgetResult, GadgetError> {
         // L3 gate: reject disabled tools before provider lookup.
         if !self.allowed_names.contains(name) {
             // Preserve UnknownTool semantics: if the tool is not
@@ -254,16 +254,16 @@ impl McpToolRegistry {
             // `dispatch_unknown_tool_returns_unknown_tool_error` test
             // (and callers that rely on the distinction) still pass.
             if !self.by_tool_name.contains_key(name) {
-                return Err(McpError::UnknownTool(name.to_string()));
+                return Err(GadgetError::UnknownGadget(name.to_string()));
             }
-            return Err(McpError::Denied {
+            return Err(GadgetError::Denied {
                 reason: format!("tool '{name}' disabled by operator config"),
             });
         }
         let provider = self
             .by_tool_name
             .get(name)
-            .ok_or_else(|| McpError::UnknownTool(name.to_string()))?;
+            .ok_or_else(|| GadgetError::UnknownGadget(name.to_string()))?;
         provider.call(name, args).await
     }
 }
@@ -273,21 +273,21 @@ impl McpToolRegistry {
 /// Per ADR-P2A-06 §"Tier + Mode in P2A", `Ask` is treated as `Never` because
 /// the interactive approval flow is deferred to Phase 2B. Only `Auto` tools
 /// reach Claude Code's allowed-tools flag.
-fn tool_is_enabled(schema: &ToolSchema, cfg: &AgentConfig) -> bool {
+fn tool_is_enabled(schema: &GadgetSchema, cfg: &AgentConfig) -> bool {
     match schema.tier {
-        Tier::Read => true,
-        Tier::Write => {
+        GadgetTier::Read => true,
+        GadgetTier::Write => {
             let mode = resolve_write_mode(&schema.name, cfg);
-            !matches!(mode, ToolMode::Never | ToolMode::Ask)
+            !matches!(mode, GadgetMode::Never | GadgetMode::Ask)
         }
-        Tier::Destructive => cfg.tools.destructive.enabled,
+        GadgetTier::Destructive => cfg.gadgets.destructive.enabled,
     }
 }
 
-/// Map a `Tier::Write` tool name to the config subcategory that
+/// Map a `GadgetTier::Write` tool name to the config subcategory that
 /// controls its mode.
-fn resolve_write_mode(name: &str, cfg: &AgentConfig) -> ToolMode {
-    let w = &cfg.tools.write;
+fn resolve_write_mode(name: &str, cfg: &AgentConfig) -> GadgetMode {
+    let w = &cfg.gadgets.write;
     let prefix = name.split('.').next().unwrap_or("");
     match prefix {
         "wiki" => w.wiki_write,
@@ -309,9 +309,9 @@ mod tests {
     // unidirectional and the test self-contained.
     struct TestProvider {
         category: &'static str,
-        schemas: Vec<ToolSchema>,
+        schemas: Vec<GadgetSchema>,
         available: bool,
-        response: Result<ToolResult, McpError>,
+        response: Result<GadgetResult, GadgetError>,
     }
 
     impl TestProvider {
@@ -320,15 +320,15 @@ mod tests {
                 category,
                 schemas: Vec::new(),
                 available: true,
-                response: Ok(ToolResult {
+                response: Ok(GadgetResult {
                     content: json!({"ok": true}),
                     is_error: false,
                 }),
             }
         }
 
-        fn with_tool(mut self, name: &str, tier: Tier) -> Self {
-            self.schemas.push(ToolSchema {
+        fn with_tool(mut self, name: &str, tier: GadgetTier) -> Self {
+            self.schemas.push(GadgetSchema {
                 name: name.to_string(),
                 tier,
                 description: format!("fake tool {name}"),
@@ -345,19 +345,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl McpToolProvider for TestProvider {
+    impl GadgetProvider for TestProvider {
         fn category(&self) -> &'static str {
             self.category
         }
-        fn tool_schemas(&self) -> Vec<ToolSchema> {
+        fn gadget_schemas(&self) -> Vec<GadgetSchema> {
             self.schemas.clone()
         }
         async fn call(
             &self,
             _name: &str,
             _args: serde_json::Value,
-        ) -> Result<ToolResult, McpError> {
-            // Return a cloned result; McpError isn't Clone so we map.
+        ) -> Result<GadgetResult, GadgetError> {
+            // Return a cloned result; GadgetError isn't Clone so we map.
             match &self.response {
                 Ok(r) => Ok(r.clone()),
                 Err(e) => Err(clone_err(e)),
@@ -368,24 +368,24 @@ mod tests {
         }
     }
 
-    fn clone_err(e: &McpError) -> McpError {
+    fn clone_err(e: &GadgetError) -> GadgetError {
         match e {
-            McpError::UnknownTool(s) => McpError::UnknownTool(s.clone()),
-            McpError::Denied { reason } => McpError::Denied {
+            GadgetError::UnknownGadget(s) => GadgetError::UnknownGadget(s.clone()),
+            GadgetError::Denied { reason } => GadgetError::Denied {
                 reason: reason.clone(),
             },
-            McpError::RateLimited {
-                tool,
+            GadgetError::RateLimited {
+                gadget,
                 remaining,
                 limit,
-            } => McpError::RateLimited {
-                tool: tool.clone(),
+            } => GadgetError::RateLimited {
+                gadget: gadget.clone(),
                 remaining: *remaining,
                 limit: *limit,
             },
-            McpError::ApprovalTimeout { secs } => McpError::ApprovalTimeout { secs: *secs },
-            McpError::InvalidArgs(s) => McpError::InvalidArgs(s.clone()),
-            McpError::Execution(s) => McpError::Execution(s.clone()),
+            GadgetError::ApprovalTimeout { secs } => GadgetError::ApprovalTimeout { secs: *secs },
+            GadgetError::InvalidArgs(s) => GadgetError::InvalidArgs(s.clone()),
+            GadgetError::Execution(s) => GadgetError::Execution(s.clone()),
         }
     }
 
@@ -402,11 +402,11 @@ mod tests {
 
     #[test]
     fn register_then_freeze_produces_dispatch_map() {
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         let provider = Arc::new(
             TestProvider::new("knowledge")
-                .with_tool("wiki.read", Tier::Read)
-                .with_tool("wiki.write", Tier::Write),
+                .with_tool("wiki.read", GadgetTier::Read)
+                .with_tool("wiki.write", GadgetTier::Write),
         );
         builder.register(provider).expect("register");
         assert_eq!(builder.provider_count(), 1);
@@ -418,17 +418,17 @@ mod tests {
 
     #[test]
     fn register_empty_builder_produces_empty_registry() {
-        let registry = McpToolRegistryBuilder::new().freeze(&default_cfg());
+        let registry = GadgetRegistryBuilder::new().freeze(&default_cfg());
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
     }
 
     #[test]
     fn register_unavailable_provider_is_skipped() {
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         let provider = Arc::new(
             TestProvider::new("knowledge")
-                .with_tool("wiki.read", Tier::Read)
+                .with_tool("wiki.read", GadgetTier::Read)
                 .unavailable(),
         );
         builder.register(provider).expect("register ok (skipped)");
@@ -438,29 +438,29 @@ mod tests {
 
     #[test]
     fn register_reserved_agent_category_fails() {
-        let mut builder = McpToolRegistryBuilder::new();
-        let provider = Arc::new(TestProvider::new("agent").with_tool("foo", Tier::Read));
+        let mut builder = GadgetRegistryBuilder::new();
+        let provider = Arc::new(TestProvider::new("agent").with_tool("foo", GadgetTier::Read));
         let err = builder.register(provider).expect_err("must fail");
-        assert!(matches!(err, McpError::Denied { .. }));
+        assert!(matches!(err, GadgetError::Denied { .. }));
     }
 
     #[test]
     fn register_reserved_tool_name_fails() {
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         let provider =
-            Arc::new(TestProvider::new("knowledge").with_tool("agent.set_brain", Tier::Read));
+            Arc::new(TestProvider::new("knowledge").with_tool("agent.set_brain", GadgetTier::Read));
         let err = builder.register(provider).expect_err("must fail");
-        assert!(matches!(err, McpError::Denied { .. }));
+        assert!(matches!(err, GadgetError::Denied { .. }));
     }
 
     // ---- dispatch ----
 
     #[tokio::test]
     async fn dispatch_routes_to_matching_provider() {
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         builder
             .register(Arc::new(
-                TestProvider::new("knowledge").with_tool("wiki.read", Tier::Read),
+                TestProvider::new("knowledge").with_tool("wiki.read", GadgetTier::Read),
             ))
             .unwrap();
         let registry = builder.freeze(&default_cfg());
@@ -473,29 +473,29 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_unknown_tool_error() {
-        let registry = McpToolRegistryBuilder::new().freeze(&default_cfg());
+        let registry = GadgetRegistryBuilder::new().freeze(&default_cfg());
         let err = registry
             .dispatch("ghost.tool", json!({}))
             .await
             .expect_err("unknown");
         match err {
-            McpError::UnknownTool(name) => assert_eq!(name, "ghost.tool"),
+            GadgetError::UnknownGadget(name) => assert_eq!(name, "ghost.tool"),
             other => panic!("wrong variant: {other:?}"),
         }
     }
 
     #[test]
     fn duplicate_tool_name_last_wins_in_dispatch() {
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         builder
             .register(Arc::new(
-                TestProvider::new("knowledge").with_tool("wiki.read", Tier::Read),
+                TestProvider::new("knowledge").with_tool("wiki.read", GadgetTier::Read),
             ))
             .unwrap();
         // A second provider claims the same name.
         builder
             .register(Arc::new(
-                TestProvider::new("custom").with_tool("wiki.read", Tier::Read),
+                TestProvider::new("custom").with_tool("wiki.read", GadgetTier::Read),
             ))
             .unwrap();
         let registry = builder.freeze(&default_cfg());
@@ -507,31 +507,31 @@ mod tests {
     // ---- L3 defense-in-depth (ADR-P2A-06 addendum item 3) ----
 
     #[tokio::test]
-    async fn mcp_server_rejects_never_mode_tool_even_when_dispatched_directly() {
-        // A provider registers `wiki.write` as a Tier::Write tool whose
+    async fn gadget_server_rejects_never_mode_tool_even_when_dispatched_directly() {
+        // A provider registers `wiki.write` as a GadgetTier::Write tool whose
         // `call()` returns `Ok` unconditionally. The registry is frozen
         // against an `AgentConfig` where `wiki_write = Never`. A direct
-        // `dispatch("wiki.write")` MUST return `McpError::Denied` — the
+        // `dispatch("wiki.write")` MUST return `GadgetError::Denied` — the
         // L3 gate rejects the call before the provider's `call` runs.
         //
         // Without the L3 gate the provider's `Ok` return leaks through,
         // and a caller that bypassed `build_allowed_tools` (e.g. a
-        // direct `gadgetron mcp serve` stdio consumer or a Claude Code
+        // direct `gadgetron gadget serve` stdio consumer or a Claude Code
         // `--dangerously-skip-permissions` abuse) could reach a
         // Never-mode tool. Regression-locked here at the dispatch
-        // layer; mcp_server.rs `handle_request` routes through
+        // layer; gadget_server.rs `handle_request` routes through
         // `registry.dispatch` so the L3 check also covers stdio
         // requests without a separate integration test.
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         builder
             .register(Arc::new(
-                TestProvider::new("knowledge").with_tool("wiki.write", Tier::Write),
+                TestProvider::new("knowledge").with_tool("wiki.write", GadgetTier::Write),
             ))
             .unwrap();
         let cfg = cfg_with_overrides(
-            ToolMode::Auto,  // default_mode (irrelevant for wiki.*)
-            ToolMode::Never, // wiki_write — the one under test
-            ToolMode::Auto,  // infra_write
+            GadgetMode::Auto,  // default_mode (irrelevant for wiki.*)
+            GadgetMode::Never, // wiki_write — the one under test
+            GadgetMode::Auto,  // infra_write
             false,
         );
         let registry = builder.freeze(&cfg);
@@ -545,7 +545,7 @@ mod tests {
             .await
             .expect_err("dispatch must reject Never-mode tool");
         match err {
-            McpError::Denied { reason } => {
+            GadgetError::Denied { reason } => {
                 assert!(
                     reason.contains("wiki.write"),
                     "denial reason should mention the tool name: {reason}"
@@ -565,13 +565,13 @@ mod tests {
         // allowed_names, the caller must see UnknownTool — not Denied.
         // This prevents a probing caller from learning whether a
         // specific disabled tool exists by comparing error variants.
-        let registry = McpToolRegistryBuilder::new().freeze(&default_cfg());
+        let registry = GadgetRegistryBuilder::new().freeze(&default_cfg());
         let err = registry
             .dispatch("ghost.never.seen", json!({}))
             .await
             .expect_err("must error");
         assert!(
-            matches!(err, McpError::UnknownTool(_)),
+            matches!(err, GadgetError::UnknownGadget(_)),
             "unknown tool must beat Denied: {err:?}"
         );
     }
@@ -581,16 +581,16 @@ mod tests {
         // ADR-P2A-06: Ask === Never in P2A. The L2 build_allowed_tools
         // filter already excludes Ask; the L3 gate must match so the
         // two sources of truth can never drift.
-        let mut builder = McpToolRegistryBuilder::new();
+        let mut builder = GadgetRegistryBuilder::new();
         builder
             .register(Arc::new(
-                TestProvider::new("knowledge").with_tool("wiki.write", Tier::Write),
+                TestProvider::new("knowledge").with_tool("wiki.write", GadgetTier::Write),
             ))
             .unwrap();
         let cfg = cfg_with_overrides(
-            ToolMode::Auto,
-            ToolMode::Ask, // wiki_write in Ask mode
-            ToolMode::Auto,
+            GadgetMode::Auto,
+            GadgetMode::Ask, // wiki_write in Ask mode
+            GadgetMode::Auto,
             false,
         );
         let registry = builder.freeze(&cfg);
@@ -599,22 +599,22 @@ mod tests {
             .dispatch("wiki.write", json!({}))
             .await
             .expect_err("Ask must be denied");
-        assert!(matches!(err, McpError::Denied { .. }));
+        assert!(matches!(err, GadgetError::Denied { .. }));
     }
 
     // ---- build_allowed_tools ----
 
     fn cfg_with_overrides(
-        write_default: ToolMode,
-        wiki_write: ToolMode,
-        infra_write: ToolMode,
+        write_default: GadgetMode,
+        wiki_write: GadgetMode,
+        infra_write: GadgetMode,
         destructive_enabled: bool,
     ) -> AgentConfig {
         let mut cfg = AgentConfig::default();
-        cfg.tools.write.default_mode = write_default;
-        cfg.tools.write.wiki_write = wiki_write;
-        cfg.tools.write.infra_write = infra_write;
-        cfg.tools.destructive.enabled = destructive_enabled;
+        cfg.gadgets.write.default_mode = write_default;
+        cfg.gadgets.write.wiki_write = wiki_write;
+        cfg.gadgets.write.infra_write = infra_write;
+        cfg.gadgets.destructive.enabled = destructive_enabled;
         cfg
     }
 
@@ -622,22 +622,22 @@ mod tests {
     /// controls the L3 gate inside `freeze`. Tests that care about
     /// `all_schemas` (not dispatch) pass a permissive `AgentConfig`
     /// via `cfg_with_overrides` or `default_cfg`.
-    fn registry_with_full_set_cfg(cfg: &AgentConfig) -> McpToolRegistry {
-        let mut builder = McpToolRegistryBuilder::new();
+    fn registry_with_full_set_cfg(cfg: &AgentConfig) -> GadgetRegistry {
+        let mut builder = GadgetRegistryBuilder::new();
         builder
             .register(Arc::new(
                 TestProvider::new("knowledge")
-                    .with_tool("wiki.read", Tier::Read)
-                    .with_tool("wiki.write", Tier::Write)
-                    .with_tool("web.search", Tier::Read)
-                    .with_tool("wiki.delete", Tier::Destructive),
+                    .with_tool("wiki.read", GadgetTier::Read)
+                    .with_tool("wiki.write", GadgetTier::Write)
+                    .with_tool("web.search", GadgetTier::Read)
+                    .with_tool("wiki.delete", GadgetTier::Destructive),
             ))
             .unwrap();
         builder
             .register(Arc::new(
                 TestProvider::new("infrastructure")
-                    .with_tool("infra.list_nodes", Tier::Read)
-                    .with_tool("infra.deploy_model", Tier::Write),
+                    .with_tool("infra.list_nodes", GadgetTier::Read)
+                    .with_tool("infra.deploy_model", GadgetTier::Write),
             ))
             .unwrap();
         builder.freeze(cfg)
@@ -646,11 +646,11 @@ mod tests {
     /// Back-compat helper: freezes with a permissive config that
     /// enables every Write subcategory. Previously this was the only
     /// helper because freeze didn't take cfg.
-    fn registry_with_full_set() -> McpToolRegistry {
+    fn registry_with_full_set() -> GadgetRegistry {
         registry_with_full_set_cfg(&cfg_with_overrides(
-            ToolMode::Auto,
-            ToolMode::Auto,
-            ToolMode::Auto,
+            GadgetMode::Auto,
+            GadgetMode::Auto,
+            GadgetMode::Auto,
             true, // destructive enabled so the T3 filter tests still see wiki.delete
         ))
     }
@@ -659,7 +659,7 @@ mod tests {
     fn build_allowed_tools_t1_always_present() {
         let reg = registry_with_full_set();
         // Even with all writes never and destructive disabled, T1 reads remain.
-        let cfg = cfg_with_overrides(ToolMode::Never, ToolMode::Never, ToolMode::Never, false);
+        let cfg = cfg_with_overrides(GadgetMode::Never, GadgetMode::Never, GadgetMode::Never, false);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(tools.contains(&"wiki.read".to_string()));
         assert!(tools.contains(&"web.search".to_string()));
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn build_allowed_tools_wiki_write_auto_included() {
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(ToolMode::Never, ToolMode::Auto, ToolMode::Never, false);
+        let cfg = cfg_with_overrides(GadgetMode::Never, GadgetMode::Auto, GadgetMode::Never, false);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(tools.contains(&"wiki.write".to_string()));
         // infra.deploy_model is still Never.
@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn build_allowed_tools_wiki_write_never_omitted() {
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(ToolMode::Auto, ToolMode::Never, ToolMode::Auto, false);
+        let cfg = cfg_with_overrides(GadgetMode::Auto, GadgetMode::Never, GadgetMode::Auto, false);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(!tools.contains(&"wiki.write".to_string()));
     }
@@ -697,7 +697,7 @@ mod tests {
         // runtime correctness gap Codex flagged in the pre-Phase-5 review
         // (`a304a359c467a6579`).
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(ToolMode::Ask, ToolMode::Ask, ToolMode::Ask, false);
+        let cfg = cfg_with_overrides(GadgetMode::Ask, GadgetMode::Ask, GadgetMode::Ask, false);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(
             !tools.contains(&"wiki.write".to_string()),
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn build_allowed_tools_t3_disabled_omits_all_destructive() {
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(ToolMode::Auto, ToolMode::Auto, ToolMode::Auto, false);
+        let cfg = cfg_with_overrides(GadgetMode::Auto, GadgetMode::Auto, GadgetMode::Auto, false);
         let tools = reg.build_allowed_tools(&cfg);
         // wiki.delete is T3 — must NOT appear when enabled=false.
         assert!(!tools.contains(&"wiki.delete".to_string()));
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn build_allowed_tools_t3_enabled_includes_destructive() {
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(ToolMode::Auto, ToolMode::Auto, ToolMode::Auto, true);
+        let cfg = cfg_with_overrides(GadgetMode::Auto, GadgetMode::Auto, GadgetMode::Auto, true);
         let tools = reg.build_allowed_tools(&cfg);
         assert!(tools.contains(&"wiki.delete".to_string()));
     }
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn build_allowed_tools_output_is_sorted_and_deduped() {
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(ToolMode::Auto, ToolMode::Auto, ToolMode::Auto, false);
+        let cfg = cfg_with_overrides(GadgetMode::Auto, GadgetMode::Auto, GadgetMode::Auto, false);
         let tools = reg.build_allowed_tools(&cfg);
         let mut sorted = tools.clone();
         sorted.sort();
@@ -743,32 +743,32 @@ mod tests {
     #[test]
     fn resolve_write_mode_by_prefix() {
         let mut cfg = AgentConfig::default();
-        cfg.tools.write.default_mode = ToolMode::Ask;
-        cfg.tools.write.wiki_write = ToolMode::Auto;
-        cfg.tools.write.infra_write = ToolMode::Never;
-        cfg.tools.write.scheduler_write = ToolMode::Auto;
-        cfg.tools.write.provider_mutate = ToolMode::Never;
+        cfg.gadgets.write.default_mode = GadgetMode::Ask;
+        cfg.gadgets.write.wiki_write = GadgetMode::Auto;
+        cfg.gadgets.write.infra_write = GadgetMode::Never;
+        cfg.gadgets.write.scheduler_write = GadgetMode::Auto;
+        cfg.gadgets.write.provider_mutate = GadgetMode::Never;
 
         assert!(matches!(
             resolve_write_mode("wiki.write", &cfg),
-            ToolMode::Auto
+            GadgetMode::Auto
         ));
         assert!(matches!(
             resolve_write_mode("infra.deploy_model", &cfg),
-            ToolMode::Never
+            GadgetMode::Never
         ));
         assert!(matches!(
             resolve_write_mode("scheduler.schedule_job", &cfg),
-            ToolMode::Auto
+            GadgetMode::Auto
         ));
         assert!(matches!(
             resolve_write_mode("provider.rotate_key", &cfg),
-            ToolMode::Never
+            GadgetMode::Never
         ));
         // Unrecognized prefix uses default_mode.
         assert!(matches!(
             resolve_write_mode("weird.tool", &cfg),
-            ToolMode::Ask
+            GadgetMode::Ask
         ));
     }
 }

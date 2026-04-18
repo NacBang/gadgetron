@@ -1,8 +1,9 @@
-//! Manual stdio MCP server — the `gadgetron mcp serve` entry point.
+//! Manual stdio Gadget server — the `gadgetron gadget serve` entry point
+//! (renamed from `gadgetron mcp serve` per ADR-P2A-10).
 //!
 //! Spec: `docs/design/phase2/01-knowledge-layer.md §6.1` (manual MCP
 //! fallback path — `rmcp` integration deferred to P2B per that doc's
-//! rationale).
+//! rationale). MCP is the wire protocol; Gadgets are the payload.
 //!
 //! # Protocol
 //!
@@ -17,17 +18,17 @@
 //!
 //! - **`initialize`** — MCP protocol handshake. Returns the server's
 //!   `protocolVersion`, `capabilities`, and `serverInfo`. Required
-//!   before any tool-related method.
+//!   before any Gadget-related method.
 //! - **`initialized`** — Notification from the client that it's ready.
 //!   We just silently ack (no response).
-//! - **`tools/list`** — Returns the flattened list of tools from
-//!   `McpToolRegistry::all_schemas()`. Each tool is shaped as
-//!   `{ name, description, inputSchema }` per the MCP spec. Tool
+//! - **`tools/list`** — Returns the flattened list of Gadgets from
+//!   `GadgetRegistry::all_schemas()`. Each Gadget is shaped as
+//!   `{ name, description, inputSchema }` per the MCP spec. Gadget
 //!   names are the raw registry names (no `mcp__<server>__` prefix —
 //!   that transformation happens on the Claude Code side for
 //!   `--allowed-tools`; the wire protocol uses the server's own names).
-//! - **`tools/call`** — Dispatches through `McpToolRegistry::dispatch`
-//!   and returns the `ToolResult` wrapped in the MCP result shape
+//! - **`tools/call`** — Dispatches through `GadgetRegistry::dispatch`
+//!   and returns the `GadgetResult` wrapped in the MCP result shape
 //!   `{ content: [{ type: "text", text: ... }], isError }`.
 //! - **Anything else** — Returns JSON-RPC error code `-32601`
 //!   (method not found).
@@ -37,7 +38,7 @@
 //! The server exits cleanly on stdin EOF — which happens when Claude
 //! Code (the parent process) exits. This is the per-request-per-
 //! subprocess model from 00-overview.md §5: one `claude -p`
-//! invocation → one `gadgetron mcp serve` child → exits together.
+//! invocation → one `gadgetron gadget serve` child → exits together.
 //!
 //! # Why manual JSON-RPC, not `rmcp`?
 //!
@@ -49,12 +50,12 @@
 
 use std::sync::Arc;
 
-use gadgetron_core::agent::tools::{McpError, ToolSchema};
+use gadgetron_core::agent::tools::{GadgetError, GadgetSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::registry::McpToolRegistry;
+use crate::gadget_registry::GadgetRegistry;
 
 /// JSON-RPC 2.0 request envelope — subset used by MCP.
 #[derive(Debug, Deserialize)]
@@ -110,10 +111,10 @@ impl RpcResponse {
 
 /// Run the stdio MCP server until stdin EOF.
 ///
-/// `registry` is the frozen `McpToolRegistry` built by the caller
+/// `registry` is the frozen `GadgetRegistry` built by the caller
 /// with all the providers it wants to expose (typically just
 /// `KnowledgeToolProvider` in P2A).
-pub async fn serve_stdio(registry: Arc<McpToolRegistry>) -> std::io::Result<()> {
+pub async fn serve_stdio(registry: Arc<GadgetRegistry>) -> std::io::Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
@@ -163,7 +164,7 @@ pub async fn serve_stdio(registry: Arc<McpToolRegistry>) -> std::io::Result<()> 
 /// Dispatch one request against the registry. Pure async function
 /// extracted from `serve_stdio` so unit tests can call it directly
 /// without routing through real stdio.
-pub async fn handle_request(registry: &McpToolRegistry, request: RpcRequest) -> RpcResponse {
+pub async fn handle_request(registry: &GadgetRegistry, request: RpcRequest) -> RpcResponse {
     match request.method.as_str() {
         "initialize" => {
             let result = json!({
@@ -215,7 +216,7 @@ pub async fn handle_request(registry: &McpToolRegistry, request: RpcRequest) -> 
                     });
                     RpcResponse::ok(request.id, wrapped)
                 }
-                Err(e) => RpcResponse::ok(request.id, mcp_error_as_tool_result(&e)),
+                Err(e) => RpcResponse::ok(request.id, gadget_error_as_tool_result(&e)),
             }
         }
         other => RpcResponse::err(
@@ -228,21 +229,21 @@ pub async fn handle_request(registry: &McpToolRegistry, request: RpcRequest) -> 
     }
 }
 
-/// Translate an `McpError` into an MCP `{ content, isError: true }`
-/// payload. Keeps tool-level errors as successful JSON-RPC responses
+/// Translate a `GadgetError` into an MCP `{ content, isError: true }`
+/// payload. Keeps Gadget-level errors as successful JSON-RPC responses
 /// with `isError: true`, matching the MCP spec's tool error model.
-fn mcp_error_as_tool_result(err: &McpError) -> Value {
+fn gadget_error_as_tool_result(err: &GadgetError) -> Value {
     let text = match err {
-        McpError::UnknownTool(name) => format!("unknown tool: {name}"),
-        McpError::Denied { reason } => format!("denied: {reason}"),
-        McpError::RateLimited {
-            tool,
+        GadgetError::UnknownGadget(name) => format!("unknown tool: {name}"),
+        GadgetError::Denied { reason } => format!("denied: {reason}"),
+        GadgetError::RateLimited {
+            gadget,
             remaining,
             limit,
-        } => format!("rate limited for {tool}: {remaining}/{limit} remaining this hour"),
-        McpError::ApprovalTimeout { secs } => format!("approval timed out after {secs}s"),
-        McpError::InvalidArgs(msg) => format!("invalid arguments: {msg}"),
-        McpError::Execution(msg) => format!("execution failed: {msg}"),
+        } => format!("rate limited for {gadget}: {remaining}/{limit} remaining this hour"),
+        GadgetError::ApprovalTimeout { secs } => format!("approval timed out after {secs}s"),
+        GadgetError::InvalidArgs(msg) => format!("invalid arguments: {msg}"),
+        GadgetError::Execution(msg) => format!("execution failed: {msg}"),
     };
     json!({
         "content": [{ "type": "text", "text": text }],
@@ -250,8 +251,8 @@ fn mcp_error_as_tool_result(err: &McpError) -> Value {
     })
 }
 
-/// Shape a `ToolSchema` into the MCP `tools/list` wire format.
-fn schema_to_mcp_tool_value(schema: &ToolSchema) -> Value {
+/// Shape a `GadgetSchema` into the MCP `tools/list` wire format.
+fn schema_to_mcp_tool_value(schema: &GadgetSchema) -> Value {
     json!({
         "name": schema.name,
         "description": schema.description,
@@ -276,21 +277,21 @@ async fn write_response(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use gadgetron_core::agent::tools::{McpToolProvider, Tier, ToolResult};
+    use gadgetron_core::agent::tools::{GadgetProvider, GadgetResult, GadgetTier};
     use std::sync::Arc;
 
     struct FakeProvider;
 
     #[async_trait]
-    impl McpToolProvider for FakeProvider {
+    impl GadgetProvider for FakeProvider {
         fn category(&self) -> &'static str {
             "knowledge"
         }
-        fn tool_schemas(&self) -> Vec<ToolSchema> {
+        fn gadget_schemas(&self) -> Vec<GadgetSchema> {
             vec![
-                ToolSchema {
+                GadgetSchema {
                     name: "wiki.get".to_string(),
-                    tier: Tier::Read,
+                    tier: GadgetTier::Read,
                     description: "fetch a wiki page".to_string(),
                     input_schema: json!({
                         "type": "object",
@@ -299,9 +300,9 @@ mod tests {
                     }),
                     idempotent: Some(true),
                 },
-                ToolSchema {
+                GadgetSchema {
                     name: "wiki.write".to_string(),
-                    tier: Tier::Write,
+                    tier: GadgetTier::Write,
                     description: "write a wiki page".to_string(),
                     input_schema: json!({
                         "type": "object",
@@ -315,25 +316,25 @@ mod tests {
                 },
             ]
         }
-        async fn call(&self, name: &str, _args: Value) -> Result<ToolResult, McpError> {
+        async fn call(&self, name: &str, _args: Value) -> Result<GadgetResult, GadgetError> {
             match name {
-                "wiki.get" => Ok(ToolResult {
+                "wiki.get" => Ok(GadgetResult {
                     content: json!({ "name": "home", "content": "# Home\n" }),
                     is_error: false,
                 }),
-                "wiki.write" => Err(McpError::Denied {
+                "wiki.write" => Err(GadgetError::Denied {
                     reason: "test denial".to_string(),
                 }),
-                _ => Err(McpError::UnknownTool(name.to_string())),
+                _ => Err(GadgetError::UnknownGadget(name.to_string())),
             }
         }
     }
 
-    fn fresh_registry() -> Arc<McpToolRegistry> {
-        let mut builder = crate::registry::McpToolRegistryBuilder::new();
+    fn fresh_registry() -> Arc<GadgetRegistry> {
+        let mut builder = crate::gadget_registry::GadgetRegistryBuilder::new();
         builder.register(Arc::new(FakeProvider)).unwrap();
         // Default AgentConfig has wiki_write = Auto, so wiki.write (a
-        // Tier::Write tool in FakeProvider) passes the L3 gate and the
+        // GadgetTier::Write tool in FakeProvider) passes the L3 gate and the
         // existing `tools_call_*` tests still exercise dispatch.
         Arc::new(builder.freeze(&gadgetron_core::agent::config::AgentConfig::default()))
     }
@@ -408,13 +409,13 @@ mod tests {
         let content = result["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
-        // The inner text is the JSON-encoded ToolResult.content.
+        // The inner text is the JSON-encoded GadgetResult.content.
         assert!(content[0]["text"].as_str().unwrap().contains("home"));
     }
 
     #[tokio::test]
     async fn tools_call_denied_returns_tool_error_not_rpc_error() {
-        // McpError::Denied is an agent-visible "tool failed" signal,
+        // GadgetError::Denied is an agent-visible "tool failed" signal,
         // not a protocol error. Per MCP spec, tool errors are
         // successful JSON-RPC responses with isError=true in the
         // result payload.

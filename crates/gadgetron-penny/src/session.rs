@@ -58,8 +58,8 @@ use std::time::Duration;
 use futures::Stream;
 use gadgetron_core::agent::config::{AgentConfig, SessionMode, StdEnv};
 use gadgetron_core::audit::{
-    NoopToolAuditEventSink, ToolAuditEvent, ToolAuditEventSink, ToolCallOutcome, ToolMetadata,
-    ToolTier,
+    NoopGadgetAuditEventSink, GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome, GadgetMetadata,
+    GadgetTier,
 };
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::Role;
@@ -72,7 +72,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::home::PennyHome;
-use crate::mcp_config::write_config_file;
+use crate::gadget_config::write_config_file;
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
 use crate::spawn::{build_claude_command_with_session, ClaudeSessionMode};
@@ -178,8 +178,8 @@ pub struct ClaudeCodeSession {
     config: Arc<AgentConfig>,
     allowed_tools: Vec<String>,
     request: ChatRequest,
-    tool_metadata: Arc<HashMap<String, ToolMetadata>>,
-    audit_sink: Arc<dyn ToolAuditEventSink>,
+    tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
+    audit_sink: Arc<dyn GadgetAuditEventSink>,
     session_store: Option<Arc<SessionStore>>,
     /// Neutral cwd for Claude Code (see `crate::home`). When `None`,
     /// spawn inherits the caller's cwd — acceptable for tests but means
@@ -189,7 +189,7 @@ pub struct ClaudeCodeSession {
     penny_home: Option<Arc<PennyHome>>,
     /// Absolute path to the `gadgetron.toml` the server was started with.
     /// Forwarded into the MCP config JSON as `--config <abs>` so the
-    /// `gadgetron mcp serve` grandchild that Claude Code spawns can
+    /// `gadgetron gadget serve` grandchild that Claude Code spawns can
     /// locate `[knowledge]` / `[agent]` regardless of its cwd (which is
     /// pinned to `~/.gadgetron/penny/work/` for auto-memory isolation).
     /// `None` in tests and legacy constructors.
@@ -199,15 +199,15 @@ pub struct ClaudeCodeSession {
 impl ClaudeCodeSession {
     /// Construct a session with an explicit audit sink + tool metadata
     /// snapshot. The metadata snapshot is taken from
-    /// `McpToolRegistry::tool_metadata_snapshot()` by the caller (the
+    /// `GadgetRegistry::tool_metadata_snapshot()` by the caller (the
     /// `PennyProvider`). Tests that don't exercise audit can pass
-    /// `NoopToolAuditEventSink::new_arc()` and an empty HashMap.
+    /// `NoopGadgetAuditEventSink::new_arc()` and an empty HashMap.
     pub fn new(
         config: Arc<AgentConfig>,
         allowed_tools: Vec<String>,
         request: ChatRequest,
-        tool_metadata: Arc<HashMap<String, ToolMetadata>>,
-        audit_sink: Arc<dyn ToolAuditEventSink>,
+        tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
+        audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
     ) -> Self {
         Self::new_with_home(
@@ -227,8 +227,8 @@ impl ClaudeCodeSession {
         config: Arc<AgentConfig>,
         allowed_tools: Vec<String>,
         request: ChatRequest,
-        tool_metadata: Arc<HashMap<String, ToolMetadata>>,
-        audit_sink: Arc<dyn ToolAuditEventSink>,
+        tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
+        audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
         penny_home: Option<Arc<PennyHome>>,
     ) -> Self {
@@ -252,8 +252,8 @@ impl ClaudeCodeSession {
         config: Arc<AgentConfig>,
         allowed_tools: Vec<String>,
         request: ChatRequest,
-        tool_metadata: Arc<HashMap<String, ToolMetadata>>,
-        audit_sink: Arc<dyn ToolAuditEventSink>,
+        tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
+        audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
         penny_home: Option<Arc<PennyHome>>,
         config_path: Option<PathBuf>,
@@ -271,7 +271,7 @@ impl ClaudeCodeSession {
     }
 
     /// Back-compat constructor for tests that do not care about audit
-    /// or session continuity. Installs `NoopToolAuditEventSink` + empty
+    /// or session continuity. Installs `NoopGadgetAuditEventSink` + empty
     /// metadata + no session store.
     pub fn new_without_audit(
         config: Arc<AgentConfig>,
@@ -283,7 +283,7 @@ impl ClaudeCodeSession {
             allowed_tools,
             request,
             Arc::new(HashMap::new()),
-            Arc::new(NoopToolAuditEventSink),
+            Arc::new(NoopGadgetAuditEventSink),
             None,
         )
     }
@@ -336,7 +336,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
     }
 }
 
-/// Emit a `ToolCallCompleted` audit event for a single stream-json
+/// Emit a `GadgetCallCompleted` audit event for a single stream-json
 /// `ToolUse` boundary. Called BEFORE `event_to_chat_chunks` on the
 /// hot path so the audit write happens even if the caller fails to
 /// drain the chunk channel. Other event variants are ignored.
@@ -347,8 +347,8 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
 /// requires `fake_claude` Step 21 infrastructure.
 fn emit_tool_audit_if_needed(
     event: &StreamJsonEvent,
-    tool_metadata: &HashMap<String, ToolMetadata>,
-    audit_sink: &dyn ToolAuditEventSink,
+    tool_metadata: &HashMap<String, GadgetMetadata>,
+    audit_sink: &dyn GadgetAuditEventSink,
     conversation_id: Option<&str>,
     claude_session_uuid: Option<&str>,
 ) {
@@ -358,13 +358,13 @@ fn emit_tool_audit_if_needed(
             .unwrap_or(name.as_str());
         let (tier, category) = match tool_metadata.get(bare_name) {
             Some(meta) => (meta.tier, meta.category.clone()),
-            None => (ToolTier::Read, "unknown".to_string()),
+            None => (GadgetTier::Read, "unknown".to_string()),
         };
-        audit_sink.send(ToolAuditEvent::ToolCallCompleted {
-            tool_name: bare_name.to_string(),
+        audit_sink.send(GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name: bare_name.to_string(),
             tier,
             category,
-            outcome: ToolCallOutcome::Success,
+            outcome: GadgetCallOutcome::Success,
             elapsed_ms: 0,
             conversation_id: conversation_id.map(|s| s.to_string()),
             claude_session_uuid: claude_session_uuid.map(|s| s.to_string()),
@@ -464,8 +464,8 @@ fn spawn_claude_process(
 async fn stream_stdout_until_deadline(
     stdout: ChildStdout,
     request: &ChatRequest,
-    tool_metadata: &HashMap<String, ToolMetadata>,
-    audit_sink: &dyn ToolAuditEventSink,
+    tool_metadata: &HashMap<String, GadgetMetadata>,
+    audit_sink: &dyn GadgetAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
     deadline: tokio::time::Instant,
     audit_conv_id: Option<&str>,
@@ -651,8 +651,8 @@ async fn drive(
     config: &AgentConfig,
     allowed_tools: &[String],
     request: &ChatRequest,
-    tool_metadata: &HashMap<String, ToolMetadata>,
-    audit_sink: &dyn ToolAuditEventSink,
+    tool_metadata: &HashMap<String, GadgetMetadata>,
+    audit_sink: &dyn GadgetAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
     session_store: Option<&SessionStore>,
     penny_home: Option<&PennyHome>,
@@ -959,7 +959,7 @@ mod tests {
     //
     // `emit_tool_audit_if_needed` is the helper session::drive calls on
     // every parsed stream-json event. It must emit a
-    // `ToolCallCompleted` event on `ToolUse` and pass through on every
+    // `GadgetCallCompleted` event on `ToolUse` and pass through on every
     // other variant. For ToolUse, it must look up (tier, category) via
     // the metadata snapshot passed by the caller, stripping the
     // `mcp__knowledge__` prefix that Claude Code wraps tool names in.
@@ -968,21 +968,21 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct CaptureSink {
-        events: Mutex<Vec<ToolAuditEvent>>,
+        events: Mutex<Vec<GadgetAuditEvent>>,
     }
 
-    impl ToolAuditEventSink for CaptureSink {
-        fn send(&self, event: ToolAuditEvent) {
+    impl GadgetAuditEventSink for CaptureSink {
+        fn send(&self, event: GadgetAuditEvent) {
             self.events.lock().unwrap().push(event);
         }
     }
 
-    fn metadata_with_wiki_write() -> HashMap<String, ToolMetadata> {
+    fn metadata_with_wiki_write() -> HashMap<String, GadgetMetadata> {
         let mut m = HashMap::new();
         m.insert(
             "wiki.write".to_string(),
-            ToolMetadata {
-                tier: ToolTier::Write,
+            GadgetMetadata {
+                tier: GadgetTier::Write,
                 category: "knowledge".to_string(),
             },
         );
@@ -996,7 +996,7 @@ mod tests {
         // Construct a ToolUse stream-json event with the Claude Code
         // `mcp__knowledge__<tool>` wrapper. Call
         // `emit_tool_audit_if_needed` with a `CaptureSink` and the
-        // metadata snapshot. Assert exactly one `ToolCallCompleted`
+        // metadata snapshot. Assert exactly one `GadgetCallCompleted`
         // event was captured with the expected fields.
         let sink = CaptureSink::default();
         let metadata = metadata_with_wiki_write();
@@ -1011,8 +1011,8 @@ mod tests {
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ToolAuditEvent::ToolCallCompleted {
-                tool_name,
+            GadgetAuditEvent::GadgetCallCompleted {
+                gadget_name,
                 tier,
                 category,
                 outcome,
@@ -1022,10 +1022,10 @@ mod tests {
                 owner_id,
                 tenant_id,
             } => {
-                assert_eq!(tool_name, "wiki.write");
-                assert_eq!(*tier, ToolTier::Write);
+                assert_eq!(gadget_name, "wiki.write");
+                assert_eq!(*tier, GadgetTier::Write);
                 assert_eq!(category, "knowledge");
-                assert!(matches!(outcome, ToolCallOutcome::Success));
+                assert!(matches!(outcome, GadgetCallOutcome::Success));
                 assert_eq!(*elapsed_ms, 0); // P2A: precise timing deferred
                 assert!(conversation_id.is_none()); // A5-A7 populates
                 assert!(claude_session_uuid.is_none()); // A6 populates
@@ -1034,7 +1034,7 @@ mod tests {
                 assert!(tenant_id.is_none());
             }
             #[allow(unreachable_patterns)]
-            _ => panic!("unexpected ToolAuditEvent variant"),
+            _ => panic!("unexpected GadgetAuditEvent variant"),
         }
     }
 
@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn emit_tool_audit_falls_back_to_unknown_metadata_for_unregistered_tools() {
         // A `ToolUse` event whose name is not in the metadata snapshot
-        // still produces an event — with `ToolTier::Read` + category
+        // still produces an event — with `GadgetTier::Read` + category
         // `"unknown"`. This covers the case where Claude Code
         // references a tool the registry does not know about (e.g. a
         // built-in that slipped through `--tools ""`).
@@ -1085,18 +1085,18 @@ mod tests {
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ToolAuditEvent::ToolCallCompleted {
-                tool_name,
+            GadgetAuditEvent::GadgetCallCompleted {
+                gadget_name,
                 tier,
                 category,
                 ..
             } => {
-                assert_eq!(tool_name, "some.unknown.tool");
-                assert_eq!(*tier, ToolTier::Read);
+                assert_eq!(gadget_name, "some.unknown.tool");
+                assert_eq!(*tier, GadgetTier::Read);
                 assert_eq!(category, "unknown");
             }
             #[allow(unreachable_patterns)]
-            _ => panic!("unexpected ToolAuditEvent variant"),
+            _ => panic!("unexpected GadgetAuditEvent variant"),
         }
     }
 
@@ -1562,7 +1562,7 @@ mod tests {
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ToolAuditEvent::ToolCallCompleted {
+            GadgetAuditEvent::GadgetCallCompleted {
                 conversation_id,
                 claude_session_uuid,
                 ..

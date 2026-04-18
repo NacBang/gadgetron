@@ -1,4 +1,4 @@
 pub mod tool_event;
 pub mod writer;
 
-pub use tool_event::ToolAuditEventWriter;
+pub use tool_event::GadgetAuditEventWriter;

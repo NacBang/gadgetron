@@ -8,7 +8,7 @@
 //!
 //! `git2::Repository` is `Send` but **not** `Sync` — it is an opaque handle
 //! over a mutable C struct. To keep `Wiki` as `Sync` (required by the
-//! `McpToolProvider: Send + Sync + 'static` bound), this type does NOT
+//! `GadgetProvider: Send + Sync + 'static` bound), this type does NOT
 //! hold the repository. Instead, every mutating operation re-opens the
 //! repo at the configured root. libgit2's open path is ~1ms and bounded
 //! by stat(2), so for P2A's single-user rate this is well under noise.

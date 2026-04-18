@@ -1,13 +1,16 @@
-//! MCP config JSON tempfile writer (M1).
+//! MCP config JSON tempfile writer (M1) — bridges Claude Code to the
+//! Gadgetron stdio Gadget server.
 //!
 //! Spec: `docs/design/phase2/02-penny-agent.md §7`.
 //!
 //! Every Claude Code subprocess invocation writes a fresh JSON tempfile
-//! pointing at the `gadgetron mcp serve` stdio subcommand. Claude Code
-//! reads the file via `--mcp-config <path>` at startup and launches the
-//! stdio MCP server as its own child process. The tempfile is held by
-//! the caller (`ClaudeCodeSession`) and removed on drop when the
-//! subprocess exits.
+//! pointing at the `gadgetron gadget serve` stdio subcommand (renamed
+//! from `gadgetron mcp serve` per ADR-P2A-10 — the CLI keeps a
+//! deprecation shim for the old name through v0.4). Claude Code reads
+//! the file via `--mcp-config <path>` at startup and launches the stdio
+//! MCP server as its own child process. The tempfile is held by the
+//! caller (`ClaudeCodeSession`) and removed on drop when the subprocess
+//! exits.
 //!
 //! # Compile-time Unix gate
 //!
@@ -34,14 +37,18 @@ use tempfile::NamedTempFile;
 ///
 /// Uses `std::env::current_exe()` to resolve the absolute path of the
 /// running `gadgetron` binary, so Claude Code's subprocess can find
-/// `gadgetron mcp serve` even with the restricted SEC-B1 PATH.
+/// `gadgetron gadget serve` even with the restricted SEC-B1 PATH.
 ///
 /// When `config_path` is supplied, it is appended to the child's argv as
-/// `--config <abs>`, so the `gadgetron mcp serve` grandchild finds the
+/// `--config <abs>`, so the `gadgetron gadget serve` grandchild finds the
 /// `[knowledge]` / `[agent]` TOML regardless of its cwd (Claude Code pins
 /// the child cwd to `~/.gadgetron/penny/work/`, which never contains a
 /// `gadgetron.toml`). Callers pass the same TOML path used by
 /// `gadgetron serve`.
+///
+/// The invocation uses the canonical `gadget serve` verb (ADR-P2A-10);
+/// the old `mcp serve` form remains available as a deprecation shim
+/// until v0.4.
 ///
 /// Lifted out of the tempfile writer so tests can round-trip it without
 /// touching the filesystem.
@@ -51,7 +58,7 @@ pub fn build_config_json(config_path: Option<&Path>) -> serde_json::Value {
         .and_then(|p| p.canonicalize().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "gadgetron".to_string());
-    let mut args: Vec<String> = vec!["mcp".to_string(), "serve".to_string()];
+    let mut args: Vec<String> = vec!["gadget".to_string(), "serve".to_string()];
     if let Some(path) = config_path {
         let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         args.push("--config".to_string());
@@ -108,7 +115,7 @@ mod tests {
             command.starts_with('/') || command == "gadgetron",
             "command must be absolute path (current_exe) or the bare fallback, got {command}"
         );
-        assert_eq!(v["mcpServers"]["knowledge"]["args"][0], "mcp");
+        assert_eq!(v["mcpServers"]["knowledge"]["args"][0], "gadget");
         assert_eq!(v["mcpServers"]["knowledge"]["args"][1], "serve");
         // Without a config_path the args stop after `serve`.
         assert_eq!(
@@ -126,7 +133,7 @@ mod tests {
         let args = v["mcpServers"]["knowledge"]["args"]
             .as_array()
             .expect("args array");
-        assert_eq!(args[0], "mcp");
+        assert_eq!(args[0], "gadget");
         assert_eq!(args[1], "serve");
         assert_eq!(args[2], "--config");
         let abs = tmp

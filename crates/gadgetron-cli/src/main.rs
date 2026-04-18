@@ -154,27 +154,63 @@ enum Commands {
         config: Option<PathBuf>,
     },
 
-    /// Run the Model Context Protocol (MCP) stdio server.
+    /// Run the stdio Gadget server (MCP-wire-protocol payload of Gadgets).
     ///
     /// This subcommand is invoked by Claude Code as a child process via
     /// the `--mcp-config` JSON file that Penny writes per request.
-    /// It reads JSON-RPC 2.0 messages from stdin, dispatches tool calls
-    /// through the registered `McpToolProvider`s (currently just
-    /// `KnowledgeToolProvider` from `[knowledge]`), and writes responses
+    /// It reads JSON-RPC 2.0 messages from stdin, dispatches Gadget calls
+    /// through the registered `GadgetProvider`s (currently just
+    /// `KnowledgeGadgetProvider` from `[knowledge]`), and writes responses
     /// to stdout.
     ///
     /// Not intended for direct operator use. `gadgetron serve` is the
-    /// user-facing entry point; the mcp serve subcommand exists only as
+    /// user-facing entry point; `gadgetron gadget serve` exists only as
     /// the child-side of the Penny subprocess bridge.
+    ///
+    /// Operator-facing list/info subcommands are stubs in P2A and ship
+    /// behind the `bundle` + `gadget list` workflow in P2B per ADR-P2A-10.
+    Gadget {
+        #[command(subcommand)]
+        command: GadgetCmd,
+    },
+
+    /// DEPRECATED: renamed to `gadgetron gadget serve` (ADR-P2A-10).
+    ///
+    /// Retained as a compatibility shim through v0.4. Emits a
+    /// `tracing::warn!` and forwards to the new handler.
+    #[command(hide = true)]
     Mcp {
         #[command(subcommand)]
         command: McpCmd,
     },
+
+    /// Manage installed Bundles (P2B — list/install are stubs in P2A).
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCmd,
+    },
+
+    /// Inspect active Plugs — which Rust trait implementation fills each
+    /// core port (LlmProvider, Extractor, BlobStore, etc.). P2B stub.
+    Plug {
+        #[command(subcommand)]
+        command: PlugCmd,
+    },
+
+    /// Alias for `gadgetron bundle install <name>` (ADR-P2A-10 §CLI).
+    ///
+    /// The everyday invocation path; `bundle install` is the canonical
+    /// long form for docs and scripts. Stubbed in P2A — lands in P2B.
+    Install {
+        /// Bundle name (kebab-case, globally unique within this
+        /// deployment; matches `[bundle]` in the Bundle's manifest).
+        name: String,
+    },
 }
 
-/// Subcommands for `gadgetron mcp`.
+/// Subcommands for `gadgetron gadget` (canonical form; ADR-P2A-10).
 #[derive(Subcommand)]
-enum McpCmd {
+enum GadgetCmd {
     /// Run the stdio MCP server on the current process's stdin/stdout.
     /// Exits cleanly on stdin EOF (parent process exit).
     Serve {
@@ -183,6 +219,40 @@ enum McpCmd {
         #[arg(long, short = 'c')]
         config: Option<PathBuf>,
     },
+    /// List every Gadget Penny can see. Stubbed in P2A; full
+    /// implementation lands with the bundle-lifecycle work in P2B.
+    List,
+}
+
+/// Subcommands for the deprecated `gadgetron mcp` group.
+#[derive(Subcommand)]
+enum McpCmd {
+    /// DEPRECATED: renamed to `gadgetron gadget serve` (ADR-P2A-10).
+    Serve {
+        /// Path to the config file containing the `[knowledge]` section.
+        /// Defaults to `gadgetron.toml` in the current directory.
+        #[arg(long, short = 'c')]
+        config: Option<PathBuf>,
+    },
+}
+
+/// Subcommands for `gadgetron bundle` (P2B — stubs in P2A).
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Install a Bundle (stub).
+    Install {
+        /// Bundle name.
+        name: String,
+    },
+    /// List installed Bundles (stub).
+    List,
+}
+
+/// Subcommands for `gadgetron plug` (P2B — stubs in P2A).
+#[derive(Subcommand)]
+enum PlugCmd {
+    /// List all Plugs registered to core ports (stub).
+    List,
 }
 
 /// Subcommands for `gadgetron tenant`.
@@ -289,26 +359,92 @@ async fn main() -> Result<()> {
         Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
 
+        Some(Commands::Gadget {
+            command: GadgetCmd::Serve { config },
+        }) => cmd_gadget_serve(config).await,
+        Some(Commands::Gadget {
+            command: GadgetCmd::List,
+        }) => cmd_gadget_list_stub(),
+
+        // Deprecation shim — forward to the canonical handler after a warn.
         Some(Commands::Mcp {
             command: McpCmd::Serve { config },
-        }) => cmd_mcp_serve(config).await,
+        }) => {
+            tracing::warn!(
+                target: "cli_deprecation",
+                legacy_command = "gadgetron mcp serve",
+                new_command = "gadgetron gadget serve",
+                removed_in = "v0.5",
+                adr = "ADR-P2A-10",
+                "`gadgetron mcp serve` is renamed to `gadgetron gadget serve` (ADR-P2A-10). The old form works through v0.3 and v0.4 and will be removed in v0.5. Update scripts, systemd units, and MCP config that invoke this subcommand."
+            );
+            cmd_gadget_serve(config).await
+        }
+
+        Some(Commands::Bundle {
+            command: BundleCmd::Install { name },
+        }) => cmd_bundle_install_stub(&name),
+        Some(Commands::Bundle {
+            command: BundleCmd::List,
+        }) => cmd_bundle_list_stub(),
+
+        Some(Commands::Plug {
+            command: PlugCmd::List,
+        }) => cmd_plug_list_stub(),
+
+        Some(Commands::Install { name }) => cmd_bundle_install_stub(&name),
 
         // No subcommand given: default to `serve` with no flags.
         None => serve(None, None, false, false, None).await,
     }
 }
 
-/// `gadgetron mcp serve` — run the stdio MCP server.
+// ---------------------------------------------------------------------------
+// P2B-deferred subcommand stubs (ADR-P2A-10 §CLI)
+//
+// These are wired into `clap` now so the operator-facing vocabulary is
+// reserved; the real implementations land in P2B alongside the bundle
+// manifest + registry work. Each stub prints a consistent message so
+// scripts can distinguish "not yet implemented" from a hard error.
+// ---------------------------------------------------------------------------
+
+fn cmd_bundle_install_stub(name: &str) -> Result<()> {
+    println!(
+        "bundle install {name}: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."
+    );
+    Ok(())
+}
+
+fn cmd_bundle_list_stub() -> Result<()> {
+    println!("bundle list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI.");
+    Ok(())
+}
+
+fn cmd_plug_list_stub() -> Result<()> {
+    println!("plug list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI.");
+    Ok(())
+}
+
+fn cmd_gadget_list_stub() -> Result<()> {
+    println!("gadget list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI.");
+    Ok(())
+}
+
+/// `gadgetron gadget serve` — run the stdio Gadget server.
 ///
 /// Reads the `[knowledge]` section from the config file, builds a
-/// `KnowledgeToolProvider`, freezes it into an `McpToolRegistry`, and
+/// `KnowledgeGadgetProvider`, freezes it into a `GadgetRegistry`, and
 /// calls `gadgetron_penny::serve_stdio(registry)` to handle the
 /// JSON-RPC 2.0 message loop on stdin/stdout.
 ///
 /// Exits cleanly on stdin EOF. Errors in config loading or provider
 /// construction produce a descriptive message on stderr and exit
 /// code 1.
-async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
+///
+/// The legacy `gadgetron mcp serve` verb dispatches here through a
+/// deprecation shim (ADR-P2A-10); the shim prints a `tracing::warn!`
+/// and forwards unchanged.
+async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     let config_path: PathBuf = config_path_override
         .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
@@ -322,9 +458,9 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
 
     // Also load the `[agent]` section from the same TOML so the
     // registry can enforce L3 defense-in-depth (ADR-P2A-06 addendum
-    // item 3). The stdio MCP server is a grandchild process that does
-    // not go through the gateway's `AppConfig::load` path, so we parse
-    // the full AppConfig here and pick out `.agent`. A missing
+    // item 3). The stdio Gadget server is a grandchild process that
+    // does not go through the gateway's `AppConfig::load` path, so we
+    // parse the full AppConfig here and pick out `.agent`. A missing
     // section is tolerated because `AgentConfig` implements
     // `#[serde(default)]` at the AppConfig level.
     let agent_cfg = gadgetron_core::config::AppConfig::load(&config_path.to_string_lossy())
@@ -333,7 +469,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
 
     let registry = load_penny_registry_from_config(&config_path, &agent_cfg)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "`[knowledge]` section is missing in {}. `gadgetron mcp serve` \
+            "`[knowledge]` section is missing in {}. `gadgetron gadget serve` \
                  requires the knowledge layer to be configured.",
             config_path.display()
         )
@@ -342,7 +478,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     // Drive the stdio loop until EOF.
     gadgetron_penny::serve_stdio(registry)
         .await
-        .map_err(|e| anyhow::anyhow!("mcp stdio server error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("gadget stdio server error: {e}"))?;
 
     Ok(())
 }
@@ -350,7 +486,7 @@ async fn cmd_mcp_serve(config_path_override: Option<PathBuf>) -> Result<()> {
 fn load_penny_registry_from_config(
     config_path: &std::path::Path,
     agent_cfg: &gadgetron_core::agent::AgentConfig,
-) -> Result<Option<Arc<gadgetron_penny::McpToolRegistry>>> {
+) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
     let raw = std::fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
 
@@ -372,13 +508,13 @@ fn load_penny_registry_from_config(
         .validate()
         .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
 
-    let provider = gadgetron_knowledge::KnowledgeToolProvider::new(knowledge_cfg)
+    let provider = gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg)
         .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
 
-    let mut builder = gadgetron_penny::McpToolRegistryBuilder::new();
+    let mut builder = gadgetron_penny::GadgetRegistryBuilder::new();
     builder
         .register(Arc::new(provider))
-        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeToolProvider: {e:?}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
 
     // Freeze against the operator's [agent] config so `dispatch()` can
     // enforce L3 defense-in-depth on any tool call that reaches this
@@ -389,8 +525,8 @@ fn load_penny_registry_from_config(
 
 struct PennyRouterRegistration {
     agent_cfg: Arc<gadgetron_core::agent::AgentConfig>,
-    registry: Arc<gadgetron_penny::McpToolRegistry>,
-    audit_sink: Arc<dyn gadgetron_core::audit::ToolAuditEventSink>,
+    registry: Arc<gadgetron_penny::GadgetRegistry>,
+    audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
     session_store: Arc<gadgetron_penny::SessionStore>,
     config_path_for_mcp: PathBuf,
 }
@@ -412,7 +548,7 @@ fn canonicalize_config_path_for_mcp(config_path: &std::path::Path) -> PathBuf {
     // Use the canonical absolute TOML path so the MCP-child's cwd doesn't
     // influence config lookup. Fall back to the as-provided path if
     // canonicalize fails (e.g. on a filesystem that doesn't support it);
-    // `gadgetron mcp serve --config` will then surface a clear error
+    // `gadgetron gadget serve --config` will then surface a clear error
     // instead of silently running without the `[knowledge]` section.
     config_path
         .canonicalize()
@@ -432,8 +568,8 @@ fn prepare_penny_router_registration(
     };
 
     let agent_cfg = Arc::new(app_config.agent.clone());
-    let audit_sink: Arc<dyn gadgetron_core::audit::ToolAuditEventSink> =
-        Arc::new(gadgetron_core::audit::NoopToolAuditEventSink);
+    let audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink> =
+        Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink);
     let session_store = Arc::new(gadgetron_penny::SessionStore::new(
         agent_cfg.session_ttl_secs,
         agent_cfg.session_store_max_entries,
@@ -1183,7 +1319,7 @@ async fn serve(
 // Phase 2A Penny registration — P2A Step 22
 // ---------------------------------------------------------------------------
 
-/// Build the knowledge layer + McpToolRegistry + PennyProvider and
+/// Build the knowledge layer + GadgetRegistry + PennyProvider and
 /// register it into the router's provider map under the `"penny"`
 /// key, IF the operator has a `[knowledge]` section in their
 /// gadgetron.toml.
@@ -1226,7 +1362,7 @@ fn register_penny_if_configured(
     // router map. The existing provider map already holds concrete
     // OpenAI/Anthropic/vLLM/etc entries; this adds one more.
     //
-    // P2A PR A4 wires a `NoopToolAuditEventSink` as the audit sink —
+    // P2A PR A4 wires a `NoopGadgetAuditEventSink` as the audit sink —
     // the real `ToolAuditEventWriter` lives in `gadgetron-xaas` and
     // is connected to the DB writer loop there. The composition root
     // for that wiring lands with the broader `AppState` audit plumbing;
@@ -1236,7 +1372,7 @@ fn register_penny_if_configured(
     registration.register(providers);
     tracing::info!(
         model = "penny",
-        "penny: registered (KnowledgeToolProvider active; web.search = {})",
+        "penny: registered (KnowledgeGadgetProvider active; web.search = {})",
         if providers.get("penny").is_some() {
             "configured_via_knowledge_section"
         } else {

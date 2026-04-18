@@ -1,9 +1,9 @@
-//! Tool audit event types.
+//! Gadget audit event types.
 //!
-//! The `ToolAuditEvent` enum is the wire-format for per-tool-call audit
+//! The `GadgetAuditEvent` enum is the wire-format for per-Gadget-call audit
 //! records emitted from `gadgetron-penny::stream::event_to_chat_chunks`
 //! and consumed by a concrete persistence backend in `gadgetron-xaas`.
-//! The `ToolAuditEventSink` trait abstracts "where the event goes" so
+//! The `GadgetAuditEventSink` trait abstracts "where the event goes" so
 //! `gadgetron-penny` does not have to depend on the persistence layer.
 //!
 //! Design notes:
@@ -26,30 +26,39 @@
 
 use std::sync::Arc;
 
-/// A single tool-call audit record.
+/// A single Gadget-call audit record.
 ///
-/// Currently only one variant (`ToolCallCompleted`). Approval-flow events
-/// — `ToolApprovalRequested`, `ToolApprovalGranted`, `ToolApprovalDenied`,
-/// `ToolApprovalTimeout`, `ToolApprovalCancelled` — are deferred to P2B
+/// Currently only one variant (`GadgetCallCompleted`). Approval-flow events
+/// — `GadgetApprovalRequested`, `GadgetApprovalGranted`, `GadgetApprovalDenied`,
+/// `GadgetApprovalTimeout`, `GadgetApprovalCancelled` — are deferred to P2B
 /// per ADR-P2A-06.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolAuditEvent {
-    /// One tool invocation finished (success OR error). Emitted from
+pub enum GadgetAuditEvent {
+    /// One Gadget invocation finished (success OR error). Emitted from
     /// the Penny stream on a `ToolUse` / `ToolResult` boundary.
-    ToolCallCompleted {
-        /// The tool name as seen by the `McpToolRegistry` — e.g.
+    GadgetCallCompleted {
+        /// The Gadget name as seen by the `GadgetRegistry` — e.g.
         /// `"wiki.write"`, `"web.search"`.
-        tool_name: String,
-        /// The tool's tier at schema definition time. Denormalized
+        ///
+        /// **DB column mapping (P2B writer):** this field is persisted to
+        /// SQL column `tool_audit_events.tool_name TEXT NOT NULL` (migration
+        /// `20260416000001_tool_audit_events.sql:11`). The P2B DB writer
+        /// loop MUST map this Rust field to the `tool_name` column name in
+        /// its INSERT statement; the column name is a wire-frozen contract
+        /// per ADR-P2A-10 security review (D-20260418-05). Do NOT rename
+        /// the SQL column to `gadget_name`; downstream SIEM / BI queries
+        /// filter on `tool_name`.
+        gadget_name: String,
+        /// The Gadget's tier at schema definition time. Denormalized
         /// into the audit record so downstream queries can filter by
         /// tier without joining against a live registry snapshot.
-        tier: ToolTier,
-        /// The `McpToolProvider::category()` the tool came from — e.g.
+        tier: GadgetTier,
+        /// The `GadgetProvider::category()` the Gadget came from — e.g.
         /// `"knowledge"`, `"infrastructure"`. Informational.
         category: String,
         /// Success vs Error outcome.
-        outcome: ToolCallOutcome,
+        outcome: GadgetCallOutcome,
         /// Wall-clock milliseconds between the `ToolUse` event and
         /// its matching `ToolResult` event. For P2A this is a
         /// best-effort number — precise `id`-based correlation lands
@@ -77,39 +86,39 @@ pub enum ToolAuditEvent {
     },
 }
 
-/// Tool-call outcome — success or error.
+/// Gadget-call outcome — success or error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolCallOutcome {
+pub enum GadgetCallOutcome {
     Success,
-    /// The tool returned `is_error: true` or the provider raised an
-    /// `McpError`. The `error_code` is the short-form
-    /// `McpError::error_code()` value (e.g. `"mcp_denied"`).
+    /// The Gadget returned `is_error: true` or the provider raised a
+    /// `GadgetError`. The `error_code` is the short-form
+    /// `GadgetError::error_code()` value (e.g. `"gadget_denied_by_policy"`).
     Error {
         error_code: &'static str,
     },
 }
 
 /// Tier copy used in audit records. Kept separate from
-/// `gadgetron_core::agent::tools::Tier` so the audit crate doesn't pick
+/// `gadgetron_core::agent::tools::GadgetTier` so the audit crate doesn't pick
 /// up the full agent-tool module as a transitive dep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolTier {
+pub enum GadgetTier {
     Read,
     Write,
     Destructive,
 }
 
 /// Denormalized metadata snapshot used by the Penny audit emitter to
-/// look up `(tier, category)` from a bare tool name on each stream-json
-/// `ToolUse` event. Populated by `McpToolRegistryBuilder::freeze` from
-/// every registered provider's `category()` + `tool_schemas()` output.
+/// look up `(tier, category)` from a bare Gadget name on each stream-json
+/// `ToolUse` event. Populated by `GadgetRegistryBuilder::freeze` from
+/// every registered provider's `category()` + `gadget_schemas()` output.
 #[derive(Debug, Clone)]
-pub struct ToolMetadata {
-    pub tier: ToolTier,
+pub struct GadgetMetadata {
+    pub tier: GadgetTier,
     pub category: String,
 }
 
-impl ToolTier {
+impl GadgetTier {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Read => "read",
@@ -119,39 +128,39 @@ impl ToolTier {
     }
 }
 
-impl From<crate::agent::tools::Tier> for ToolTier {
-    fn from(t: crate::agent::tools::Tier) -> Self {
+impl From<crate::agent::tools::GadgetTier> for GadgetTier {
+    fn from(t: crate::agent::tools::GadgetTier) -> Self {
         match t {
-            crate::agent::tools::Tier::Read => Self::Read,
-            crate::agent::tools::Tier::Write => Self::Write,
-            crate::agent::tools::Tier::Destructive => Self::Destructive,
+            crate::agent::tools::GadgetTier::Read => Self::Read,
+            crate::agent::tools::GadgetTier::Write => Self::Write,
+            crate::agent::tools::GadgetTier::Destructive => Self::Destructive,
         }
     }
 }
 
-/// Sink for `ToolAuditEvent`. Implementors deliver events to their
+/// Sink for `GadgetAuditEvent`. Implementors deliver events to their
 /// persistence backend (PostgreSQL, tracing, test capture, etc.).
 ///
 /// The trait is deliberately minimal and synchronous-looking. Async
 /// writers wrap a bounded channel or `tokio::spawn` internally. Callers
 /// MUST treat this as fire-and-forget — no `.await`, no `Result`, no
 /// back-pressure.
-pub trait ToolAuditEventSink: Send + Sync + std::fmt::Debug {
-    fn send(&self, event: ToolAuditEvent);
+pub trait GadgetAuditEventSink: Send + Sync + std::fmt::Debug {
+    fn send(&self, event: GadgetAuditEvent);
 }
 
 /// Default sink that drops every event on the floor. Used when audit
 /// persistence is not configured (e.g. running `gadgetron serve` without
 /// a database) and as the test harness default.
 #[derive(Debug, Clone, Default)]
-pub struct NoopToolAuditEventSink;
+pub struct NoopGadgetAuditEventSink;
 
-impl ToolAuditEventSink for NoopToolAuditEventSink {
-    fn send(&self, _event: ToolAuditEvent) {}
+impl GadgetAuditEventSink for NoopGadgetAuditEventSink {
+    fn send(&self, _event: GadgetAuditEvent) {}
 }
 
-impl NoopToolAuditEventSink {
-    pub fn new_arc() -> Arc<dyn ToolAuditEventSink> {
+impl NoopGadgetAuditEventSink {
+    pub fn new_arc() -> Arc<dyn GadgetAuditEventSink> {
         Arc::new(Self)
     }
 }
@@ -161,20 +170,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_tier_as_str_is_stable() {
-        assert_eq!(ToolTier::Read.as_str(), "read");
-        assert_eq!(ToolTier::Write.as_str(), "write");
-        assert_eq!(ToolTier::Destructive.as_str(), "destructive");
+    fn gadget_tier_as_str_is_stable() {
+        assert_eq!(GadgetTier::Read.as_str(), "read");
+        assert_eq!(GadgetTier::Write.as_str(), "write");
+        assert_eq!(GadgetTier::Destructive.as_str(), "destructive");
     }
 
     #[test]
     fn noop_sink_drops_events() {
-        let sink = NoopToolAuditEventSink;
-        sink.send(ToolAuditEvent::ToolCallCompleted {
-            tool_name: "wiki.write".into(),
-            tier: ToolTier::Write,
+        let sink = NoopGadgetAuditEventSink;
+        sink.send(GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name: "wiki.write".into(),
+            tier: GadgetTier::Write,
             category: "knowledge".into(),
-            outcome: ToolCallOutcome::Success,
+            outcome: GadgetCallOutcome::Success,
             elapsed_ms: 42,
             conversation_id: None,
             claude_session_uuid: None,
@@ -185,16 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_completed_has_multi_tenant_fields() {
+    fn gadget_call_completed_has_multi_tenant_fields() {
         // Type 1 Decision #1 regression lock — `owner_id` and `tenant_id`
         // must exist as `Option<String>` fields so multi-tenant rollout
         // needs no schema migration. This test fails if someone ever
         // removes the fields or changes them to non-optional.
-        let evt = ToolAuditEvent::ToolCallCompleted {
-            tool_name: "wiki.read".into(),
-            tier: ToolTier::Read,
+        let evt = GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name: "wiki.read".into(),
+            tier: GadgetTier::Read,
             category: "knowledge".into(),
-            outcome: ToolCallOutcome::Success,
+            outcome: GadgetCallOutcome::Success,
             elapsed_ms: 0,
             conversation_id: Some("c1".into()),
             claude_session_uuid: Some("11111111-2222-3333-4444-555555555555".into()),
@@ -202,7 +211,7 @@ mod tests {
             tenant_id: Some("manycoresoft".into()),
         };
         match evt {
-            ToolAuditEvent::ToolCallCompleted {
+            GadgetAuditEvent::GadgetCallCompleted {
                 owner_id,
                 tenant_id,
                 ..
@@ -215,9 +224,9 @@ mod tests {
 
     #[test]
     fn from_agent_tier_conversion_preserves_variant() {
-        use crate::agent::tools::Tier;
-        assert_eq!(ToolTier::from(Tier::Read), ToolTier::Read);
-        assert_eq!(ToolTier::from(Tier::Write), ToolTier::Write);
-        assert_eq!(ToolTier::from(Tier::Destructive), ToolTier::Destructive);
+        use crate::agent::tools::GadgetTier as AgentTier;
+        assert_eq!(GadgetTier::from(AgentTier::Read), GadgetTier::Read);
+        assert_eq!(GadgetTier::from(AgentTier::Write), GadgetTier::Write);
+        assert_eq!(GadgetTier::from(AgentTier::Destructive), GadgetTier::Destructive);
     }
 }

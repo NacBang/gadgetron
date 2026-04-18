@@ -1,6 +1,6 @@
 //! Agent configuration — `[agent]` section of `gadgetron.toml`.
 //!
-//! Spec: `docs/design/phase2/04-mcp-tool-registry.md` §4 + §5.
+//! Spec: `docs/design/phase2/04-gadget-registry.md` §4 + §5.
 //! Decision: D-20260414-04, ADR-P2A-05.
 //!
 //! Validation rules V1..V14 are implemented in [`AgentConfig::validate_with_env`]
@@ -111,9 +111,13 @@ pub struct AgentConfig {
     #[serde(default)]
     pub brain: BrainConfig,
 
-    /// Tool permission model. 3-tier × 3-mode.
-    #[serde(default)]
-    pub tools: ToolsConfig,
+    /// Gadget permission model. 3-tier × 3-mode.
+    ///
+    /// Config TOML accepts both `[agent.gadgets]` (canonical after
+    /// ADR-P2A-10) and the legacy `[agent.tools]` form via `#[serde(alias)]`
+    /// for backward compatibility.
+    #[serde(default, alias = "tools")]
+    pub gadgets: GadgetsConfig,
 
     /// Native Claude Code session policy. See `SessionMode`.
     #[serde(default)]
@@ -171,7 +175,7 @@ impl Default for AgentConfig {
             request_timeout_secs: default_request_timeout_secs(),
             max_concurrent_subprocesses: default_max_concurrent_subprocesses(),
             brain: BrainConfig::default(),
-            tools: ToolsConfig::default(),
+            gadgets: GadgetsConfig::default(),
             session_mode: SessionMode::default(),
             session_ttl_secs: default_session_ttl_secs(),
             session_store_max_entries: default_session_store_max_entries(),
@@ -214,7 +218,7 @@ impl AgentConfig {
                 self.max_concurrent_subprocesses
             )));
         }
-        self.tools.validate()?;
+        self.gadgets.validate()?;
         self.brain.validate_with_env(providers, env)?;
 
         // V15: session_ttl_secs ∈ [60, 7 * 86_400]
@@ -273,8 +277,8 @@ impl AgentConfig {
     /// Called by `AppConfig::load` after validation succeeds. Returns
     /// the number of warnings emitted so tests can assert the count.
     pub fn warn_unusable_modes_in_p2a(&self) -> usize {
-        let w = &self.tools.write;
-        let fields: &[(&str, &ToolMode)] = &[
+        let w = &self.gadgets.write;
+        let fields: &[(&str, &GadgetMode)] = &[
             ("default_mode", &w.default_mode),
             ("wiki_write", &w.wiki_write),
             ("infra_write", &w.infra_write),
@@ -284,10 +288,10 @@ impl AgentConfig {
 
         let mut count = 0usize;
         for (name, mode) in fields {
-            if matches!(mode, ToolMode::Ask) {
+            if matches!(mode, GadgetMode::Ask) {
                 tracing::warn!(
                     target: "agent_config",
-                    field = %format!("agent.tools.write.{name}"),
+                    field = %format!("agent.gadgets.write.{name}"),
                     "ask mode has no effect in Phase 2A — approval flow is deferred to P2B per ADR-P2A-06. Set to 'auto' or 'never' to silence this warning."
                 );
                 count += 1;
@@ -521,14 +525,14 @@ impl BrainConfig {
 }
 
 // ---------------------------------------------------------------------------
-// ToolsConfig — tier + mode matrix
+// GadgetsConfig — tier + mode matrix
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolsConfig {
-    /// T1 read. Informational — must always be `ToolMode::Auto` (V1).
+pub struct GadgetsConfig {
+    /// T1 read. Informational — must always be `GadgetMode::Auto` (V1).
     #[serde(default)]
-    pub read: ToolMode,
+    pub read: GadgetMode,
 
     /// Approval card timeout seconds. Range [10, 600] (V14).
     #[serde(default = "default_approval_timeout_secs")]
@@ -536,41 +540,41 @@ pub struct ToolsConfig {
 
     /// T2 write.
     #[serde(default)]
-    pub write: WriteToolsConfig,
+    pub write: WriteGadgetsConfig,
 
     /// T3 destructive.
     #[serde(default)]
-    pub destructive: DestructiveToolsConfig,
+    pub destructive: DestructiveGadgetsConfig,
 }
 
 fn default_approval_timeout_secs() -> u64 {
     60
 }
 
-impl Default for ToolsConfig {
+impl Default for GadgetsConfig {
     fn default() -> Self {
         Self {
-            read: ToolMode::Auto,
+            read: GadgetMode::Auto,
             approval_timeout_secs: default_approval_timeout_secs(),
-            write: WriteToolsConfig::default(),
-            destructive: DestructiveToolsConfig::default(),
+            write: WriteGadgetsConfig::default(),
+            destructive: DestructiveGadgetsConfig::default(),
         }
     }
 }
 
-impl ToolsConfig {
+impl GadgetsConfig {
     pub fn validate(&self) -> Result<()> {
         // V1 — read must always be Auto
-        if self.read != ToolMode::Auto {
+        if self.read != GadgetMode::Auto {
             return Err(GadgetronError::Config(format!(
-                "agent.tools.read must be 'auto' — Tier 1 mode cannot be changed; got {:?}",
+                "agent.gadgets.read must be 'auto' — Tier 1 mode cannot be changed; got {:?}",
                 self.read
             )));
         }
         // V14 — approval timeout range
         if self.approval_timeout_secs < 10 || self.approval_timeout_secs > 600 {
             return Err(GadgetronError::Config(format!(
-                "agent.tools.approval_timeout_secs must be in [10, 600]; got {}",
+                "agent.gadgets.approval_timeout_secs must be in [10, 600]; got {}",
                 self.approval_timeout_secs
             )));
         }
@@ -582,7 +586,7 @@ impl ToolsConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ToolMode {
+pub enum GadgetMode {
     /// Execute immediately; audit log records the call.
     Auto,
     /// Enqueue an approval card; user must Allow / Deny.
@@ -593,52 +597,52 @@ pub enum ToolMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteToolsConfig {
+pub struct WriteGadgetsConfig {
     /// Default mode for any T2 subcategory not explicitly overridden below.
     #[serde(default = "default_write_mode")]
-    pub default_mode: ToolMode,
+    pub default_mode: GadgetMode,
 
     /// Wiki write tools (`wiki.write`, `wiki.create`, `wiki.delete`).
     #[serde(default = "default_wiki_write_mode")]
-    pub wiki_write: ToolMode,
+    pub wiki_write: GadgetMode,
 
     /// Infrastructure write tools — P2C. Examples: `infra.deploy_model`,
     /// `infra.hot_reload_config`, `infra.set_routing_strategy`.
     #[serde(default)]
-    pub infra_write: ToolMode,
+    pub infra_write: GadgetMode,
 
     /// Scheduler write tools — P3. Examples: `scheduler.schedule_job`.
     #[serde(default)]
-    pub scheduler_write: ToolMode,
+    pub scheduler_write: GadgetMode,
 
     /// Provider mutation tools — P2C. Examples: `infra.rotate_api_key`,
     /// `infra.add_provider`, `infra.remove_provider`.
     #[serde(default)]
-    pub provider_mutate: ToolMode,
+    pub provider_mutate: GadgetMode,
 }
 
-fn default_write_mode() -> ToolMode {
-    ToolMode::Ask
+fn default_write_mode() -> GadgetMode {
+    GadgetMode::Ask
 }
 /// Convenience: wiki_write defaults to Auto for single-user desktops (§4 of
-/// 04-mcp-tool-registry.md notes this as the common choice).
-fn default_wiki_write_mode() -> ToolMode {
-    ToolMode::Auto
+/// 04-gadget-registry.md notes this as the common choice).
+fn default_wiki_write_mode() -> GadgetMode {
+    GadgetMode::Auto
 }
 
-impl Default for WriteToolsConfig {
+impl Default for WriteGadgetsConfig {
     fn default() -> Self {
         Self {
             default_mode: default_write_mode(),
             wiki_write: default_wiki_write_mode(),
-            infra_write: ToolMode::Ask,
-            scheduler_write: ToolMode::Ask,
-            provider_mutate: ToolMode::Ask,
+            infra_write: GadgetMode::Ask,
+            scheduler_write: GadgetMode::Ask,
+            provider_mutate: GadgetMode::Ask,
         }
     }
 }
 
-impl WriteToolsConfig {
+impl WriteGadgetsConfig {
     pub fn validate(&self) -> Result<()> {
         // V2/V3 — serde already enforces the enum. Nothing further to check here.
         Ok(())
@@ -646,9 +650,9 @@ impl WriteToolsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DestructiveToolsConfig {
+pub struct DestructiveGadgetsConfig {
     /// When false, T3 tools are omitted from `--allowed-tools` entirely
-    /// (equivalent to `ToolMode::Never`). Default false.
+    /// (equivalent to `GadgetMode::Never`). Default false.
     #[serde(default)]
     pub enabled: bool,
 
@@ -673,7 +677,7 @@ fn default_destructive_max_per_hour() -> u32 {
     3
 }
 
-impl Default for DestructiveToolsConfig {
+impl Default for DestructiveGadgetsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -696,12 +700,12 @@ pub enum ExtraConfirmation {
     File,
 }
 
-impl DestructiveToolsConfig {
+impl DestructiveGadgetsConfig {
     pub fn validate(&self) -> Result<()> {
         // V5 — max_per_hour > 0 when enabled
         if self.enabled && self.max_per_hour == 0 {
             return Err(GadgetronError::Config(
-                "agent.tools.destructive.max_per_hour must be > 0 when enabled=true; \
+                "agent.gadgets.destructive.max_per_hour must be > 0 when enabled=true; \
                  use enabled=false to disable T3 tools entirely"
                     .into(),
             ));
@@ -711,7 +715,7 @@ impl DestructiveToolsConfig {
             let path = std::path::Path::new(&self.extra_confirmation_token_file);
             if self.extra_confirmation_token_file.is_empty() || !path.exists() {
                 return Err(GadgetronError::Config(format!(
-                    "agent.tools.destructive.extra_confirmation_token_file {:?} does not exist",
+                    "agent.gadgets.destructive.extra_confirmation_token_file {:?} does not exist",
                     self.extra_confirmation_token_file
                 )));
             }
@@ -720,13 +724,13 @@ impl DestructiveToolsConfig {
                 use std::os::unix::fs::PermissionsExt;
                 let meta = std::fs::metadata(path).map_err(|e| {
                     GadgetronError::Config(format!(
-                        "cannot stat agent.tools.destructive.extra_confirmation_token_file: {e}"
+                        "cannot stat agent.gadgets.destructive.extra_confirmation_token_file: {e}"
                     ))
                 })?;
                 let mode = meta.permissions().mode() & 0o777;
                 if mode != 0o400 && mode != 0o600 {
                     return Err(GadgetronError::Config(format!(
-                        "agent.tools.destructive.extra_confirmation_token_file must have mode 0400 or 0600; got {mode:o}"
+                        "agent.gadgets.destructive.extra_confirmation_token_file must have mode 0400 or 0600; got {mode:o}"
                     )));
                 }
             }
@@ -754,14 +758,14 @@ mod config_tests {
 
     #[test]
     fn v1_read_must_be_auto() {
-        let mut cfg = ToolsConfig::default();
-        cfg.read = ToolMode::Ask;
+        let mut cfg = GadgetsConfig::default();
+        cfg.read = GadgetMode::Ask;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn v5_destructive_max_per_hour_must_be_positive() {
-        let mut cfg = DestructiveToolsConfig::default();
+        let mut cfg = DestructiveGadgetsConfig::default();
         cfg.enabled = true;
         cfg.max_per_hour = 0;
         assert!(cfg.validate().is_err());
@@ -939,10 +943,10 @@ mod config_tests {
     #[test]
     fn warn_unusable_modes_zero_when_all_auto_or_never() {
         let mut cfg = AgentConfig::default();
-        cfg.tools.write.default_mode = ToolMode::Auto;
-        cfg.tools.write.infra_write = ToolMode::Never;
-        cfg.tools.write.scheduler_write = ToolMode::Auto;
-        cfg.tools.write.provider_mutate = ToolMode::Never;
+        cfg.gadgets.write.default_mode = GadgetMode::Auto;
+        cfg.gadgets.write.infra_write = GadgetMode::Never;
+        cfg.gadgets.write.scheduler_write = GadgetMode::Auto;
+        cfg.gadgets.write.provider_mutate = GadgetMode::Never;
         assert_eq!(cfg.warn_unusable_modes_in_p2a(), 0);
     }
 
@@ -962,7 +966,7 @@ mod config_tests {
 
     #[test]
     fn v14_approval_timeout_in_range() {
-        let mut cfg = ToolsConfig::default();
+        let mut cfg = GadgetsConfig::default();
         cfg.approval_timeout_secs = 5;
         assert!(cfg.validate().is_err());
         cfg.approval_timeout_secs = 700;
@@ -973,7 +977,7 @@ mod config_tests {
 
     #[test]
     fn defaults_validate_ok() {
-        let cfg = ToolsConfig::default();
+        let cfg = GadgetsConfig::default();
         assert!(cfg.validate().is_ok());
         let brain = BrainConfig::default();
         assert!(brain.validate(&empty_providers()).is_ok());
