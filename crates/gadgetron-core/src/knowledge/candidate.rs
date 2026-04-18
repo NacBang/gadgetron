@@ -260,6 +260,20 @@ pub trait ActivityCaptureStore: Send + Sync + std::fmt::Debug {
         limit: usize,
         only_pending: bool,
     ) -> CaptureResult<Vec<KnowledgeCandidate>>;
+
+    /// Fetch a single candidate by id.
+    ///
+    /// Returns `Ok(None)` when the candidate is not present so callers can
+    /// distinguish "absent" from "backend down" — KC-1b's materialization
+    /// fast-path uses this instead of scanning `list_candidates` with
+    /// `usize::MAX`. No default impl: breaking the trait is fine because
+    /// the only concrete impl is `InMemoryActivityCaptureStore`, and
+    /// KC-1c's Postgres impl will implement this directly.
+    async fn get_candidate(
+        &self,
+        actor: &crate::knowledge::AuthenticatedContext,
+        id: Uuid,
+    ) -> CaptureResult<Option<KnowledgeCandidate>>;
 }
 
 /// Capture-plane coordinator — the public entry point that direct-action
