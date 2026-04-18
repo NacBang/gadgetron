@@ -62,6 +62,8 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron init` — generate an annotated baseline `gadgetron.toml` (assistant blocks still require manual authoring on trunk)
 - `gadgetron doctor` — check configuration, database connectivity, provider reachability, and `/health`
 - `gadgetron mcp serve` — stdio MCP server used by the Penny subprocess bridge and available for manual smoke tests
+- `gadgetron reindex [--full]` — rebuild pgvector semantic index from wiki filesystem; `--full` forces all pages, default is incremental
+- `gadgetron wiki audit [--config <path>]` — report stale pages and pages without frontmatter
 - `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
 - Embedded Web UI at `/web` when built with the default `web-ui` feature and `[web].enabled = true`
 - `gadgetron-testing` crate — `FakeLlmProvider` and `FailingProvider` for use in unit and integration tests
