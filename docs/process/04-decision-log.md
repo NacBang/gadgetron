@@ -2996,4 +2996,89 @@ Codex cycle 11 vote 는 PSL-1c (startup wiring) 를 지목. 실제 코드 확인
 
 ---
 
+## D-20260418-20: W3-PSL-1d 착수 — 첫 번째 capture_action hook (chat completion)
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-PSL-1c 머지 직후, cron 12번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote)
+**관련 문서**: `docs/design/core/knowledge-candidate-curation.md` §2.1 (CapturedActivityEvent + capture_action), `docs/design/phase2/13-penny-shared-surface-loop.md`
+**Follows**: D-20260418-19 (W3-PSL-1c)
+
+### 배경
+
+PSL-1c 머지 후 prod AppState 에 모든 observability 필드 wired. 하지만 `capture_action` 호출하는 경로가 존재하지 않음 → `<gadgetron_shared_context>` 의 `recent_activity` / `pending_candidates` / `pending_approvals` 가 항상 `[]`. operator-visible signal 이 여전히 없음.
+
+Codex cycle 12 vote: **chat completion capture (1a)** — 가장 작은 단위의 capture site 를 추가해 shared-context stream 에 첫 데이터 흐름 생성. WEB-2b 는 capture 가 비어있으면 렌더링할 게 없으므로 cycle 13 으로 지연.
+
+### 결정: W3-PSL-1d (chat completion capture)
+
+**근거** (codex cycle 12):
+- 가장 작은 증분으로 `<gadgetron_shared_context>` 를 empty 에서 populated 로 전환
+- 전체 PSL-1c wiring 이 실제 traffic 에 대해 동작하는지 E2E 검증 가능
+- capture site 는 `chat_completions_handler` 안에서만 완결 — gateway 외부 churn 없음
+
+### W3-PSL-1d tight scope (본 PR)
+
+1. **Capture helper** (`crates/gadgetron-gateway/src/handlers.rs`):
+   - `async fn capture_chat_completion(state: &AppState, ctx: &TenantContext, model: &str, prompt_tokens: u32, completion_tokens: u32, stream: bool)` — fire-and-forget
+   - 조건: `state.candidate_coordinator.is_some()`
+   - `AuthenticatedContext::default()` 사용 (doc 10 promotes later)
+   - `CapturedActivityEvent` 조립:
+     - `id = Uuid::new_v4()`
+     - `tenant_id = ctx.tenant_id`
+     - `actor_user_id = Uuid::nil()` (TODO: doc 10 identity promotion 후 실제 user_id)
+     - `request_id = Some(ctx.request_id)`
+     - `origin = ActivityOrigin::Penny`
+     - `kind = ActivityKind::GadgetToolCall`
+     - `title = format!("chat completion: {model}")` (non-PII)
+     - `summary = format!("{prompt_tokens} input / {completion_tokens} output tokens, stream={stream}")` (non-PII, 토큰 수만)
+     - `source_bundle = None`, `source_capability = Some("chat.completions")`, `audit_event_id = None` (KC-1c plumbs)
+     - `facts = json!({"model": model, "stream": stream, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens})`
+   - `coordinator.capture_action(&actor, event, vec![]).await` — 힌트 empty (hint generation 은 후속 PR)
+   - Err 시 warn-log, 요청 진행 중단 금지 (graceful degrade, audit 와 동일 패턴)
+2. **Wire into both paths**:
+   - `handle_non_streaming` 의 `Ok(response)` 분기에서 audit.send() 다음 줄에 capture 호출 (fire-and-forget spawn)
+   - `handle_streaming` 에서도 동일 지점 (dispatch 시점 audit 와 같이)
+   - 실패 경로 (Err arm) 는 본 PR 범위 밖 — 성공한 chat turn 만 capture
+3. **Tracing**: `penny_shared_context.capture_chat` span with `request_id`, `tenant_id`, `model`, `stream`, `prompt_tokens`, `completion_tokens`
+4. **Integration test** — `crates/gadgetron-gateway/tests/psl_1d_chat_capture.rs` (신규):
+   - Build test router with PSL-1c full stack wired + fake provider
+   - POST `/v1/chat/completions` with simple user message
+   - Wait briefly for fire-and-forget capture to land
+   - Query `coordinator.store.list_candidates(actor, 100, false)` (or adapt store access) → nothing (hints empty)
+   - Query store's activity events → 1 event with `kind = GadgetToolCall`, `title` contains "chat completion"
+   - Second POST → 2 events total
+   - `render_penny_shared_context(bootstrap, ...)` 의 `recent_activity` 섹션에 entry 포함 검증
+5. **Streaming capture note**: 스트리밍 path 에선 `dispatch 시점` 에 capture 하고 (총 토큰 수는 추정치 — 기존 latency 설명 참고), 정확한 usage metrics 는 P2 `Drop guard` 구현 뒤에 갱신 (본 PR 범위 밖)
+
+### Codex hidden caveat
+
+- `actor_user_id = Uuid::nil()` 은 의도된 placeholder. `AuthenticatedContext` 가 ZST 인 한 근본 해결 불가 — doc 10 permission inheritance 구현 후 복원
+- streaming path 에서 `completion_tokens = 0` 으로 capture (stream 완료 전 audit 와 동일) — KC-1c 나 Drop-guard PR 에서 정정
+- non-PII 규칙: title / summary 에 사용자 메시지 문자열 포함 금지 (log leakage 위험). 현재 설계는 모델명 + 토큰 수만 노출
+
+### Non-scope (PSL-1e / WEB-2b / KC-1c)
+
+- **Workbench direct-action capture** — WEB-2b actions route 생성 후
+- **Approval decision capture** — xaas approval store 연결 후
+- **Hint generation** — chat turn 이 runbook / incident 후보를 만드는 LLM-driven hint 추출 (P2C+)
+- **Failure capture** — Err arm 에서도 `ActivityKind::RuntimeObservation` 같은 이벤트 남기기
+- **audit_event_id 실제 plumbing** — KC-1c
+- **Streaming 정확한 completion_tokens** — Drop guard (P2)
+
+### 영향 받는 크레이트
+
+- `gadgetron-gateway`: `handlers.rs` + 신규 integration test (~300-400 LOC)
+- 다른 크레이트 변경 없음
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-psl-1d/chat-capture` (생성됨)
+3. inference-engine-lead delegation (chat handler 소유자)
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_

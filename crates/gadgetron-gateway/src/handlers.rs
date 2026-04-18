@@ -26,6 +26,64 @@ use crate::server::AppState;
 use crate::sse::chat_chunk_to_sse;
 
 // ---------------------------------------------------------------------------
+// capture_chat_completion — PSL-1d fire-and-forget helper
+// ---------------------------------------------------------------------------
+
+/// Capture a successful chat completion into the activity stream for
+/// `<gadgetron_shared_context>` projection on the next turn.
+/// Fire-and-forget: errors logged but never propagated.
+/// Non-PII: only model name + token counts; no message text.
+/// Spec: docs/design/core/knowledge-candidate-curation.md §2.1
+async fn capture_chat_completion(
+    coordinator: std::sync::Arc<
+        dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator,
+    >,
+    tenant_id: uuid::Uuid,
+    request_id: uuid::Uuid,
+    model: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    stream: bool,
+) {
+    use gadgetron_core::knowledge::candidate::{
+        ActivityKind, ActivityOrigin, CapturedActivityEvent,
+    };
+
+    let event = CapturedActivityEvent {
+        id: uuid::Uuid::new_v4(),
+        tenant_id,
+        // TODO(doc-10): real user_id after permission-inheritance lands.
+        actor_user_id: uuid::Uuid::nil(),
+        request_id: Some(request_id),
+        origin: ActivityOrigin::Penny,
+        kind: ActivityKind::GadgetToolCall,
+        title: format!("chat completion: {model}"),
+        summary: format!(
+            "{prompt_tokens} input / {completion_tokens} output tokens, stream={stream}"
+        ),
+        source_bundle: None,
+        source_capability: Some("chat.completions".into()),
+        audit_event_id: None,
+        facts: serde_json::json!({
+            "model": model,
+            "stream": stream,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }),
+        created_at: chrono::Utc::now(),
+    };
+
+    let actor = AuthenticatedContext;
+    if let Err(e) = coordinator.capture_action(&actor, event, vec![]).await {
+        tracing::warn!(
+            request_id = %request_id,
+            error = %e,
+            "penny_shared_context.capture_chat_failed"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/chat/completions
 // ---------------------------------------------------------------------------
 
@@ -164,6 +222,29 @@ async fn handle_non_streaming(
                 latency_ms,
             });
 
+            // PSL-1d: fire-and-forget capture on successful non-streaming chat.
+            // Authority: docs/design/core/knowledge-candidate-curation.md §2.1,
+            // D-20260418-20. No capture on Err arm (success-only, this PR).
+            if let Some(coord) = state.candidate_coordinator.clone() {
+                let tenant_id = ctx.tenant_id;
+                let request_id = ctx.request_id;
+                let model = req.model.clone();
+                let prompt_tokens = response.usage.prompt_tokens;
+                let completion_tokens = response.usage.completion_tokens;
+                tokio::spawn(async move {
+                    capture_chat_completion(
+                        coord,
+                        tenant_id,
+                        request_id,
+                        model,
+                        prompt_tokens,
+                        completion_tokens,
+                        false,
+                    )
+                    .await;
+                });
+            }
+
             Json(response).into_response()
         }
         Err(e) => {
@@ -238,6 +319,21 @@ async fn handle_streaming(
             latency_ms,
         });
     });
+
+    // PSL-1d: fire-and-forget capture at dispatch time for streaming path.
+    // Streaming usage counts are 0 here (deferred to Phase-2 Drop-guard).
+    // Authority: docs/design/core/knowledge-candidate-curation.md §2.1,
+    // D-20260418-20.
+    if let Some(coord) = state.candidate_coordinator.clone() {
+        let tenant_id_cap = ctx.tenant_id;
+        let request_id_cap = ctx.request_id;
+        let model_cap = req.model.clone();
+        tokio::spawn(async move {
+            // Streaming usage counts deferred to Phase-2 Drop-guard.
+            capture_chat_completion(coord, tenant_id_cap, request_id_cap, model_cap, 0, 0, true)
+                .await;
+        });
+    }
 
     chat_chunk_to_sse(stream).into_response()
 }
