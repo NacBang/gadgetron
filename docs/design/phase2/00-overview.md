@@ -307,7 +307,7 @@ gadgetron-web/                 ← Web UI crate, embedded static assets
     └── dist/                  # build output, include_dir!-embedded at cargo build time
 ```
 
-See D-20260414-02 and `docs/design/phase2/03-gadgetron-web.md` (upcoming) for Cargo.toml, build pipeline, XSS hardening, threat model, and the `web-ui` feature flag on `gadgetron-gateway`.
+See D-20260414-02 and `docs/design/phase2/03-gadgetron-web.md` for Cargo.toml, build pipeline, XSS hardening, threat model, and the `web-ui` feature flag on `gadgetron-gateway`.
 
 ### Modified crates
 - `gadgetron-core` — `AppConfig` gains `[knowledge]`, `[agent]`, and `[agent.brain]` sections; legacy `[penny]` is accepted only as a migration input; `GadgetronError` gains 2 nested variants (see §12)
@@ -422,7 +422,7 @@ Per "오픈소스 최대한 활용" directive. All versions must be pinned in `C
 | MCP server transport | Manual JSON-RPC 2.0 stdio server (`gadgetron mcp serve`) | Matches current trunk implementation; no extra SDK dependency in P2A | SDK adoption, if any, is deferred to a later phase |
 | Subprocess | `tokio::process::Command` | Already in workspace | — |
 | Temp files | `tempfile` | Secure permission handling, process-owned dir | **Required** for MCP config tmpfile per §8 |
-| **Web UI chat** | **`gadgetron-web` crate (NEW, P2A)** — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT, shadcn + Radix headless components) + Next.js + Tailwind | MIT end-to-end; embedded in Rust binary via `include_dir!`; single-binary deployment; Gadgetron branding fully owned | See **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md` (upcoming) |
+| **Web UI chat** | **`gadgetron-web` crate (NEW, P2A)** — [assistant-ui](https://github.com/assistant-ui/assistant-ui) (MIT, shadcn + Radix headless components) + Next.js + Tailwind | MIT end-to-end; embedded in Rust binary via `include_dir!`; single-binary deployment; Gadgetron branding fully owned | See **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md` |
 | Vector store (P2B+) | `sqlite-vec` extension | Embedded SQLite extension; "가볍게" principle | — |
 | Embedding model (P2B+) | `ort` (ONNX Runtime) + `bge-small-en-v1.5` or `multilingual-e5-small` | Fully local; Korean support | — |
 | PDF extraction (P2B+) | `pdf-extract` or `lopdf` | Pure Rust | — |
@@ -715,7 +715,7 @@ Both disclosures are enforced as a P2A PR merge gate — no `gadgetron-penny` co
 
 - The assistant-ui-based `gadgetron-web` frontend stores the Gadgetron API key in `localStorage` scoped to `:8080/web`. The user pastes it into the settings page after calling `gadgetron key create`. Because `gadgetron-web` and `/v1/*` are same-origin, no CORS is required and no third-party process ever sees the key.
 - Operator responsibility: ensure `gadgetron serve` is bound to a trusted interface (localhost for P2A single-user; TLS + reverse proxy for P2C). Key rotation via `gadgetron key create --rotate` (Phase 1 command) followed by user re-pasting in the Web UI.
-- XSS defense: `gadgetron-web` MUST sanitize any assistant-rendered HTML via `DOMPurify` or equivalent (tracked in `docs/design/phase2/03-gadgetron-web.md` — upcoming). Markdown rendering uses a hardened pipeline that strips `<script>`, `javascript:` URLs, and `onerror=` attributes.
+- XSS defense: `gadgetron-web` MUST sanitize any assistant-rendered HTML via `DOMPurify` or equivalent (tracked in `docs/design/phase2/03-gadgetron-web.md`). Markdown rendering uses a hardened pipeline that strips `<script>`, `javascript:` URLs, and `onerror=` attributes.
 
 ---
 
@@ -995,7 +995,7 @@ Set `[knowledge.search].searxng_url = "http://127.0.0.1:8888"` in `gadgetron.tom
 
 **No external chat UI or docker-compose required.** The existing `list_models_handler` already includes `penny` once the provider is registered — `gadgetron-web` consumes the same `/v1/models` endpoint as any third-party client.
 
-See `docs/design/phase2/03-gadgetron-web.md` (upcoming) for crate layout, build pipeline (`cargo xtask build-web` or `build.rs` + `npm run build`), and threat-model rewrite.
+See `docs/design/phase2/03-gadgetron-web.md` for crate layout, build pipeline (`cargo xtask build-web` or `build.rs` + `npm run build`), and threat-model rewrite.
 
 ---
 
