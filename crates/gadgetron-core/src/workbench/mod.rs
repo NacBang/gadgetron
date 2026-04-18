@@ -4,7 +4,7 @@
 //! (e.g. `gadgetron-web` shell). All heavy orchestration logic lives in
 //! `gadgetron-gateway::web::workbench` and `::web::projection`.
 //!
-//! Authority doc: `docs/design/gateway/workbench-projection-and-actions.md`
+//! Authority doc: `docs/design/core/workbench-shared-types.md`
 //! Phase: [P2B]
 
 use chrono::{DateTime, Utc};
