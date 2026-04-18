@@ -282,6 +282,8 @@ mod tests {
             tui_tx: None,
             workbench: Some(Arc::new(GatewayWorkbenchService { projection })),
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
         }
     }
 

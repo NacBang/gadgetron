@@ -144,6 +144,8 @@ mod tests {
             tui_tx: Some(tui_tx),
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
         }
     }
 
@@ -211,6 +213,8 @@ mod tests {
             tui_tx: None,
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
         };
         let app = build_router(state);
 

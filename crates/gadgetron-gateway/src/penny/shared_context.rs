@@ -105,6 +105,59 @@ pub trait PennySharedSurfaceService: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Arc<dyn PennySharedSurfaceService> blanket impl
+// ---------------------------------------------------------------------------
+
+/// Allow `DefaultPennyTurnContextAssembler` to be instantiated with
+/// `Arc<dyn PennySharedSurfaceService>` as its generic parameter.
+///
+/// This makes the handler code simpler: it can pass `service.clone()` (where
+/// `service: &Arc<dyn PennySharedSurfaceService>`) directly to the assembler
+/// without a wrapper type.
+#[async_trait]
+impl PennySharedSurfaceService for Arc<dyn PennySharedSurfaceService> {
+    async fn recent_activity(
+        &self,
+        actor: &AuthenticatedContext,
+        limit: u32,
+    ) -> Result<Vec<PennyActivityDigest>, GadgetronError> {
+        (**self).recent_activity(actor, limit).await
+    }
+
+    async fn pending_candidates(
+        &self,
+        actor: &AuthenticatedContext,
+        limit: u32,
+    ) -> Result<Vec<PennyCandidateDigest>, GadgetronError> {
+        (**self).pending_candidates(actor, limit).await
+    }
+
+    async fn pending_approvals(
+        &self,
+        actor: &AuthenticatedContext,
+        limit: u32,
+    ) -> Result<Vec<PennyApprovalDigest>, GadgetronError> {
+        (**self).pending_approvals(actor, limit).await
+    }
+
+    async fn request_evidence(
+        &self,
+        actor: &AuthenticatedContext,
+        request_id: Uuid,
+    ) -> Result<WorkbenchRequestEvidenceResponse, GadgetronError> {
+        (**self).request_evidence(actor, request_id).await
+    }
+
+    async fn decide_candidate(
+        &self,
+        actor: &AuthenticatedContext,
+        request: PennyCandidateDecisionRequest,
+    ) -> Result<PennyCandidateDecisionReceipt, GadgetronError> {
+        (**self).decide_candidate(actor, request).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InProcessPennySharedSurfaceService
 // ---------------------------------------------------------------------------
 

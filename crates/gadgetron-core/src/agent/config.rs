@@ -181,13 +181,16 @@ fn default_session_store_max_entries() -> usize {
 
 /// Tuning parameters for the per-turn Penny shared-context bootstrap.
 ///
-/// These fields are ADDITIVE config only — they adjust limits and caps, not
-/// whether the feature is active. The feature is not optional per doc §2.3:
-/// "direct action parity and shared surface awareness are … P2B Penny
-/// contract". There is no `enabled = false` toggle.
+/// The `enabled` field is the ONLY on/off toggle and exists exclusively as an
+/// emergency rollback escape hatch (D-20260418-16). In normal operation
+/// `enabled = true`. Setting `enabled = false` disables bootstrap injection
+/// entirely — this is **distinct** from `require_explicit_degraded_notice`,
+/// which controls whether degraded-state notices are surfaced and MUST remain
+/// `true` per doc §2.3.
 ///
 /// # Validation rules
 ///
+/// - `enabled`: both `true` and `false` accepted (emergency rollback only)
 /// - `bootstrap_activity_limit`: `1..=20`
 /// - `bootstrap_candidate_limit`: `1..=12`
 /// - `bootstrap_approval_limit`: `0..=10`
@@ -196,6 +199,14 @@ fn default_session_store_max_entries() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SharedContextConfig {
+    /// Emergency rollback switch. `enabled = false` disables bootstrap injection
+    /// entirely — the handler skips the assembler call and passes the original
+    /// messages unmodified to the router.
+    ///
+    /// Default `true`. This flag exists only for emergency rollback; it is not
+    /// a legitimate tuning knob. Distinct from `require_explicit_degraded_notice`,
+    /// which must remain `true` per doc §2.3 and cannot be set to `false`.
+    pub enabled: bool,
     /// How many recent activity entries to include in the bootstrap.
     /// Default `6`. Range `1..=20`.
     pub bootstrap_activity_limit: u32,
@@ -219,6 +230,7 @@ pub struct SharedContextConfig {
 impl Default for SharedContextConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             bootstrap_activity_limit: 6,
             bootstrap_candidate_limit: 4,
             bootstrap_approval_limit: 3,
@@ -1101,6 +1113,28 @@ mod config_tests {
         assert!(
             cfg.validate().is_ok(),
             "default SharedContextConfig must pass validation"
+        );
+    }
+
+    #[test]
+    fn enabled_defaults_to_true() {
+        let cfg = SharedContextConfig::default();
+        assert!(
+            cfg.enabled,
+            "enabled must default to true; P2B Penny contract requires bootstrap injection unless emergency rollback is needed"
+        );
+    }
+
+    #[test]
+    fn enabled_false_passes_validation() {
+        // `enabled = false` is the emergency rollback path — validation must
+        // accept it. This is explicitly distinct from
+        // `require_explicit_degraded_notice = false`, which validation rejects.
+        let mut cfg = SharedContextConfig::default();
+        cfg.enabled = false;
+        assert!(
+            cfg.validate().is_ok(),
+            "enabled = false must pass validation (emergency rollback)"
         );
     }
 
