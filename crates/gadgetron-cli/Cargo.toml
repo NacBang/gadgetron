@@ -29,6 +29,9 @@ toml = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = ["web-ui"]
 web-ui = ["gadgetron-gateway/web-ui"]

@@ -1125,6 +1125,7 @@ dependencies = [
  "gadgetron-xaas",
  "reqwest",
  "sqlx",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
