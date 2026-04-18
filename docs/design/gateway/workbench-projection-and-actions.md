@@ -486,6 +486,21 @@ gateway 가 읽는 의미:
 - `show_relation_panel`
   - relation view descriptor 노출 여부의 상위 gate
 
+##### Orthogonal dual-gate: `required_scope` vs `allow_direct_actions`
+
+이 두 gate 는 **서로 다른 계층에서 작동하며 결합되지 않는다** — 감사에서 "allow_direct_actions 가 Scope 에 bound 안됨" 으로 flag 될 수 있으나 spec-correct 이다 (drift-fix PR 4 / D-20260418-25 에서 close-out). 두 gate 는 다음과 같이 구분한다:
+
+| Gate | Layer | Trigger | Effect | Rendered response |
+|---|---|---|---|---|
+| `required_scope` | **per-descriptor** (actor privilege) | actor 가 scope 를 보유하지 않음 | descriptor 가 **숨겨짐** (list 에서 strip) + direct `POST /actions/:id` 는 404 | descriptor 가 아예 없음 |
+| `allow_direct_actions = false` | **per-instance** (config policy) | 인스턴스 정책으로 direct action 전역 비활성화 | descriptor 는 **노출되지만** `disabled_reason` 주입 + `POST /actions/:id` 는 403 | descriptor + `disabled_reason` + 403 forbidden |
+
+Key rules (line 148 의 원칙 재확인):
+
+- `disabled_reason` 은 **actor privilege 문제가 아니다** — instance config 또는 runtime availability 이슈에만 사용한다.
+- actor 가 scope 를 보유하지 않은 경우 disabled_reason 을 채우지 말고 descriptor 자체를 strip 하라. disabled_reason 에 "you lack scope X" 를 쓰는 것은 privilege-disclosure 위반.
+- 두 gate 는 AND 가 아니라 독립 적용 — actor 가 scope 를 가지더라도 `allow_direct_actions = false` 이면 `disabled_reason` + 403 으로 막는다.
+
 검증 규칙:
 
 - family 문자열이 등록되지 않은 bundle 을 가리켜도 config load 는 실패시키지 않는다. 단 warning log 를 남기고 해당 family descriptor 는 비어 있는 것으로 처리한다.
