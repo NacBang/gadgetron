@@ -27,6 +27,7 @@
 | C-4 | legacy 설계 문서 | `06-backend-plugin-architecture.md`, `07-plugin-server.md` 가 legacy 용어를 강하게 드러내지 못함 | `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/design/phase2/07-plugin-server.md` | P1 | Closed |
 | C-5 | seed/frontmatter | `plugin`, `plugin_version`, `plugin_seed` 호환 필드와 canonical 용어 사이 설명 부족 | `docs/architecture/glossary.md`, `crates/gadgetron-knowledge/src/wiki/frontmatter.rs`, `crates/gadgetron-knowledge/seeds/*` | P1 | Open |
 | C-6 | deep architecture docs | `platform-architecture.md`, older module docs, review docs 의 legacy naming 잔존 | `docs/architecture/platform-architecture.md`, `docs/modules/*`, `docs/reviews/*` | P2 | Open |
+| C-7 | authority entrypoint | `README.md` 가 hard-coded ADR count/range 를 유지해 최신 accepted ADR set 을 축소해서 보임 | `README.md`, `docs/adr/README.md` | P0 | Closed |
 
 ---
 
@@ -86,6 +87,9 @@
   - `docs/design/phase2/00-overview.md`, `01-knowledge-layer.md`, `02-penny-agent.md`, `04-mcp-tool-registry.md` 의 current-name mapping 과 visible type names 정렬
   - `docs/design/ops/*`, `ADR-P2A-05`, `ADR-P2A-06`, `09-knowledge-acl.md`, `10-penny-permission-inheritance.md` 에 canonical terminology note 추가
   - 결과: entrypoint/operator/active-design 문서의 top-level 해석은 정렬되었고, 잔여 드리프트는 deep body code blocks / historical references / compatibility-field docs 로 축소
+- 2026-04-18 reconciliation pass (ADR index entrypoint):
+  - `README.md` 의 stale ADR count/range 문구를 제거하고 `docs/adr/README.md` 를 유일한 maintained index 로 재고정
+  - tracker 에 C-7 을 추가하고 같은 패스에서 Closed 처리
 
 ---
 
