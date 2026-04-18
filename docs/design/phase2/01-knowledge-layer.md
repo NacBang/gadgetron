@@ -1,6 +1,6 @@
 # 01 — Knowledge Layer Detailed Implementation Spec (`gadgetron-knowledge`)
 
-> **Status**: Draft v3 (addressed chief-architect + dx + security + qa Round 1 feedback; Round 2 review addressed (4 reviewers cross-check)) — **§4 search subsystem extended by `05-knowledge-semantic.md` (ADR-P2A-07) as of 2026-04-16**
+> **Status**: Draft v3 (addressed chief-architect + dx + security + qa Round 1 feedback; Round 2 review addressed (4 reviewers cross-check)) — **§4 search subsystem extended by `05-knowledge-semantic.md` (ADR-P2A-07) as of 2026-04-16** — **P2B architecture extension: `docs/design/core/knowledge-plug-architecture.md` (Plug/Bundle boundary for knowledge), 2026-04-18**
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13 (v3), 2026-04-16 (§4 semantic extension pointer)
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
