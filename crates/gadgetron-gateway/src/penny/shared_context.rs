@@ -372,6 +372,26 @@ fn workbench_err_to_gadgetron(err: WorkbenchHttpError) -> GadgetronError {
                  Verify the request_id or refresh the workbench."
             ),
         },
+        WorkbenchHttpError::ViewNotFound { view_id } => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: format!("view/{view_id}"),
+            },
+            message: format!(
+                "View '{view_id}' is not visible to the current actor or has been removed."
+            ),
+        },
+        WorkbenchHttpError::ActionNotFound { action_id } => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: format!("action/{action_id}"),
+            },
+            message: format!(
+                "Action '{action_id}' is not visible to the current actor or has been removed."
+            ),
+        },
+        WorkbenchHttpError::ActionInvalidArgs { detail } => {
+            GadgetronError::Config(format!("action args validation failed: {detail}"))
+        }
+        WorkbenchHttpError::DirectActionsDisabled => GadgetronError::Forbidden,
     }
 }
 
@@ -663,6 +683,40 @@ mod tests {
             request_id: Uuid,
         ) -> Result<WorkbenchRequestEvidenceResponse, WorkbenchHttpError> {
             Err(WorkbenchHttpError::RequestNotFound { request_id })
+        }
+        async fn knowledge_status(
+            &self,
+        ) -> Result<gadgetron_core::workbench::WorkbenchKnowledgeStatusResponse, WorkbenchHttpError>
+        {
+            Ok(
+                gadgetron_core::workbench::WorkbenchKnowledgeStatusResponse {
+                    canonical_ready: false,
+                    search_ready: false,
+                    relation_ready: false,
+                    stale_reasons: vec![],
+                    last_ingest_at: None,
+                },
+            )
+        }
+        async fn views(
+            &self,
+        ) -> Result<gadgetron_core::workbench::WorkbenchRegisteredViewsResponse, WorkbenchHttpError>
+        {
+            Ok(gadgetron_core::workbench::WorkbenchRegisteredViewsResponse { views: vec![] })
+        }
+        async fn view_data(
+            &self,
+            view_id: &str,
+        ) -> Result<gadgetron_core::workbench::WorkbenchViewData, WorkbenchHttpError> {
+            Err(WorkbenchHttpError::ViewNotFound {
+                view_id: view_id.to_string(),
+            })
+        }
+        async fn actions(
+            &self,
+        ) -> Result<gadgetron_core::workbench::WorkbenchRegisteredActionsResponse, WorkbenchHttpError>
+        {
+            Ok(gadgetron_core::workbench::WorkbenchRegisteredActionsResponse { actions: vec![] })
         }
     }
 

@@ -113,3 +113,6 @@ tempfile = "3"
 include_dir = "0.7.4"
 mime_guess = "2.0.5"
 percent-encoding = "2.3.1"
+
+# JSON Schema validation (used by workbench direct-action input validation)
+jsonschema = "0.33"

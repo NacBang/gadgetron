@@ -1240,24 +1240,45 @@ fn build_knowledge_service(
     Ok(Some(provider.service().clone()))
 }
 
-/// Build the workbench gateway service from a `KnowledgeService`.
+/// Build the workbench gateway service from an optional `KnowledgeService`
+/// and an optional `KnowledgeCandidateCoordinator`.
 ///
-/// Returns `None` when the knowledge service is absent so graceful-degrade
-/// applies: the workbench bootstrap endpoint responds with 503.
+/// Always returns `Some` so the bootstrap endpoint remains reachable even
+/// without a knowledge backend. When no coordinator is supplied, the action
+/// service captures activity events as no-ops.
 fn build_workbench(
     knowledge_service: Option<Arc<gadgetron_knowledge::service::KnowledgeService>>,
+    candidate_coordinator: Option<
+        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
+    >,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
-    use gadgetron_gateway::{
-        web::projection::InProcessWorkbenchProjection,
-        web::workbench::{GatewayWorkbenchService, WorkbenchProjectionService},
+    use gadgetron_gateway::web::{
+        action_service::InProcessWorkbenchActionService,
+        catalog::DescriptorCatalog,
+        projection::InProcessWorkbenchProjection,
+        replay_cache::{InMemoryReplayCache, DEFAULT_REPLAY_TTL},
+        workbench::{GatewayWorkbenchService, WorkbenchActionService, WorkbenchProjectionService},
     };
+
+    let catalog = DescriptorCatalog::seed_p2b();
 
     let projection: Arc<dyn WorkbenchProjectionService> = Arc::new(InProcessWorkbenchProjection {
         knowledge: knowledge_service,
         gateway_version: env!("CARGO_PKG_VERSION"),
+        descriptor_catalog: catalog.clone(),
     });
 
-    Some(Arc::new(GatewayWorkbenchService { projection }))
+    let action_svc: Arc<dyn WorkbenchActionService> =
+        Arc::new(InProcessWorkbenchActionService::new(
+            catalog,
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            candidate_coordinator,
+        ));
+
+    Some(Arc::new(GatewayWorkbenchService {
+        projection,
+        actions: Some(action_svc),
+    }))
 }
 
 /// Build the candidate capture plane, backed by Postgres when a pool is
@@ -1425,8 +1446,6 @@ async fn init_serve_runtime(
 
     let knowledge_service = build_knowledge_service(knowledge_cfg.as_ref(), pg_pool_for_knowledge)?;
 
-    let workbench = build_workbench(knowledge_service.clone());
-
     let (activity_capture_store, candidate_coordinator) =
         match (knowledge_service.as_ref(), knowledge_cfg.as_ref()) {
             (Some(svc), Some(kcfg)) if kcfg.curation.enabled => {
@@ -1438,6 +1457,8 @@ async fn init_serve_runtime(
             }
             _ => (None, None),
         };
+
+    let workbench = build_workbench(knowledge_service.clone(), candidate_coordinator.clone());
 
     let agent_config = Arc::new(config.agent.clone());
 
@@ -3441,15 +3462,18 @@ wiki_max_page_bytes = 1048576
         );
         let knowledge_service = knowledge_service.unwrap();
 
-        let workbench = build_workbench(Some(knowledge_service.clone()));
+        // No pg_pool in unit tests — keyword-only mode uses InMemory store.
+        let (activity_store, candidate_coordinator) =
+            build_candidate_plane(&knowledge_service, &knowledge_cfg.curation, None);
+
+        let workbench = build_workbench(
+            Some(knowledge_service.clone()),
+            Some(candidate_coordinator.clone()),
+        );
         assert!(
             workbench.is_some(),
             "workbench must be Some when knowledge_service is Some"
         );
-
-        // No pg_pool in unit tests — keyword-only mode uses InMemory store.
-        let (activity_store, candidate_coordinator) =
-            build_candidate_plane(&knowledge_service, &knowledge_cfg.curation, None);
 
         let agent_cfg = gadgetron_core::agent::config::AgentConfig::default();
         let wb = workbench.as_ref().unwrap();
@@ -3540,9 +3564,9 @@ wiki_max_page_bytes = 1048576
             "knowledge_service must be None"
         );
 
-        // build_workbench(None) → Some (degraded-mode projection — always wired
-        // so the endpoint returns a degraded bootstrap rather than 404).
-        let workbench = build_workbench(None);
+        // build_workbench(None, None) → Some (degraded-mode projection — always
+        // wired so the endpoint returns a degraded bootstrap rather than 404).
+        let workbench = build_workbench(None, None);
         assert!(
             workbench.is_some(),
             "workbench is always Some (degraded mode) even without knowledge service"

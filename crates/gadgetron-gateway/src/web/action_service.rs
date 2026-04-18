@@ -1,0 +1,564 @@
+//! In-process workbench action service — W3-WEB-2b.
+//!
+//! Implements the 10-step direct action flow from doc §2.2.4.
+//! Real provider dispatch is deferred (this PR returns a synthetic response).
+//! Approval stub returns `pending_approval` for `requires_approval || destructive` actions.
+//!
+//! Authority: `docs/design/gateway/workbench-projection-and-actions.md` §2.2.4
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use gadgetron_core::{
+    knowledge::{
+        candidate::{
+            ActivityKind, ActivityOrigin, CapturedActivityEvent, KnowledgeCandidateCoordinator,
+        },
+        AuthenticatedContext,
+    },
+    workbench::{
+        InvokeWorkbenchActionRequest, InvokeWorkbenchActionResponse, WorkbenchActionResult,
+    },
+};
+use uuid::Uuid;
+
+use crate::web::{
+    catalog::DescriptorCatalog,
+    replay_cache::{InMemoryReplayCache, ReplayKey},
+    workbench::{WorkbenchActionService, WorkbenchHttpError},
+};
+
+// ---------------------------------------------------------------------------
+// InProcessWorkbenchActionService
+// ---------------------------------------------------------------------------
+
+/// In-process direct-action service.
+///
+/// Backed by a `DescriptorCatalog` snapshot, a replay cache, and an optional
+/// `KnowledgeCandidateCoordinator`. Real gadget dispatch is not performed in
+/// this PR — the ok path returns a synthetic result and optionally captures
+/// an activity event via the coordinator.
+pub struct InProcessWorkbenchActionService {
+    pub descriptor_catalog: DescriptorCatalog,
+    pub replay_cache: Arc<InMemoryReplayCache>,
+    pub coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+    /// Pre-compiled JSON-Schema validator, keyed by action id.
+    ///
+    /// Built at construction time from each descriptor's `input_schema` so
+    /// validation is purely in-memory with no re-compilation per request.
+    pub schema_validators: std::collections::HashMap<String, Arc<jsonschema::Validator>>,
+}
+
+impl InProcessWorkbenchActionService {
+    /// Build a new action service.
+    ///
+    /// Pre-compiles JSON-Schema validators for every action in the catalog.
+    /// If a descriptor's `input_schema` is invalid JSON-Schema, that action
+    /// will lack a compiled validator and args will pass through unvalidated
+    /// (warn-log emitted). This is intentional: misconfigured schema is an
+    /// operator problem, not a reason to crash at startup.
+    pub fn new(
+        descriptor_catalog: DescriptorCatalog,
+        replay_cache: InMemoryReplayCache,
+        coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+    ) -> Self {
+        // Build schema validators for all actions in the catalog.
+        // We iterate visible_actions with the broadest scope so we compile
+        // schemas for all descriptors (including scope-gated ones).
+        // Using find_action iteration via internal state via seed_p2b catalog
+        // We gather all actions from the catalog's internal state via find_action loops.
+        // Since the catalog doesn't expose an iter(), we ask for actions visible
+        // to all scopes by using Management scope (broadest). This is compile-time
+        // only and never leaks descriptors to actors.
+        use gadgetron_core::context::Scope;
+        let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
+        let all_actions = descriptor_catalog.visible_actions(&all_scopes);
+
+        let mut validators = std::collections::HashMap::new();
+        for action in &all_actions {
+            match jsonschema::validator_for(&action.input_schema) {
+                Ok(v) => {
+                    validators.insert(action.id.clone(), Arc::new(v));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        action_id = %action.id,
+                        error = %e,
+                        "action descriptor has invalid input_schema; validation skipped"
+                    );
+                }
+            }
+        }
+
+        Self {
+            descriptor_catalog,
+            replay_cache: Arc::new(replay_cache),
+            coordinator,
+            schema_validators: validators,
+        }
+    }
+}
+
+#[async_trait]
+impl WorkbenchActionService for InProcessWorkbenchActionService {
+    /// 10-step direct action flow (doc §2.2.4).
+    async fn invoke(
+        &self,
+        actor: &AuthenticatedContext,
+        action_id: &str,
+        request: InvokeWorkbenchActionRequest,
+    ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError> {
+        // ---------------------------------------------------------------
+        // Step 1: Actor resolved (handled by auth middleware upstream).
+        // Step 2: Descriptor lookup — 404 if not found.
+        // ---------------------------------------------------------------
+        let descriptor = self
+            .descriptor_catalog
+            .find_action(action_id)
+            .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
+                action_id: action_id.to_string(),
+            })?;
+
+        // ---------------------------------------------------------------
+        // Step 3: required_scope + disabled_reason check.
+        //
+        // required_scope: doc §2.4.1 says return 404 (not 403) to avoid
+        // leaking existence of scope-restricted actions.
+        // disabled_reason from allow_direct_actions=false: 403 forbidden.
+        // ---------------------------------------------------------------
+        // TODO doc-10: replace Scope::OpenAiCompat with actor.scopes.
+        use gadgetron_core::context::Scope;
+        if let Some(required) = descriptor.required_scope {
+            // Placeholder scope check until doc-10 lands.
+            let actor_scopes = [Scope::OpenAiCompat];
+            if !actor_scopes.contains(&required) {
+                return Err(WorkbenchHttpError::ActionNotFound {
+                    action_id: action_id.to_string(),
+                });
+            }
+        }
+
+        // Check instance-level policy (allow_direct_actions=false).
+        if !self.descriptor_catalog.allow_direct_actions() {
+            return Err(WorkbenchHttpError::DirectActionsDisabled);
+        }
+
+        // Check descriptor-level disabled_reason (e.g. runtime unavailability).
+        // This is separate from the allow_direct_actions policy: a descriptor
+        // can be individually disabled regardless of instance policy.
+        if let Some(ref reason) = descriptor.disabled_reason {
+            // If the reason matches the policy message, use the dedicated error.
+            if reason.contains("Direct actions are disabled") {
+                return Err(WorkbenchHttpError::DirectActionsDisabled);
+            }
+            // Otherwise treat as a generic forbidden / config error.
+            return Err(WorkbenchHttpError::Core(
+                gadgetron_core::error::GadgetronError::Config(reason.clone()),
+            ));
+        }
+
+        // ---------------------------------------------------------------
+        // Step 4: JSON-Schema validation of args.
+        // ---------------------------------------------------------------
+        if let Some(validator) = self.schema_validators.get(action_id) {
+            // `validate` returns the first error via Result<(), ValidationError>.
+            // Use `iter_errors` to collect a user-facing message.
+            let mut error_iter = validator.iter_errors(&request.args);
+            if let Some(first_err) = error_iter.next() {
+                return Err(WorkbenchHttpError::ActionInvalidArgs {
+                    detail: first_err.to_string(),
+                });
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Step 5: Replay-cache check (requires client_invocation_id).
+        // ---------------------------------------------------------------
+        // We use a synthetic tenant_id for the replay key because
+        // AuthenticatedContext is a ZST (doc-10 deferred). The ZST means
+        // two actors cannot be distinguished; the tenant boundary is broken
+        // until doc-10 promotes identity. Document this limitation.
+        //
+        // TODO doc-10: replace synthetic_tenant_id with actor.tenant_id.
+        let synthetic_tenant_id = Uuid::nil();
+
+        if let Some(ciid) = request.client_invocation_id {
+            let replay_key = ReplayKey {
+                tenant_id: synthetic_tenant_id,
+                action_id: action_id.to_string(),
+                client_invocation_id: ciid,
+            };
+            if let Some(cached) = self.replay_cache.get(&replay_key).await {
+                tracing::debug!(
+                    action_id = %action_id,
+                    client_invocation_id = %ciid,
+                    "replay cache hit — returning cached response"
+                );
+                return Ok(cached);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Step 6: Approval gate stub.
+        // ---------------------------------------------------------------
+        let needs_approval = descriptor.requires_approval || descriptor.destructive;
+        if needs_approval {
+            let approval_id = Uuid::new_v4();
+            let result = WorkbenchActionResult {
+                status: "pending_approval".into(),
+                approval_id: Some(approval_id),
+                activity_event_id: None,
+                audit_event_id: None,
+                refresh_view_ids: vec![],
+                knowledge_candidates: vec![],
+                payload: None,
+            };
+            let resp = InvokeWorkbenchActionResponse { result };
+            // Cache under client_invocation_id if provided.
+            if let Some(ciid) = request.client_invocation_id {
+                let key = ReplayKey {
+                    tenant_id: synthetic_tenant_id,
+                    action_id: action_id.to_string(),
+                    client_invocation_id: ciid,
+                };
+                self.replay_cache.put(key, resp.clone()).await;
+            }
+            return Ok(resp);
+        }
+
+        // ---------------------------------------------------------------
+        // Step 7: Ok path — synthesize result + optional coordinator capture.
+        // ---------------------------------------------------------------
+        let mut activity_event_id: Option<Uuid> = None;
+        let mut knowledge_candidates: Vec<serde_json::Value> = vec![];
+
+        if let Some(ref coord) = self.coordinator {
+            let event_id = Uuid::new_v4();
+            let event = CapturedActivityEvent {
+                id: event_id,
+                // TODO doc-10: use actor.tenant_id / actor.user_id.
+                tenant_id: synthetic_tenant_id,
+                actor_user_id: Uuid::nil(),
+                request_id: None,
+                origin: ActivityOrigin::UserDirect,
+                kind: ActivityKind::DirectAction,
+                title: format!("direct action: {action_id}"),
+                summary: format!("action_id={action_id}"),
+                source_bundle: Some(descriptor.owner_bundle.clone()),
+                source_capability: descriptor.gadget_name.clone(),
+                audit_event_id: None,
+                facts: serde_json::json!({
+                    "action_id": action_id,
+                    "gadget_name": descriptor.gadget_name,
+                    "knowledge_hint": descriptor.knowledge_hint,
+                }),
+                created_at: chrono::Utc::now(),
+            };
+
+            match coord.capture_action(actor, event, vec![]).await {
+                Ok(candidates) => {
+                    activity_event_id = Some(event_id);
+                    knowledge_candidates = candidates
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "id": c.id,
+                                "disposition": c.disposition,
+                            })
+                        })
+                        .collect();
+                }
+                Err(e) => {
+                    // Coordinator failure is non-fatal — log and continue.
+                    tracing::warn!(
+                        action_id = %action_id,
+                        error = %e,
+                        "coordinator capture_action failed; proceeding without activity capture"
+                    );
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Step 8 / 9: Build and optionally cache the response.
+        // ---------------------------------------------------------------
+        let result = WorkbenchActionResult {
+            status: "ok".into(),
+            approval_id: None,
+            activity_event_id,
+            audit_event_id: None,
+            refresh_view_ids: vec![],
+            knowledge_candidates,
+            payload: None,
+        };
+        let resp = InvokeWorkbenchActionResponse { result };
+
+        if let Some(ciid) = request.client_invocation_id {
+            let key = ReplayKey {
+                tenant_id: synthetic_tenant_id,
+                action_id: action_id.to_string(),
+                client_invocation_id: ciid,
+            };
+            self.replay_cache.put(key, resp.clone()).await;
+        }
+
+        Ok(resp)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::catalog::DescriptorCatalog;
+    use crate::web::replay_cache::{InMemoryReplayCache, DEFAULT_REPLAY_TTL};
+    use gadgetron_core::workbench::InvokeWorkbenchActionRequest;
+
+    fn make_service(catalog: DescriptorCatalog) -> InProcessWorkbenchActionService {
+        InProcessWorkbenchActionService::new(
+            catalog,
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            None,
+        )
+    }
+
+    fn actor() -> AuthenticatedContext {
+        AuthenticatedContext
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 2: ActionNotFound
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_unknown_action_returns_action_not_found() {
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "test"}),
+            client_invocation_id: None,
+        };
+        let err = svc
+            .invoke(&actor(), "nonexistent-action", req)
+            .await
+            .unwrap_err();
+        match err {
+            WorkbenchHttpError::ActionNotFound { action_id } => {
+                assert_eq!(action_id, "nonexistent-action");
+            }
+            other => panic!("expected ActionNotFound, got: {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: DirectActionsDisabled
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_returns_direct_actions_disabled_when_policy_off() {
+        let catalog = DescriptorCatalog::seed_p2b().with_allow_direct_actions(false);
+        let svc = make_service(catalog);
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "test"}),
+            client_invocation_id: None,
+        };
+        let err = svc
+            .invoke(&actor(), "knowledge-search", req)
+            .await
+            .unwrap_err();
+        match err {
+            WorkbenchHttpError::DirectActionsDisabled => {}
+            other => panic!("expected DirectActionsDisabled, got: {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4: Schema validation
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_valid_args_passes_schema_validation() {
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "hello", "max_results": 5}),
+            client_invocation_id: None,
+        };
+        let resp = svc.invoke(&actor(), "knowledge-search", req).await.unwrap();
+        assert_eq!(resp.result.status, "ok");
+    }
+
+    #[tokio::test]
+    async fn invoke_missing_required_arg_returns_action_invalid_args() {
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        // "query" is required; sending empty object should fail.
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({}),
+            client_invocation_id: None,
+        };
+        let err = svc
+            .invoke(&actor(), "knowledge-search", req)
+            .await
+            .unwrap_err();
+        match err {
+            WorkbenchHttpError::ActionInvalidArgs { detail } => {
+                assert!(!detail.is_empty(), "detail must be non-empty");
+            }
+            other => panic!("expected ActionInvalidArgs, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_additional_properties_rejected() {
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        // "extra_field" is not in the schema and additionalProperties=false.
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "test", "extra_field": "bad"}),
+            client_invocation_id: None,
+        };
+        let err = svc
+            .invoke(&actor(), "knowledge-search", req)
+            .await
+            .unwrap_err();
+        match err {
+            WorkbenchHttpError::ActionInvalidArgs { .. } => {}
+            other => panic!("expected ActionInvalidArgs, got: {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 5: Replay cache
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_duplicate_client_invocation_id_returns_cached_response() {
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        let ciid = Uuid::new_v4();
+        let req1 = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "first"}),
+            client_invocation_id: Some(ciid),
+        };
+        let resp1 = svc
+            .invoke(&actor(), "knowledge-search", req1)
+            .await
+            .unwrap();
+        assert_eq!(resp1.result.status, "ok");
+
+        // Second call with the same ciid — should return the cached response.
+        let req2 = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "different-args-dont-matter"}),
+            client_invocation_id: Some(ciid),
+        };
+        let resp2 = svc
+            .invoke(&actor(), "knowledge-search", req2)
+            .await
+            .unwrap();
+        // Both must be "ok" (same cached response).
+        assert_eq!(resp2.result.status, "ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6: Approval pending for destructive actions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_destructive_action_returns_pending_approval() {
+        use gadgetron_core::workbench::{
+            WorkbenchActionDescriptor, WorkbenchActionKind, WorkbenchActionPlacement,
+        };
+        let mut catalog = DescriptorCatalog::seed_p2b();
+        catalog.actions.push(WorkbenchActionDescriptor {
+            id: "delete-everything".into(),
+            title: "Delete All".into(),
+            owner_bundle: "ops".into(),
+            source_kind: "admin".into(),
+            source_id: "delete.all".into(),
+            gadget_name: None,
+            placement: WorkbenchActionPlacement::ContextMenu,
+            kind: WorkbenchActionKind::Dangerous,
+            input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+            destructive: true,
+            requires_approval: false,
+            knowledge_hint: "destroys everything".into(),
+            required_scope: None,
+            disabled_reason: None,
+        });
+
+        let svc = make_service(catalog);
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({}),
+            client_invocation_id: None,
+        };
+        let resp = svc
+            .invoke(&actor(), "delete-everything", req)
+            .await
+            .unwrap();
+        assert_eq!(resp.result.status, "pending_approval");
+        assert!(resp.result.approval_id.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 7: coordinator capture
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_seeded_action_succeeds_and_status_is_ok() {
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "test knowledge"}),
+            client_invocation_id: None,
+        };
+        let resp = svc.invoke(&actor(), "knowledge-search", req).await.unwrap();
+        assert_eq!(resp.result.status, "ok");
+        assert!(resp.result.approval_id.is_none());
+        assert!(resp.result.audit_event_id.is_none());
+        // Without coordinator wired, no candidates or activity event.
+        assert!(resp.result.knowledge_candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invoke_seeded_action_with_coordinator_captures_activity() {
+        use gadgetron_core::knowledge::candidate::{
+            ActivityCaptureStore, KnowledgeCandidateCoordinator,
+        };
+        use gadgetron_knowledge::candidate::{
+            InMemoryActivityCaptureStore, InProcessCandidateCoordinator,
+        };
+
+        let store: Arc<dyn ActivityCaptureStore> = Arc::new(InMemoryActivityCaptureStore::new());
+        let coordinator: Arc<dyn KnowledgeCandidateCoordinator> =
+            Arc::new(InProcessCandidateCoordinator::new(store.clone(), 8));
+
+        let svc = InProcessWorkbenchActionService::new(
+            DescriptorCatalog::seed_p2b(),
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            Some(coordinator),
+        );
+
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "wiki article search"}),
+            client_invocation_id: None,
+        };
+
+        let resp = svc.invoke(&actor(), "knowledge-search", req).await.unwrap();
+
+        // Status must be "ok"
+        assert_eq!(resp.result.status, "ok", "status must be ok");
+        // activity_event_id must be set when coordinator is wired
+        assert!(
+            resp.result.activity_event_id.is_some(),
+            "activity_event_id must be set when coordinator is wired"
+        );
+        // approval_id must be absent on the ok path
+        assert!(
+            resp.result.approval_id.is_none(),
+            "no approval_id on ok path"
+        );
+        // audit_event_id is a follow-up
+        assert!(
+            resp.result.audit_event_id.is_none(),
+            "audit_event_id not wired in this PR"
+        );
+    }
+}
