@@ -184,6 +184,19 @@ plugin_version  = "0.2.0"          # deprecated, renames to `bundle_version`
 
 The frontmatter fields rename follows the same migration pattern as `[penny]` → `[agent.brain]` (transparent rewrite at load time with `tracing::warn!`).
 
+#### Frontmatter field migration (P2B)
+
+Fields with `deprecated` comments in the example above will be renamed in P2B:
+
+| P2A field (deprecated) | P2B target field | Meaning |
+|---|---|---|
+| `plugin = "<name>"` | `bundle = "<name>"` | owning Bundle name |
+| `plugin_version = "x.y.z"` | `bundle_version = "x.y.z"` | Bundle version at write time |
+
+Note: `source = "seed"` (not `"plugin_seed"`) is the valid current value for seed pages — the comment in the example block above is aspirational. `SeedPage` itself is listed as unchanged in ADR-P2A-10 §Rename scope.
+
+During P2A, the Rust struct still uses `plugin` / `plugin_version` field names (see `crates/gadgetron-knowledge/src/wiki/frontmatter.rs`). The P2B rename plan: introduce `serde(alias)` for backwards compatibility first, then remove the old names once all seed pages in the repo are migrated.
+
 ### DisableBehavior
 
 What happens to a Bundle's seed pages when the Bundle is disabled:
