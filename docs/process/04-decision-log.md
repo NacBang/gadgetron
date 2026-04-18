@@ -2520,4 +2520,78 @@ W3-KL-2 merged (wiki.import E2E). W3-WEB-1 merged (shell with empty states). 다
 
 ---
 
+## D-20260418-14: W3-WEB-2 착수 — Workbench gateway projection (read-only slice)
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-KL-3 머지 직후, cron 6번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote)
+**관련 문서**: `docs/design/gateway/workbench-projection-and-actions.md` (Approved, 4라운드 통과), `docs/design/web/expert-knowledge-workbench.md` (authority), `docs/design/phase2/13-penny-shared-surface-loop.md` (downstream 소비자)
+**Follows**: D-20260418-12 (W3-WEB-1), D-20260418-13 (W3-KL-3)
+
+### 배경
+
+W3-WEB-1 (shell) + W3-KL-3 (RAG) merged. Shell 의 status-strip `/health` 폴링과 empty-state copy 는 live 하지만 실제 projection (`plugs:`, activity, evidence) 은 static fixture. PSL-1 (doc 13) workbench.* 가젯은 `/activity` + `/evidence` backend 가 필요. Codex vote: **WEB-2 → PSL-1 → KC-1** 순서.
+
+### 결정: W3-WEB-2 (read-only slice)
+
+**근거** (codex):
+- WEB-1 shell 이 이미 배포됨 → PSL-1 는 `/activity` + `/evidence` 엔드포인트에 의존
+- 단일 PR 에서 status-strip 의 `plugs:` + activity feed 가 static → live 로 전환되는 operator-visible 변화
+- `/candidates/*` 는 KC-1 와 schema 충돌 위험 → 본 PR 에서 제외 (codex hidden caveat)
+- 전체 8 endpoint (descriptor catalog, view data, action invoke 포함) 는 ~3000 LOC → 1 cycle 넘음 → 2b 로 split
+
+### W3-WEB-2 tight scope (본 PR)
+
+1. **Core additive types** (`gadgetron-core::workbench`):
+   - `WorkbenchBootstrapResponse` (health, `active_plugs: Vec<PlugHealth>`, `degraded_reasons`, `default_model`)
+   - `WorkbenchActivityEntry` + `WorkbenchActivityResponse` (origin: Penny/UserDirect/System; kind: ChatTurn/DirectAction/SystemEvent)
+   - `WorkbenchRequestEvidenceResponse` (tool_traces, citations, candidates — citations/candidates 배열은 일단 빈 shape)
+   - 모두 additive — `#[non_exhaustive]` + `#[serde(default)]`
+2. **Gateway scope exception** (`crates/gadgetron-gateway/src/middleware/scope.rs`):
+   - `/api/v1/web/workbench/*` → `Scope::OpenAiCompat` (catch-all `Management` 보다 **먼저** 매칭)
+3. **Gateway routes** (`crates/gadgetron-gateway/src/web/workbench.rs`):
+   - `GET /api/v1/web/workbench/bootstrap`
+   - `GET /api/v1/web/workbench/activity?limit=50`
+   - `GET /api/v1/web/workbench/requests/:request_id/evidence`
+4. **Service trait** (gateway-local, not core per D-12):
+   - `WorkbenchProjectionService` trait with `bootstrap / activity / request_evidence`
+   - Default `InProcessWorkbenchProjection` 는 `Arc<KnowledgeService>` + gateway health 만 읽음
+   - activity/evidence 는 빈 벡터 (Penny trace 소스는 PSL-1 에서 wire)
+5. **Error shape** (`WorkbenchHttpError` enum in gateway):
+   - `Core(GadgetronError)`, `RequestNotFound { request_id }` → OpenAI-shape `invalid_request_error` / `workbench_request_not_found`
+6. **Tests**:
+   - Unit (9): scope 예외, 3 endpoint happy path, bootstrap degraded signal, activity limit clamp (100), evidence not-found 404, error serializer shape, projection fake-health wiring
+   - Integration (2): OpenAiCompat key 로 bootstrap 200 + `/api/v1/nodes` 403 (scope regression)
+   - Total ~1400-1700 LOC incl. tests
+
+### Codex hidden caveat
+
+`required_scope = Some(Scope::Management)` descriptor filtering 은 본 PR 범위 밖. scope 예외 자체는 path prefix 만 보므로 descriptor-level filter 는 WEB-2b 로 defer. 지금 landing 하면 PSL-1 이 잘못된 URL convention 에 lock-in 될 위험이 최소화됨 (doc #74 canonical path 그대로).
+
+### Non-scope (W3-WEB-2b / 2c 에서 다룰 것)
+
+- Descriptor types: `WorkbenchViewDescriptor`, `WorkbenchActionDescriptor`
+- 5 추가 endpoint: `knowledge-status`, `views`, `views/:id/data`, `actions`, `actions/:id` POST
+- `DescriptorCatalog` + family/scope filter + `disabled_reason`
+- `client_invocation_id` replay cache
+- `jsonschema` args validation
+- Approval gate 연동 (xaas)
+- `candidates/*` endpoint (KC-1 와 함께)
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: additive types only (`workbench` submodule 신규)
+- `gadgetron-gateway`: `web/workbench.rs`, `middleware/scope.rs` 1-line 추가
+- `gadgetron-web`: 본 PR 에서는 변경 없음 (PSL-1 또는 별도 FE PR 이 status-strip 을 live data 로 swap)
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-web-2/workbench-read-endpoints`
+3. gateway-router-lead delegation (primary), chief-architect 의 scope middleware / core 타입 Round 2 리뷰
+4. cargo fmt/clippy/test + integration
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
