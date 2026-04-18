@@ -1,6 +1,6 @@
 # 02 — Penny Agent Adapter Detailed Implementation Spec (`gadgetron-penny`)
 
-> **Status**: Draft v4 (Path 1 alignment — agent-centric control plane, approval flow deferred to P2B)
+> **Status**: Draft v4 (Path 1 alignment — agent-centric control plane, approval flow deferred to P2B) — **P2B runtime extensions: `13-penny-shared-surface-loop.md` (surface awareness loop), `14-penny-retrieval-citation-contract.md` (retrieval & citation contract), `15-penny-chat-bootstrap-injection.md` (bootstrap injection & resume boundary), all 2026-04-18**
 > **Author**: PM (Claude)
 > **Date (v3)**: 2026-04-13
 > **Date (v4)**: 2026-04-14
