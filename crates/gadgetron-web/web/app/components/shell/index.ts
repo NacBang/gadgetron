@@ -1,0 +1,10 @@
+export { WorkbenchShell } from "./workbench-shell";
+export { StatusStrip, useGatewayHealth } from "./status-strip";
+export type { GatewayHealth, HealthState } from "./status-strip";
+export { LeftRail } from "./left-rail";
+export type { LeftRailTab } from "./left-rail";
+export { EvidencePane } from "./evidence-pane";
+export { FailurePanel } from "./failure-panel";
+export type { FailurePanelProps } from "./failure-panel";
+export { useWorkbenchPrefs } from "./use-workbench-prefs";
+export type { WorkbenchPrefs, WorkbenchDensity, WorkbenchRightPane } from "./use-workbench-prefs";
