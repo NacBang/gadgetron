@@ -67,6 +67,7 @@ pub async fn scope_guard_middleware(
             );
             // SEC-M4: audit 403 — insufficient scope. SOC2 CC6.7.
             state.audit_writer.send(AuditEntry {
+                event_id: uuid::Uuid::new_v4(),
                 tenant_id: ctx.tenant_id,
                 api_key_id: ctx.api_key_id,
                 request_id: ctx.request_id,

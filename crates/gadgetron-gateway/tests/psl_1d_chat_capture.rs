@@ -290,16 +290,22 @@ async fn psl_1d_successful_non_streaming_chat_completions_captures_one_event() {
         "source_capability must be 'chat.completions'"
     );
 
-    // W3-KC-1c: audit_event_id must be Some(request_id) to correlate with audit row.
-    // The request_id comes from TenantContext injected by the middleware in the test app;
-    // we assert it is Some (non-nil) — the exact UUID is opaque to this test.
+    // Drift-fix PR 5 (D-20260418-24): audit_event_id must be a freshly
+    // generated Uuid::new_v4(), NOT a reused request_id. The handler
+    // generates it once per outcome and threads it through both the
+    // AuditEntry and the capture event so audit_log.id ↔
+    // captured_activity_event.audit_event_id JOIN is unambiguous.
     assert!(
         ev.audit_event_id.is_some(),
-        "audit_event_id must be Some(request_id) for correlation; got None"
+        "audit_event_id must be Some(generated UUID) for correlation; got None"
     );
     assert_ne!(
         ev.audit_event_id,
         Some(uuid::Uuid::nil()),
         "audit_event_id must not be the nil UUID"
+    );
+    assert_ne!(
+        ev.audit_event_id, ev.request_id,
+        "audit_event_id MUST differ from request_id per drift-fix PR 5"
     );
 }

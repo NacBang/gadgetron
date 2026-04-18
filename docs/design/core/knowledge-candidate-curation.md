@@ -86,7 +86,7 @@ Trade-off:
   - `[knowledge]` + `[knowledge.curation].enabled = true` 일 때만 `activity_capture_store`, `candidate_coordinator`, `penny_shared_surface`, `penny_assembler` 가 live wiring 된다
   - `gadgetron-gateway::handlers::capture_chat_completion()` 이 첫 production `capture_action()` owner hook 으로 landed 했고, 성공한 `/v1/chat/completions` 요청을 fire-and-forget activity event 로 append 한다
   - non-streaming chat 성공 경로는 실제 `prompt_tokens` / `completion_tokens` 를 기록하고, streaming 경로는 dispatch 시점 `0/0` placeholder usage 로 capture 한다
-  - PSL-1d capture event 는 `origin = Penny`, `kind = GadgetToolCall`, `source_capability = "chat.completions"`, `actor_user_id = Uuid::nil()`, `audit_event_id = None`, `hints = []` 를 current trunk authority 로 사용한다
+  - PSL-1d capture event 는 `origin = Penny`, `kind = GadgetToolCall`, `source_capability = "chat.completions"`, `actor_user_id = Uuid::nil()` (doc-10 placeholder), `hints = []` 를 사용한다. `audit_event_id = Some(audit_event_id)` 은 **drift-fix PR 5 (D-20260418-24)** 이후 handler 가 `AuditEntry.event_id` 와 동일한 `Uuid::new_v4()` 를 미리 생성해 양쪽에 주입하므로 `audit_log.id ↔ captured_activity_event.audit_event_id` JOIN 이 실제 primary key 단위로 성립한다. `request_id` 재사용이 아니다 — 같은 request 가 여러 audit row 를 만드는 streaming 경로 (Phase-2 Drop-guard) 에서도 각 행이 고유 event_id 를 가진다.
   - `gadgetron-gateway::penny::shared_context` 의 wire-stable `pending_penny_decision` renderer
   - `crates/gadgetron-gateway/tests/kc1_fixture_diff.rs`, `crates/gadgetron-knowledge/tests/kc1b_canonical_write_e2e.rs`, `crates/gadgetron-cli/src/main.rs` 의 PSL-1c smoke tests, `crates/gadgetron-gateway/tests/psl_1d_chat_capture.rs`
 - [P2B-next] follow-up still open
@@ -403,7 +403,10 @@ async fn capture_chat_completion(
         ),
         source_bundle: None,
         source_capability: Some("chat.completions".into()),
-        audit_event_id: None,
+        // drift-fix PR 5 (D-20260418-24): handler generates a fresh Uuid::new_v4()
+        // per outcome and uses it for BOTH AuditEntry.event_id and this field so
+        // audit_log.id ↔ captured_activity_event.audit_event_id JOIN is unambiguous.
+        audit_event_id: Some(audit_event_id),
         facts: json!({
             "model": model,
             "stream": stream,
