@@ -225,6 +225,24 @@ max_results = 10
 
 이 블록이 없으면 `web.search` 도구는 노출되지 않습니다.
 
+### Semantic search (`[knowledge.embedding]` + `[knowledge.reindex]`)
+
+`[knowledge.embedding]` 섹션을 추가하면 pgvector 기반 시맨틱 + 키워드 하이브리드 검색이 활성화됩니다. 없으면 keyword-only 검색입니다. 상세 필드 설명은 [configuration.md §knowledge.embedding](configuration.md#knowledgeembedding-semantic-search-setup) 을 참조하세요.
+
+```toml
+[knowledge.embedding]
+provider = "openai_compat"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "text-embedding-3-small"
+dimension = 1536
+write_mode = "async"
+
+[knowledge.reindex]
+on_startup = true
+stale_threshold_days = 90
+```
+
 ---
 
 ## 트러블슈팅

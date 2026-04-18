@@ -26,7 +26,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 | Page | What it covers |
 |------|---------------|
 | [installation.md](installation.md) | Prerequisites, build from source, Docker (future) |
-| [configuration.md](configuration.md) | Environment variables, `gadgetron.toml` reference, provider setup |
+| [configuration.md](configuration.md) | Environment variables, `gadgetron.toml` reference, provider setup, semantic search (`[knowledge.embedding]`, `[knowledge.reindex]`) |
 | [quickstart.md](quickstart.md) | Canonical local demo path: `demo.sh` + pgvector PostgreSQL + first request |
 | [tui.md](tui.md) | Terminal dashboard: layout, key bindings, color scheme, live gateway connection (`--tui`) |
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |

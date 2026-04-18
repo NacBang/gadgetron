@@ -355,6 +355,49 @@ max_results = 10
 
 이 블록이 없으면 `web.search` MCP 도구는 노출되지 않습니다.
 
+### `[knowledge.embedding]` (Semantic search setup)
+
+pgvector 기반 시맨틱 검색을 활성화합니다. PostgreSQL + pgvector extension이 필요합니다. 이 섹션이 없으면 keyword-only 검색만 동작합니다.
+
+```toml
+[knowledge.embedding]
+provider = "openai_compat"          # P2A: openai_compat 고정
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"      # 임베딩 API 키를 담은 환경변수명
+model = "text-embedding-3-small"
+dimension = 1536                    # 모델의 벡터 차원 (DDL과 일치 필요)
+write_mode = "async"                # "async" (기본) 또는 "sync"
+timeout_secs = 30
+```
+
+- `provider`: 현재 `"openai_compat"` 만 지원. OpenAI 및 로컬 Ollama 등 OpenAI-compat endpoint 모두 수용.
+- `base_url`: 임베딩 요청을 보낼 endpoint root. `{base_url}/embeddings` 에 POST.
+- `api_key_env`: API 키 값이 아닌 **환경변수 이름**. 키가 없으면 서버 시작 시 오류.
+- `dimension`: DDL `vector(N)` 과 반드시 일치해야 함. 불일치 시 `EmbeddingError::DimensionMismatch` 로 INSERT 차단.
+- `write_mode`: 설정 타입은 존재하며 기본값 `"async"`. 현재 trunk에서 write completion semantics 차이는 보장되지 않음 (구현 진행 중).
+
+로컬 임베딩 모델 사용 예 (Ollama):
+```toml
+[knowledge.embedding]
+base_url = "http://localhost:11434/v1"
+api_key_env = "OLLAMA_API_KEY"      # Ollama는 임의 값 허용
+model = "nomic-embed-text"
+dimension = 768
+```
+
+### `[knowledge.reindex]`
+
+`gadgetron reindex` CLI와 `gadgetron wiki audit` 명령이 이 필드를 사용합니다. `stale_threshold_days` 는 `[knowledge.embedding]` 없이도 audit에서 독립적으로 사용됩니다.
+
+```toml
+[knowledge.reindex]
+on_startup = true                   # 서버 시작 시 reindex 실행 여부 (설정 타입 존재; trunk 부팅 루프 wiring 진행 중)
+on_startup_mode = "async"           # "async" | "sync" | "incremental" | "full"
+stale_threshold_days = 90           # stale 청크 기준 일수 (1–3650)
+```
+
+수동 full reindex: `gadgetron reindex --full` (서버 중단 불필요).
+
 ---
 
 ### Minimal working `gadgetron.toml`
