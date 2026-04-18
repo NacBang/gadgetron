@@ -52,6 +52,7 @@ Phase 2A의 지식 레이어(`gadgetron-knowledge`)는 마크다운 파일 + git
    - Codex chief advisor가 지적: wiki.write 훅만으로는 수동 편집/git pull 커버 불가
    - **`gadgetron reindex` CLI 명령 필수**: 파일시스템/git 상태 스캔으로 DB diff → 갱신
    - `gadgetron serve` 시작 시 incremental reindex 자동 실행 옵션 (`knowledge.reindex.on_startup = true`, default)
+   - **청킹 알고리즘** — 이 ADR 작성 시점 미결. **ADR-P2A-09 I3 로 확정**: Hybrid chunking (heading 1차 + fixed-size 2차, target 500 / max 1500 / min 100 / overlap 50 tokens). 상세: `docs/design/phase2/11-raw-ingestion-and-rag.md §2.5`.
 
 5. **AI 자동 추출 + 유저 승인**
    - Claude Code `-p` 모드는 "대화 종료" 개념이 없으므로, 에이전트가 매 턴 "이 대화에서 저장할 지식이 있는가?"를 판단
