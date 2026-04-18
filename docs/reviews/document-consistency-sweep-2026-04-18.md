@@ -22,7 +22,7 @@
 | ID | 축 | 충돌 내용 | 대표 파일 | 우선순위 | 상태 |
 |---|---|---|---|---|---|
 | C-1 | 용어 | `plugin` vs `Bundle / Plug / Gadget` | `README.md`, `docs/00-overview.md`, `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/process/04-decision-log.md` | P0 | Open |
-| C-2 | 경계 | `router` / `scheduler` / `provider` 의 core vs Bundle ownership 불일치 | `docs/00-overview.md`, `docs/architecture/glossary.md`, `docs/process/04-decision-log.md`, `docs/design/phase2/06-backend-plugin-architecture.md` | P0 | Open |
+| C-2 | 경계 | `ADR-P2A-10` 의 Plug consumer wording / crate-path note 가 `router` 를 core-owned 로 오독하게 만들 수 있었음 | `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md`, `README.md`, `docs/00-overview.md`, `docs/architecture/glossary.md` | P0 | Closed |
 | C-3 | 실행 경로 | `README` / manual 의 no-db, plain Postgres, `demo.sh`, pgvector 전제가 서로 다름 | `README.md`, `docs/manual/quickstart.md`, `docs/manual/web.md`, `docs/manual/installation.md` | P0 | Closed |
 | C-4 | legacy 설계 문서 | `06-backend-plugin-architecture.md`, `07-plugin-server.md` 가 legacy 용어를 강하게 드러내지 못함 | `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/design/phase2/07-plugin-server.md` | P1 | Closed |
 | C-5 | seed/frontmatter | `plugin`, `plugin_version`, `plugin_seed` 호환 필드와 canonical 용어 사이 설명 부족 | `docs/architecture/glossary.md`, `crates/gadgetron-knowledge/src/wiki/frontmatter.rs`, `crates/gadgetron-knowledge/seeds/*` | P1 | Open |
@@ -90,6 +90,10 @@
 - 2026-04-18 reconciliation pass (ADR index entrypoint):
   - `README.md` 의 stale ADR count/range 문구를 제거하고 `docs/adr/README.md` 를 유일한 maintained index 로 재고정
   - tracker 에 C-7 을 추가하고 같은 패스에서 Closed 처리
+- 2026-04-18 reconciliation pass (ownership authority note):
+  - `ADR-P2A-10` 이 Plug 의 consumer boundary 와 crate ownership 을 분리해서 설명하도록 정정
+  - `ADR-P2A-10` 의 current-path note 를 `router/provider/scheduler/node` canonical ownership (`ai-infra`, `server`, `gpu`) 과 충돌하지 않게 정렬
+  - 결과: authority-layer boundary answer 는 `README.md` / `docs/00-overview.md` / glossary / decision log 와 일치하며 C-2 를 Closed 처리
 
 ---
 
