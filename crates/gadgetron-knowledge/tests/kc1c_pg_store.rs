@@ -44,7 +44,7 @@ use gadgetron_testing::harness::pg::PgHarness;
 use uuid::Uuid;
 
 fn actor() -> AuthenticatedContext {
-    AuthenticatedContext
+    AuthenticatedContext::system()
 }
 
 /// Return true iff the local Postgres has the `vector` extension available.

@@ -88,22 +88,60 @@ pub type KnowledgeResult<T> = std::result::Result<T, GadgetronError>;
 
 /// Caller identity passed through every knowledge plane call.
 ///
-/// # Deliberate placeholder
+/// # Promotion from ZST (drift-fix PR 7, doc-10)
 ///
-/// This is a zero-field marker type in W3-KL-1. The 08/09/10 Phase 2B
-/// docs (`docs/design/phase2/08-*`, `09-knowledge-acl.md`,
-/// `10-penny-permission-inheritance.md`) will promote it to carry
-/// `user_id`, `tenant_id`, scopes, and audit correlation. The trait
-/// signatures lock the **shape** ("every store/index/relation takes the
-/// caller identity") so W3-KL-2 can swell the payload without a
-/// breaking-change to the public trait surface.
+/// Previously a zero-field marker type. Drift-fix PR 7 promotes it to
+/// carry the two identity fields every Phase 2B consumer actually needs:
+/// `user_id` (who's acting) and `tenant_id` (which tenant the action
+/// runs against). The 09-knowledge-acl / 10-penny-permission-inheritance
+/// docs may layer scopes / audit-correlation / delegation chain on top
+/// without further trait-shape changes.
 ///
-/// Constructing it is cheap (ZST) and safe from anywhere; ACL enforcement
-/// is strictly at the service boundary — the placeholder deliberately has
-/// no `new()` beyond `Default` so implementations cannot accidentally
-/// fabricate an authorized context.
+/// # Construction discipline
+///
+/// - Gateway / middleware boundary sites (where a real authenticated
+///   request is in hand) MUST populate both fields from the caller's
+///   identity (e.g. from `TenantContext` / `ValidatedKey`). The public
+///   fields are left `pub` so call sites construct directly — there is
+///   no hidden constructor to fabricate.
+/// - Internal / background sites (wiki indexing, semantic indexing,
+///   ingest pipelines) that genuinely have no authenticated caller MAY
+///   use [`AuthenticatedContext::system`] for a well-known sentinel. We
+///   keep `Default` as an alias for `system()` so the mechanical ZST
+///   callsites (`AuthenticatedContext::default()`) continue to compile
+///   during the migration.
+/// - ACL enforcement MUST remain at the service boundary — no consumer
+///   downstream of a store/index should be re-checking permissions.
+///
+/// `#[derive(Default)]` keeps `Default::default()` available during the
+/// mechanical migration; individual call sites can opt into the explicit
+/// `system()` sentinel or populate real values as the ACL layer
+/// materialises.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AuthenticatedContext;
+pub struct AuthenticatedContext {
+    /// The acting user's identity. `Uuid::nil()` for system / background
+    /// operations. Populated from [`gadgetron_core::context::TenantContext`]
+    /// at the gateway boundary (eventually — the initial promotion
+    /// threads `api_key_id` here as a placeholder until a real user
+    /// table lands).
+    pub user_id: uuid::Uuid,
+    /// The tenant scope the action runs against. `Uuid::nil()` for
+    /// system / background operations.
+    pub tenant_id: uuid::Uuid,
+}
+
+impl AuthenticatedContext {
+    /// Well-known system / background-operation sentinel — both identity
+    /// fields set to `Uuid::nil()`. Use this at internal call sites
+    /// (wiki indexing, semantic rebuild, ingest pipelines) where there
+    /// is no authenticated caller. `Default::default()` is an alias.
+    pub const fn system() -> Self {
+        Self {
+            user_id: uuid::Uuid::nil(),
+            tenant_id: uuid::Uuid::nil(),
+        }
+    }
+}
 
 /// Write consistency policy for [`KnowledgeStore::put`] / `delete` /
 /// `rename` fanout.
@@ -1031,10 +1069,38 @@ mod tests {
         assert_eq!(err.error_type(), "invalid_request_error");
     }
 
-    // ---- AuthenticatedContext placeholder invariant ----
+    // ---- AuthenticatedContext identity invariants (drift-fix PR 7) ----
 
     #[test]
-    fn authenticated_context_is_zero_sized() {
-        assert_eq!(std::mem::size_of::<AuthenticatedContext>(), 0);
+    fn authenticated_context_carries_user_and_tenant_identity() {
+        // Post-PR-7 (doc-10 promotion): the struct now carries two Uuid
+        // fields. Size should be exactly 32 bytes (16 + 16) on every
+        // supported platform — uuid::Uuid is a transparent [u8; 16].
+        assert_eq!(std::mem::size_of::<AuthenticatedContext>(), 32);
+    }
+
+    #[test]
+    fn authenticated_context_system_sentinel_has_nil_fields() {
+        let sys = AuthenticatedContext::system();
+        assert_eq!(sys.user_id, uuid::Uuid::nil());
+        assert_eq!(sys.tenant_id, uuid::Uuid::nil());
+        // Default is the same as `system()` — keeps mechanical callsites
+        // (`AuthenticatedContext::default()`) semantically identical.
+        assert_eq!(AuthenticatedContext::default(), sys);
+    }
+
+    #[test]
+    fn authenticated_context_round_trips_populated_identity() {
+        let user = uuid::Uuid::new_v4();
+        let tenant = uuid::Uuid::new_v4();
+        let ctx = AuthenticatedContext {
+            user_id: user,
+            tenant_id: tenant,
+        };
+        assert_eq!(ctx.user_id, user);
+        assert_eq!(ctx.tenant_id, tenant);
+        // Clone/Copy: the struct is Copy, so no borrow issues in loops.
+        let clone = ctx;
+        assert_eq!(clone, ctx);
     }
 }

@@ -559,7 +559,7 @@ mod tests {
     use gadgetron_core::knowledge::candidate::{ActivityKind, ActivityOrigin};
 
     fn actor() -> AuthenticatedContext {
-        AuthenticatedContext
+        AuthenticatedContext::system()
     }
 
     fn make_event(id_seed: u8) -> CapturedActivityEvent {

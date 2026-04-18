@@ -353,7 +353,7 @@ mod tests {
         // pipeline writes the page via the service, and the returned
         // receipt reports the canonical plug id.
         let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
             plain_text: "# Hello\n\nBody".into(),
             structure: vec![StructureHint::Heading {
@@ -392,7 +392,7 @@ mod tests {
         // Explicit `title_hint` wins over the first-heading fallback —
         // regression guard for the precedence order in `resolve_title`.
         let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
             plain_text: "# Heading\n".into(),
             structure: vec![StructureHint::Heading {
@@ -426,7 +426,7 @@ mod tests {
         // No title_hint → resolver pulls "Doc Heading" from the
         // StructureHint array and kebabs it into the path.
         let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
             plain_text: "# Doc Heading\n\n## Sub".into(),
             structure: vec![
@@ -467,7 +467,7 @@ mod tests {
         // Frontmatter must carry `source = "imported"` + content-type +
         // hash. Read the page back through the service and inspect.
         let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
             plain_text: "# Hello\n".into(),
             structure: vec![StructureHint::Heading {
@@ -610,7 +610,7 @@ mod tests {
         });
         let receipt = pipeline
             .import(
-                &AuthenticatedContext,
+                &AuthenticatedContext::system(),
                 ImportRequest {
                     bytes: b"# X".to_vec(),
                     content_type: "text/markdown".into(),

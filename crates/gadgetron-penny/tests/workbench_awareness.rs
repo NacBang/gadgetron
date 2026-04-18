@@ -112,7 +112,7 @@ impl WorkbenchService for FakeWorkbenchService {
 
 fn make_registry() -> GadgetRegistry {
     let provider = WorkbenchAwarenessGadgetProvider {
-        actor: AuthenticatedContext,
+        actor: AuthenticatedContext::system(),
         service: Arc::new(FakeWorkbenchService),
         config: SharedContextConfig::default(),
     };

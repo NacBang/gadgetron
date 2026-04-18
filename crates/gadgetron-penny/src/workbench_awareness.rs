@@ -466,7 +466,7 @@ mod tests {
 
     fn make_provider() -> WorkbenchAwarenessGadgetProvider<FakeSuccessService> {
         WorkbenchAwarenessGadgetProvider {
-            actor: AuthenticatedContext,
+            actor: AuthenticatedContext::system(),
             service: Arc::new(FakeSuccessService),
             config: gadgetron_core::agent::config::SharedContextConfig::default(),
         }

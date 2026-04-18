@@ -188,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn apply_upsert_then_search_returns_hit() {
         let idx = WikiKeywordIndex::new().unwrap();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         idx.apply(
             &actor,
             KnowledgeChangeEvent::Upsert {
@@ -219,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn apply_delete_removes_page_from_hits() {
         let idx = WikiKeywordIndex::new().unwrap();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         idx.apply(
             &actor,
             KnowledgeChangeEvent::Upsert {
@@ -256,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn apply_rename_updates_hit_path() {
         let idx = WikiKeywordIndex::new().unwrap();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         idx.apply(
             &actor,
             KnowledgeChangeEvent::Upsert {
@@ -297,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn reset_drops_all_indexed_state() {
         let idx = WikiKeywordIndex::new().unwrap();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         idx.apply(
             &actor,
             KnowledgeChangeEvent::Upsert {
@@ -326,7 +326,7 @@ mod tests {
     #[tokio::test]
     async fn empty_query_returns_no_hits() {
         let idx = WikiKeywordIndex::new().unwrap();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         idx.apply(
             &actor,
             KnowledgeChangeEvent::Upsert {
