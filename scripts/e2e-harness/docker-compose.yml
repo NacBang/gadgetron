@@ -1,0 +1,63 @@
+# E2E harness Postgres service.
+#
+# Only Postgres runs in Docker — mock-openai and gadgetron run on the host
+# to keep the build/iteration loop tight (no Dockerfile.gadgetron rebuild on
+# every Rust edit). Postgres is containerized so the harness controls the
+# pgvector version + resets state between runs without touching the
+# operator's dev database.
+#
+# Gadgetron owns all schema migrations — sqlx runs them at startup against
+# an empty database. The pgvector image ships with the `vector` extension
+# pre-installed, and migration `20260417000001_knowledge_semantic.sql`
+# begins with `CREATE EXTENSION IF NOT EXISTS vector`, so no initdb mount
+# is needed. (Prior versions of this file mounted the migrations into
+# `/docker-entrypoint-initdb.d/` — that caused double-apply conflicts on
+# `ALTER TABLE ADD CONSTRAINT` statements, which are NOT idempotent even
+# when the surrounding `CREATE TABLE` is. Lesson: one migration runner, not
+# two.)
+#
+# Ports:
+#   15432 → 5432 (host-mapped; 15432 picked to avoid a local Postgres 16/17/18)
+#
+# Teardown (`run.sh` → `docker compose down -v`) drops the volume so every
+# run starts with a clean schema.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: gadgetron-e2e-postgres
+    environment:
+      POSTGRES_DB: gadgetron_e2e
+      POSTGRES_USER: gadgetron
+      POSTGRES_PASSWORD: test_local_only_no_prod
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gadgetron -d gadgetron_e2e -q"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    # Run Postgres with verbose logging directed to stderr so `docker compose
+    # logs postgres` shows migration errors (the harness captures this to
+    # artifacts/postgres.log on failure).
+    command: >-
+      postgres
+      -c log_statement=none
+      -c log_connections=off
+      -c log_disconnections=off
+      -c fsync=off
+      -c synchronous_commit=off
+      -c full_page_writes=off
+
+  # mock-openai intentionally runs on the host (Python stdlib, zero deps,
+  # reloads on edit without a rebuild). Including it here as a comment so
+  # operators know the full stack shape.
+  #
+  # mock-openai:
+  #   # Host: python3 scripts/e2e-harness/mock-openai.py
+  #   # Port: 19999
+  #
+  # gadgetron:
+  #   # Host: ./target/debug/gadgetron serve --config artifacts/gadgetron-test.toml
+  #   # Port: 19090

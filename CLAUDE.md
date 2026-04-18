@@ -79,6 +79,32 @@ gstack is **recommended**, not mandatory — contributors who choose not to
 install it should document any ad-hoc browser automation they use so the
 team can triage drift.
 
+## PR gate (E2E harness)
+
+**Every feature PR MUST make `./scripts/e2e-harness/run.sh` green before it
+is opened.** No exceptions — if a gate fails, find the root cause and fix
+it BEFORE pushing. 통과를 못하면 원인을 파악하여 완전 수정후에 올릴 수
+있도록.
+
+The harness boots the full stack (Postgres + wiki + mock OpenAI provider +
+`gadgetron serve` + `/web`) and exercises the public API surface with
+`curl`, tailing `gadgetron.log` for regressions. See
+`scripts/e2e-harness/README.md` for the gate table, artifact layout, and
+the "how to add a gate" pattern.
+
+**Recommended workflow**:
+
+```sh
+# Before opening a PR:
+./scripts/e2e-harness/run.sh           # full run (2-3 min warm)
+./scripts/e2e-harness/run.sh --quick   # skip cargo test (~30s)
+```
+
+New features SHOULD add a runtime assertion to the harness (a `curl`
+against a new endpoint, a grep over `mock-openai.log`, or a new mock
+error mode). Keep each gate under 5s of wall time — heavy matrices belong
+in `cargo test`, not the smoke layer.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
