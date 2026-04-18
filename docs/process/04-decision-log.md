@@ -3261,6 +3261,87 @@ Codex cycle 14 vote: WEB-2b. Streaming Drop-guard (PSL-1d 0/0 placeholder) 는 c
 
 ---
 
+## D-20260418-23: Drift-fix PR 1 — Wire-stability + fail-fast + doc-lag
+
+**날짜**: 2026-04-18
+**유형**: Follow-up fix (cycle 14 후 drift 감사 결과)
+**상태**: 🟢 승인 (사용자 직접 scope 확정 — 전체 22건 drift 를 8 PR 연쇄로 처리, 본 PR 은 첫 번째)
+**관련 문서**: 감사 리포트 (세션 내 Explore 출력), `docs/design/phase2/13-penny-shared-surface-loop.md` §2.3, `docs/design/core/knowledge-candidate-curation.md` §2.2.2, `docs/design/gateway/workbench-projection-and-actions.md`, `docs/design/gateway/route-groups-and-scope-gates.md`
+**Follows**: D-20260418-22 (W3-WEB-2b)
+
+### 배경
+
+14 cycle 자동 cron 종료 후 구현 vs 문서 drift 감사 수행. 22건 drift 확인 — 16건 은 기존 D-entry 에 기록, 6건 은 미기록 신규 발견. 사용자가 전체 22건 수정을 지시 → 8 PR 연쇄로 분할:
+
+- **PR 1 (본)**: Wire-stability + fail-fast + doc-lag (낮은 위험)
+- PR 2: `KnowledgePath` 타입 도입
+- PR 3: `provenance` plumbing
+- PR 4: coordinator gate cleanup + `allow_direct_actions` scope binding
+- PR 5: `AuditEntry.event_id` 별도 필드
+- PR 6: 스트리밍 Drop-guard
+- PR 7: `AuthenticatedContext` ZST promotion (doc-10)
+- PR 8: moka replay cache + DescriptorCatalog hot-reload + real action dispatch
+
+### 결정: Drift-fix PR 1 scope
+
+1. **U-A — `enum_snake_case_label` 중복 통합** (wire-stability 리스크):
+   - `gadgetron-knowledge::candidate::enum_snake_case_label` (pub(crate)) + `gadgetron-gateway::penny::shared_context::enum_snake_case_label` (private) 2 copies 존재
+   - 둘이 divergent 하게 갈라지면 `<gadgetron_shared_context>` 블록의 wire label 이 깨질 수 있음
+   - Single source of truth 로 `gadgetron-core::knowledge::candidate::snake_case_label` (pub fn) 로 승격
+   - 두 copies 삭제 + import 로 교체
+2. **U-B — `pg_pool` 없는데 `curation.enabled=true` 인 경우 silent fallback 제거**:
+   - 현재 `build_candidate_plane(pool: Option<PgPool>)` 이 `None` → InMemory fallback 을 소리없이 사용
+   - 운영자 관점: "enabled=true 인데 restart 시 데이터 유실" 로 놀람
+   - Fix: `serve()` 에서 `enabled=true && pg_pool.is_none()` 감지 시 `tracing::warn!` 로 operator-visible 경고 + 설정 수정 가이드 메시지
+   - Hard-fail 은 dev 경로 (로컬 Postgres 없이 `gadgetron serve`) 를 깨므로 WARN 레벨로 시작, hard-fail 은 후속 PR 에서 고려
+3. **U-F — `digest_summary_chars` validation 확인** (false positive):
+   - `SharedContextConfig::validate()` 가 이미 `80..=512` 체크 수행 (`config.rs:266-271`)
+   - 감사에서 "확인 권장" 으로 flagged 됐지만 실제로는 OK
+   - Non-scope: 별도 작업 불필요 — D-entry 에 false-positive 로 기록만
+4. **D1 — doc 13 §2.3 TOML schema 에 `enabled` 필드 추가**:
+   - PSL-1b (D-16) 에서 추가된 필드가 원 문서에 빠져 있음
+   - schema 블록 + 필드 해설 + `require_explicit_degraded_notice` 와의 의미 차이 설명 보강
+5. **D2 — doc 71 §2.2.2 snake_case wire-label 계약 명시**:
+   - KC-1b 에서 `[pendingpennydecision]` → `[pending_penny_decision]` 로 교체
+   - 문서에는 라벨 포맷 계약이 명문화 안됨 → `enum_snake_case_label` 계약 + examples 추가
+6. **D3 — doc 74/81 에 P2B-complete `AppState` matrix 추가**:
+   - 14 cycle 동안 `AppState` 가 5개 Optional + 1개 required 필드 확장
+   - 각 필드 의미, wiring 소스, None vs Some 의미 매트릭스 문서화
+7. **D4 — doc 74 §2.2.1 `build_workbench` degraded mode 명시**:
+   - `knowledge_service: None` 이어도 `Some(degraded_workbench)` 를 반환 (D-19 에서만 언급)
+   - 문서에 공식 계약으로 승격
+
+### Codex hidden caveat
+
+U-B 는 WARN 수준으로 시작. Operator 가 WARN 을 무시하는 경향이 있으면 후속 PR 에서 hard-fail + `[knowledge.curation] allow_inmemory_store: bool` 옵트인 필드 추가 고려.
+
+### Non-scope (PR 2-8 순차)
+
+- Material M1/M2/M3 (proposed_path, provenance, streaming Drop-guard)
+- Nominal N2/N3/N5/N6/N7 (audit_event_id field, coordinator gate cleanup, moka cache, hot-reload, real dispatch)
+- Critical (AuthenticatedContext ZST promotion)
+- Unreferenced C/D/E (InMemory restart loss 문서, scope binding, capture async ordering)
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: `knowledge::candidate` 에 `pub fn snake_case_label` 추가 (~20 LOC)
+- `gadgetron-knowledge`: 기존 helper 삭제 + import 로 교체 (~5 LOC diff)
+- `gadgetron-gateway`: 기존 helper 삭제 + import 로 교체 (~5 LOC diff)
+- `gadgetron-cli`: `serve()` 의 warn 로직 추가 (~20 LOC + test)
+- 문서 업데이트 4개: doc 13, 71, 74, 81 (~200-400 LOC markdown)
+
+**Total 예상**: ~50 LOC Rust + 200-400 LOC markdown
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `fix/drift-pr1-wire-stability-and-docs` (생성됨)
+3. 직접 구현 (tight scope — subagent 불필요)
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
 
 ## D-20260418-11 — 문서 개선에는 완전 기동 스크립트와 운영 루프까지 포함한다
