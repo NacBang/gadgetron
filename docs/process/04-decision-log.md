@@ -2594,4 +2594,80 @@ W3-WEB-1 (shell) + W3-KL-3 (RAG) merged. Shell 의 status-strip `/health` 폴링
 
 ---
 
+## D-20260418-15: W3-PSL-1 착수 — Penny Shared Surface Awareness Loop (contract slice)
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-WEB-2 머지 직후, cron 7번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote, cycle 6 계획된 순서 유지)
+**관련 문서**: `docs/design/phase2/13-penny-shared-surface-loop.md` (Approved), `docs/design/phase2/14-penny-retrieval-citation-contract.md` (Approved), `docs/design/gateway/workbench-projection-and-actions.md`, `docs/design/core/knowledge-candidate-curation.md`
+**Follows**: D-20260418-14 (W3-WEB-2)
+
+### 배경
+
+W3-WEB-2 merged (3 read endpoints + core workbench types + scope 예외). PR #77 (doc 14) 로 Penny retrieval/citation contract 가 문서로 고정. Cycle 6 codex 가 제시한 순서 **WEB-2 → PSL-1 → KC-1** 유지. Cycle 7 codex 재투표도 PSL-1 확인 (doc 14 는 WEB-2 이후 PSL-1 가치를 강화만 한다).
+
+### 결정: W3-PSL-1 (contract slice)
+
+**근거** (codex cycle 7):
+- WEB-2 가 `/activity` + `/evidence` 를 live 로 제공 → PSL-1 의 `workbench.activity_recent` + `workbench.request_evidence` 두 가젯은 즉시 end-to-end 로 동작 가능
+- `workbench.candidates_pending` + `workbench.candidate_decide` 는 KC-1 stubs 로 landing (schema pinned)
+- per-turn bootstrap digest 가 operator-visible 핵심 변화 — "Penny 가 workbench 에서 일어난 일을 다음 turn 에 인식"
+- 단일 PR 에서 types + 4 gadgets + assembler 까지 가능 (wire-into-chat-handler 는 PSL-1b 로 분리)
+
+### W3-PSL-1 tight scope (본 PR)
+
+1. **Core — `gadgetron-core::knowledge::candidate` (신규 minimal 모듈)**:
+   - `KnowledgeCandidateDisposition` enum (`#[non_exhaustive]`): `PendingPennyDecision | PendingUserConfirmation | Accepted | Rejected`
+   - `CandidateDecisionKind` enum (`#[non_exhaustive]`): `Accept | Reject | EscalateToUser`
+   - KC-1 이 이 모듈에 `KnowledgeCandidate`, `CandidateHint`, `CandidateDecision`, coordinator traits 를 additive 로 붙일 것
+2. **Core — `gadgetron-core::agent::shared_context` (신규 모듈)**:
+   - `PennySharedContextHealth` · `PennyTurnBootstrap` · `PennyActivityDigest` · `PennyCandidateDigest` · `PennyApprovalDigest`
+   - `PennyCandidateDecisionRequest` · `PennyCandidateDecisionReceipt`
+   - `PennyTurnContextAssembler` async_trait
+3. **Gateway — `gadgetron-gateway::penny::shared_context` (신규 모듈)**:
+   - `PennySharedSurfaceService` async_trait (doc §2.1.2)
+   - `InProcessPennySharedSurfaceService` default impl: activity / evidence 는 `WorkbenchProjectionService` 재사용, candidates/approvals 는 빈 Vec 반환 (KC-1 stub), `decide_candidate` 는 `GadgetronError::Unsupported` (KC-1 미랜딩)
+   - `DefaultPennyTurnContextAssembler` impl: 3 read 를 병렬 시도, 일부 실패 시 `degraded = true` + 이유 명시
+   - `render_penny_shared_context()` pure function: doc §2.2.2 deterministic text 형식 (`<gadgetron_shared_context>` 블록)
+4. **Penny — `gadgetron-penny::gadget::workbench_awareness` (신규 모듈)**:
+   - `WorkbenchAwarenessGadgetProvider<S>` · `GadgetProvider` 구현
+   - 4 gadget schemas: `workbench.activity_recent` (Read, LIVE), `workbench.request_evidence` (Read, LIVE → WEB-2 stub 404 허용), `workbench.candidates_pending` (Read, 빈 Vec 반환), `workbench.candidate_decide` (Write, `Unsupported` 반환)
+5. **Config — `[agent.shared_context]` 서브섹션**:
+   - `bootstrap_activity_limit` default 6 (1..=20), `bootstrap_candidate_limit` default 4 (1..=12), `bootstrap_approval_limit` default 3 (0..=10), `digest_summary_chars` default 240 (80..=512), `require_explicit_degraded_notice` must be true
+6. **Tests**:
+   - Core: 2 enum serialization tests, assembler trait surface test
+   - Gateway: in-process happy path / partial degraded / fail-closed on auth / render format witness
+   - Penny: 4 gadget dispatch tests (2 LIVE delegations + 2 stub outcomes)
+   - Integration: register `WorkbenchAwarenessGadgetProvider`, dispatch each gadget end-to-end
+   - ~1500-2000 LOC incl. tests
+
+### Codex hidden caveat
+
+`PennyTurnContextAssembler::build` 는 actor-filtered projection 만 반환. `AuthenticatedContext` 가 아직 `gadgetron-core::knowledge` 에 ZST placeholder — doc 10 의 caller identity payload 로의 승격은 PSL-1b (또는 doc 10 구현 PR) 로 분리. 본 PR 은 기존 ZST 를 그대로 passthrough 하고 향후 struct 으로 narrowing 될 수 있음을 타입 경계에 명시.
+
+### Non-scope (PSL-1b / KC-1 / P2C)
+
+- **PSL-1b**: `render_penny_shared_context()` 를 `/v1/chat/completions` handler 에 실제 wiring — bootstrap 을 user turn 앞에 주입
+- **PSL-1b**: session_store 와의 resume 경계 (doc §2.2.4) explicit test
+- **KC-1**: `workbench.candidates_pending` 실제 candidate source, `candidate_decide` 가 `KnowledgeCandidateCoordinator` 로 내려가는 wiring
+- **KC-1**: `CapturedActivityEvent` / `KnowledgeCandidate` / `CandidateHint` 등 core 타입
+- **P2C**: push-refresh 토큰, WebSocket subscription
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: 2 신규 모듈 (additive only, `#[non_exhaustive]` enums)
+- `gadgetron-gateway`: 신규 `penny::shared_context` + `AppState.penny_shared_surface: Option<Arc<...>>` 필드
+- `gadgetron-penny`: 신규 `gadget::workbench_awareness` 모듈
+- `gadgetron-cli`, `gadgetron-testing`: `AppState` 생성자에 `penny_shared_surface: None` 추가 (WEB-2 교훈: 생성자 drift 방지)
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-psl-1/shared-surface-awareness` (이미 생성됨)
+3. inference-engine-lead delegation (primary) + chief-architect 의 core types / assembler trait 경계 Round 2 검토
+4. cargo fmt/clippy/test (full workspace — `--workspace --all-targets`)
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
