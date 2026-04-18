@@ -39,6 +39,13 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 gadgetron-testing = { workspace = true }
+# W3-KL-3 (D-20260418-13): RAG citation integration test validates the
+# search → footnote pipeline using the `citation` parser in
+# gadgetron-penny. Dev-only dep — the penny crate already depends on
+# knowledge, so runtime-scope inclusion would create a cycle. Integration
+# test compiled against `--test` stage, so cycle-safe.
+gadgetron-penny = { workspace = true }
+gadgetron-bundle-document-formats = { path = "../../plugins/plugin-document-formats", features = ["pdf"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
