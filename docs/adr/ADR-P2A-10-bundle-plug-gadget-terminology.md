@@ -28,7 +28,7 @@ All references to "Driver" / "drivers" in the first version of this document hav
 
 Gadgetron's existing extension vocabulary is a single word — **"plugin"** — that unintentionally mashes three distinct concerns into one namespace:
 
-1. **`BackendPlugin` trait** (`docs/design/phase2/06-backend-plugin-architecture.md §3`) — a Rust entry-point trait whose `initialize(&mut PluginContext)` method registers Rust trait implementations (`LlmProvider`, `Extractor`, `BlobStore`, `EntityKind`), HTTP routes, and seed pages. These are consumed by **core** (gateway, router, wiki, scheduler).
+1. **`BackendPlugin` trait** (`docs/design/phase2/06-backend-plugin-architecture.md §3`) — a Rust entry-point trait whose `initialize(&mut PluginContext)` method registers Rust trait implementations (`LlmProvider`, `Extractor`, `BlobStore`, `EntityKind`), HTTP routes, and seed pages. These are consumed by the **core-facing runtime / service layer** (gateway, wiki, and Bundle-owned services such as the `ai-infra` router/scheduler).
 2. **`McpToolProvider` trait** (`docs/design/phase2/04-mcp-tool-registry.md v2 §3`) — a Rust trait whose impls produce MCP tool schemas (`wiki.write`, `web.search`, future `graph.query_graph`). These are consumed by **Penny** as agent tools.
 3. **External utilities** (e.g., [graphify](https://github.com/safishamsi/graphify), Whisper, PaddleOCR) — out-of-process services that expose MCP tools via stdio/HTTP. Not covered by either trait today.
 
@@ -51,12 +51,14 @@ Adopt a three-term extension vocabulary. Each term names one concern, has one co
 | Term | Consumer | Interface | Runtime |
 |---|---|---|---|
 | **Bundle** | The operator (install/enable/disable target) | Manifest + entry-point trait | Rust crate or external distribution (pip / npm / docker / binary URL) |
-| **Plug** | **Core** — gateway, router, wiki, scheduler, embedding provider | Rust trait implementation (`impl LlmProvider for …`) | Must be in-process Rust (compile-time or dylib) |
+| **Plug** | **Core-facing runtime / service layer** — gateway, wiki, embedding pipeline, and Bundle-owned services such as the `ai-infra` router/scheduler | Rust trait implementation (`impl LlmProvider for …`) | Must be in-process Rust (compile-time or dylib) |
 | **Gadget** | **Penny** — LLM agent | MCP tool schema (JSON) + dispatcher | In-core Rust / In-Bundle Rust / external subprocess / external HTTP / wasm |
 
 ### Relationship
 
 A **Bundle** is the unit of distribution. Each Bundle provides **zero or more Plugs** (core-facing Rust trait implementations) and **zero or more Gadgets** (Penny-facing MCP tools). A Bundle may provide only Plugs (e.g., an S3 `BlobStore` Plug), only Gadgets (e.g., graphify's 7 graph query Gadgets), or both (e.g., `ai-infra` provides `LlmProvider` Plugs + `gpu.*` Gadgets).
+
+Ownership note: "core-facing" here describes which side of the interface consumes the Plug, not crate ownership. Canonical ownership remains `gateway` in core; `router`, `provider`, and `scheduler` under the `ai-infra` Bundle; and `node` split across `server` / `gpu` / `ai-infra` per D-20260418-01.
 
 ### Core vocabulary mapping to Rust symbols
 
@@ -221,7 +223,7 @@ Removes the need for a single entry-point trait. Rejected on:
 
 1. **Rename PR landed** — Rust symbols, doc filenames, doc body terminology all updated per §`Rename scope` below. Executed as six small PRs to keep review tractable.
 2. **`docs/architecture/glossary.md` authored** — single source of truth for Bundle / Plug / Gadget definitions plus Port / Adapter sub-pattern. All design docs link to it on first use.
-3. **Crate layout reorganized** — `crates/gadgetron-node`, `crates/gadgetron-provider`, `crates/gadgetron-scheduler` move to `bundles/ai-infra/` as sub-modules of the `ai-infra` Bundle. Core crates (`gadgetron-core`, `gadgetron-gateway`, `gadgetron-router`, `gadgetron-penny`, `gadgetron-knowledge`, `gadgetron-xaas`, `gadgetron-web`, `gadgetron-cli`, `gadgetron-tui`, `gadgetron-testing`) stay in `crates/`.
+3. **Crate layout reorganized** — canonical ownership is reclassified before the directory move fully lands: `gadgetron-provider`, `gadgetron-router`, and `gadgetron-scheduler` belong to the `ai-infra` Bundle surface, and the engine-facing part of `gadgetron-node` joins that migration cluster while `node` as a whole still splits across `server` / `gpu` / `ai-infra`. During the transition, the current top-level crates remain in `crates/`; canonical core crates are `gadgetron-core`, `gadgetron-gateway`, `gadgetron-penny`, `gadgetron-knowledge`, `gadgetron-xaas`, `gadgetron-web`, `gadgetron-cli`, `gadgetron-tui`, and `gadgetron-testing`.
 4. **Design docs refreshed** — `04-mcp-tool-registry.md` → `04-gadget-registry.md`; `06-backend-plugin-architecture.md` → `06-bundle-architecture.md`; `07-plugin-server.md` → `07-bundle-server.md`. Body updated to the new vocabulary. Section numbers preserved where possible to minimize cross-reference churn.
 5. **Agent roster updated** — `docs/process/00-agent-roster.md` and persona files in `docs/agents/*.md` replace "plugin" usage with the appropriate term.
 
@@ -277,7 +279,7 @@ plugins/plugin-document-formats/   →  bundles/document-formats/
 plugins/plugin-web-scrape/         →  bundles/web-scrape/
 ```
 
-Core crates (`crates/gadgetron-*`) are unchanged. `crates/gadgetron-node`, `crates/gadgetron-provider`, `crates/gadgetron-scheduler` are absorbed into `bundles/ai-infra/` as sub-modules during the Bundle migration; that migration is a separate PR and is **not** part of this rename (it is functional refactoring that happened to get deferred by the plugin boundary reshuffle in D-20260418-01).
+Current top-level crate paths (`crates/gadgetron-*`) remain during the transition. Canonical ownership, however, follows D-20260418-01: `crates/gadgetron-provider`, `crates/gadgetron-router`, and `crates/gadgetron-scheduler` migrate into `bundles/ai-infra/`, while `crates/gadgetron-node` splits across `bundles/server/`, `bundles/gpu/`, and `bundles/ai-infra/`. That migration is a separate PR and is **not** part of this rename (it is functional refactoring that happened to get deferred by the plugin boundary reshuffle in D-20260418-01).
 
 **Design docs**:
 
