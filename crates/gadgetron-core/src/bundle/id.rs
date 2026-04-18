@@ -31,7 +31,11 @@ use thiserror::Error;
 /// `Arc<str>` internal — per-call clone is a ref-count bump, free.
 /// Serialized as a plain string via the `String` bridge, so `PlugId` round-
 /// trips through TOML / JSON transparently.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Ord` / `PartialOrd` (lexicographic over the inner string) is required so
+/// `PlugId` can key `BTreeMap` — which the W2 Plug registries rely on for
+/// stable iteration order in `gadgetron bundle info` output.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PlugId(Arc<str>);
 
@@ -40,7 +44,7 @@ pub struct PlugId(Arc<str>);
 /// Separate newtype from `PlugId` for misuse resistance: the compiler catches
 /// accidental swaps (`requires_plugs: HashMap<GadgetName, Vec<PlugId>>` cannot
 /// be populated with `PlugId` keys). Underlying validation is identical.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct GadgetName(Arc<str>);
 

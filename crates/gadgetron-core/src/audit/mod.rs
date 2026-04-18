@@ -13,6 +13,6 @@
 mod event;
 
 pub use event::{
-    GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome, GadgetMetadata, GadgetTier,
-    NoopGadgetAuditEventSink,
+    CoreAuditEvent, CoreAuditEventSink, GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome,
+    GadgetMetadata, GadgetTier, NoopCoreAuditEventSink, NoopGadgetAuditEventSink,
 };
