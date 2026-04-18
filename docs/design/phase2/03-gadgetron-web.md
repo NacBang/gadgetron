@@ -1,6 +1,6 @@
 # 03 — `gadgetron-web` Crate Detailed Implementation Spec
 
-> **Status**: Draft v2.1 (2026-04-14) — v1 21 blockers + 8 determinism items addressed in v2; v2 mechanical fixes from Round 1.5/2/3 re-review applied in v2.1. All four reviewers: APPROVE WITH MINOR. Round 1.5 security **CLOSED**. Ready for TDD after the first-code-PR review of the non-blocker/nit list in Appendix C.
+> **Status**: Draft v2.1 (2026-04-14) — v1 21 blockers + 8 determinism items addressed in v2; v2 mechanical fixes from Round 1.5/2/3 re-review applied in v2.1. All four reviewers: APPROVE WITH MINOR. Round 1.5 security **CLOSED**. Ready for TDD after the first-code-PR review of the non-blocker/nit list in Appendix C. — **P2B UX extension: `docs/design/web/expert-knowledge-workbench.md` (Expert Knowledge Workbench UI contract, 2026-04-18)**
 > **Author**: PM (Claude)
 > **Date**: 2026-04-14 (v2)
 > **Parent**: `docs/design/phase2/00-overview.md` v3 (partial supersede 2026-04-14)
