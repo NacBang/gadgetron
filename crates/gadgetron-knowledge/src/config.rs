@@ -14,6 +14,7 @@
 
 use gadgetron_core::agent::config::{EnvResolver, StdEnv};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Configuration for the semantic embedding subsystem.
@@ -366,6 +367,130 @@ impl ReindexConfig {
 }
 
 // ---------------------------------------------------------------------------
+// KnowledgeCurationConfig — toml surface under `[knowledge.curation]`
+// ---------------------------------------------------------------------------
+
+/// Curation / candidate-lifecycle policy.
+///
+/// Spec: `docs/design/core/knowledge-candidate-curation.md §2.3`. KC-1 wires
+/// the config shape + validation; KC-1b / KC-1c use the values at runtime
+/// (retention job schedule, path-rule template expansion, confirmation
+/// routing). Defaults are chosen so the capture plane stays active even
+/// when operator config omits `[knowledge.curation]` entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnowledgeCurationConfig {
+    /// Master toggle for the candidate generation + Penny curation loop.
+    /// Activity capture remains on even when this is `false` — the authority
+    /// doc §2.3 rule 1 is explicit that audit capture cannot be disabled here.
+    pub enabled: bool,
+    /// Retention window for raw activity events, in days. Must be >= 7.
+    pub capture_retention_days: u32,
+    /// Retention window for candidate rows, in days. Must be <= `capture_retention_days`.
+    pub candidate_retention_days: u32,
+    /// Maximum number of candidates the coordinator will persist per
+    /// capture call. Clamped to [1, 32].
+    pub max_candidates_per_request: u32,
+    /// Whether Penny is automatically prompted to curate new pending
+    /// candidates on the next turn.
+    pub auto_prompt_penny: bool,
+    /// Candidate classes that REQUIRE user confirmation (Penny cannot
+    /// accept unilaterally). Free-form strings for KC-1; KC-1c will narrow
+    /// to an enum once the canonical vocabulary is finalized.
+    pub require_user_confirmation_for: Vec<String>,
+    /// Path template rules keyed by category (e.g. `"operations"` →
+    /// `"ops/journal/%Y/%m/%d"`). Templates MUST NOT escape the canonical
+    /// knowledge root — validation rejects any `..` segment.
+    pub path_rules: BTreeMap<String, String>,
+}
+
+impl Default for KnowledgeCurationConfig {
+    fn default() -> Self {
+        let mut path_rules = BTreeMap::new();
+        path_rules.insert("operations".to_string(), "ops/journal/%Y/%m/%d".to_string());
+        path_rules.insert("incident".to_string(), "ops/incidents/%Y/%m/%d".to_string());
+        path_rules.insert(
+            "research".to_string(),
+            "research/notes/%Y/%m/%d".to_string(),
+        );
+        Self {
+            enabled: true,
+            capture_retention_days: 90,
+            candidate_retention_days: 30,
+            max_candidates_per_request: 8,
+            auto_prompt_penny: true,
+            require_user_confirmation_for: vec![
+                "org_write".to_string(),
+                "policy_note".to_string(),
+                "destructive_action".to_string(),
+            ],
+            path_rules,
+        }
+    }
+}
+
+impl KnowledgeCurationConfig {
+    /// Validate curation config. Rules (authority doc §2.3):
+    ///
+    /// - `capture_retention_days >= 7` — anything shorter breaks incident review.
+    /// - `candidate_retention_days <= capture_retention_days`.
+    /// - `max_candidates_per_request` in `[1, 32]`.
+    /// - Every `path_rules` value MUST NOT start with `../` and MUST NOT
+    ///   contain a `..` path segment anywhere — this is the "no canonical
+    ///   root escape" rule.
+    /// - `require_user_confirmation_for` accepts any non-empty string for
+    ///   KC-1; KC-1c narrows to an enum.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.capture_retention_days < 7 {
+            return Err(format!(
+                "knowledge.curation.capture_retention_days must be >= 7; got {}",
+                self.capture_retention_days
+            ));
+        }
+        if self.candidate_retention_days > self.capture_retention_days {
+            return Err(format!(
+                "knowledge.curation.candidate_retention_days ({}) must not exceed \
+                 capture_retention_days ({})",
+                self.candidate_retention_days, self.capture_retention_days
+            ));
+        }
+        if !(1..=32).contains(&self.max_candidates_per_request) {
+            return Err(format!(
+                "knowledge.curation.max_candidates_per_request must be in [1, 32]; got {}",
+                self.max_candidates_per_request
+            ));
+        }
+        for (key, template) in &self.path_rules {
+            if template.starts_with("../") {
+                return Err(format!(
+                    "knowledge.curation.path_rules.{key:?} must not start with '../'; got {template:?}"
+                ));
+            }
+            // Any `..` segment (inc. `foo/../bar`) is rejected — the
+            // canonical root escape rule is about segments, not just
+            // the leading prefix.
+            for segment in template.split('/') {
+                if segment == ".." {
+                    return Err(format!(
+                        "knowledge.curation.path_rules.{key:?} must not contain '..' segments; \
+                         got {template:?}"
+                    ));
+                }
+            }
+        }
+        for label in &self.require_user_confirmation_for {
+            if label.trim().is_empty() {
+                return Err(
+                    "knowledge.curation.require_user_confirmation_for entries must not be empty"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // KnowledgeConfig — toml surface under `[knowledge]`
 // ---------------------------------------------------------------------------
 
@@ -450,6 +575,14 @@ pub struct KnowledgeConfig {
     /// indexing is not yet wired into runtime calls.
     #[serde(default)]
     pub reindex: ReindexConfig,
+
+    /// Candidate-lifecycle / curation policy (W3-KC-1,
+    /// `docs/design/core/knowledge-candidate-curation.md §2.3`). Defaults
+    /// keep the capture plane active and allow up to 8 candidates per
+    /// request; operators disable the curation loop by setting
+    /// `enabled = false` (the audit plane stays on regardless).
+    #[serde(default)]
+    pub curation: KnowledgeCurationConfig,
 }
 
 fn default_true() -> bool {
@@ -550,6 +683,9 @@ impl KnowledgeConfig {
         self.reindex
             .validate()
             .map_err(|e| format!("knowledge.reindex: {e}"))?;
+        self.curation
+            .validate()
+            .map_err(|e| format!("knowledge.curation: {e}"))?;
         Ok(())
     }
 
@@ -667,6 +803,7 @@ mod knowledge_config_tests {
             search: None,
             embedding: None,
             reindex: ReindexConfig::default(),
+            curation: KnowledgeCurationConfig::default(),
         };
         assert!(cfg.validate().is_ok());
     }
@@ -681,6 +818,7 @@ mod knowledge_config_tests {
             search: None,
             embedding: None,
             reindex: ReindexConfig::default(),
+            curation: KnowledgeCurationConfig::default(),
         };
         assert!(cfg.validate().is_err());
     }
@@ -696,6 +834,7 @@ mod knowledge_config_tests {
             search: None,
             embedding: None,
             reindex: ReindexConfig::default(),
+            curation: KnowledgeCurationConfig::default(),
         };
         assert!(cfg.validate().is_err());
     }
@@ -711,6 +850,7 @@ mod knowledge_config_tests {
             search: None,
             embedding: None,
             reindex: ReindexConfig::default(),
+            curation: KnowledgeCurationConfig::default(),
         };
         let wc = cfg.to_wiki_config().unwrap();
         assert_eq!(wc.git_author_name, "Penny");
@@ -812,9 +952,133 @@ stale_threshold_days = 30
             search: None,
             embedding: Some(EmbeddingConfig::default()),
             reindex: ReindexConfig::default(),
+            curation: KnowledgeCurationConfig::default(),
         };
 
         cfg.validate_without_embedding_env()
             .expect("audit/local wiki ops should not require embedding env presence");
+    }
+
+    // --------------------------------------------------------------
+    // KnowledgeCurationConfig tests (W3-KC-1)
+    // --------------------------------------------------------------
+
+    #[test]
+    fn curation_defaults_pass_validation() {
+        let cfg = KnowledgeCurationConfig::default();
+        // Defaults must validate so operators who omit `[knowledge.curation]`
+        // still get a running curation loop.
+        cfg.validate()
+            .expect("default curation config must validate");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.capture_retention_days, 90);
+        assert_eq!(cfg.candidate_retention_days, 30);
+        assert_eq!(cfg.max_candidates_per_request, 8);
+        assert!(cfg.auto_prompt_penny);
+        assert_eq!(
+            cfg.require_user_confirmation_for,
+            vec![
+                "org_write".to_string(),
+                "policy_note".to_string(),
+                "destructive_action".to_string(),
+            ]
+        );
+        assert_eq!(
+            cfg.path_rules.get("operations").map(String::as_str),
+            Some("ops/journal/%Y/%m/%d")
+        );
+        assert_eq!(
+            cfg.path_rules.get("incident").map(String::as_str),
+            Some("ops/incidents/%Y/%m/%d")
+        );
+        assert_eq!(
+            cfg.path_rules.get("research").map(String::as_str),
+            Some("research/notes/%Y/%m/%d")
+        );
+    }
+
+    #[test]
+    fn curation_retention_invariants() {
+        // capture_retention_days < 7 → reject.
+        let cfg = KnowledgeCurationConfig {
+            capture_retention_days: 6,
+            ..KnowledgeCurationConfig::default()
+        };
+        let err = cfg.validate().expect_err("retention < 7 must fail");
+        assert!(err.contains("capture_retention_days"));
+
+        // candidate_retention_days > capture_retention_days → reject.
+        let cfg = KnowledgeCurationConfig {
+            capture_retention_days: 30,
+            candidate_retention_days: 60,
+            ..KnowledgeCurationConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("candidate retention longer than capture must fail");
+        assert!(err.contains("candidate_retention_days"));
+
+        // candidate_retention_days == capture_retention_days → pass.
+        let cfg = KnowledgeCurationConfig {
+            capture_retention_days: 30,
+            candidate_retention_days: 30,
+            ..KnowledgeCurationConfig::default()
+        };
+        cfg.validate()
+            .expect("equal retention windows must be permitted");
+    }
+
+    #[test]
+    fn curation_max_candidates_out_of_range() {
+        let cfg = KnowledgeCurationConfig {
+            max_candidates_per_request: 0,
+            ..KnowledgeCurationConfig::default()
+        };
+        assert!(cfg.validate().is_err(), "0 must be rejected");
+
+        let cfg = KnowledgeCurationConfig {
+            max_candidates_per_request: 33,
+            ..KnowledgeCurationConfig::default()
+        };
+        assert!(cfg.validate().is_err(), ">32 must be rejected");
+
+        let cfg = KnowledgeCurationConfig {
+            max_candidates_per_request: 1,
+            ..KnowledgeCurationConfig::default()
+        };
+        cfg.validate().expect("1 is the lower bound and valid");
+
+        let cfg = KnowledgeCurationConfig {
+            max_candidates_per_request: 32,
+            ..KnowledgeCurationConfig::default()
+        };
+        cfg.validate().expect("32 is the upper bound and valid");
+    }
+
+    #[test]
+    fn curation_path_rules_reject_parent_traversal() {
+        // Leading `../`
+        let mut cfg = KnowledgeCurationConfig::default();
+        cfg.path_rules
+            .insert("escape".to_string(), "../elsewhere/%Y".to_string());
+        let err = cfg
+            .validate()
+            .expect_err("path_rules value with leading '../' must be rejected");
+        assert!(err.contains("escape"), "err must cite the key: {err}");
+
+        // Embedded `..` segment.
+        let mut cfg = KnowledgeCurationConfig::default();
+        cfg.path_rules
+            .insert("sneaky".to_string(), "ops/../secret/%Y".to_string());
+        let err = cfg
+            .validate()
+            .expect_err("path_rules value with embedded '..' segment must be rejected");
+        assert!(err.contains("sneaky"), "err must cite the key: {err}");
+
+        // Templates without traversal pass.
+        let mut cfg = KnowledgeCurationConfig::default();
+        cfg.path_rules
+            .insert("weekly".to_string(), "reports/weekly/%Y-%W".to_string());
+        cfg.validate().expect("non-escaping template must validate");
     }
 }

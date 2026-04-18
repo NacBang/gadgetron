@@ -28,6 +28,7 @@ use crate::middleware::{
 use crate::penny::shared_context::PennySharedSurfaceService;
 use crate::web::workbench::{workbench_routes, GatewayWorkbenchService};
 use gadgetron_core::agent::config::AgentConfig;
+use gadgetron_core::knowledge::candidate::{ActivityCaptureStore, KnowledgeCandidateCoordinator};
 
 /// 4 MiB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
 /// Rationale: 128k-token window × ~4 bytes/token ≈ 512 KB; 8× headroom.
@@ -132,6 +133,15 @@ pub struct AppState {
     /// trait object to avoid handling the generic type parameter inline.
     pub penny_assembler:
         Option<Arc<dyn gadgetron_core::agent::shared_context::PennyTurnContextAssembler>>,
+    /// Capture-plane store — `None` until W3-KC-1b wires the Postgres-backed
+    /// store into the production binary. The in-memory KC-1 implementation
+    /// lives in `gadgetron_knowledge::candidate::InMemoryActivityCaptureStore`
+    /// and is used by tests + the fixture-diff gate.
+    pub activity_capture_store: Option<Arc<dyn ActivityCaptureStore>>,
+    /// Capture-plane coordinator — `None` until W3-KC-1b wires a persistent
+    /// coordinator. Mirrors `activity_capture_store` so they can be wired
+    /// together at startup.
+    pub candidate_coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -417,6 +427,8 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            activity_capture_store: None,
+            candidate_coordinator: None,
         }
     }
 
@@ -435,6 +447,8 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            activity_capture_store: None,
+            candidate_coordinator: None,
         }
     }
 
@@ -770,6 +784,8 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            activity_capture_store: None,
+            candidate_coordinator: None,
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -845,6 +861,8 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            activity_capture_store: None,
+            candidate_coordinator: None,
         };
 
         let app = build_router(state);
