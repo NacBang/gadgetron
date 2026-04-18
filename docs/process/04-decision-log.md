@@ -2917,4 +2917,83 @@ Codex 권고는 Pg store + testcontainers + migration 도 본 PR 에 포함. 하
 
 ---
 
+## D-20260418-19: W3-PSL-1c 착수 — gadgetron-cli 프로덕션 startup에서 P2B observability stack 전체 wiring
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-KC-1b 머지 직후, cron 11번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote, 다만 사전 조사에서 scope 확대 필요)
+**관련 문서**: `docs/design/phase2/13-penny-shared-surface-loop.md`, `docs/design/core/knowledge-candidate-curation.md`, `docs/design/gateway/workbench-projection-and-actions.md`
+**Follows**: D-20260418-18 (W3-KC-1b)
+
+### 배경
+
+W3-KC-1b merged → `materialize_accepted_candidate` 가 `KnowledgeService::write` 를 호출. 하지만 `gadgetron-cli` serve 경로에서 확인:
+- `AppState.workbench = None`
+- `AppState.penny_shared_surface = None`
+- `AppState.penny_assembler = None`
+- `AppState.activity_capture_store = None`
+- `AppState.candidate_coordinator = None`
+
+즉 모든 P2B observability stack 이 테스트에서만 wiring 되고 **프로덕션 경로에서는 None**. `<gadgetron_shared_context>` 가 chat 응답에 주입되지 않음 (penny_assembler is None → PSL-1b 의 graceful-degrade 분기 탐) → 모든 KC-1/KC-1b 작업이 prod 에서 "dead code".
+
+Codex cycle 11 vote 는 PSL-1c (startup wiring) 를 지목. 실제 코드 확인 결과 범위가 codex 추정 (300-500 LOC) 보다 크지만 (~800-1200 LOC including tests) 단일 PR 에 합당.
+
+### 결정: W3-PSL-1c (startup wiring)
+
+**근거**:
+- Cycle 9 의 "WEB-2b becomes cycle 11 lead once KC-1b produces non-trivial `pending_writebacks`" 조건 미충족 — prod 에 coordinator 자체가 없어서 WEB-2b 가 render 할 데이터가 없음
+- 본 PR 은 scaffolding 만 wiring — 실제 `capture_action` 호출 지점은 이후 사이클에서 이벤트 별로 추가 (chat completion / workbench action / approval)
+- 3 스모크 통합 테스트 하나만으로 end-to-end "startup → 실제 `<gadgetron_shared_context>` 주입" 검증
+
+### W3-PSL-1c tight scope (본 PR)
+
+1. **Build helper functions** in `gadgetron-cli/src/main.rs`:
+   - `fn build_knowledge_service(config: &AppConfig, pg_pool: Option<PgPool>) -> Result<Option<Arc<KnowledgeService>>>` — `[knowledge]` 섹션이 있으면 `Wiki::open` + `LlmWikiStore` + optional indexes + `KnowledgeServiceBuilder` 로 조립. 없으면 `Ok(None)`
+   - `fn build_candidate_plane(service: &Arc<KnowledgeService>, curation_cfg: &KnowledgeCurationConfig) -> (Arc<dyn ActivityCaptureStore>, Arc<dyn KnowledgeCandidateCoordinator>)` — `InMemoryActivityCaptureStore` + `InProcessCandidateCoordinator::new(...).with_knowledge_service(service).with_path_rules(cfg.path_rules)` 
+   - `fn build_penny_shared_context(knowledge_service, candidate_store, coordinator, workbench_projection, agent_cfg) -> (Arc<dyn PennySharedSurfaceService>, Arc<dyn PennyTurnContextAssembler>)` — `InProcessPennySharedSurfaceService::new(workbench_projection).with_candidate_plane(store, coordinator)` → `DefaultPennyTurnContextAssembler::new(service, agent_cfg.shared_context)`
+2. **Wire into `build_app_state`**:
+   - `AppStateParts` struct 확장: `knowledge_service: Option<Arc<KnowledgeService>>`, `activity_capture_store: Option<Arc<dyn ActivityCaptureStore>>`, `candidate_coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>`, `workbench: Option<Arc<GatewayWorkbenchService>>`, `penny_shared_surface: Option<Arc<dyn PennySharedSurfaceService>>`, `penny_assembler: Option<Arc<dyn PennyTurnContextAssembler>>`, `agent_config: Arc<AgentConfig>`
+   - `build_app_state` → parts 를 그대로 AppState 필드에 매핑
+3. **Wire into `serve` command**:
+   - `serve` subcommand 실행 시: config 로드 → `build_knowledge_service` → (knowledge 가 Some 이면) `build_candidate_plane` + `build_penny_shared_context` + `GatewayWorkbenchService { projection: InProcessWorkbenchProjection::new(knowledge_service) }` → `build_app_state(parts)`
+   - knowledge 섹션 없으면 모든 새 필드 `None` (기존 동작 유지 — 하위 호환)
+   - `[knowledge.curation] enabled = false` 이면 knowledge service 는 wiring 되지만 candidate_coordinator 는 None
+4. **Smoke integration test** — `crates/gadgetron-cli/tests/psl_1c_startup_smoke.rs` (신규, 또는 기존 harness 활용):
+   - 최소 config 로 startup → `AppState.penny_assembler.is_some()` 확인 → `POST /v1/chat/completions` 호출 → response 의 provider-received messages[0].content 에 `<gadgetron_shared_context>` substring 포함 검증
+   - 이는 PSL-1b 의 `chat_completion_injects_shared_context_when_service_configured` 와 유사하지만 **startup path 로 전체 조립이 동작함** 을 확인하는 것이 포인트
+5. **Config validation**:
+   - `[knowledge]` 있는데 `wiki_path` 존재 안 하는 경우 startup error
+   - `[knowledge.curation] enabled = true` 인데 `[knowledge]` 없으면 startup error
+
+### Codex hidden caveat
+
+본 PR 은 **plumbing 만 wiring**. `capture_action` 호출 지점 (chat completion hook, workbench action hook, approval hook) 은 각 경로 owner 가 별도 PR 에서 추가. 즉 이 PR 머지 후에도 prod 에서 `pending_candidates` 는 여전히 빈 Vec 반환 (no-one calls capture_action). operator-visible 효과는:
+- `<gadgetron_shared_context>` 가 live chat 응답에 주입됨 (health=healthy, 모든 list=[] 인 상태)
+- `wiki.search` 가젯이 Penny 에게 노출됨 (기존 knowledge gadget path)
+
+완전한 operator E2E 는 capture call sites 를 추가한 후에 가능. 이 분리는 의도적 — 각 hook 이 별도 합의 필요.
+
+### Non-scope (KC-1c / 이후 사이클)
+
+- **각 이벤트별 capture_action hook** — chat completion capture, workbench action capture, approval decision capture (별도 PR)
+- **KC-1c**: `PgActivityCaptureStore` + testcontainers migration
+- **KC-1c**: `audit_event_id` 실제 plumbing (capture 와 audit 연결)
+- **KC-1c**: `require_user_confirmation_for` 분기 로직
+- **W3-WEB-2b**: workbench descriptor/view/action endpoints (cycle 12 이후, 본 PR 후 prod 에서 실제 coordinator 를 관찰 가능)
+
+### 영향 받는 크레이트
+
+- `gadgetron-cli`: `main.rs` 의 `AppStateParts` + `build_app_state` + `serve` 확장 (~400-600 LOC)
+- `gadgetron-knowledge`, `gadgetron-gateway`, `gadgetron-core`: 변경 없음 (이미 필요한 public API 는 존재)
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-psl-1c/startup-wiring` (생성됨)
+3. inference-engine-lead delegation (startup/serve 경로 primary owner)
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
