@@ -35,7 +35,7 @@ use gadgetron_core::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{enum_snake_case_label, resolve_initial_disposition};
+use super::{resolve_initial_disposition, snake_case_label};
 
 // ---------------------------------------------------------------------------
 // Error mapping — mirrors gadgetron_xaas::error::sqlx_to_gadgetron without
@@ -120,8 +120,8 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
         .bind(event.tenant_id)
         .bind(event.actor_user_id)
         .bind(event.request_id)
-        .bind(enum_snake_case_label(&event.origin))
-        .bind(enum_snake_case_label(&event.kind))
+        .bind(snake_case_label(&event.origin))
+        .bind(snake_case_label(&event.kind))
         .bind(&event.title)
         .bind(&event.summary)
         .bind(&event.source_bundle)
@@ -142,7 +142,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
         hint: CandidateHint,
     ) -> CaptureResult<KnowledgeCandidate> {
         let disposition = resolve_initial_disposition(&hint, &self.require_user_confirmation_for);
-        let disposition_label = enum_snake_case_label(&disposition);
+        let disposition_label = snake_case_label(&disposition);
 
         let candidate_id = Uuid::new_v4();
         let now = Utc::now();
@@ -226,7 +226,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
                 });
             }
         };
-        let next_label = enum_snake_case_label(&next_disposition);
+        let next_label = snake_case_label(&next_disposition);
 
         // Transaction: update candidate disposition + append decision row.
         let mut tx = self.pool.begin().await.map_err(pg_to_gadgetron)?;
@@ -262,7 +262,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
              VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(decision.candidate_id)
-        .bind(enum_snake_case_label(&decision.decision))
+        .bind(snake_case_label(&decision.decision))
         .bind(decision.decided_by_user_id)
         .bind(decision.decided_by_penny)
         .bind(&decision.rationale)

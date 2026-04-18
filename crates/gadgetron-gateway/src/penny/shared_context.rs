@@ -36,7 +36,7 @@ use gadgetron_core::{
     error::GadgetronError,
     knowledge::{
         candidate::{
-            ActivityCaptureStore, CandidateDecision, KnowledgeCandidate,
+            snake_case_label, ActivityCaptureStore, CandidateDecision, KnowledgeCandidate,
             KnowledgeCandidateCoordinator, KnowledgeCandidateDisposition,
         },
         AuthenticatedContext,
@@ -576,7 +576,7 @@ pub fn render_penny_shared_context(
             // `format!("{:?}").to_lowercase()` collapsed to
             // `pendingpennydecision`, which silently diverged from every
             // other audit-plane consumer of this enum.
-            let disposition = enum_snake_case_label(&c.disposition);
+            let disposition = snake_case_label(&c.disposition);
             let clipped = clip_to_code_points(&c.summary, digest_summary_chars);
             out.push_str(&format!("- [{disposition}] {clipped}\n"));
         }
@@ -615,21 +615,10 @@ fn clip_to_code_points(s: &str, max_chars: usize) -> String {
     result
 }
 
-/// Serialize a `#[serde(rename_all = "snake_case")]` enum into its wire
-/// label (e.g. `KnowledgeCandidateDisposition::PendingPennyDecision` →
-/// `"pending_penny_decision"`).
-///
-/// Falls back to `"unknown"` for the (impossible-in-practice) case where
-/// serde produces a non-string JSON value — keeping the signature
-/// infallible lets the renderer stay a pure function with no `Result`
-/// plumbing. This mirrors the same helper on the capture-plane side in
-/// `gadgetron_knowledge::candidate::enum_snake_case_label`.
-fn enum_snake_case_label<E: serde::Serialize>(e: &E) -> String {
-    serde_json::to_value(e)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
-}
+// `enum_snake_case_label` is gone — the single source of truth is
+// `gadgetron_core::knowledge::candidate::snake_case_label` (D-20260418-23 /
+// drift-fix U-A). Duplicate helpers in sibling crates were deleted because
+// divergence would break the `<gadgetron_shared_context>` wire label.
 
 // ---------------------------------------------------------------------------
 // Tests

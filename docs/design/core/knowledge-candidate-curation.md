@@ -347,6 +347,36 @@ CandidateHint normalization + optional path_rules expansion
 - [P2B] 현재 landed slice 는 optimistic version check 를 구현하지 않는다. 중복 decision 은 mutex 순서대로 기록된다.
 - [P2C / KC-1c] Postgres backing 이 들어오면 row-level locking 또는 explicit version check 로 conflict semantics 를 강화한다.
 
+#### 2.2.0 Wire-stable snake_case 라벨 계약 `[P2B landed]`
+
+`ActivityOrigin`, `ActivityKind`, `KnowledgeCandidateDisposition`, `CandidateDecisionKind` 모두 `#[serde(rename_all = "snake_case")]` 로 선언되어 있다. 이 라벨 문자열은 다음 네 경로에서 동일하게 나타난다:
+
+1. **PostgreSQL column values** — `activity_events.origin`, `activity_events.kind`, `knowledge_candidates.disposition`, `candidate_decisions.decision` 컬럼은 snake_case 문자열을 그대로 저장한다 (`crates/gadgetron-xaas/migrations/20260418000001_activity_capture.sql`).
+2. **Audit JSON facts** — `capture_chat_completion()` 의 `facts` payload 가 origin/kind 를 JSON 으로 내보낼 때.
+3. **`<gadgetron_shared_context>` block** — `render_penny_shared_context()` 가 `[pending_penny_decision]` 형태로 emit 하는 disposition 라벨.
+4. **`path_rules` keys** — `[knowledge.curation].path_rules` TOML map 의 key 가 snake_case `ActivityKind` variant 를 사용한다 (§2.3).
+
+이 네 경로가 모두 동일한 렌더러를 쓰지 않으면 조용히 갈라져서 wire-break 이 된다. 따라서 canonical 렌더러는 하나뿐이다:
+
+```rust
+// crates/gadgetron-core/src/knowledge/candidate.rs
+pub fn snake_case_label<E: Serialize>(e: &E) -> String {
+    serde_json::to_value(e)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+```
+
+규칙:
+
+- **Single source of truth.** 모든 crate (`gadgetron-core`, `gadgetron-knowledge`, `gadgetron-gateway`) 는 위 함수를 import 해서 쓴다. sibling copy 를 만드는 것은 drift 의 씨앗 — 삭제 대상.
+- **Debug-lowercase 금지.** `format!("{:?}", disposition).to_lowercase()` 은 variant 이름이 바뀌지 않는 한 "얼추 같은" 결과를 내지만, serde 의 `rename_all` 이 개별 variant 에 `#[serde(rename = ...)]` 을 추가하면 즉시 divergent 하게 간다. PSL-1 초기 구현은 이 방식을 썼고 KC-1b 에서 교체됐다.
+- **Fallback `"unknown"`.** 바레 JSON string 이 아닌 값 (즉 unit-variant 가 아닌 enum 또는 struct) 은 에러 대신 `"unknown"` 로 렌더한다. 이는 미래에 variant 가 튜플/struct-like 로 바뀌는 것을 방지하는 게 아니라, renderer 호출부의 `Result` 전파를 피하기 위한 pragmatic 선택이다. unit-variant 만 받도록 `#[non_exhaustive]` + Clippy lint 로 enforcement 는 그대로 유지된다.
+- **마이그레이션 contract.** 문자열을 바꾸려면 (1) `#[serde(rename = ...)]` 추가, (2) Postgres 마이그레이션으로 기존 row 업데이트, (3) 문서화된 audit JSON 소비자에게 공지 — 3단 플레이. variant 추가는 safe (enum 이 `#[non_exhaustive]` 이므로), 이름 바꾸기는 wire-break.
+
+Ref: D-20260418-23 (drift-fix PR 1 U-A), `crates/gadgetron-core/src/knowledge/candidate.rs::snake_case_label`.
+
 #### 2.2.1 PSL-1d 첫 번째 live capture owner (`/v1/chat/completions`) [P2B landed]
 
 현재 trunk 는 첫 production `capture_action()` owner hook 을 `gadgetron-gateway::handlers` 에 둔다. 이는 "후보 승격"이 아니라 "사실 이벤트 append" 를 먼저 live traffic 에 연결하는 최소 단위다.

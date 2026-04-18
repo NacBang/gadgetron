@@ -1452,6 +1452,24 @@ async fn init_serve_runtime(
                 // Pass pg_pool so production wiring uses PgActivityCaptureStore.
                 // The pool is cloned here; the outer pool remains available for
                 // other subsystems (audit writer, key validator, etc.).
+                //
+                // W3-drift-fix U-B (D-20260418-23): when curation is enabled
+                // but no Postgres pool is available, `build_candidate_plane`
+                // silently falls back to the in-memory store. Restart then
+                // loses every captured activity event. Warn operators loudly
+                // so they stop being surprised by the silent ephemerality;
+                // hard-fail is deferred until we know whether operators want
+                // an explicit `allow_inmemory_store` opt-in flag instead.
+                if pg_pool.is_none() {
+                    tracing::warn!(
+                        "[knowledge.curation].enabled = true but no Postgres \
+                         connection is configured. Activity + candidate events \
+                         will be stored in memory and LOST on restart. Configure \
+                         a `[audit].postgres_url` (or equivalent) for durable \
+                         storage, or set `[knowledge.curation].enabled = false` \
+                         to silence this warning."
+                    );
+                }
                 let (s, c) = build_candidate_plane(svc, &kcfg.curation, pg_pool.clone());
                 (Some(s), Some(c))
             }

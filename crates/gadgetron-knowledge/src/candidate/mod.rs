@@ -54,9 +54,10 @@ use gadgetron_core::{
     error::{GadgetronError, KnowledgeErrorKind},
     knowledge::{
         candidate::{
-            ActivityCaptureStore, ActivityKind, CandidateDecision, CandidateDecisionKind,
-            CandidateHint, CaptureResult, CapturedActivityEvent, KnowledgeCandidate,
-            KnowledgeCandidateCoordinator, KnowledgeCandidateDisposition, KnowledgeDocumentWrite,
+            snake_case_label, ActivityCaptureStore, ActivityKind, CandidateDecision,
+            CandidateDecisionKind, CandidateHint, CaptureResult, CapturedActivityEvent,
+            KnowledgeCandidate, KnowledgeCandidateCoordinator, KnowledgeCandidateDisposition,
+            KnowledgeDocumentWrite,
         },
         AuthenticatedContext, KnowledgePutRequest,
     },
@@ -387,19 +388,10 @@ pub(crate) fn resolve_initial_disposition(
     }
 }
 
-/// Serialize a `#[serde(rename_all = "snake_case")]` enum into its wire
-/// label. Falls back to `"unknown"` for the (impossible) JSON-not-a-string
-/// case so callers can keep the signature infallible.
-///
-/// Re-used by the gateway's `render_penny_shared_context` after KC-1b to
-/// emit `[pending_penny_decision]` instead of the old
-/// `format!("{:?}").to_lowercase()` collapse.
-pub(crate) fn enum_snake_case_label<E: serde::Serialize>(e: &E) -> String {
-    serde_json::to_value(e)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
-}
+// `snake_case_label` lives in `gadgetron_core::knowledge::candidate` —
+// single source of truth for every `snake_case` enum render across the
+// candidate plane (D-20260418-23 / U-A). The import is at the top of
+// this file.
 
 /// Expand `{date}` / `{topic}` / `{author}` in a `path_rules` template
 /// against a captured activity event.
@@ -412,7 +404,7 @@ pub(crate) fn enum_snake_case_label<E: serde::Serialize>(e: &E) -> String {
 /// config-load time once the vocabulary stabilizes.
 fn expand_path_rule(rule: &str, event: &CapturedActivityEvent) -> String {
     let date = event.created_at.format("%Y-%m-%d").to_string();
-    let topic = enum_snake_case_label(&event.kind);
+    let topic = snake_case_label(&event.kind);
     let author = event.actor_user_id.to_string();
     rule.replace("{date}", &date)
         .replace("{topic}", &topic)
@@ -426,7 +418,7 @@ fn resolve_path_from_rules(
     rules: &BTreeMap<String, String>,
     event: &CapturedActivityEvent,
 ) -> Option<String> {
-    let key = enum_snake_case_label(&event.kind);
+    let key = snake_case_label(&event.kind);
     rules.get(&key).map(|rule| expand_path_rule(rule, event))
 }
 
@@ -462,7 +454,7 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
                     format!(
                         "ops/journal/{}/{}",
                         event_snapshot.created_at.format("%Y-%m-%d"),
-                        enum_snake_case_label(&event_snapshot_kind)
+                        snake_case_label(&event_snapshot_kind)
                     )
                 }));
             }

@@ -319,6 +319,33 @@ pub trait KnowledgeCandidateCoordinator: Send + Sync + std::fmt::Debug {
     ) -> CaptureResult<String>;
 }
 
+/// Wire-stable snake_case label for any `#[serde(rename_all = "snake_case")]` enum.
+///
+/// Serializes the value through serde_json and returns the resulting string
+/// variant — e.g. [`KnowledgeCandidateDisposition::PendingPennyDecision`] →
+/// `"pending_penny_decision"`.
+///
+/// # Single source of truth
+///
+/// This function is the canonical wire-label renderer for every
+/// `snake_case` enum in the candidate plane. The gateway renderer
+/// (`<gadgetron_shared_context>` block) and the Postgres adapter both
+/// depend on it producing identical output for the same enum value — any
+/// second copy in a sibling crate is a latent wire-divergence risk and MUST
+/// be deleted.
+///
+/// # Fallback
+///
+/// Returns `"unknown"` when `serde_json::to_value` does not yield a bare
+/// JSON string (i.e. the value is not a unit-variant enum). In practice
+/// this never happens for the enums declared in this module.
+pub fn snake_case_label<E: Serialize>(e: &E) -> String {
+    serde_json::to_value(e)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

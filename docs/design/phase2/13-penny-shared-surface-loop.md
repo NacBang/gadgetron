@@ -433,6 +433,7 @@ degraded continuation 규칙:
 
 ```toml
 [agent.shared_context]
+enabled = true                     # emergency-only rollback switch; see below
 bootstrap_activity_limit = 6
 bootstrap_candidate_limit = 4
 bootstrap_approval_limit = 3
@@ -442,6 +443,11 @@ require_explicit_degraded_notice = true
 
 필드 규칙:
 
+- `enabled`
+  - default: `true`
+  - **Emergency rollback switch only.** `false` 로 설정하면 gateway 의 chat-completions handler 가 bootstrap 조립을 완전히 건너뛴다 — `<gadgetron_shared_context>` 블록이 주입되지 않고 Penny 는 shared surface 를 인식하지 못한 채 응답한다. "tuning" 으로 쓰는 것은 금지이며, PSL-1b 이 도입한 이유는 오직 "prod 에서 bootstrap 이 잘못 조립되어 사용자 요청을 깨고 있을 때 즉시 OFF 하기 위해서" 다. `require_explicit_degraded_notice` 와는 의미가 다르다 — 후자는 "No silent degradation" 을 강제하는 invariant, 전자는 incident 운영 놉 (knob).
+  - 검증: `true` / `false` 모두 허용 (enforcement 는 operator-visible WARN 으로 대체 — `false` 설정 시 tracing::warn! 로 "Penny awareness is disabled" 경고)
+  - Ref: D-20260418-16 (PSL-1b).
 - `bootstrap_activity_limit`
   - default: `6`
   - 검증: `1..=20`
@@ -462,7 +468,7 @@ require_explicit_degraded_notice = true
 
 - operator 가 limit 조정은 할 수 있어야 한다.
 - 하지만 degraded notice 를 끄는 것은 "No silent degradation" 원칙과 충돌한다.
-- `enabled = false` 같은 옵션은 허용하지 않는다. 그 자체가 workbench/Penny parity 를 깨는 footgun 이다.
+- `enabled` 는 feature toggle 이 아니라 **incident 운영 switch** 다. P2B Penny contract 는 shared surface awareness 를 필수로 요구하지만, 버그가 prod 에 landed 된 순간 즉시 OFF 할 수 있는 경로가 없으면 blast radius 를 제어할 수 없다. doc 13 §1.3 대안 A 가 금지한 "silent private memory" 와 혼동하지 말 것 — `enabled = false` 는 Penny 가 shared surface 를 못 보게 만들 뿐이고, shared surface 자체 (workbench / audit / approval) 는 여전히 동작한다.
 
 ### 2.4 에러 & 로깅
 

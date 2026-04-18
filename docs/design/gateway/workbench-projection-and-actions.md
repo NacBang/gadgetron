@@ -307,6 +307,28 @@ pub struct AppState {
 }
 ```
 
+#### 2.1.3 `AppState` P2B observability matrix
+
+14 cycle 을 거치면서 `AppState` 에 workbench / Penny shared-surface / candidate plane wiring 이 순차적으로 추가됐다. P2B-complete `AppState` 의 6 new fields 는 다음과 같다 (source: `crates/gadgetron-gateway/src/server.rs`):
+
+| 필드 | 타입 | wiring 소스 | `Some` 의미 | `None` 의미 |
+|---|---|---|---|---|
+| `workbench` | `Option<Arc<GatewayWorkbenchService>>` | `build_workbench(knowledge_service, candidate_coordinator)` | workbench read endpoints live — `bootstrap` / `activity` / `views` / `actions` / `evidence` 전부 동작 | 5개 workbench endpoint 이 config-error(400) 응답 |
+| `penny_shared_surface` | `Option<Arc<dyn PennySharedSurfaceService>>` | `build_penny_shared_context()` | Penny 가 `workbench.*` 가젯 dispatch 가능 (activity_recent / request_evidence / candidates_pending / candidate_decide) | 4개 가젯이 `ToolDenied` 반환 (graceful degrade) |
+| `penny_assembler` | `Option<Arc<dyn PennyTurnContextAssembler>>` | 같은 helper | chat handler 가 매 turn `<gadgetron_shared_context>` 블록 주입 | PSL-1b 의 graceful-degrade branch — block 주입 skip, 원 request 그대로 전송 |
+| `activity_capture_store` | `Option<Arc<dyn ActivityCaptureStore>>` | `build_candidate_plane(service, curation, pg_pool)` | capture_chat_completion 이 활동 이벤트 영속화 (Pg or InMemory) | capture hook fire-and-forget spawn 이 호출되지 않음 |
+| `candidate_coordinator` | `Option<Arc<dyn KnowledgeCandidateCoordinator>>` | 같은 helper | Penny 가 candidate accept/reject 결정 기록 + materialize → `KnowledgeService::write` | `candidate_decide` 는 `ToolDenied`, `capture_action` spawn 생략 |
+| `agent_config` | `Arc<AgentConfig>` (required, not Optional) | startup 에서 config 로드 | chat handler 가 `[agent.shared_context].enabled` 및 `digest_summary_chars` 등을 소비 | 존재하지 않는 상태 — `AppState::default()` 가 안전한 기본값 제공 |
+
+**Boot-gating rule:**
+- `knowledge_cfg.is_none()` → 모든 6 필드 default (None / Arc::new(Default)) — P1 legacy serve path 보존
+- `knowledge_cfg.is_some() && !curation.enabled` → `workbench` + `agent_config` 만 wired, candidate plane 은 None
+- `knowledge_cfg.is_some() && curation.enabled` → 6 필드 모두 wired (Pg backing if `pg_pool.is_some()`)
+
+**Degraded mode:** `build_workbench(None, None)` 은 `None` 이 아니라 `Some(degraded_workbench)` 을 반환한다. 즉 `knowledge_service` 가 없어도 workbench endpoint 들은 mount 되며, bootstrap 응답이 `degraded_reasons = ["knowledge service not wired"]` 로 operator 에게 상태를 알린다. hidden 404 / unauthenticated bypass 가 되지 않도록 하는 PSL-1b graceful-degrade 계약의 일부 (D-20260418-19).
+
+**pg_pool 없는데 curation.enabled=true:** serve startup 이 `tracing::warn!` 로 "활동 이벤트가 메모리에만 저장되고 restart 시 유실됩니다" 를 명시적으로 경고한다. hard-fail 은 아직 안 — dev 경로 (로컬 Postgres 없이 `gadgetron serve`) 를 보존하기 위함. operator 가 실제 prod 에서 이를 silent 하게 넘겨받지 않도록 `allow_inmemory_store` 옵트인 플래그로 후속 PR 에서 강화 예정 (drift-fix U-B, D-20260418-23).
+
 경로/권한 규칙:
 
 | Route | Base scope | 추가 제약 | 비고 |
