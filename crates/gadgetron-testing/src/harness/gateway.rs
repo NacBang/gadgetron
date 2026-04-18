@@ -99,6 +99,7 @@ impl GatewayHarness {
             no_db: false,
             tui_tx: None,
             workbench: None,
+            penny_shared_surface: None,
         };
 
         let router = build_router(state);

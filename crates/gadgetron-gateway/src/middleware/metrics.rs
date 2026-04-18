@@ -143,6 +143,7 @@ mod tests {
             no_db: false,
             tui_tx: Some(tui_tx),
             workbench: None,
+            penny_shared_surface: None,
         }
     }
 
@@ -209,6 +210,7 @@ mod tests {
             no_db: false,
             tui_tx: None,
             workbench: None,
+            penny_shared_surface: None,
         };
         let app = build_router(state);
 

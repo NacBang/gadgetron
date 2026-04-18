@@ -504,6 +504,7 @@ mod tests {
             no_db: false,
             tui_tx: None,
             workbench: None,
+            penny_shared_surface: None,
         }
     }
 

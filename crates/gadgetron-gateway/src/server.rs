@@ -25,6 +25,7 @@ use crate::middleware::{
     auth::auth_middleware, metrics::metrics_middleware, request_id::request_id_middleware,
     scope::scope_guard_middleware, tenant_context::tenant_context_middleware,
 };
+use crate::penny::shared_context::PennySharedSurfaceService;
 use crate::web::workbench::{workbench_routes, GatewayWorkbenchService};
 
 /// 4 MiB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
@@ -116,6 +117,10 @@ pub struct AppState {
     /// production binary. Existing tests that build `AppState` without this
     /// field use `..Default::default()` or set `workbench: None` explicitly.
     pub workbench: Option<Arc<GatewayWorkbenchService>>,
+    /// Penny shared surface service — `None` until PSL-1 is wired in the
+    /// production binary. PSL-1b will populate this from the production
+    /// `InProcessPennySharedSurfaceService`.
+    pub penny_shared_surface: Option<Arc<dyn PennySharedSurfaceService>>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -398,6 +403,7 @@ mod tests {
             no_db: false,
             tui_tx: None,
             workbench: None,
+            penny_shared_surface: None,
         }
     }
 
@@ -413,6 +419,7 @@ mod tests {
             no_db: false,
             tui_tx: None,
             workbench: None,
+            penny_shared_surface: None,
         }
     }
 
@@ -745,6 +752,7 @@ mod tests {
             no_db: false,
             tui_tx: Some(tx),
             workbench: None,
+            penny_shared_surface: None,
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -817,6 +825,7 @@ mod tests {
             no_db: false,
             tui_tx: None,
             workbench: None,
+            penny_shared_surface: None,
         };
 
         let app = build_router(state);

@@ -5,6 +5,7 @@
 pub mod error;
 pub mod handlers;
 pub mod middleware;
+pub mod penny;
 pub mod server;
 pub mod sse;
 pub mod web;

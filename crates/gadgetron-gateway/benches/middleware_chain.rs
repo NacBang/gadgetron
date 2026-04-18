@@ -81,6 +81,7 @@ fn make_state() -> AppState {
         no_db: true, // /ready returns 200 unconditionally; unused for /health
         tui_tx: None,
         workbench: None,
+        penny_shared_surface: None,
     }
 }
 

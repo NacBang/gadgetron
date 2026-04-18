@@ -53,6 +53,7 @@ fn make_state() -> AppState {
         no_db: true,
         tui_tx: None,
         workbench: None,
+        penny_shared_surface: None,
     }
 }
 

@@ -1223,6 +1223,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         no_db,
         tui_tx,
         workbench: None,
+        penny_shared_surface: None,
     }
 }
 
