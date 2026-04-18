@@ -34,28 +34,28 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use gadgetron_core::agent::config::AgentConfig;
-use gadgetron_core::audit::{NoopToolAuditEventSink, ToolAuditEventSink};
+use gadgetron_core::audit::{GadgetAuditEventSink, NoopGadgetAuditEventSink};
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::{Content, Message, Role};
 use gadgetron_core::provider::{
     ChatChunk, ChatRequest, ChatResponse, Choice, LlmProvider, ModelInfo, Usage,
 };
 
-use crate::registry::McpToolRegistry;
+use crate::gadget_registry::GadgetRegistry;
 use crate::session::ClaudeCodeSession;
 use crate::session_store::SessionStore;
 
 /// The Penny `LlmProvider`.
 ///
 /// Holds the operator-facing `AgentConfig` (binary path, brain mode,
-/// timeout), a frozen `McpToolRegistry` from which every request
-/// derives its `--allowed-tools` list, and an `Arc<dyn ToolAuditEventSink>`
+/// timeout), a frozen `GadgetRegistry` from which every request
+/// derives its `--allowed-tools` list, and an `Arc<dyn GadgetAuditEventSink>`
 /// that receives `ToolCallCompleted` events on each tool-use boundary
 /// (ADR-P2A-06 Implementation status addendum item 1).
 pub struct PennyProvider {
     config: Arc<AgentConfig>,
-    registry: Arc<McpToolRegistry>,
-    audit_sink: Arc<dyn ToolAuditEventSink>,
+    registry: Arc<GadgetRegistry>,
+    audit_sink: Arc<dyn GadgetAuditEventSink>,
     session_store: Arc<SessionStore>,
     /// Penny workspace (see `crate::home`). When `None`, sessions spawn
     /// with the caller's current working directory — which means Claude
@@ -79,8 +79,8 @@ impl PennyProvider {
     /// or a noop/test sink.
     pub fn new(
         config: Arc<AgentConfig>,
-        registry: Arc<McpToolRegistry>,
-        audit_sink: Arc<dyn ToolAuditEventSink>,
+        registry: Arc<GadgetRegistry>,
+        audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Arc<SessionStore>,
     ) -> Self {
         Self::new_with_home(config, registry, audit_sink, session_store, None)
@@ -90,8 +90,8 @@ impl PennyProvider {
     /// (`register_with_router`) calls this.
     pub fn new_with_home(
         config: Arc<AgentConfig>,
-        registry: Arc<McpToolRegistry>,
-        audit_sink: Arc<dyn ToolAuditEventSink>,
+        registry: Arc<GadgetRegistry>,
+        audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Arc<SessionStore>,
         penny_home: Option<Arc<crate::home::PennyHome>>,
     ) -> Self {
@@ -110,8 +110,8 @@ impl PennyProvider {
     /// MCP child can locate the same `[knowledge]` / `[agent]` block.
     pub fn new_with_home_and_config_path(
         config: Arc<AgentConfig>,
-        registry: Arc<McpToolRegistry>,
-        audit_sink: Arc<dyn ToolAuditEventSink>,
+        registry: Arc<GadgetRegistry>,
+        audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Arc<SessionStore>,
         penny_home: Option<Arc<crate::home::PennyHome>>,
         config_path: Option<std::path::PathBuf>,
@@ -126,14 +126,14 @@ impl PennyProvider {
         }
     }
 
-    /// Back-compat constructor — installs a `NoopToolAuditEventSink`
+    /// Back-compat constructor — installs a `NoopGadgetAuditEventSink`
     /// and a default `SessionStore`. Used in unit tests.
-    pub fn new_without_audit(config: Arc<AgentConfig>, registry: Arc<McpToolRegistry>) -> Self {
+    pub fn new_without_audit(config: Arc<AgentConfig>, registry: Arc<GadgetRegistry>) -> Self {
         let store = Arc::new(SessionStore::new(
             config.session_ttl_secs,
             config.session_store_max_entries,
         ));
-        Self::new(config, registry, Arc::new(NoopToolAuditEventSink), store)
+        Self::new(config, registry, Arc::new(NoopGadgetAuditEventSink), store)
     }
 
     /// The model id this provider exposes via `/v1/models` and
@@ -252,7 +252,7 @@ impl LlmProvider for PennyProvider {
 
 /// Register `PennyProvider` in a router provider map under the
 /// model id `"penny"`. Called once at startup from `gadgetron-cli::main`
-/// after `AgentConfig` is loaded and the `McpToolRegistry` is frozen.
+/// after `AgentConfig` is loaded and the `GadgetRegistry` is frozen.
 ///
 /// Prepares Penny's persistent workspace at `~/.gadgetron/penny/`
 /// (idempotent) as a side-effect — every subsequent chat request spawns
@@ -263,8 +263,8 @@ impl LlmProvider for PennyProvider {
 /// the server's current cwd (per-project memory may then replay).
 pub fn register_with_router(
     config: Arc<AgentConfig>,
-    registry: Arc<McpToolRegistry>,
-    audit_sink: Arc<dyn ToolAuditEventSink>,
+    registry: Arc<GadgetRegistry>,
+    audit_sink: Arc<dyn GadgetAuditEventSink>,
     session_store: Arc<SessionStore>,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
     config_path: Option<std::path::PathBuf>,
@@ -309,12 +309,12 @@ pub fn register_with_router(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::McpToolRegistryBuilder;
+    use crate::gadget_registry::GadgetRegistryBuilder;
     use gadgetron_core::message::Message;
 
-    fn empty_registry() -> Arc<McpToolRegistry> {
+    fn empty_registry() -> Arc<GadgetRegistry> {
         Arc::new(
-            McpToolRegistryBuilder::new()
+            GadgetRegistryBuilder::new()
                 .freeze(&gadgetron_core::agent::config::AgentConfig::default()),
         )
     }
@@ -363,7 +363,7 @@ mod tests {
         PennyProvider::new(
             cfg,
             empty_registry(),
-            Arc::new(NoopToolAuditEventSink),
+            Arc::new(NoopGadgetAuditEventSink),
             store,
         )
     }
@@ -434,7 +434,7 @@ mod tests {
     fn register_with_router_inserts_under_penny_key() {
         let cfg = Arc::new(AgentConfig::default());
         let reg = empty_registry();
-        let sink: Arc<dyn ToolAuditEventSink> = Arc::new(NoopToolAuditEventSink);
+        let sink: Arc<dyn GadgetAuditEventSink> = Arc::new(NoopGadgetAuditEventSink);
         let store = Arc::new(SessionStore::new(86_400, 10_000));
         let mut map: std::collections::HashMap<String, Arc<dyn LlmProvider>> =
             std::collections::HashMap::new();

@@ -1,14 +1,23 @@
-//! MCP tool provider for the knowledge layer.
+//! Gadget provider for the knowledge layer.
 //!
-//! Implements `gadgetron_core::agent::tools::McpToolProvider` for the
+//! Implements `gadgetron_core::agent::tools::GadgetProvider` for the
 //! `"knowledge"` category. Exposes wiki CRUD/search plus optional
-//! `web.search`.
+//! `web.search` and semantic search variants.
+//!
+//! Terminology (per `docs/architecture/glossary.md`):
+//! - **Gadget** = MCP tool consumed by Penny. Defined by a `GadgetSchema`.
+//! - **GadgetProvider** = Rust supplier of Gadgets, owned by a Bundle.
+//!
+//! Spec: `docs/design/phase2/01-knowledge-layer.md §6.2 + §6.3`,
+//! `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use gadgetron_core::agent::config::{EnvResolver, StdEnv};
-use gadgetron_core::agent::tools::{McpError, McpToolProvider, Tier, ToolResult, ToolSchema};
+use gadgetron_core::agent::tools::{
+    GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
+};
 use gadgetron_core::error::WikiErrorKind;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -20,15 +29,15 @@ use crate::search::{SearxngClient, WebSearch};
 use crate::semantic::{normalize_page_content, SemanticBackend, SemanticSearchHit};
 use crate::wiki::{Wiki, WikiSearchHit};
 
-/// The concrete `McpToolProvider` for knowledge-layer tools.
-pub struct KnowledgeToolProvider {
+/// The concrete `GadgetProvider` for knowledge-layer tools.
+pub struct KnowledgeGadgetProvider {
     wiki: Arc<Wiki>,
     web_search: Option<Arc<dyn WebSearch>>,
     semantic: Option<Arc<SemanticBackend>>,
     max_search_results: usize,
 }
 
-impl KnowledgeToolProvider {
+impl KnowledgeGadgetProvider {
     /// Build the provider from a validated `KnowledgeConfig`.
     ///
     /// `pg_pool` is optional so the same config can still expose keyword-only
@@ -111,12 +120,12 @@ impl KnowledgeToolProvider {
 }
 
 #[async_trait]
-impl McpToolProvider for KnowledgeToolProvider {
+impl GadgetProvider for KnowledgeGadgetProvider {
     fn category(&self) -> &'static str {
         "knowledge"
     }
 
-    fn tool_schemas(&self) -> Vec<ToolSchema> {
+    fn gadget_schemas(&self) -> Vec<GadgetSchema> {
         let mut out = vec![
             schema_wiki_list(),
             schema_wiki_get(),
@@ -131,7 +140,7 @@ impl McpToolProvider for KnowledgeToolProvider {
         out
     }
 
-    async fn call(&self, name: &str, args: Value) -> Result<ToolResult, McpError> {
+    async fn call(&self, name: &str, args: Value) -> Result<GadgetResult, GadgetError> {
         match name {
             "wiki.list" => self.call_wiki_list().await,
             "wiki.get" => self.call_wiki_get(args),
@@ -140,15 +149,15 @@ impl McpToolProvider for KnowledgeToolProvider {
             "wiki.delete" => self.call_wiki_delete(args).await,
             "wiki.rename" => self.call_wiki_rename(args).await,
             "web.search" => self.call_web_search(args).await,
-            other => Err(McpError::UnknownTool(other.to_string())),
+            other => Err(GadgetError::UnknownGadget(other.to_string())),
         }
     }
 }
 
-fn schema_wiki_list() -> ToolSchema {
-    ToolSchema {
+fn schema_wiki_list() -> GadgetSchema {
+    GadgetSchema {
         name: "wiki.list".into(),
-        tier: Tier::Read,
+        tier: GadgetTier::Read,
         description: "List all pages in the Penny wiki. Returns page names \
             (use forward slashes for subdirectories). Call wiki.list first to \
             discover what pages exist before searching or fetching by name."
@@ -162,10 +171,10 @@ fn schema_wiki_list() -> ToolSchema {
     }
 }
 
-fn schema_wiki_get() -> ToolSchema {
-    ToolSchema {
+fn schema_wiki_get() -> GadgetSchema {
+    GadgetSchema {
         name: "wiki.get".into(),
-        tier: Tier::Read,
+        tier: GadgetTier::Read,
         description: "Fetch a wiki page by its logical name. Use wiki.get \
             when you already know the exact page name (e.g. from a previous \
             wiki.list or wiki.search result). Page names use forward slashes \
@@ -183,10 +192,10 @@ fn schema_wiki_get() -> ToolSchema {
     }
 }
 
-fn schema_wiki_search() -> ToolSchema {
-    ToolSchema {
+fn schema_wiki_search() -> GadgetSchema {
+    GadgetSchema {
         name: "wiki.search".into(),
-        tier: Tier::Read,
+        tier: GadgetTier::Read,
         description: "Semantic + keyword search over the wiki. Returns pages \
             ranked by relevance with a short snippet."
             .into(),
@@ -208,10 +217,10 @@ fn schema_wiki_search() -> ToolSchema {
     }
 }
 
-fn schema_wiki_write() -> ToolSchema {
-    ToolSchema {
+fn schema_wiki_write() -> GadgetSchema {
+    GadgetSchema {
         name: "wiki.write".into(),
-        tier: Tier::Write,
+        tier: GadgetTier::Write,
         description: "Write or overwrite a wiki page. Content is markdown. \
             Auto-commits to git on success. Default size limit is 1 MiB. Path \
             must not contain '..' or absolute paths. Writes containing \
@@ -231,10 +240,10 @@ fn schema_wiki_write() -> ToolSchema {
     }
 }
 
-fn schema_wiki_delete() -> ToolSchema {
-    ToolSchema {
+fn schema_wiki_delete() -> GadgetSchema {
+    GadgetSchema {
         name: "wiki.delete".into(),
-        tier: Tier::Write,
+        tier: GadgetTier::Write,
         description: "Delete a wiki page. Soft delete by default: the page is \
             moved to `_archived/<YYYY-MM-DD>/<name>.md` with a git commit. \
             The operator can permanently remove archived pages later. Use \
@@ -252,10 +261,10 @@ fn schema_wiki_delete() -> ToolSchema {
     }
 }
 
-fn schema_wiki_rename() -> ToolSchema {
-    ToolSchema {
+fn schema_wiki_rename() -> GadgetSchema {
+    GadgetSchema {
         name: "wiki.rename".into(),
-        tier: Tier::Write,
+        tier: GadgetTier::Write,
         description: "Rename or move a wiki page. Both `from` and `to` are \
             page names without the `.md` extension. Forward slashes are \
             treated as subdirectories. Fails with a conflict error if the \
@@ -275,10 +284,10 @@ fn schema_wiki_rename() -> ToolSchema {
     }
 }
 
-fn schema_web_search() -> ToolSchema {
-    ToolSchema {
+fn schema_web_search() -> GadgetSchema {
+    GadgetSchema {
         name: "web.search".into(),
-        tier: Tier::Read,
+        tier: GadgetTier::Read,
         description: "Search the web for information not in the wiki. Returns \
             up to 10 results (title, URL, snippet) via a self-hosted SearXNG \
             proxy. Use when the user's question cannot be answered from the \
@@ -296,10 +305,10 @@ fn schema_web_search() -> ToolSchema {
     }
 }
 
-impl KnowledgeToolProvider {
-    async fn call_wiki_list(&self) -> Result<ToolResult, McpError> {
+impl KnowledgeGadgetProvider {
+    async fn call_wiki_list(&self) -> Result<GadgetResult, GadgetError> {
         let entries = self.wiki.list().map_err(map_wiki_err_generic)?;
-        Ok(ToolResult {
+        Ok(GadgetResult {
             content: json!({
                 "pages": entries.into_iter().map(|e| e.name).collect::<Vec<_>>()
             }),
@@ -307,10 +316,10 @@ impl KnowledgeToolProvider {
         })
     }
 
-    fn call_wiki_get(&self, args: Value) -> Result<ToolResult, McpError> {
+    fn call_wiki_get(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let name = required_string_arg(&args, "name")?;
         match self.wiki.read(&name) {
-            Ok(content) => Ok(ToolResult {
+            Ok(content) => Ok(GadgetResult {
                 content: json!({
                     "name": name,
                     "content": content,
@@ -321,7 +330,7 @@ impl KnowledgeToolProvider {
         }
     }
 
-    async fn call_wiki_search(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_search(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let query = required_string_arg(&args, "query")?;
         let limit = parse_search_limit(&args);
 
@@ -348,7 +357,7 @@ impl KnowledgeToolProvider {
             ),
         };
 
-        Ok(ToolResult {
+        Ok(GadgetResult {
             content: json!({
                 "query": query,
                 "hits": hits,
@@ -357,7 +366,7 @@ impl KnowledgeToolProvider {
         })
     }
 
-    async fn call_wiki_write(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_write(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let name = required_string_arg(&args, "name")?;
         let raw_content = required_string_arg(&args, "content")?;
         let content = if self.semantic.is_some() {
@@ -395,7 +404,7 @@ impl KnowledgeToolProvider {
                     }
                 }
 
-                Ok(ToolResult {
+                Ok(GadgetResult {
                     content: json!({
                         "name": result.name,
                         "bytes": result.bytes,
@@ -408,7 +417,7 @@ impl KnowledgeToolProvider {
         }
     }
 
-    async fn call_wiki_delete(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_delete(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let name = required_string_arg(&args, "name")?;
         match self.wiki.delete(&name) {
             Ok(archive_path) => {
@@ -439,7 +448,7 @@ impl KnowledgeToolProvider {
                     }
                 }
 
-                Ok(ToolResult {
+                Ok(GadgetResult {
                     content: json!({
                         "name": name,
                         "archived_to": archive_path,
@@ -452,7 +461,7 @@ impl KnowledgeToolProvider {
         }
     }
 
-    async fn call_wiki_rename(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_wiki_rename(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let from = required_string_arg(&args, "from")?;
         let to = required_string_arg(&args, "to")?;
         match self.wiki.rename(&from, &to) {
@@ -487,7 +496,7 @@ impl KnowledgeToolProvider {
                     }
                 }
 
-                Ok(ToolResult {
+                Ok(GadgetResult {
                     content: json!({
                         "from": from,
                         "to": result.name,
@@ -500,9 +509,9 @@ impl KnowledgeToolProvider {
         }
     }
 
-    async fn call_web_search(&self, args: Value) -> Result<ToolResult, McpError> {
+    async fn call_web_search(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let Some(client) = &self.web_search else {
-            return Err(McpError::Denied {
+            return Err(GadgetError::Denied {
                 reason: "web.search is not configured on this server".into(),
             });
         };
@@ -510,7 +519,7 @@ impl KnowledgeToolProvider {
         match client.search(&query).await {
             Ok(results) => {
                 let capped: Vec<_> = results.into_iter().take(self.max_search_results).collect();
-                Ok(ToolResult {
+                Ok(GadgetResult {
                     content: json!({
                         "query": query,
                         "results": capped,
@@ -569,60 +578,64 @@ fn parse_search_limit(args: &Value) -> usize {
         .clamp(1, 50)
 }
 
-fn required_string_arg(args: &Value, field: &str) -> Result<String, McpError> {
+fn required_string_arg(args: &Value, field: &str) -> Result<String, GadgetError> {
     match args.get(field) {
         Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
-        Some(Value::String(_)) => Err(McpError::InvalidArgs(format!(
+        Some(Value::String(_)) => Err(GadgetError::InvalidArgs(format!(
             "field '{field}' must not be empty"
         ))),
-        Some(_) => Err(McpError::InvalidArgs(format!(
+        Some(_) => Err(GadgetError::InvalidArgs(format!(
             "field '{field}' must be a string"
         ))),
-        None => Err(McpError::InvalidArgs(format!(
+        None => Err(GadgetError::InvalidArgs(format!(
             "missing required field '{field}'"
         ))),
     }
 }
 
-fn map_wiki_err_generic(err: WikiError) -> McpError {
+fn map_wiki_err_generic(err: WikiError) -> GadgetError {
     match err.kind_ref() {
-        Some(WikiErrorKind::PathEscape { .. }) => McpError::InvalidArgs("invalid page path".into()),
-        _ => McpError::Execution("wiki operation failed".into()),
+        Some(WikiErrorKind::PathEscape { .. }) => {
+            GadgetError::InvalidArgs("invalid page path".into())
+        }
+        _ => GadgetError::Execution("wiki operation failed".into()),
     }
 }
 
-fn map_wiki_err_read(err: WikiError, name: &str) -> McpError {
+fn map_wiki_err_read(err: WikiError, name: &str) -> GadgetError {
     match err {
         WikiError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
-            McpError::Execution(format!("page {name:?} not found"))
+            GadgetError::Execution(format!("page {name:?} not found"))
         }
         other => map_wiki_err_generic(other),
     }
 }
 
-fn map_wiki_err_write(err: WikiError, _name: &str) -> McpError {
+fn map_wiki_err_write(err: WikiError, _name: &str) -> GadgetError {
     match err.kind_ref() {
-        Some(WikiErrorKind::PathEscape { .. }) => McpError::InvalidArgs("invalid page path".into()),
-        Some(WikiErrorKind::PageTooLarge { bytes, limit, .. }) => McpError::InvalidArgs(format!(
-            "page too large: {bytes} bytes exceeds the {limit}-byte limit"
-        )),
-        Some(WikiErrorKind::CredentialBlocked { pattern, .. }) => McpError::Denied {
+        Some(WikiErrorKind::PathEscape { .. }) => {
+            GadgetError::InvalidArgs("invalid page path".into())
+        }
+        Some(WikiErrorKind::PageTooLarge { bytes, limit, .. }) => GadgetError::InvalidArgs(
+            format!("page too large: {bytes} bytes exceeds the {limit}-byte limit"),
+        ),
+        Some(WikiErrorKind::CredentialBlocked { pattern, .. }) => GadgetError::Denied {
             reason: format!(
                 "credential pattern {pattern:?} detected in content — refusing to write"
             ),
         },
         Some(WikiErrorKind::Conflict { .. }) => {
-            McpError::Execution("wiki git conflict — resolve manually and retry".into())
+            GadgetError::Execution("wiki git conflict — resolve manually and retry".into())
         }
-        _ => McpError::Execution("wiki storage error".into()),
+        _ => GadgetError::Execution("wiki storage error".into()),
     }
 }
 
-fn map_search_err(err: SearchError) -> McpError {
+fn map_search_err(err: SearchError) -> GadgetError {
     match err {
-        SearchError::Http(_) => McpError::Execution("web search upstream HTTP error".into()),
-        SearchError::Parse(_) => McpError::Execution("web search response parse failed".into()),
-        SearchError::Upstream(_) => McpError::Execution("web search upstream error".into()),
+        SearchError::Http(_) => GadgetError::Execution("web search upstream HTTP error".into()),
+        SearchError::Parse(_) => GadgetError::Execution("web search response parse failed".into()),
+        SearchError::Upstream(_) => GadgetError::Execution("web search upstream error".into()),
     }
 }
 
@@ -638,7 +651,7 @@ mod tests {
 
     use crate::config::WikiConfig;
 
-    fn fresh_provider_no_search() -> (TempDir, KnowledgeToolProvider) {
+    fn fresh_provider_no_search() -> (TempDir, KnowledgeGadgetProvider) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = WikiConfig {
             root: dir.path().join("wiki"),
@@ -648,7 +661,7 @@ mod tests {
             max_page_bytes: 1024 * 1024,
         };
         let wiki = Arc::new(Wiki::open(cfg).unwrap());
-        let provider = KnowledgeToolProvider::with_components(wiki, None, 10);
+        let provider = KnowledgeGadgetProvider::with_components(wiki, None, 10);
         (dir, provider)
     }
 
@@ -720,9 +733,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_schemas_no_search_has_six_tools() {
+    fn gadget_schemas_no_search_has_six_tools() {
         let (_dir, p) = fresh_provider_no_search();
-        let schemas = p.tool_schemas();
+        let schemas = p.gadget_schemas();
         assert_eq!(schemas.len(), 6);
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
         for expected in [
@@ -745,7 +758,7 @@ mod tests {
     fn wiki_search_schema_uses_limit_field() {
         let (_dir, p) = fresh_provider_no_search();
         let schema = p
-            .tool_schemas()
+            .gadget_schemas()
             .into_iter()
             .find(|s| s.name == "wiki.search")
             .expect("wiki.search schema");
@@ -758,11 +771,11 @@ mod tests {
     #[test]
     fn wiki_list_tier_is_read_wiki_write_tier_is_write() {
         let (_dir, p) = fresh_provider_no_search();
-        let schemas = p.tool_schemas();
+        let schemas = p.gadget_schemas();
         let list = schemas.iter().find(|s| s.name == "wiki.list").unwrap();
         let write = schemas.iter().find(|s| s.name == "wiki.write").unwrap();
-        assert!(matches!(list.tier, Tier::Read));
-        assert!(matches!(write.tier, Tier::Write));
+        assert!(matches!(list.tier, GadgetTier::Read));
+        assert!(matches!(write.tier, GadgetTier::Write));
     }
 
     #[tokio::test]
@@ -837,7 +850,7 @@ mod tests {
             .await
             .expect_err("should be blocked");
         match err {
-            McpError::Denied { reason } => {
+            GadgetError::Denied { reason } => {
                 assert!(reason.contains("pem_private_key"), "reason: {reason}");
             }
             other => panic!("wrong variant: {other:?}"),
@@ -851,7 +864,7 @@ mod tests {
             .call("wiki.write", json!({"name": "../escape", "content": "x"}))
             .await
             .expect_err("path escape");
-        assert!(matches!(err, McpError::InvalidArgs(_)));
+        assert!(matches!(err, GadgetError::InvalidArgs(_)));
     }
 
     #[tokio::test]
@@ -865,7 +878,7 @@ mod tests {
             max_page_bytes: 10,
         };
         let wiki = Arc::new(Wiki::open(cfg).unwrap());
-        let p = KnowledgeToolProvider::with_components(wiki, None, 10);
+        let p = KnowledgeGadgetProvider::with_components(wiki, None, 10);
         let err = p
             .call(
                 "wiki.write",
@@ -874,7 +887,7 @@ mod tests {
             .await
             .expect_err("too large");
         match err {
-            McpError::InvalidArgs(msg) => {
+            GadgetError::InvalidArgs(msg) => {
                 assert!(msg.contains("page too large"));
                 assert!(msg.contains("100"));
                 assert!(msg.contains("10"));
@@ -891,7 +904,7 @@ mod tests {
             .await
             .expect_err("missing name");
         match err {
-            McpError::InvalidArgs(msg) => assert!(msg.contains("'name'")),
+            GadgetError::InvalidArgs(msg) => assert!(msg.contains("'name'")),
             other => panic!("wrong variant: {other:?}"),
         }
     }
@@ -903,7 +916,7 @@ mod tests {
             .call("wiki.get", json!({"name": 42}))
             .await
             .expect_err("wrong type");
-        assert!(matches!(err, McpError::InvalidArgs(_)));
+        assert!(matches!(err, GadgetError::InvalidArgs(_)));
     }
 
     #[tokio::test]
@@ -914,7 +927,7 @@ mod tests {
             .await
             .expect_err("not found");
         match err {
-            McpError::Execution(msg) => assert!(msg.contains("not found")),
+            GadgetError::Execution(msg) => assert!(msg.contains("not found")),
             other => panic!("wrong variant: {other:?}"),
         }
     }
@@ -927,7 +940,7 @@ mod tests {
             .await
             .expect_err("unknown");
         match err {
-            McpError::UnknownTool(name) => assert_eq!(name, "wiki.nonexistent"),
+            GadgetError::UnknownGadget(name) => assert_eq!(name, "wiki.nonexistent"),
             other => panic!("wrong variant: {other:?}"),
         }
     }
@@ -940,7 +953,7 @@ mod tests {
             .await
             .expect_err("denied");
         match err {
-            McpError::Denied { reason } => assert!(reason.contains("not configured")),
+            GadgetError::Denied { reason } => assert!(reason.contains("not configured")),
             other => panic!("wrong variant: {other:?}"),
         }
     }
@@ -967,7 +980,7 @@ mod tests {
             EmbeddingWriteMode::Sync,
         ));
         let provider =
-            KnowledgeToolProvider::with_components_and_semantic(wiki, None, Some(semantic), 10);
+            KnowledgeGadgetProvider::with_components_and_semantic(wiki, None, Some(semantic), 10);
 
         provider
             .call(
@@ -1029,10 +1042,10 @@ timeout_secs = 5
             .expect("knowledge cfg");
         let env = gadgetron_core::agent::config::FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
         let provider =
-            KnowledgeToolProvider::new_with_env(cfg, Some(harness.pool.clone()), &env).unwrap();
+            KnowledgeGadgetProvider::new_with_env(cfg, Some(harness.pool.clone()), &env).unwrap();
 
         let schema = provider
-            .tool_schemas()
+            .gadget_schemas()
             .into_iter()
             .find(|s| s.name == "wiki.search")
             .expect("search schema");

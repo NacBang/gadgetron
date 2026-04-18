@@ -10,7 +10,7 @@
 //!
 //! The `Wiki` aggregate (open + read + write with full M5 enforcement chain)
 //! is assembled once `search::searxng` lands and Phase 3 wires the
-//! `KnowledgeToolProvider` on top.
+//! `KnowledgeGadgetProvider` on top.
 
 pub mod chunking;
 pub mod frontmatter;

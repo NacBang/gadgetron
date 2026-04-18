@@ -3,7 +3,7 @@ name = "gadgetron-penny"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Penny agent adapter — Claude Code subprocess + McpToolRegistry dispatch"
+description = "Penny agent adapter — Claude Code subprocess + GadgetRegistry dispatch"
 
 [lib]
 path = "src/lib.rs"

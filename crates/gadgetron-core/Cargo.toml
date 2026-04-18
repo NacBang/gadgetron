@@ -15,3 +15,11 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+# Bundle manifest (ADR-P2A-10-ADDENDUM-01 §3 / W1 foundation) — BundleManifest.version
+semver = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+# Writable-path probing for `bundles_home` resolver tests. `tempfile` is in
+# workspace dev-dep catalog; `gadgetron-core` becomes the first consumer.
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }

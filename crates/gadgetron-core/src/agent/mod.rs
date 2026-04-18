@@ -1,21 +1,23 @@
 //! Agent-Centric Control Plane types.
 //!
-//! Agent (Claude Code) permission model, brain model selection, MCP tool
-//! registry plugin interface. See:
+//! Agent (Claude Code) permission model, brain model selection, Gadget
+//! registry provider interface. See:
 //!
 //! - D-20260414-04 (decision log)
 //! - ADR-P2A-05 (agent-centric control plane)
-//! - docs/design/phase2/04-mcp-tool-registry.md
+//! - ADR-P2A-10 (Bundle / Plug / Gadget terminology)
+//! - docs/design/phase2/04-gadget-registry.md
 //!
 //! Submodules:
-//! - [`config`] — `AgentConfig`, `BrainConfig`, `ToolsConfig`, + validation
-//! - [`tools`] — `McpToolProvider` trait, `ToolSchema`, `Tier`, `ToolResult`, `McpError`
+//! - [`config`] — `AgentConfig`, `BrainConfig`, `GadgetsConfig`, + validation
+//! - [`tools`] — `GadgetProvider` trait, `GadgetSchema`, `GadgetTier`,
+//!   `GadgetResult`, `GadgetError`
 
 pub mod config;
 pub mod tools;
 
 pub use config::{
-    AgentConfig, BrainConfig, BrainMode, BrainShimConfig, DestructiveToolsConfig,
-    ExtraConfirmation, ToolMode, ToolsConfig, WriteToolsConfig,
+    AgentConfig, BrainConfig, BrainMode, BrainShimConfig, DestructiveGadgetsConfig,
+    ExtraConfirmation, GadgetMode, GadgetsConfig, WriteGadgetsConfig,
 };
-pub use tools::{McpError, McpToolProvider, Tier, ToolResult, ToolSchema};
+pub use tools::{GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier};

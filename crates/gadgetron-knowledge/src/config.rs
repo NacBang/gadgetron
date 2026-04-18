@@ -437,7 +437,7 @@ pub struct KnowledgeConfig {
     pub wiki_max_page_bytes: usize,
 
     /// Nested `[knowledge.search]` block. When `None`, the `web.search`
-    /// MCP tool is omitted from the `KnowledgeToolProvider` manifest.
+    /// Gadget is omitted from the `KnowledgeGadgetProvider` manifest.
     #[serde(default)]
     pub search: Option<SearchConfig>,
 

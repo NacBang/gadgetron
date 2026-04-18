@@ -1,26 +1,26 @@
-//! Cross-crate integration tests: `McpToolRegistry` registering a real
-//! `KnowledgeToolProvider` and exercising dispatch + allowed-tools
+//! Cross-crate integration tests: `GadgetRegistry` registering a real
+//! `KnowledgeGadgetProvider` and exercising dispatch + allowed-tools
 //! filtering end-to-end.
 //!
 //! This is the first test that proves the registry (Step 10) + the
-//! Wiki aggregate (Step 11) + the `KnowledgeToolProvider` (Step 11)
-//! compose correctly via the stable `McpToolProvider` trait surface
-//! from `gadgetron-core`.
+//! Wiki aggregate (Step 11) + the `KnowledgeGadgetProvider` (Step 11)
+//! compose correctly via the stable `GadgetProvider` trait surface
+//! from `gadgetron-core` (terminology per ADR-P2A-10).
 //!
 //! Spec: `00-overview.md §15` Phase 3 Step 14.
 
 use std::sync::Arc;
 
-use gadgetron_core::agent::config::{AgentConfig, ToolMode};
-use gadgetron_core::agent::tools::McpError;
+use gadgetron_core::agent::config::{AgentConfig, GadgetMode};
+use gadgetron_core::agent::tools::GadgetError;
 use gadgetron_knowledge::config::WikiConfig;
-use gadgetron_knowledge::mcp::KnowledgeToolProvider;
+use gadgetron_knowledge::gadget::KnowledgeGadgetProvider;
 use gadgetron_knowledge::wiki::Wiki;
-use gadgetron_penny::{McpToolRegistry, McpToolRegistryBuilder};
+use gadgetron_penny::{GadgetRegistry, GadgetRegistryBuilder};
 use serde_json::json;
 use tempfile::TempDir;
 
-fn fresh_provider() -> (TempDir, KnowledgeToolProvider) {
+fn fresh_provider() -> (TempDir, KnowledgeGadgetProvider) {
     let dir = tempfile::tempdir().expect("tempdir");
     let cfg = WikiConfig {
         root: dir.path().join("wiki"),
@@ -30,16 +30,16 @@ fn fresh_provider() -> (TempDir, KnowledgeToolProvider) {
         max_page_bytes: 1024 * 1024,
     };
     let wiki = Arc::new(Wiki::open(cfg).expect("wiki open"));
-    let provider = KnowledgeToolProvider::with_components(wiki, None, 10);
+    let provider = KnowledgeGadgetProvider::with_components(wiki, None, 10);
     (dir, provider)
 }
 
-fn register_knowledge(provider: KnowledgeToolProvider) -> McpToolRegistry {
-    let mut builder = McpToolRegistryBuilder::new();
+fn register_knowledge(provider: KnowledgeGadgetProvider) -> GadgetRegistry {
+    let mut builder = GadgetRegistryBuilder::new();
     builder
         .register(Arc::new(provider))
         .expect("register knowledge provider");
-    // Default AgentConfig permits wiki.write (Auto); other Write tools
+    // Default AgentConfig permits wiki.write (Auto); other Write Gadgets
     // would be filtered by the L3 gate if present.
     builder.freeze(&AgentConfig::default())
 }
@@ -100,7 +100,7 @@ fn build_allowed_tools_with_wiki_write_never_omits_write() {
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     let mut cfg = AgentConfig::default();
-    cfg.tools.write.wiki_write = ToolMode::Never;
+    cfg.gadgets.write.wiki_write = GadgetMode::Never;
     let allowed = registry.build_allowed_tools(&cfg);
     assert!(!allowed.contains(&"wiki.write".to_string()));
     assert!(allowed.contains(&"wiki.list".to_string()));
@@ -152,7 +152,7 @@ async fn dispatch_unknown_tool_returns_unknown_tool_error() {
         .await
         .expect_err("unknown");
     match err {
-        McpError::UnknownTool(name) => assert_eq!(name, "nonexistent.tool"),
+        GadgetError::UnknownGadget(name) => assert_eq!(name, "nonexistent.tool"),
         other => panic!("wrong variant: {other:?}"),
     }
 }
@@ -172,7 +172,7 @@ async fn dispatch_wiki_write_blocked_credential_returns_denied() {
         .await
         .expect_err("must block");
     match err {
-        McpError::Denied { reason } => {
+        GadgetError::Denied { reason } => {
             assert!(
                 reason.contains("pem_private_key"),
                 "reason must identify the pattern: {reason}"
@@ -246,5 +246,5 @@ async fn dispatch_wiki_search_via_registry_returns_hits() {
         .expect("search");
     let hits = result.content["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["name"], "notes");
+    assert_eq!(hits[0]["page_name"], "notes");
 }

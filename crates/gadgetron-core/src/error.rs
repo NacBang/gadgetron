@@ -50,10 +50,12 @@ impl fmt::Display for NodeErrorKind {
 /// # Subprocess kinds (P2A, 02-penny-agent.md v4)
 /// - `NotInstalled`, `SpawnFailed`, `AgentError`, `Timeout`
 ///
-/// # MCP tool dispatch kinds (P2A, 04-mcp-tool-registry.md v2 §10.1)
+/// # Gadget dispatch kinds (P2A, 04-gadget-registry.md §10.1)
 /// - `ToolUnknown`, `ToolDenied`, `ToolRateLimited`, `ToolApprovalTimeout`,
-///   `ToolInvalidArgs`, `ToolExecution`
-/// - Populated by `impl From<McpError> for GadgetronError` at the dispatch
+///   `ToolInvalidArgs`, `ToolExecution` (variant names retained for stable
+///   `penny_tool_*` error codes; carry Gadget-dispatch failures after the
+///   ADR-P2A-10 terminology rename)
+/// - Populated by `impl From<GadgetError> for GadgetronError` at the dispatch
 ///   boundary. `ToolApprovalTimeout` is reserved for P2B (no approval flow
 ///   in P2A per ADR-P2A-06) but the variant ships in P2A for forward
 ///   compatibility of the enum surface.
@@ -75,8 +77,8 @@ pub enum PennyErrorKind {
     /// Subprocess wallclock exceeded `penny.request_timeout_secs`. HTTP 504.
     Timeout { seconds: u64 },
 
-    // ---- MCP tool dispatch kinds (04 v2 §10.1) ----
-    /// Agent called a tool name that is not registered with the MCP tool
+    // ---- Gadget dispatch kinds (04-gadget-registry.md §10.1) ----
+    /// Agent called a Gadget name that is not registered with the Gadget
     /// registry. Indicates version mismatch between Claude Code's cached
     /// tool manifest and the live registry. HTTP 500.
     ToolUnknown { name: String },
@@ -247,6 +249,17 @@ pub enum GadgetronError {
         kind: WikiErrorKind,
         message: String,
     },
+
+    /// Bundle subsystem error (Phase 2B). Manifest parse failures, install
+    /// hook errors, bundles-home resolution failures. Added by
+    /// ADR-P2A-10-ADDENDUM-01 §4 / D-20260418-07 W1 foundation.
+    ///
+    /// The inner `BundleError` carries the structured kind (`Manifest`,
+    /// `Install`, `PlugId`, `Home`); this variant is the single `GadgetronError`
+    /// seam so the gateway renders bundle failures through the same code
+    /// path as every other subsystem.
+    #[error("Bundle error: {0}")]
+    Bundle(#[from] crate::bundle::errors::BundleError),
 }
 
 impl GadgetronError {
@@ -297,6 +310,12 @@ impl GadgetronError {
                 WikiErrorKind::GitCorruption { .. } => "wiki_git_corrupted",
                 WikiErrorKind::Conflict { .. } => "wiki_conflict",
                 WikiErrorKind::PageNotFound { .. } => "wiki_page_not_found",
+            },
+            Self::Bundle(e) => match e {
+                crate::bundle::errors::BundleError::Manifest(_) => "bundle_manifest_error",
+                crate::bundle::errors::BundleError::Install(_) => "bundle_install_failed",
+                crate::bundle::errors::BundleError::PlugId(_) => "bundle_plug_id_invalid",
+                crate::bundle::errors::BundleError::Home(_) => "bundle_home_unresolvable",
             },
         }
     }
@@ -372,6 +391,10 @@ impl GadgetronError {
                 WikiErrorKind::PageNotFound { path } =>
                     format!("Wiki page not found: {path}. Check the page name; use `wiki.list` or `wiki.search` to find existing pages."),
             },
+            // Bundle errors surface the inner `BundleError` text verbatim —
+            // these are operator-facing messages (startup / install time)
+            // and the inner text already carries the remediation hint.
+            Self::Bundle(e) => format!("A bundle subsystem error occurred: {e}"),
         }
     }
 
@@ -405,6 +428,15 @@ impl GadgetronError {
                 WikiErrorKind::CredentialBlocked { .. } => "invalid_request_error",
                 WikiErrorKind::PageNotFound { .. } => "invalid_request_error",
                 _ => "server_error",
+            },
+            // Bundle errors are config / install-time; `Manifest` + `PlugId`
+            // are operator-supplied data → `invalid_request_error`. `Install`
+            // + `Home` are daemon-side failures → `server_error`.
+            Self::Bundle(e) => match e {
+                crate::bundle::errors::BundleError::Manifest(_)
+                | crate::bundle::errors::BundleError::PlugId(_) => "invalid_request_error",
+                crate::bundle::errors::BundleError::Install(_)
+                | crate::bundle::errors::BundleError::Home(_) => "server_error",
             },
         }
     }
@@ -453,6 +485,16 @@ impl GadgetronError {
                 WikiErrorKind::Conflict { .. } => 409,
                 WikiErrorKind::PageNotFound { .. } => 404,
             },
+            // Bundle errors are configuration / install-time failures. `Manifest`
+            // + `PlugId` classify as operator-fixable config mistakes (400);
+            // `Install` + `Home` are daemon-side misconfiguration blocking
+            // startup (500).
+            Self::Bundle(e) => match e {
+                crate::bundle::errors::BundleError::Manifest(_)
+                | crate::bundle::errors::BundleError::PlugId(_) => 400,
+                crate::bundle::errors::BundleError::Install(_)
+                | crate::bundle::errors::BundleError::Home(_) => 500,
+            },
         }
     }
 }
@@ -460,38 +502,38 @@ impl GadgetronError {
 pub type Result<T> = std::result::Result<T, GadgetronError>;
 
 // ---------------------------------------------------------------------------
-// McpError → GadgetronError conversion (04-mcp-tool-registry.md v2 §10.1)
+// GadgetError → GadgetronError conversion (04-gadget-registry.md §10.1)
 // ---------------------------------------------------------------------------
 
-/// Maps an `McpError` from the MCP dispatch boundary into a
+/// Maps a `GadgetError` from the Gadget dispatch boundary into a
 /// `GadgetronError::Penny` variant so the gateway can render HTTP + SSE
 /// responses through the single user-facing error path per D-13.
 ///
-/// Called at the `PennyProvider::chat_stream` seam when a tool call
+/// Called at the `PennyProvider::chat_stream` seam when a Gadget call
 /// returns `Err`. The `message` field is a generic one-line summary; the
 /// `kind` holds the structured payload that `error_message()`,
 /// `http_status_code()`, and `error_code()` consume.
-impl From<crate::agent::tools::McpError> for GadgetronError {
-    fn from(err: crate::agent::tools::McpError) -> Self {
-        use crate::agent::tools::McpError;
+impl From<crate::agent::tools::GadgetError> for GadgetronError {
+    fn from(err: crate::agent::tools::GadgetError) -> Self {
+        use crate::agent::tools::GadgetError;
         let kind = match err {
-            McpError::UnknownTool(name) => PennyErrorKind::ToolUnknown { name },
-            McpError::Denied { reason } => PennyErrorKind::ToolDenied { reason },
-            McpError::RateLimited {
-                tool,
+            GadgetError::UnknownGadget(name) => PennyErrorKind::ToolUnknown { name },
+            GadgetError::Denied { reason } => PennyErrorKind::ToolDenied { reason },
+            GadgetError::RateLimited {
+                gadget,
                 remaining,
                 limit,
             } => PennyErrorKind::ToolRateLimited {
-                tool,
+                tool: gadget,
                 remaining,
                 limit,
             },
-            McpError::ApprovalTimeout { secs } => PennyErrorKind::ToolApprovalTimeout { secs },
-            McpError::InvalidArgs(reason) => PennyErrorKind::ToolInvalidArgs { reason },
-            McpError::Execution(reason) => PennyErrorKind::ToolExecution { reason },
+            GadgetError::ApprovalTimeout { secs } => PennyErrorKind::ToolApprovalTimeout { secs },
+            GadgetError::InvalidArgs(reason) => PennyErrorKind::ToolInvalidArgs { reason },
+            GadgetError::Execution(reason) => PennyErrorKind::ToolExecution { reason },
         };
         // Generic summary — the kind carries the structured detail.
-        let message = format!("tool dispatch error: {kind}");
+        let message = format!("gadget dispatch error: {kind}");
         GadgetronError::Penny { kind, message }
     }
 }
@@ -1108,12 +1150,12 @@ mod tests {
         );
     }
 
-    // ---- MCP tool dispatch conversions (04 v2 §10.1) ----
+    // ---- Gadget dispatch conversions (04-gadget-registry.md §10.1) ----
 
     #[test]
-    fn from_mcp_unknown_tool_maps_to_tool_unknown_kind() {
+    fn from_gadget_unknown_maps_to_tool_unknown_kind() {
         let err: GadgetronError =
-            crate::agent::tools::McpError::UnknownTool("wiki.ghost".into()).into();
+            crate::agent::tools::GadgetError::UnknownGadget("wiki.ghost".into()).into();
         assert_eq!(err.error_code(), "penny_tool_unknown");
         assert_eq!(err.http_status_code(), 500);
         let msg = err.error_message();
@@ -1121,9 +1163,9 @@ mod tests {
     }
 
     #[test]
-    fn from_mcp_denied_preserves_reason() {
-        let err: GadgetronError = crate::agent::tools::McpError::Denied {
-            reason: "tool disabled by policy (never)".into(),
+    fn from_gadget_denied_preserves_reason() {
+        let err: GadgetronError = crate::agent::tools::GadgetError::Denied {
+            reason: "gadget disabled by policy (never)".into(),
         }
         .into();
         assert_eq!(err.error_code(), "penny_tool_denied");
@@ -1132,9 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn from_mcp_rate_limited_includes_tool_and_counts() {
-        let err: GadgetronError = crate::agent::tools::McpError::RateLimited {
-            tool: "infra.deploy_model".into(),
+    fn from_gadget_rate_limited_includes_name_and_counts() {
+        let err: GadgetronError = crate::agent::tools::GadgetError::RateLimited {
+            gadget: "infra.deploy_model".into(),
             remaining: 0,
             limit: 3,
         }
@@ -1147,27 +1189,27 @@ mod tests {
     }
 
     #[test]
-    fn from_mcp_approval_timeout_maps_to_504() {
+    fn from_gadget_approval_timeout_maps_to_504() {
         let err: GadgetronError =
-            crate::agent::tools::McpError::ApprovalTimeout { secs: 60 }.into();
+            crate::agent::tools::GadgetError::ApprovalTimeout { secs: 60 }.into();
         assert_eq!(err.error_code(), "penny_tool_approval_timeout");
         assert_eq!(err.http_status_code(), 504);
         assert!(err.error_message().contains("60"));
     }
 
     #[test]
-    fn from_mcp_invalid_args_maps_to_400() {
+    fn from_gadget_invalid_args_maps_to_400() {
         let err: GadgetronError =
-            crate::agent::tools::McpError::InvalidArgs("missing field 'path'".into()).into();
+            crate::agent::tools::GadgetError::InvalidArgs("missing field 'path'".into()).into();
         assert_eq!(err.error_code(), "penny_tool_invalid_args");
         assert_eq!(err.http_status_code(), 400);
         assert!(err.error_message().contains("missing field"));
     }
 
     #[test]
-    fn from_mcp_execution_maps_to_500() {
+    fn from_gadget_execution_maps_to_500() {
         let err: GadgetronError =
-            crate::agent::tools::McpError::Execution("SearXNG returned 502".into()).into();
+            crate::agent::tools::GadgetError::Execution("SearXNG returned 502".into()).into();
         assert_eq!(err.error_code(), "penny_tool_execution");
         assert_eq!(err.http_status_code(), 500);
         assert!(err.error_message().contains("SearXNG"));

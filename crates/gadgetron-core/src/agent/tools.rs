@@ -1,30 +1,35 @@
-//! MCP tool registry plugin interface.
+//! Gadget registry interface — the Bundle-Penny seam.
 //!
-//! See `docs/design/phase2/04-mcp-tool-registry.md` §2 + §13.
-//! Decision: D-20260414-04, ADR-P2A-05.
+//! See `docs/design/phase2/04-gadget-registry.md` §2 + §13.
+//! Decision: D-20260414-04, ADR-P2A-05, ADR-P2A-10.
 //!
-//! The `McpToolProvider` trait is the stable seam between:
-//! - `gadgetron-knowledge::mcp::KnowledgeToolProvider` (P2A — wiki + web_search)
-//! - `gadgetron-infra::mcp::InfraToolProvider` (P2C — nodes, GPUs, providers)
-//! - `gadgetron-scheduler::mcp::SchedulerToolProvider` (P3 — slurm, k8s jobs)
-//! - `gadgetron-cluster::mcp::ClusterToolProvider` (P3 — kubectl, helm)
+//! The `GadgetProvider` trait is the stable seam between:
+//! - `gadgetron-knowledge::gadget::KnowledgeGadgetProvider` (P2A — wiki + web_search)
+//! - `bundles/ai-infra::gadget::InfraGadgetProvider` (P2B+ — nodes, GPUs, providers)
+//! - `bundles/cicd::gadget::CiCdGadgetProvider` (P3 — build, deploy)
+//! - `bundles/server::gadget::ServerGadgetProvider` (P3 — SSH primitives)
 //!
-//! Adding a new tool category = new `impl McpToolProvider for XxxProvider {}`
-//! plus a `McpToolRegistry::register(...)` call at startup. The trait itself
+//! Adding a new Gadget namespace = new `impl GadgetProvider for XxxProvider {}`
+//! plus a `GadgetRegistry::register(...)` call at startup. The trait itself
 //! is not expected to change across phases.
+//!
+//! Terminology (per `docs/architecture/glossary.md`):
+//! - **Gadget** — MCP tool consumed by Penny. Defined by a `GadgetSchema`.
+//! - **GadgetProvider** — Rust supplier of Gadgets, owned by a Bundle.
+//! - **Bundle** — distribution unit that provides Plugs and/or GadgetProviders.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// Stable plugin interface for MCP tool providers.
+/// Stable Bundle-facing interface for Gadget suppliers.
 ///
-/// Each provider bundles a set of related tools under a namespace (category).
-/// Providers are registered statically at startup via `McpToolRegistry::register`.
+/// Each provider bundles a set of related Gadgets under a namespace (category).
+/// Providers are registered statically at startup via `GadgetRegistry::register`.
 /// **The agent cannot register, deregister, or mutate providers** — this is a
-/// hard scope boundary enforced by `McpToolRegistry` (ADR-P2A-05 §14).
+/// hard scope boundary enforced by `GadgetRegistry` (ADR-P2A-05 §14).
 #[async_trait]
-pub trait McpToolProvider: Send + Sync + 'static {
-    /// Namespace for this provider's tools. Tool names are `"{category}.{tool}"`.
+pub trait GadgetProvider: Send + Sync + 'static {
+    /// Namespace for this provider's Gadgets. Gadget names are `"{category}.{gadget}"`.
     ///
     /// Reserved categories:
     /// - `"knowledge"` — wiki, web search, (P2B) vectors
@@ -38,17 +43,17 @@ pub trait McpToolProvider: Send + Sync + 'static {
     /// (ADR-P2A-05 §14 — scope boundary).
     fn category(&self) -> &'static str;
 
-    /// Enumerate the tool schemas this provider exposes. Called once at startup.
-    fn tool_schemas(&self) -> Vec<ToolSchema>;
+    /// Enumerate the Gadget schemas this provider exposes. Called once at startup.
+    fn gadget_schemas(&self) -> Vec<GadgetSchema>;
 
-    /// Dispatch a tool call.
+    /// Dispatch a Gadget call.
     ///
     /// `name` is the full namespaced name (e.g. `"wiki.read"`, not `"read"`).
-    /// The registry routes by full tool name via a HashMap lookup — it does
-    /// NOT assume `name.starts_with(self.category())`. Tool names and
+    /// The registry routes by full Gadget name via a HashMap lookup — it does
+    /// NOT assume `name.starts_with(self.category())`. Gadget names and
     /// categories are independent identifiers; a `"knowledge"` category may
-    /// host tools named `"wiki.read"`, `"web.search"`, etc.
-    async fn call(&self, name: &str, args: serde_json::Value) -> Result<ToolResult, McpError>;
+    /// host Gadgets named `"wiki.read"`, `"web.search"`, etc.
+    async fn call(&self, name: &str, args: serde_json::Value) -> Result<GadgetResult, GadgetError>;
 
     /// Optional runtime availability check. A provider gated on a Cargo
     /// feature or runtime config returns `false` to be excluded from the
@@ -58,15 +63,15 @@ pub trait McpToolProvider: Send + Sync + 'static {
     }
 }
 
-/// Schema for a single tool exposed by a provider.
+/// Schema for a single Gadget exposed by a provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolSchema {
-    /// Namespaced: `{category}.{tool_name}`. Must match the `--allowed-tools`
+pub struct GadgetSchema {
+    /// Namespaced: `{category}.{gadget_name}`. Must match the `--allowed-tools`
     /// format used by Claude Code.
     pub name: String,
     /// Tier — determines the default permission mode.
-    pub tier: Tier,
-    /// Human-readable description. Shown to the agent in the tool manifest
+    pub tier: GadgetTier,
+    /// Human-readable description. Shown to the agent in the Gadget manifest
     /// AND on the approval card, so it must be end-user-friendly.
     pub description: String,
     /// JSON Schema (draft-07) for the `args` object.
@@ -77,11 +82,11 @@ pub struct ToolSchema {
     pub idempotent: Option<bool>,
 }
 
-/// Tool risk tier. Declared by the tool author on `ToolSchema`, consumed by
-/// the permission model (`ToolMode`) and the approval card renderer.
+/// Gadget risk tier. Declared by the Gadget author on `GadgetSchema`, consumed by
+/// the permission model (`GadgetMode`) and the approval card renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Tier {
+pub enum GadgetTier {
     /// Observes state; no mutation.
     Read,
     /// Mutates state; reversible.
@@ -91,28 +96,29 @@ pub enum Tier {
     Destructive,
 }
 
-/// Tool call outcome returned to Claude Code as a `tool_result` block.
+/// Gadget call outcome returned to Claude Code as a `tool_result` block
+/// (MCP wire-level term; internally it is a Gadget result).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
+pub struct GadgetResult {
     /// Content returned to the agent. Rendered in the tool_result block.
     pub content: serde_json::Value,
-    /// If true, Claude Code treats this as a tool failure.
+    /// If true, Claude Code treats this as a Gadget failure.
     #[serde(default)]
     pub is_error: bool,
 }
 
-/// Structured tool execution errors. Mapped to `ToolResult { is_error: true }`
+/// Structured Gadget execution errors. Mapped to `GadgetResult { is_error: true }`
 /// at the MCP dispatch boundary; the agent sees a friendly message + the
 /// `error_code` for machine parsing.
 #[derive(Debug, thiserror::Error)]
-pub enum McpError {
-    #[error("tool not found: {0}")]
-    UnknownTool(String),
+pub enum GadgetError {
+    #[error("gadget not found: {0}")]
+    UnknownGadget(String),
     #[error("denied by policy: {reason}")]
     Denied { reason: String },
-    #[error("rate limit exceeded for {tool}: {remaining}/{limit} this hour")]
+    #[error("rate limit exceeded for {gadget}: {remaining}/{limit} this hour")]
     RateLimited {
-        tool: String,
+        gadget: String,
         remaining: u32,
         limit: u32,
     },
@@ -120,15 +126,25 @@ pub enum McpError {
     ApprovalTimeout { secs: u64 },
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
-    #[error("tool execution failed: {0}")]
+    #[error("gadget execution failed: {0}")]
     Execution(String),
 }
 
-impl McpError {
+impl GadgetError {
     /// Stable machine-readable error code for agent tool_result content.
+    ///
+    /// **Wire-frozen strings (do NOT rename).** These codes are persisted
+    /// in `audit_log.error_code` (migration `20260416000001_tool_audit_events.sql`)
+    /// and consumed by downstream SIEM / BI queries. They name **MCP
+    /// protocol-level states** (unknown tool, denied, rate-limited, invalid
+    /// args, execution failed, approval timeout) and are therefore stable
+    /// across the Driver→Plug→Gadget naming evolution. Per ADR-P2A-10
+    /// §"Unchanged" (security-compliance-lead review, 2026-04-18), the
+    /// Rust type name `GadgetError` may change but the string table below
+    /// stays bit-identical to the v0.2 `McpError` codes.
     pub fn error_code(&self) -> &'static str {
         match self {
-            Self::UnknownTool(_) => "mcp_unknown_tool",
+            Self::UnknownGadget(_) => "mcp_unknown_tool",
             Self::Denied { .. } => "mcp_denied_by_policy",
             Self::RateLimited { .. } => "mcp_rate_limited",
             Self::ApprovalTimeout { .. } => "mcp_approval_timeout",
@@ -166,37 +182,37 @@ pub const RESERVED_TOOL_NAMES: &[&str] = &[
 /// claiming `category() == "agent"` is rejected at registration time.
 pub const RESERVED_CATEGORY: &str = "agent";
 
-/// Validate that a tool schema does not violate the reserved-namespace
-/// cardinal rule. Called by `McpToolRegistry::register` on every tool.
+/// Validate that a Gadget schema does not violate the reserved-namespace
+/// cardinal rule. Called by `GadgetRegistry::register` on every Gadget.
 ///
 /// Three defense layers (ADR-P2A-05 §14, SEC-MCP-B3):
 /// 1. Category cannot be `"agent"` — the entire category is reserved.
-/// 2. Tool name cannot start with `"agent."` — defense in depth against a
+/// 2. Gadget name cannot start with `"agent."` — defense in depth against a
 ///    provider declaring a non-agent category but smuggling in an
-///    `agent.set_brain`-style tool.
+///    `agent.set_brain`-style Gadget.
 /// 3. Specific well-known meta-operation names are banned regardless of
 ///    namespace prefix (covers unnamespaced legacy names).
-pub fn ensure_tool_name_allowed(name: &str, category: &str) -> Result<(), McpError> {
+pub fn ensure_tool_name_allowed(name: &str, category: &str) -> Result<(), GadgetError> {
     if category == RESERVED_CATEGORY {
-        return Err(McpError::Denied {
+        return Err(GadgetError::Denied {
             reason: format!(
-                "category 'agent' is permanently reserved and cannot host tools \
+                "category 'agent' is permanently reserved and cannot host Gadgets \
                  (ADR-P2A-05 §14); provider {name:?} rejected"
             ),
         });
     }
     if name.starts_with("agent.") {
-        return Err(McpError::Denied {
+        return Err(GadgetError::Denied {
             reason: format!(
-                "tool {name:?} starts with the reserved 'agent.' prefix \
+                "gadget {name:?} starts with the reserved 'agent.' prefix \
                  (ADR-P2A-05 §14) — the agent cannot modify its own environment"
             ),
         });
     }
     if RESERVED_TOOL_NAMES.contains(&name) {
-        return Err(McpError::Denied {
+        return Err(GadgetError::Denied {
             reason: format!(
-                "tool {name:?} is in the reserved meta-operation namespace \
+                "gadget {name:?} is in the reserved meta-operation namespace \
                  (ADR-P2A-05 §14) — the agent cannot modify its own environment"
             ),
         });
@@ -239,22 +255,48 @@ mod tests {
 
     #[test]
     fn tier_round_trips_serde() {
-        let t = Tier::Destructive;
+        let t = GadgetTier::Destructive;
         let j = serde_json::to_string(&t).unwrap();
         assert_eq!(j, "\"destructive\"");
-        let back: Tier = serde_json::from_str(&j).unwrap();
+        let back: GadgetTier = serde_json::from_str(&j).unwrap();
         assert_eq!(back, t);
     }
 
     #[test]
-    fn mcp_error_codes_are_stable() {
+    fn gadget_error_codes_are_wire_frozen() {
+        // Wire-frozen strings per ADR-P2A-10 security review (D-20260418-05):
+        // these codes are persisted in audit_log and downstream consumers
+        // (SIEM, BI) depend on them. Rust type rename McpError → GadgetError
+        // did NOT change the string table. Any diff here is a BREAKING CHANGE
+        // to audit consumers and requires a separate ADR.
         assert_eq!(
-            McpError::UnknownTool("x".into()).error_code(),
+            GadgetError::UnknownGadget("x".into()).error_code(),
             "mcp_unknown_tool"
         );
         assert_eq!(
-            McpError::Denied { reason: "x".into() }.error_code(),
+            GadgetError::Denied { reason: "x".into() }.error_code(),
             "mcp_denied_by_policy"
+        );
+        assert_eq!(
+            GadgetError::RateLimited {
+                gadget: "x".into(),
+                remaining: 0,
+                limit: 10,
+            }
+            .error_code(),
+            "mcp_rate_limited"
+        );
+        assert_eq!(
+            GadgetError::ApprovalTimeout { secs: 60 }.error_code(),
+            "mcp_approval_timeout"
+        );
+        assert_eq!(
+            GadgetError::InvalidArgs("bad".into()).error_code(),
+            "mcp_invalid_args"
+        );
+        assert_eq!(
+            GadgetError::Execution("boom".into()).error_code(),
+            "mcp_execution_failed"
         );
     }
 }

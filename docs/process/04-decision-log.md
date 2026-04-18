@@ -1681,4 +1681,467 @@ Penny 응답 포맷:
 
 ---
 
+## D-20260418-04: Extension 어휘 통일 — Bundle / Plug / Gadget trinity
+
+> **♻️ 2026-04-18 수정**: 당초 "Driver" 로 기록된 Axis A 명칭은 D-20260418-05 에서 **Plug** 로 교체됨 (동일일 외부 리뷰 반영). 본 엔트리의 "Driver" 용어는 전부 "Plug" 로 읽으시오. 그 외 Bundle / Gadget / Rust rename / CLI / config 결정은 유효.
+
+**날짜**: 2026-04-18
+**유형**: Architecture / Naming / Public API (사용자 직접 지시, 2026-04-18 세션)
+**상태**: 🟢 승인 (3 결정 동시 확정) — Axis A 명칭만 D-20260418-05 로 대체됨
+**관련 문서**: `docs/adr/ADR-P2A-10-bundle-driver-gadget-terminology.md` (신설), `docs/architecture/glossary.md` (신설)
+**Supersedes**: D-20260418-01 §(1) "플러그인 평면 분류" 의 **용어** 부분만 — plugin 이 3 개 개념을 섞고 있었다는 문제를 해결. D-20260418-01 의 **구조적** 결정 (flat peers, 3 primitive, EntityTree forest, DAG) 은 **그대로 유효**하고 이 결정은 그 위에 명칭을 재배열.
+
+### 배경
+
+사용자 2026-04-18 세션 지시 흐름:
+
+1. "graphify 프로젝트를 gadgetron 에 녹일 수 있을지 검토" — graphify 는 Python MCP stdio 유틸리티, gadgetron 의 "single binary" 와 정합성 없음
+2. "single rust binary 는 core 에만 해당. 외부 기능의 utility 를 도킹 할 플랫폼을 만들자" — core 바깥의 확장 platform 필요성 확인
+3. "core 확장 dock vs penny 기능 plugin 두 가지로 봐도 되나" — 2 축 분리 개념 제시
+4. "명칭도 저게 적당한지 논의" — Dock/Plugin 의 overload 문제 제기
+5. "Driver-Gadget 이게 의미적으로 맞을 것 같고, 번들 이름을 꼭 정해야하나" — Driver/Gadget 확정, Bundle 의 존재 필요성 질의
+6. "번들로 갑시다. 번들 트레잇은 번들이지. 축약합시다" — Bundle 확정, `Bundle` trait 이름, `gadgetron install` alias 채택
+
+**문제 (기존 어휘가 실패하는 지점)**:
+
+- `BackendPlugin` trait (06 doc §3) 가 `initialize(&mut PluginContext)` 에서 LlmProvider / Extractor / BlobStore / HTTP routes / MCP tools / seed pages 전부 등록 — 6 가지 관심사가 한 trait 에 섞여 있음
+- `McpToolProvider` (04 doc v2 §3) 는 MCP tool 만 공급 — `BackendPlugin` 과 독립 axis 인데 같은 "plugin" 단어 공유
+- 외부 유틸리티 (graphify, whisper, PaddleOCR) 는 두 trait 어느 쪽에도 안 맞음 — 제 3 의 플러그인 kind 가 암묵적으로 필요해짐
+- "이 plugin 이 Penny 한테 tool 을 주는가?" 가 매번 문서마다 다른 답 — 독자가 지칭 대상을 매번 재확인해야 함
+
+### 결정 (3 sub-decision 동시)
+
+#### (T1) Extension 은 **3 개 서로 다른 개념** 으로 분리
+
+| 개념 | Consumer | Interface | 성능 특성 | 배포 가능 runtime |
+|---|---|---|---|---|
+| **Bundle** | 운영자 (install/enable/disable 대상) | `Bundle` trait + `bundle.toml` manifest | 라이프사이클 단위 | Rust 컴파일 / Rust dylib / pip / npm / docker / binary-url |
+| **Driver** | Core (gateway, router, wiki, scheduler, embedding) | Rust trait impl (ex. `impl LlmProvider for OpenAi`) | Hot path 가능 (정적 디스패치) | **Rust in-process only** |
+| **Gadget** | Penny (LLM agent) | MCP tool schema (JSON) | Agent loop 수준 | In-core Rust / In-bundle Rust / subprocess / HTTP / wasm |
+
+하나의 Bundle 이 0..N Driver + 0..N Gadget 공급 가능. 3 형상 모두 valid: Driver-only Bundle (ex. `blob-s3`), Gadget-only Bundle (ex. `graphify`), Driver+Gadget Bundle (ex. `ai-infra`).
+
+#### (T2) Rust 심볼 rename (요약, 전체 목록은 ADR-P2A-10 §Rename scope)
+
+- `BackendPlugin` → **`Bundle`**
+- `PluginContext` → **`BundleContext`**
+- `McpToolProvider` → **`GadgetProvider`**
+- `McpToolRegistry` → **`GadgetRegistry`**
+- `Tier` → **`GadgetTier`**, `ToolMode` → **`GadgetMode`**
+- `ctx.register_extractor(...)` → **`ctx.drivers.extractors.register(...)`**
+- `ctx.mcp_registry_mut()` → **`ctx.gadgets_mut()`**
+- `gadgetron-penny::mcp_server` → **`gadgetron-penny::gadget_server`**
+- 변경 없음: `DisableBehavior`, `SeedPage`, `LlmProvider`, `Extractor`, `BlobStore`, `EntityKind` (Driver trait 이름들은 domain-specific 이라 유지)
+
+#### (T3) CLI / config / 디렉토리 rename
+
+- CLI 정식: `gadgetron bundle|driver|gadget <subcmd>`
+- CLI alias (운영자 편의): `gadgetron install <name>` = `gadgetron bundle install <name>`
+- `gadgetron mcp serve` → **`gadgetron gadget serve`** (1 릴리스 deprecation shim 유지)
+- Config: `[plugins.<name>]` → **`[bundles.<name>]`**, `[agent.tools]` → **`[agent.gadgets]`**
+- 디렉토리: `plugins/plugin-<name>/` → **`bundles/<name>/`** (5 개 target)
+
+### 반려 옵션
+
+- **Dock + Plugin** (사용자 원안 1) — `Dock` 의미 반전 (외부가 host 에 꽂힌다는 일반 직관의 역) + Docker 혼동. `Plugin` 은 오버로드 및 기존 `BackendPlugin` 과 충돌
+- **Port + Gadget + Adapter** (hexagonal architecture 정합) — `Port` 의 네트워크 포트 혼동, 2-word 용어 ("LlmProvider Port, OpenAi Adapter") 는 문서 verbose
+- **현 용어 유지 + 문서로 해석** — 용어 모호성이 영구 채무로 남음. Rename 비용은 한 번, 모호성 비용은 매 설계 리뷰마다 재발생
+- **두 개 entry-point trait (`DriverProvider` + `GadgetProvider`, Bundle trait 없음)** — 대부분 Bundle 이 양쪽 다 공급 → boilerplate 2 배, lifecycle 에 anchor 없음
+- **Bundle 대신 content 별 명명** ("Gadget package", "Driver package") — 혼합 Bundle (`ai-infra` 같은) 이 자연스러운 카테고리 없음, version/license/audit 는 분배 단위 granularity
+- **Kit** (Gadget Kit 어감 좋음) — "AI-infra Kit" 이 어색, Rust 생태계 discoverability 는 `Bundle` 이 우위
+
+### 사용자 결정
+
+**2026-04-18**: 3 결정 동시 승인.
+
+- Axis A (core 확장) = **Driver**
+- Axis B (Penny 확장) = **Gadget**
+- 분배 단위 = **Bundle**
+- Rust entry-point trait = **`Bundle`** (간단하게)
+- CLI = `bundle|driver|gadget` + `gadgetron install` 축약
+
+### 영향 받는 문서/크레이트 (exhaustive)
+
+**신설**:
+- `docs/adr/ADR-P2A-10-bundle-driver-gadget-terminology.md`
+- `docs/architecture/glossary.md`
+
+**파일 rename (경로 변경)**:
+- `docs/design/phase2/04-mcp-tool-registry.md` → `04-gadget-registry.md`
+- `docs/design/phase2/06-backend-plugin-architecture.md` → `06-bundle-architecture.md`
+- `docs/design/phase2/07-plugin-server.md` → `07-bundle-server.md`
+
+**본문 용어 치환 대상**:
+- `docs/00-overview.md`
+- `docs/design/phase2/00-overview.md`
+- `docs/design/phase2/01-knowledge-layer.md`
+- `docs/design/phase2/02-penny-agent.md`
+- `docs/design/phase2/05-knowledge-semantic.md`
+- `docs/design/phase2/08-identity-and-users.md`
+- `docs/design/phase2/09-knowledge-acl.md`
+- `docs/design/phase2/10-penny-permission-inheritance.md`
+- `docs/design/phase2/11-raw-ingestion-and-rag.md`
+- `docs/design/ops/agentic-cluster-collaboration.md`
+- `docs/design/ops/operations-tool-providers.md`
+- `docs/adr/ADR-P2A-05-agent-centric-control-plane.md` (header note 추가)
+- `docs/adr/ADR-P2A-09-raw-ingestion-pipeline.md` (본문 `plugin` 단어)
+- `docs/process/00-agent-roster.md`
+- `docs/agents/*.md` — 10 개 페르소나 파일
+- `AGENTS.md` (루트)
+- `README.md` (루트)
+
+**Rust 코드 (현재 P2A 스캐폴드만 있음)**:
+- `crates/gadgetron-core/src/agent/tools.rs` — `McpToolProvider`, `Tier`, `ToolMode`, `ToolSchema`, `ToolResult`, `McpError` rename
+- `crates/gadgetron-core/src/agent/config.rs` — `[agent.tools]` → `[agent.gadgets]` 설정 경로
+- `crates/gadgetron-penny/src/registry.rs` → `gadget_registry.rs`
+- `crates/gadgetron-penny/src/mcp_server.rs` → `gadget_server.rs`
+- `crates/gadgetron-knowledge/src/mcp/` → `src/gadgets/`
+
+**크레이트 구조 재편 (P2B 착수 시)**:
+- `plugins/` 디렉토리 → `bundles/` 로 변경
+- `plugins/plugin-ai-infra/`, `plugins/plugin-cicd/`, `plugins/plugin-server/`, `plugins/plugin-document-formats/`, `plugins/plugin-web-scrape/` → `bundles/<name>/`
+
+### 리뷰 권고
+
+- `@chief-architect`: `Bundle` trait 및 `BundleContext` 에 `drivers.*` 네임스페이스가 D-12 leaf 원칙 및 `gadgetron-core` 의존 DAG 준수. `register_entity_kind` 위치 재검토 (drivers.entity_kinds 로 이전)
+- `@security-compliance-lead`: Gadget runtime enum 에 `Subprocess`/`Http`/`Wasm` 추가로 인한 trust boundary 변경. 외부 runtime 은 별도 doc 12 에서 threat model
+- `@qa-test-architect`: rename PR 에 `cargo test --all-features` 통과 조건. Config migration (`[plugins.*]` → `[bundles.*]`) 에 대한 backward-compat 테스트
+- `@dx-product-lead`: `gadgetron install <name>` alias 가 error path 에서 "bundle 을 install 했다" 고 명시하는지 (에러 메시지가 축약 형태를 숨기지 않음)
+
+### 비용 견적
+
+| 항목 | 공수 |
+|---|---|
+| ADR + glossary 초안 | 0.5 일 (본 커밋에서 완료) |
+| Rust 타입 rename (workspace-wide) | 1 일 — 스캐폴드만 있어 컴파일러가 전부 잡아줌 |
+| 설계 문서 rename + 본문 치환 | 1 일 |
+| 에이전트 페르소나 + 프로세스 문서 rename | 0.5 일 |
+| 디렉토리 이전 `plugins/` → `bundles/` | 0.5 일 (P2B 초반 별도 PR) |
+| 리뷰 + 머지 | 1 일 |
+| **총합** | **~3.5 일** (한 엔지니어) |
+
+### 시행 순서
+
+1. **지금 (본 커밋)**: ADR-P2A-10 + glossary + 본 D-entry 랜딩 → 승인 고정
+2. **다음 PR**: Rust 심볼 rename (`BackendPlugin` → `Bundle` 등 workspace 전체)
+3. **다음 PR**: 설계 문서 파일 rename + 본문 치환
+4. **다음 PR**: 에이전트 페르소나 + 프로세스 문서 치환
+5. **P2B 초반**: 디렉토리 재편 (`plugins/` → `bundles/`)
+6. **P2B 중반**: `docs/design/phase2/12-external-gadget-runtime.md` 신설 (subprocess/http/container/wasm runtime 상세) → graphify pilot
+
+---
+
+## D-20260418-05: Driver → Plug rename (ADR-P2A-10 amendment)
+
+**날짜**: 2026-04-18
+**유형**: Architecture / Naming amendment (사용자 직접 지시, 2026-04-18 세션 동일일 수정)
+**상태**: 🟢 승인 (♻️ supersedes D-20260418-04 의 "Driver" 명칭 부분)
+**관련 문서**: `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md` (rename 됨, 구명칭 `ADR-P2A-10-bundle-driver-gadget-terminology.md`), `docs/architecture/glossary.md` (rename 반영됨)
+**Supersedes**: D-20260418-04 의 Axis A 명칭만 수정. Bundle / Gadget / 모든 다른 결정 (trait rename, CLI 구조, config 마이그레이션 방식) 은 **유효**.
+
+### 배경
+
+D-20260418-04 확정 직후, 5 에이전트 병렬 리뷰에서 codex-chief-advisor 가 MAJOR finding 으로 "Driver" 의 의미 오버로드 (kernel driver / JDBC / ODBC) 를 지적. "Driver" 는 하드웨어 호환성 계약을 암시하는 의미가 강하여, 단순 Rust trait 구현체를 가리키는 용도로는 과한 connotation.
+
+사용자 세션에서 "Plug / Gadget" 을 새 후보로 제시. 검토 결과:
+
+- `Plug` 는 "port 에 꽂는다" 전기/메카닉 메타포로 Rust trait 구현이 core-defined trait 에 꽂히는 동작과 정확히 일치
+- `Plug` 는 Rust / 시스템 / ML 생태계에서 overload 없음
+- `Plug` + `Gadget` 이 일관된 workbench 메타포 (plug 는 socket 에, gadget 은 Penny 손에)
+- `gadgetron plug list` — CLI verb + noun 둘 다 한 단어
+- D-20260418-04 의 3 개 서브 결정 (T1 3-concept 분리, T2 Rust symbol rename, T3 CLI/config/dir rename) 은 전부 그대로 유효. 단지 "Axis A 명칭" 만 Driver → Plug
+
+동일일(2026-04-18) 내 수정이므로 D-20260418-04 를 in-place 수정하지 않고 별도 D-entry 로 기록 (append-only 정책).
+
+### 결정
+
+- Axis A (core 확장) 명칭: **Driver → Plug**
+- Rust symbol: `ctx.drivers.*` → `ctx.plugs.*`, `BundleContext::drivers` field → `BundleContext::plugs`, `DriverProvider` (Alt 4 에서만 언급된 hypothetical) → `PlugProvider`
+- CLI: `gadgetron driver list|info` → `gadgetron plug list|info`
+- 디렉토리 영향 없음 (bundle 디렉토리명은 도메인 기반이지 driver/plug 접두어 아님)
+- 문서 파일명: `ADR-P2A-10-bundle-driver-gadget-terminology.md` → `ADR-P2A-10-bundle-plug-gadget-terminology.md`
+
+Bundle / Gadget / 모든 Rust trait rename (McpToolProvider→GadgetProvider 등) / config 마이그레이션 전략 / 외부 runtime 설계 / 기타 D-20260418-04 결정은 **변경 없음**.
+
+### 반려 옵션
+
+- **Driver 유지 + glossary 주석만 추가**: 주석 한 줄로 overload 완화 가능하지만, 매 design doc 가 매번 "이 Driver 는 kernel driver 아님" 재설명하는 비용이 장기로 누적
+- **사용자 제안 "core-gadget / mcp-gadget" 통일**: 브랜드 통일성은 있으나 CLI 2-word verbose + Rust `trait McpGadgetProvider` cumbersome + "MCP" 를 domain 어휘로 다시 불러들임 (미래 non-MCP 에이전트 프로토콜 수용 시 misnomer)
+- **Adapter 로 교체**: hexagonal 정통이지만 "adapter-blob-s3" 어색, 일반 디자인 패턴 단어
+- **Backend, Card, Engine 등 기타**: 각각 front/back 프레이밍 / 하드웨어 과잉 / 너무 무거운 어감
+
+### 사용자 결정
+
+**2026-04-18**: Plug / Gadget 승인.
+
+### 영향 받는 문서/파일
+
+**신규/수정**:
+- `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md` — rename (구: `-driver-`), Amendment §추가 + 본문 Driver→Plug 치환
+- `docs/architecture/glossary.md` — Driver 엔트리 → Plug, 모든 교차참조 업데이트
+- `docs/process/04-decision-log.md` — 본 D-entry 추가
+
+**코드 수정 (P2B 착수 전)**:
+- `crates/gadgetron-cli/src/main.rs` — `Driver` 서브커맨드 enum variant → `Plug`, `cmd_driver_list_stub` → `cmd_plug_list_stub`
+- `crates/gadgetron-core/src/agent/mod.rs` — 모듈 doc comment 의 "Bundle / Driver / Gadget" → "Bundle / Plug / Gadget"
+- `crates/gadgetron-core/src/agent/tools.rs` — 모듈 doc comment 에서 "Drivers and/or GadgetProviders" → "Plugs and/or GadgetProviders"
+- `crates/gadgetron-knowledge/src/lib.rs` — 같은 패턴 doc comment
+
+**미래 P2B 설계 반영**:
+- `docs/design/phase2/06-bundle-architecture.md` (기존 `06-backend-plugin-architecture.md` 에서 rename 예정) — `PlugContext` 대신 `BundleContext::plugs.*` 를 Driver 대체로
+- `docs/design/phase2/11-raw-ingestion-and-rag.md` — `ctx.register_extractor(...)` 가 `ctx.plugs.extractors.register(...)` 가 됨을 §4.4 PluginContext 확장 설명에서 반영
+
+### 리뷰 권고
+
+이 amendment 자체는 재-리뷰 불필요 (naming-only, 구조 불변). 단, `@chief-architect` 는 rename PR 병합 전 `ctx.plugs.*` 필드 네이밍이 향후 `BundleContext` 구현 시 clippy `needless_pub_self` / `large_enum_variant` 트리거하지 않는지 확인.
+
+### 비용
+
+추가 rename 공수 ≈ 0.5 일:
+- ADR + glossary + decision log 3 개 doc = 본 커밋에서 완료
+- CLI 코드 5 hit + 3 doc comment 수정 = 15 분
+- `cargo check` + `cargo clippy` 재검증 = 5 분
+
+D-20260418-04 의 3.5 일 견적 위에 누적 → 총 ~4 일 여전히 한 엔지니어 분기 내 흡수 가능.
+
+---
+
+## D-20260418-06: Team synthesis → ADR-P2A-10-ADDENDUM-01 rev3 (RBAC granularity 최종화)
+
+**날짜**: 2026-04-18
+**유형**: Architecture / Team convergence (PM-directed 2 라운드 팀 논의 + rev3 라운드 3 피드백 통합)
+**상태**: 🟢 승인 (rev3 의 18 항목 decision matrix 만장일치 팀 수렴)
+**관련 문서**: `docs/adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md` (rev3)
+**Supersedes**: D-20260418-04 / -05 의 Open question 3 건을 decision 으로 전환. Bundle/Plug/Gadget trinity 는 유효.
+
+### 배경
+
+D-20260418-05 (Driver→Plug amendment) 직후, security-compliance-lead 가 ADR-P2A-10-ADDENDUM-01 v1 을 authoring 하며 3 개 open question 을 PM 에게 위임. PM 은 팀 convergence meeting (6 에이전트 라운드 1 + 3 에이전트 라운드 2 검수) 을 통해 10 개 결정을 수렴.
+
+### 수렴된 10 결정
+
+| # | 항목 | 팀 입장 | 해결 |
+|---|---|---|---|
+| 1 | 3축 RBAC (Bundle / Gadget / Plug) | 만장일치 | Ship — §1 |
+| 2 | P2B per-deployment, `tenant_overrides` P2C reserved | 5 찬성 + 1 minority (xaas) | Ship — §2 |
+| 3 | `requires_plugs` cascade P2B-alpha ship | 4 찬성 + 2 이견 (security/dx 는 beta 선호, 최종 승복) | Ship — §3 |
+| 4 | `PlugId` newtype + `#[must_use] RegistrationOutcome` | chief-architect 원안 만장일치 승인 | Ship — §4 |
+| 5 | 외부 런타임 5 enforcement points | 만장일치 | Ship — §5 |
+| 6 | `admin_detail: Option<String>` leak-safety | xaas 제안 만장일치 | Ship — §5 |
+| 7 | JSONB `external_runtime_meta` additive migration | xaas 제안 만장일치 (category overloading 대신) | Ship — §5 |
+| 8 | `GadgetronBundlesHome` resolver (4-단계 priority chain) | devops 제안 만장일치 | Ship — §7 |
+| 9 | `bundle info` 3 컬럼 (NAME/PORT/STATUS) + `--json` | dx + devops 합의 | Ship — §6 |
+| 10 | CLI 는 config-only, `--dry-run` TOML 프린터만 추가 | dx 권고 만장일치 | Ship — §11 |
+
+### 라운드 2 검수 결과 (rev2 대상)
+
+- **chief-architect**: APPROVE (4 Rust 변경 전부 §4 에 반영)
+- **xaas**: REQUEST CHANGES → 3 targeted edits (last_synced_at, FD-open step 3b, P2B admin annotation) → rev3 에 반영
+- **codex-chief-advisor**: BLOCK 3 CLOSED (외부 2차 검증 통과) + 3 MAJOR + 3 MINOR 잔여 concerns → rev3 에 전부 반영
+
+### 라운드 3 (rev3) 변경사항
+
+- §2: `tenant_overrides` `info!` → `warn!` + `[features] tenant_plug_overrides_accepted_as_reserved` 토글 + CFG-045 startup gate
+- §3: `cargo xtask check-bundles` lint CI gate (codex MAJOR 1)
+- §5: Enforcement floors 6 (Resource ceilings: RLIMIT + cgroup) + 7 (Egress policy: default-deny + namespaced nftables) (codex MAJOR 2)
+- §5: `admin_detail` → `Denied`/`Execution` 확장 + `render_gadget_error_for_caller` 단일 choke-point + regression test (codex MAJOR 3)
+- §6: `TENANT OVERRIDES` 테이블 헤더 annotation + 행별 `(reserved — not enforced until P2C)` 접미사 (xaas round-2 + codex MINOR 5)
+- §7: `tracing::info!(tier = …, resolved_path = …)` 해상도 로깅 (codex MINOR 6)
+- §8: `tenant_workdir_quota.last_synced_at TIMESTAMPTZ` (xaas round-2)
+- §8: deletion cascade step 3b: `/proc/<daemon_pid>/fd` scan + 30s backoff (xaas round-2)
+- STRIDE **I**: timing-oracle 위협 명시 + `render_gadget_error_for_caller` constant-time padding (codex MINOR 4)
+- Consequences: 테스트 9 → 13, 공수 5 → 6 engineer-days
+
+### 파급 문서
+
+**수정**:
+- `docs/adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md` — v1 → rev2 (in-place, 11 섹션)
+- `docs/architecture/glossary.md` — `PlugId`, `RegistrationOutcome`, `GadgetronBundlesHome` 용어 추가 예정
+
+**신규 (P2B-alpha 착수 시)**:
+- `crates/gadgetron-xaas/migrations/20260418000001_external_runtime_meta.sql` — JSONB additive
+- `crates/gadgetron-core/src/bundle/` — 새 모듈 (id, context, registry, home)
+- `crates/gadgetron-testing/src/mocks/bundle/` — FakeBundle, FakePlugRegistry, FakeTenantContext
+- `docs/design/phase2/12-external-gadget-runtime.md` — contract floor 5 points 에 따라 작성
+
+### 리뷰 권고
+
+라운드 2 수렴 meeting 결과로 재-review 불필요. P2B-alpha 착수 시 구현 PR 별 기존 rubric 적용.
+
+### 비용
+
+rev2 작성 자체 = 본 커밋 (0.5 일). P2B-alpha 테스트 계획 9 tests + 3 fakes + 1 helper = ~5 engineer-days (qa 추정).
+
+---
+
+## D-20260418-07: P2B-alpha 실행 계획 — 4-week DAG + 5팀 sign-off
+
+**날짜**: 2026-04-18
+**유형**: Execution plan / Team convergence (라운드 4: 5 에이전트 병렬 실행계획 수립)
+**상태**: 🟢 승인 (5 에이전트 전원 CONDITIONAL GO, 2 security MUST-LAND gate + 3 precondition 명시)
+**관련 문서**: D-20260418-04/-05/-06, `docs/adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md` (rev3)
+**Supersedes**: N/A (신규 실행계획)
+
+### 배경
+
+ADR-P2A-10-ADDENDUM-01 rev3 팀 수렴 완료 후 P2B-alpha 실행 단계 진입. 5 도메인 에이전트 (chief-architect / devops / qa / xaas / security) 가 각 도메인 주간별 deliverable + 의존성 + 리스크 + sign-off 병렬 제출. 본 D-entry 는 통합 계획.
+
+### 5 에이전트 sign-off 결과
+
+| 도메인 | 에이전트 | 판결 | 조건 |
+|---|---|---|---|
+| Core Rust | chief-architect | 🟢 YES conditional | (i) qa W1 fakes delivery, (ii) devops xtask ownership, (iii) xaas migration by W2 |
+| DevOps/SRE | devops-sre-lead | 🟢 CONDITIONAL GO | K8s managed cluster 에서 `egress.enforceMode: "proxy-only"` 경로 CI 검증 필요 |
+| QA Testing | qa-test-architect | 🟢 CONDITIONAL GO | (i) Bundle trait W2 freeze, (ii) `render_gadget_error_for_caller` choke-point gate W3, (iii) `PROPTEST_CASES=1024` CI env 추가 |
+| XaaS Platform | xaas-platform-lead | 🟢 CONDITIONAL GO | (i) CFG-045 startup gate 확정 (warn vs error), (ii) macOS lsof fallback 패턴, (iii) `WorkdirPurgeJob` design review |
+| Security | security-compliance-lead | 🟡 MAJOR — conditional | **2 MUST-LAND before P2B-alpha release tag**: audit sink wiring + JSONB strict-schema validator |
+
+### 통합 4-week DAG
+
+**W0 (pre-sprint, 1-2 days)** — 선결 조건 5건 처리 (§Preconditions 참조)
+
+**W1 — foundations (8 dev-days across 4 agents)**
+- chief-architect: `gadgetron-core/src/bundle/{mod,id,manifest,toml_parse,home}.rs` + `AppConfig` 확장
+  - Exit: `plug_id_rejects_uppercase`, `bundle_manifest_parses_requires_plugs`, `bundles_home_resolver_fail_closed_on_root_home`, `tenant_overrides_without_ack_toggle_refuses_startup_cfg_045`, `app_config_accepts_runtime_limits` green
+  - Deliverable freeze: `BundleManifest` 공개 schema + `GadgetronError::{Config, Bundle}` variants
+- qa: `gadgetron-testing/src/mocks/bundle/` 4 fake + `tracing_test` helper — stub-only (Bundle trait W2 bind 예정)
+- xaas: `20260418000001_external_runtime_meta.sql` (JSONB additive) + `20260418000002_tenant_workdir_quota.sql` (`last_synced_at` 포함) land
+- security: `target: "gadgetron_audit"` append-only sink 설계 draft (`docs/design/phase2/12-external-gadget-runtime.md` §Audit-sink)
+
+**W2 — core mechanism (5 dev-days)**
+- chief-architect: `Bundle` trait + `BundleContext` + `PlugRegistry<T>` + `#[must_use] RegistrationOutcome` + `trybuild` compile-fail regression
+  - **W2 end freeze**: `Bundle` / `BundleContext` / `PlugRegistry` / `RegistrationOutcome` API. 이후 변경은 supersedes D-entry 필수
+- qa: W1 fakes 에 실제 Bundle trait bind + 4 contract tests (`plug_disabled_by_config_is_not_registered`, `is_plug_enabled_returns_correct_tristate`, `bundle_disabled_takes_precedence_over_plug_override`, `bundle_plug_toml_subsection_parses_with_defaults`)
+- security: audit sink 구현 + `RuntimeMetaV1` strict serde deserializer + `external_runtime_meta_rejects_unvalidated_jsonb` regression test
+
+**W3 — dispatch + query surface (5 dev-days)**
+- chief-architect: `BundleRegistry::list_plugs/list_gadgets` + `requires_plugs` cascade resolver + AST helper API
+- qa: cascade 테스트 + redaction 테스트 (`gadget_not_available_hides_admin_detail_from_non_admin` 매트릭스) + external runtime 테스트 + resource ceiling 테스트 (4건)
+- devops: `cargo xtask check-bundles` lint + `.github/workflows/check-bundles.yml` + CI workflow 분할 (`test-cpu` / `test-integration`) + Helm values 업데이트 + PVC template
+- xaas: `WorkdirPurgeJob` 구현 + `FdScanner` trait + Linux/macOS 구현체
+- security: 2 MUST-LAND gate 검증 pass
+
+**W4 — hardening + ship gate (3 dev-days)**
+- qa: PBT 2건 (`is_plug_enabled_is_pure_function_of_config`, `authenticated_context_survives_serialization_roundtrip`) + CI gate 통합
+- devops: Prometheus metrics scrape + Grafana dashboard JSON + PagerDuty alert rule
+- security: 최종 STRIDE re-pass + secret redaction layer 확인
+
+**총 소요**: ~21 dev-days, 4 에이전트 병렬 가동 기준 ~5 calendar-week
+
+### Preconditions (W1 시작 전 해결)
+
+| # | 항목 | 주인 | PM 결정 필요? |
+|---|---|---|---|
+| P1 | CFG-045 startup gate 동작 확정 | xaas | ✅ **YES** — "warn 후 계속" vs "error 후 startup 실패". 기존 배포 TOML 에 `[tenant_overrides]` 가 없으므로 **error 권고** |
+| P2 | macOS dev 의 FD-scan fallback 패턴 | xaas | ✅ **YES** — `GADGETRON_SKIP_FD_SCAN=1` env + noop scanner 기본 vs `/usr/sbin/lsof` first-choice. 권고: 환경변수 + noop fallback |
+| P3 | `WorkdirPurgeJob` job runner 설계 | xaas + chief-architect | 공동 리뷰 (PM 결정 불필요, chief-architect 트레이트 리뷰) |
+| P4 | `PROPTEST_CASES=1024` `PROPTEST_SEED=42` `INSTA_UPDATE=no` CI env | devops | PM 결정 불필요 |
+| P5 | `cargo xtask check-bundles` ownership | chief-architect (AST helper) + devops (CI gate wiring) | 공동 완료, PM confirm only |
+
+### 2 Security MUST-LAND gates (P2B-alpha release tag 전 필수)
+
+1. **Audit sink wiring** (STRIDE R MED) — `target: "gadgetron_audit"` 이벤트가 append-only persistent storage (DB audit table 또는 signed log shipper) 로 흘러야 함. SOC2 CC6.6 evidence 가 stdout tracing 으론 불충분. `docs/design/phase2/12-external-gadget-runtime.md` §Audit-sink 또는 별도 audit-persistence spec 필수.
+2. **JSONB strict-schema validator** (STRIDE T MED) — `external_runtime_meta` insert path 가 `RuntimeMetaV1` deny-unknown-fields deserializer + string-length cap 적용. Regression test `external_runtime_meta_rejects_unvalidated_jsonb` 포함.
+
+두 gate 는 **code-complete blocker 아님, release-tag blocker**. 외부 유저가 external-runtime Gadget 건드리기 전에만 land 하면 됨.
+
+### Cross-team dependency matrix
+
+| From → To | 산출물 | 시점 | 블로커? |
+|---|---|---|---|
+| xaas → chief-architect | migrations `20260418000001`/`000002` | W1 end | YES (sqlx compile-time check) |
+| qa → chief-architect | `FakeBundle` + `FakeTenantContext` stubs | W1 end | partial (chief-architect 가 `FakePlugRegistry` 자체 ship 가능) |
+| chief-architect → qa | `Bundle` trait freeze | W2 end | YES |
+| chief-architect → xaas | AST helper `BundleManifest::plug_callsites_required()` API | W3 start | YES (devops `cargo xtask check-bundles` 가 의존) |
+| chief-architect → devops | `BundleRegistry::list_plugs/gadgets` API | W3 mid | YES (`gadgetron bundle info` CLI 의존) |
+| devops → chief-architect | `xtask/src/check_bundles.rs` scaffold | W3 start | partial (lint 미탑재 시 release block) |
+| security → xaas | `RuntimeMetaV1` deserializer spec | W2 end | YES (audit writer 통합) |
+| security → all | audit sink 설계 doc | W1 end | YES (모든 팀의 tracing 타겟이 여기로 흘러가야 함) |
+
+### Risk register (consolidated)
+
+| # | 리스크 | impact | likelihood | 주인 | 완화 |
+|---|---|---|---|---|---|
+| R1 | `Bundle` trait shape 가 W3 중 변경됨 | med | med | chief-architect | W2 end `#[non_exhaustive]` freeze + 2 real Bundle prototype 리뷰 |
+| R2 | D-12 leaf violation | high | low | chief-architect | `deny.toml` + `cargo tree` snapshot CI gate |
+| R3 | `#[must_use] RegistrationOutcome` 무시됨 | med | med | chief-architect | `trybuild` 컴파일-실패 회귀 + Bundle PR 체크리스트 |
+| R4 | `cargo xtask check-bundles` false-positive 로 dev 차단 | med | med | devops | `--warn-only` 모드 3 sprint 관찰 후 hard-block 전환 |
+| R5 | K8s managed cluster (GKE Autopilot, EKS Fargate) nftables 미허용 | high | high | devops | `egress.enforceMode: "nftables"\|"proxy-only"` Helm switch + startup warn |
+| R6 | PVC 백업 미지원으로 tenant workdir 손실 | med | med | devops | `values.yaml` 주석 ephemeral hot data 명시, P2B-beta 에 VolumeSnapshot CRD |
+| R7 | macOS dev 와 Linux CI 경험 차이로 PR 품질 저하 | med | med | devops | Linux CI job 이 merge 차단, Docker on macOS runbook 제공 |
+| R8 | Bundle trait 변경에 fragile 한 테스트 | med | med | qa | `FakeBundle::new(enabled)` 단일 factory 공개, behavior 단위 assert |
+| R9 | `render_gadget_error_for_caller` 우회 테스트 누락 | high | low | qa | CI grep gate + `cargo llvm-cov` function-level guard |
+| R10 | 576개 기존 테스트 회귀 | med | low | qa | 매 PR `cargo test --workspace` 별도 status check |
+| R11 | `external_runtime_meta` JSONB attacker XSS (저장) | med | med | security | `RuntimeMetaV1` strict deserializer + length caps (MUST-LAND #2) |
+| R12 | Audit stdout tracing 의 compliance 불충분 | med | med | security | append-only DB sink (MUST-LAND #1) |
+| R13 | Provider API key leakage | med | med | security | Tracing subscriber redaction layer day 1 |
+| R14 | lsof 미존재 시 purge 진행 허용 (macOS dev) | low | med | xaas | `warn!` emit + env var skip, Linux /proc 경로는 안전 |
+
+### 3 PM 결정 대기
+
+팀 수렴의 마지막 공백:
+
+1. **P1 — CFG-045 동작**: warn 후 계속 vs error 후 startup 실패. **팀 권고: error (기존 배포 영향 없음)**.
+2. **P2 — macOS FD-scan fallback**: `GADGETRON_SKIP_FD_SCAN=1` env + noop scanner 기본 vs `/usr/sbin/lsof` first-choice 자동 감지. **팀 권고: 환경변수 + noop fallback (개발자 경험 우선)**.
+3. **External runtime doc 12 신설 여부 + 담당**: security MUST-LAND gate 들이 doc 12 에 안착해야 함. 누가 언제 작성? **팀 권고: security-compliance-lead 가 W1 end 까지 draft, chief-architect + xaas 가 W2 리뷰**.
+
+### 비용
+
+| 항목 | dev-days |
+|---|---|
+| chief-architect W1+W2+W3 | 8 |
+| qa W1+W2+W3+W4 | 6 |
+| xaas W1+W3 (migrations, job, FdScanner) | 4 |
+| devops W3+W4 (CI, Helm, Observability) | 2 |
+| security W1+W2+W4 (sink design + validator + redaction + STRIDE) | 3 |
+| Cross-review + rubber ducking + bug fixes | 2 |
+| **Total** | **~25 dev-days** |
+
+4 agent 병렬 (PM 제외) 기준 ~**5 calendar-week** (1 달 + 1 주), buffer 포함 **6 주** 권고.
+
+### 시행 순서
+
+1. **지금 (W0 day 1)**: 본 D-entry land + 3 PM 결정 확정 + `docs/design/phase2/12-external-gadget-runtime.md` 스텁 생성 요청 (security)
+2. **W0 day 2-3**: P1/P2/P3 preconditions 해결 + 팀별 W1 PR 브랜치 오픈
+3. **W1**: 병렬 실행, end-of-week demo (chief-architect W1 exit + qa stubs + xaas migrations + security sink design)
+4. **W2**: Bundle trait freeze (W2 mid), W2 end freeze ceremony
+5. **W3**: dispatch + query + CI gates + WorkdirPurgeJob
+6. **W4**: hardening + release-tag MUST-LAND gates verify + P2B-alpha tag
+
+---
+
+## D-20260418-08: P2B-alpha 선결 조건 3건 확정 (CFG-045 / FD-scan / doc 12)
+
+**날짜**: 2026-04-18
+**유형**: Execution precondition (D-20260418-07 §Preconditions 의 PM 결정 마감)
+**상태**: 🟢 승인 (팀 권고 그대로 채택)
+**관련 문서**: D-20260418-07
+
+### 결정
+
+**P1 — CFG-045 startup gate 동작**: **error + startup 실패** (팀 권고 채택)
+- `[tenant_overrides]` 스탠자가 존재하는데 `[features] tenant_plug_overrides_accepted_as_reserved = true` 토글이 없으면 `GadgetronError::Config("CFG-045: ...")` 반환하고 startup 실패
+- 근거: 기존 배포 TOML 에 `[tenant_overrides]` 가 존재할 가능성 0 (P2B-alpha 에 새로 도입되는 필드). 실수로 설정한 operator 가 silently 동작 안 하는 것보다 명시적 실패가 안전
+- CHANGELOG 에 업그레이드 가이드 포함 (stanza 제거 or 토글 활성화)
+
+**P2 — macOS dev FD-scan fallback**: **`GADGETRON_SKIP_FD_SCAN=1` env + noop scanner 기본**
+- macOS 개발 환경에서 `lsof` 경로 편차 (`/usr/sbin/lsof` vs `/opt/homebrew/bin/lsof`) 때문에 환경변수로 skip 가능하게
+- 환경변수 설정 시 `FdScanner::is_path_fd_open` 이 `Ok(false)` 반환 + `warn!("FD scan skipped via GADGETRON_SKIP_FD_SCAN")` emit
+- Linux 프로덕션은 `/proc/<pid>/fd` 경로 사용 (env 무시 권고 또는 별도 prod 모드 플래그)
+
+**P3 — doc 12 (external runtime) 신설 주인 + 타임라인**: **security-compliance-lead 가 W1 end draft, chief-architect + xaas 가 W2 리뷰**
+- 파일: `docs/design/phase2/12-external-gadget-runtime.md`
+- 포함 내용: 2 MUST-LAND gate (audit sink 영속화 + `RuntimeMetaV1` JSONB validator) + 7 enforcement floors 의 wire protocol 세부 + subprocess/HTTP/container/wasm runtime 별 STRIDE
+- W1 end (5 working days from now): draft v0 (목차 + 2 MUST-LAND 스펙)
+- W2 end: v1 (chief-architect + xaas 리뷰 반영)
+- W3+ 의 구현 PR 이 이 문서를 참조
+
+### 영향
+
+- P1: `crates/gadgetron-core/src/config.rs` 에 CFG-045 에러 경로 추가 필요 (W1 구현 범위 포함)
+- P2: `crates/gadgetron-xaas/src/jobs/fd_scanner.rs` 의 `FdScanner` trait 에 env-var 체크 포함 (W3 구현 범위)
+- P3: security-compliance-lead 의 W1 deliverable 에 doc 12 draft 포함
+
+---
+
 _(다음 엔트리는 아래에 append)_
