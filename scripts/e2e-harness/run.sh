@@ -436,7 +436,7 @@ CHAT_RESP="$(curl -fsS \
   -H "Authorization: Bearer $TEST_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "mock-model",
+        "model": "mock",
         "messages": [{"role": "user", "content": "ping"}],
         "stream": false
       }' \
@@ -463,7 +463,7 @@ STREAM_RESP="$(curl -fsSN \
   -H "Content-Type: application/json" \
   --max-time 10 \
   -d '{
-        "model": "mock-model",
+        "model": "mock",
         "messages": [{"role": "user", "content": "ping"}],
         "stream": true
       }' \

@@ -714,7 +714,7 @@ mod tests {
     }
 
     fn actor() -> AuthenticatedContext {
-        AuthenticatedContext
+        AuthenticatedContext::system()
     }
 
     // ----------------------------------------------------------------

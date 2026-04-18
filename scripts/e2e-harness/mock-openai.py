@@ -158,10 +158,17 @@ class MockHandler(BaseHTTPRequestHandler):
             return
 
         # Streaming path — SSE.
+        #
+        # We explicitly send `Connection: close` (not keep-alive) so that
+        # reqwest on Gadgetron's side sees HTTP EOF after the final
+        # `data: [DONE]` chunk and surfaces `Poll::Ready(None)` to the
+        # SSE pipeline. Without this, some reqwest / h2 versions hold
+        # the chunked body open waiting for more, the SSE `.chain([DONE])`
+        # never fires, and the harness's curl times out on Gate 9.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
 
         pieces = ["Hello ", "from ", "mock."]

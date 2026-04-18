@@ -27,12 +27,17 @@ use uuid::Uuid;
 /// Drift-fix PR 5 (D-20260418-24): `audit_event_id` is the correlation key
 /// that joins this `captured_activity_event` row to the matching
 /// `audit_log` row. Callers MUST pass the SAME UUID they gave to
-/// `AuditWriter::send`. Reusing `request_id` instead is a bug — see the
-/// `event_id_distinct_from_request_id` unit test.
+/// `AuditWriter::send`. Reusing `request_id` instead is a bug.
+///
+/// Drift-fix PR 7 (doc-10): `actor_user_id` is now a real parameter.
+/// Gateway callers MUST populate it from the authenticated request
+/// (placeholder: `TenantContext::api_key_id` until a real user table
+/// materialises).
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_chat_completion(
     coordinator: Arc<dyn KnowledgeCandidateCoordinator>,
     tenant_id: Uuid,
+    actor_user_id: Uuid,
     request_id: Uuid,
     audit_event_id: Uuid,
     model: String,
@@ -43,8 +48,7 @@ pub async fn capture_chat_completion(
     let event = CapturedActivityEvent {
         id: Uuid::new_v4(),
         tenant_id,
-        // TODO(doc-10): real user_id after permission-inheritance lands.
-        actor_user_id: Uuid::nil(),
+        actor_user_id,
         request_id: Some(request_id),
         origin: ActivityOrigin::Penny,
         kind: ActivityKind::GadgetToolCall,
@@ -64,7 +68,10 @@ pub async fn capture_chat_completion(
         created_at: chrono::Utc::now(),
     };
 
-    let actor = AuthenticatedContext;
+    let actor = AuthenticatedContext {
+        user_id: actor_user_id,
+        tenant_id,
+    };
     if let Err(e) = coordinator.capture_action(&actor, event, vec![]).await {
         tracing::warn!(
             request_id = %request_id,
@@ -98,10 +105,14 @@ pub fn error_class(e: &GadgetronError) -> &'static str {
 ///
 /// Non-PII: only model name + error class + latency; no message text, no
 /// nested error fields.
+///
+/// Drift-fix PR 7 (doc-10): `actor_user_id` is now a real parameter —
+/// see `capture_chat_completion` for the rationale.
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_chat_completion_error(
     coordinator: Arc<dyn KnowledgeCandidateCoordinator>,
     tenant_id: Uuid,
+    actor_user_id: Uuid,
     request_id: Uuid,
     audit_event_id: Uuid,
     model: String,
@@ -111,7 +122,7 @@ pub async fn capture_chat_completion_error(
     let event = CapturedActivityEvent {
         id: Uuid::new_v4(),
         tenant_id,
-        actor_user_id: Uuid::nil(),
+        actor_user_id,
         request_id: Some(request_id),
         origin: ActivityOrigin::Penny,
         kind: ActivityKind::RuntimeObservation,
@@ -128,7 +139,10 @@ pub async fn capture_chat_completion_error(
         created_at: chrono::Utc::now(),
     };
 
-    let actor = AuthenticatedContext;
+    let actor = AuthenticatedContext {
+        user_id: actor_user_id,
+        tenant_id,
+    };
     if let Err(e) = coordinator.capture_action(&actor, event, vec![]).await {
         tracing::warn!(
             request_id = %request_id,

@@ -117,7 +117,7 @@ impl WorkbenchProjectionService for FakeProjectionEmpty {
 }
 
 fn actor() -> AuthenticatedContext {
-    AuthenticatedContext
+    AuthenticatedContext::system()
 }
 
 /// Strip the time-dependent `generated_at:` line so the block is byte-

@@ -488,7 +488,7 @@ fn schema_web_search() -> GadgetSchema {
 
 impl KnowledgeGadgetProvider {
     fn actor(&self) -> AuthenticatedContext {
-        AuthenticatedContext
+        AuthenticatedContext::system()
     }
 
     async fn call_wiki_list(&self) -> Result<GadgetResult, GadgetError> {

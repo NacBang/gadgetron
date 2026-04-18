@@ -253,6 +253,10 @@ impl Drop for StreamEndGuard {
         };
 
         let tenant_id = self.tenant_id;
+        // PR 7 (doc-10): thread the caller's user_id into the amendment
+        // capture. Until a real user table lands, api_key_id is the
+        // authoritative identity — the guard stores it at construction.
+        let actor_user_id = self.api_key_id;
         let request_id = self.request_id;
         let model = self.model.clone();
         let saw_error = snapshot.saw_error;
@@ -264,6 +268,7 @@ impl Drop for StreamEndGuard {
                 capture_chat_completion_error(
                     coord,
                     tenant_id,
+                    actor_user_id,
                     request_id,
                     amendment_event_id,
                     model,
@@ -275,6 +280,7 @@ impl Drop for StreamEndGuard {
                 capture_chat_completion(
                     coord,
                     tenant_id,
+                    actor_user_id,
                     request_id,
                     amendment_event_id,
                     model,

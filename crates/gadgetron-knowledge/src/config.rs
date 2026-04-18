@@ -1000,7 +1000,9 @@ stale_threshold_days = 30
             Some("ops/tools/{date}/{author}")
         );
         assert_eq!(
-            cfg.path_rules.get("runtime_observation").map(String::as_str),
+            cfg.path_rules
+                .get("runtime_observation")
+                .map(String::as_str),
             Some("ops/runtime/{date}/{topic}")
         );
     }

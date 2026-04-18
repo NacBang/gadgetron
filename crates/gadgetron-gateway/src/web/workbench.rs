@@ -355,7 +355,7 @@ pub async fn invoke_action(
             "action service is not wired in this build".into(),
         ))
     })?;
-    let actor = AuthenticatedContext;
+    let actor = AuthenticatedContext::system();
     let resp = action_svc.invoke(&actor, &action_id, request).await?;
     Ok(Json(resp))
 }

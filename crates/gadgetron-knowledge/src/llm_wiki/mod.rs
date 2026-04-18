@@ -383,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn put_then_get_roundtrips_markdown_and_title() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
 
         let receipt = store
             .put(
@@ -421,7 +421,7 @@ mod tests {
         // distinguish "absent" from "backend down" without string
         // matching on error messages.
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let res = store.get(&actor, "absent-page").await.expect("ok none");
         assert!(res.is_none());
     }
@@ -429,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn put_create_only_rejects_existing_path() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         store
             .put(
                 &actor,
@@ -479,7 +479,7 @@ mod tests {
         };
         let wiki = Arc::new(Wiki::open(cfg).unwrap());
         let store = LlmWikiStore::new(wiki).unwrap();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
 
         let err = store
             .put(
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn put_rejects_credential_block() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let err = store
             .put(
                 &actor,
@@ -541,7 +541,7 @@ mod tests {
         // Legacy invariant: empty provenance → no frontmatter change.
         // Keeps RAW-import / wiki.write byte-stable.
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         store
             .put(
                 &actor,
@@ -567,7 +567,7 @@ mod tests {
     #[tokio::test]
     async fn put_with_provenance_embeds_yaml_frontmatter() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let mut provenance = std::collections::BTreeMap::new();
         provenance.insert("hint_reason".to_string(), "routine check".to_string());
         provenance.insert("hint_tags".to_string(), "monitoring".to_string());
@@ -601,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn delete_missing_page_translates_to_document_not_found() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let err = store.delete(&actor, "ghost").await.expect_err("not found");
         match err {
             GadgetronError::Knowledge {
@@ -615,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn rename_missing_from_translates_to_document_not_found() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let err = store
             .rename(&actor, "ghost", "home")
             .await
@@ -632,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn list_returns_seed_pages() {
         let (_dir, store) = fresh_store();
-        let actor = AuthenticatedContext;
+        let actor = AuthenticatedContext::system();
         let paths = store.list(&actor).await.expect("list");
         assert!(!paths.is_empty(), "fresh wiki must surface seed pages");
     }

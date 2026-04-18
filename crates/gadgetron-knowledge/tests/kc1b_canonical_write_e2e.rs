@@ -42,7 +42,7 @@ fn should_skip() -> bool {
 }
 
 fn actor() -> AuthenticatedContext {
-    AuthenticatedContext
+    AuthenticatedContext::system()
 }
 
 fn build_wiki(dir: &TempDir) -> Arc<Wiki> {

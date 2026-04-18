@@ -72,7 +72,7 @@ pub async fn chat_completions_handler(
     let shared_cfg = &state.agent_config.shared_context;
     if shared_cfg.enabled {
         if let Some(assembler) = state.penny_assembler.as_ref() {
-            let actor = AuthenticatedContext;
+            let actor = AuthenticatedContext::system();
             match assembler
                 .build(&actor, req.conversation_id.as_deref(), ctx.request_id)
                 .await
@@ -178,6 +178,11 @@ async fn handle_non_streaming(
             // D-20260418-20. No capture on Err arm (success-only, this PR).
             if let Some(coord) = state.candidate_coordinator.clone() {
                 let tenant_id = ctx.tenant_id;
+                // PR 7 (doc-10): thread the caller's user_id into the
+                // capture. Until a real user table lands, the API-key
+                // id is the authoritative identity — captures no longer
+                // record `Uuid::nil()` for every row.
+                let actor_user_id = ctx.api_key_id;
                 let request_id = ctx.request_id;
                 let model = req.model.clone();
                 let prompt_tokens = response.usage.prompt_tokens;
@@ -186,6 +191,7 @@ async fn handle_non_streaming(
                     capture_chat_completion(
                         coord,
                         tenant_id,
+                        actor_user_id,
                         request_id,
                         audit_event_id,
                         model,
@@ -221,6 +227,7 @@ async fn handle_non_streaming(
             // Streaming error capture requires a Drop-guard (out of scope, W3-KC-1d).
             if let Some(coord) = state.candidate_coordinator.clone() {
                 let tenant_id = ctx.tenant_id;
+                let actor_user_id = ctx.api_key_id; // PR 7: see capture_chat_completion.
                 let request_id = ctx.request_id;
                 let model = req.model.clone();
                 let ec = error_class(&e);
@@ -228,6 +235,7 @@ async fn handle_non_streaming(
                     capture_chat_completion_error(
                         coord,
                         tenant_id,
+                        actor_user_id,
                         request_id,
                         audit_event_id,
                         model,
