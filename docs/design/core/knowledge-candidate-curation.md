@@ -3,9 +3,9 @@
 > **담당**: PM (Codex)
 > **상태**: Approved
 > **작성일**: 2026-04-18
-> **최종 업데이트**: 2026-04-18
+> **최종 업데이트**: 2026-04-18 (KC-1b conformance reconcile for recent `origin/main`)
 > **관련 크레이트**: `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-penny`, `gadgetron-gateway`, `gadgetron-web`, `gadgetron-xaas`
-> **Phase**: [P2B] landed in-memory slice / [P2B-next] startup wiring + canonical materialization / [P2C] richer heuristics + user-confirmation routing / [P3] automation candidates
+> **Phase**: [P2B] landed in-memory slice + canonical materialization on wired services / [P2B-next] startup wiring + persistent capture + materialization status / [P2C] richer heuristics + user-confirmation routing / [P3] automation candidates
 > **관련 문서**: `docs/design/core/knowledge-plug-architecture.md`, `docs/design/web/expert-knowledge-workbench.md`, `docs/design/phase2/10-penny-permission-inheritance.md`, `docs/design/phase2/11-raw-ingestion-and-rag.md`, `docs/design/phase2/12-external-gadget-runtime.md`, `docs/process/04-decision-log.md`
 
 ---
@@ -72,26 +72,30 @@ Trade-off:
 
 ### 1.5 현재 trunk 기준 landed slice
 
-2026-04-18 `origin/main` (`W3-KC-1`, PR #85) 기준으로 trunk 에 실제로 들어온 것은 "contract + in-memory slice + fixture-diff gate" 까지다.
+2026-04-18 `origin/main` (`W3-KC-1` + `W3-KC-1b`, PR #85 / #87, `docs/process/04-decision-log.md` D-20260418-17 / D-20260418-18) 기준 trunk 에 실제로 들어온 것은 "contract + in-memory slice + optional canonical writeback + fixture/E2E gate" 까지다.
 
 - [P2B] landed
   - `gadgetron-core::knowledge::candidate` 의 wire types / traits / serde contract
+  - `ActivityCaptureStore::get_candidate()` fast-path 추가
   - `gadgetron-knowledge::candidate` 의 `InMemoryActivityCaptureStore`, `InProcessCandidateCoordinator`
-  - `[knowledge.curation]` TOML surface + validation
-  - `gadgetron-gateway::penny::shared_context` 의 live candidate projection adapter
-  - `crates/gadgetron-gateway/tests/kc1_fixture_diff.rs` 의 deterministic shared-context fixture diff
+  - builder-style `InProcessCandidateCoordinator::with_knowledge_service()` / `.with_path_rules()`
+  - `ActivityKind` snake_case key 기반 `{date}` / `{topic}` / `{author}` `path_rules` expansion
+  - coordinator 에 `KnowledgeService` 가 주입된 경우의 `materialize_accepted_candidate() -> KnowledgeService::write()` canonical writeback
+  - `gadgetron-gateway::penny::shared_context` 의 wire-stable `pending_penny_decision` renderer
+  - `crates/gadgetron-gateway/tests/kc1_fixture_diff.rs` 및 `crates/gadgetron-knowledge/tests/kc1b_canonical_write_e2e.rs`
 - [P2B-next] not yet wired on real server boot
-  - `AppState.activity_capture_store` / `candidate_coordinator` 를 실제 startup path 에서 채우는 wiring
+  - `AppState.activity_capture_store` / `candidate_coordinator` / `knowledge_service` / `path_rules` 를 실제 startup path 에서 연결하는 wiring
   - Penny gadget/runtime path 가 production boot 에서 PSL-1 stub 을 벗어나는 것
-  - `KnowledgeService::write` 를 통한 canonical writeback
-  - Postgres-backed capture store / projection / retention jobs
+  - workbench/read-model 에 `canonical_path`, `materialization_status`, `audit_event_id` 를 영속적으로 반영하는 projection
+  - config default `path_rules` 와 KC-1b runtime key-space(`direct_action`, `runtime_observation` 등) 의 정렬
 - [P2C+] intentionally deferred
+  - `PgActivityCaptureStore` / retention jobs / projection persistence
   - `require_user_confirmation_for` routing semantics
   - auto-prompt Penny behavior
   - audit correlation (`audit_event_id`) 의 full plumbing
   - richer candidate heuristics / clustering / scoring
 
-따라서 이 문서는 "이상적인 최종 구조" 만 설명하지 않는다. **현재 trunk authority 와 KC-1b/c seam 을 함께 고정하는 문서**로 사용한다.
+따라서 이 문서는 "이상적인 최종 구조" 만 설명하지 않는다. **현재 trunk authority 와 KC-1b landed behavior, 그리고 KC-1c follow-up seam 을 함께 고정하는 문서**로 사용한다.
 
 ---
 
@@ -228,6 +232,12 @@ pub trait ActivityCaptureStore: Send + Sync + Debug {
         limit: usize,
         only_pending: bool,
     ) -> CaptureResult<Vec<KnowledgeCandidate>>;
+
+    async fn get_candidate(
+        &self,
+        actor: &AuthenticatedContext,
+        id: Uuid,
+    ) -> CaptureResult<Option<KnowledgeCandidate>>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,12 +271,13 @@ pub trait KnowledgeCandidateCoordinator: Send + Sync + Debug {
 - [P2B] landed slice 에서 `KnowledgeCandidateDisposition` 초기값은 `PendingPennyDecision` 이다. `PendingUserConfirmation` 은 decision path 를 통해서만 만든다.
 - `Accepted` / `Rejected` 로의 전환은 항상 `decide_candidate()` 경로를 통해 기록된다.
 - `list_candidates(actor, limit, only_pending)` 는 newest-first projection read 의 유일한 공용 진입점이다.
-- `materialize_accepted_candidate()` 는 **stable seam** 이다. 다만 [P2B] 현재 body 는 `KnowledgeService::write` 를 호출하지 않고, 승인된 candidate 의 `proposed_path` 또는 fallback string 만 반환한다. 실제 canonical write 는 [P2B-next / KC-1b] 의 책임이다.
-- `proposed_path` 와 `KnowledgeDocumentWrite` 는 현재 trunk 에서 임시 `String` 기반 wire shape 로 유지한다. typed `KnowledgePath` narrowing 은 KC-1b 에서만 허용한다.
+- `get_candidate(actor, id)` 는 materialization precondition 이 `list_candidates(usize::MAX, false)` 전체 스캔에 의존하지 않도록 만든 fast-path 이다. absent row 와 backend failure 를 구분해야 한다.
+- `materialize_accepted_candidate()` 는 **stable seam** 이다. [P2B] 현재 trunk 는 먼저 `Accepted` 여부를 확인한 뒤, coordinator 에 `knowledge_service` 가 있으면 `KnowledgeService::write` 를 호출하고, 없으면 KC-1a synthetic fallback 을 유지한다.
+- `proposed_path` 와 `KnowledgeDocumentWrite` 는 현재 trunk 에서 계속 `String` 기반 wire shape 로 유지한다. typed `KnowledgePath` narrowing 은 아직 landed 하지 않았고 [P2C+] follow-up 으로 남는다.
 
 ### 2.2 내부 구조
 
-구조는 현재 trunk authority 기준으로 **네 계층 + 하나의 deferred seam** 으로 분리한다.
+구조는 현재 trunk authority 기준으로 **네 계층 + 하나의 optional materialization seam** 으로 분리한다.
 
 1. **Capture ingress** `[P2B landed]`
    gateway, Penny, workbench action host, bundle runtime 이 `CapturedActivityEvent` 입력을 만든다.
@@ -276,8 +287,8 @@ pub trait KnowledgeCandidateCoordinator: Send + Sync + Debug {
    현재 disposition, latest rationale, proposed path, acceptance 가능 여부를 계산한다.
 4. **Penny curation loop bridge** `[P2B landed at service/test level, startup wiring is deferred]`
    Penny shared-surface service 가 pending candidate 를 읽고 accept/reject/escalate 결정을 기록한다.
-5. **Canonical knowledge materializer** `[P2B-next / KC-1b]`
-   `Accepted` 된 candidate 를 `KnowledgeService::write` 로 승격한다. 현재 trunk 의 materializer 는 seam 만 있고 실제 write 는 없다.
+5. **Canonical knowledge materializer** `[P2B landed when coordinator is wired; production startup wiring deferred]`
+   `Accepted` 된 candidate 는 `KnowledgeService::write` 로 승격할 수 있다. 다만 coordinator 에 service 가 주입되지 않은 경로에서는 synthetic path fallback 을 유지한다.
 
 데이터 흐름:
 
@@ -288,7 +299,7 @@ direct action / Penny tool / system event
        CapturedActivityEvent append
                 |
                 v
-         CandidateHint normalization
+CandidateHint normalization + optional path_rules expansion
                 |
                 v
         KnowledgeCandidate projection
@@ -303,11 +314,12 @@ direct action / Penny tool / system event
                 v
            Accepted / Rejected
                 |
-                +--> [P2B landed] materialize_accepted_candidate()
-                |        -> `proposed_path` or synthesized fallback String
+                +--> [P2B landed, service wired] materialize_accepted_candidate()
+                |        -> KnowledgeService::write
+                |        -> canonical store / index / relation
                 |
-                +--> [P2B-next / KC-1b] KnowledgeService::write
-                         -> canonical store / index / relation
+                +--> [P2B landed fallback] materialize_accepted_candidate()
+                         -> `proposed_path` or synthesized fallback String
 ```
 
 핵심 불변식:
@@ -322,7 +334,7 @@ direct action / Penny tool / system event
 - [P2B] current trunk 는 `tokio::sync::Mutex` 로 append / decide / list 를 직렬화한다.
 - source of truth 는 여전히 append-only candidate + decision append 순서다. projection 은 read-side convenience 이다.
 - [P2B] 현재 landed slice 는 optimistic version check 를 구현하지 않는다. 중복 decision 은 mutex 순서대로 기록된다.
-- [P2B-next / KC-1b] Postgres backing 이 들어오면 row-level locking 또는 explicit version check 로 conflict semantics 를 강화한다.
+- [P2C / KC-1c] Postgres backing 이 들어오면 row-level locking 또는 explicit version check 로 conflict semantics 를 강화한다.
 
 ### 2.3 설정 스키마
 
@@ -335,10 +347,16 @@ max_candidates_per_request = 8
 auto_prompt_penny = true
 require_user_confirmation_for = ["org_write", "policy_note", "destructive_action"]
 
+# 현재 `KnowledgeCurationConfig::default()` 가 실제로 제공하는 기본값
 [knowledge.curation.path_rules]
 operations = "ops/journal/%Y/%m/%d"
 incident = "ops/incidents/%Y/%m/%d"
 research = "research/notes/%Y/%m/%d"
+
+# KC-1b coordinator runtime semantics (startup wiring landed 후 의도되는 키 공간)
+# direct_action = "ops/journal/{date}/{topic}"
+# gadget_tool_call = "ops/tools/{date}/{author}"
+# runtime_observation = "ops/runtime/{date}/{topic}"
 ```
 
 검증 규칙:
@@ -348,14 +366,16 @@ research = "research/notes/%Y/%m/%d"
 - `candidate_retention_days` 는 `capture_retention_days` 보다 클 수 없다.
 - `max_candidates_per_request` 는 1 이상 32 이하로 제한한다.
 - `require_user_confirmation_for` 는 [P2B] 현재 비어 있지 않은 string label 만 요구한다. enum narrowing 은 [P2C] user-confirmation semantics 와 함께 굳힌다.
-- `path_rules.*` 는 [P2B] 현재 parent traversal (`../`, `..` segment) 만 거부한다. canonical root resolution 과 날짜 template expansion 은 [P2B-next / KC-1b] 에서 적용한다.
-- `auto_prompt_penny`, `require_user_confirmation_for`, `path_rules` application 은 현재 startup validation surface 까지만 landed 되었고 live request flow 연결은 후속이다.
+- `path_rules.*` 는 [P2B] 현재 validation 시 parent traversal (`../`, `..` segment) 만 거부한다. placeholder vocabulary, key-space(`operations` vs `direct_action`) 는 아직 validate 하지 않는다.
+- `InProcessCandidateCoordinator::with_path_rules()` 로 주입된 map 은 [P2B] 현재 `ActivityKind` snake_case key (`direct_action`, `gadget_tool_call`, `runtime_observation`, ...) 를 기준으로 `{date}` / `{topic}` / `{author}` 만 확장한다.
+- 따라서 current trunk 는 **config default surface 와 coordinator runtime semantics 가 아직 완전히 합쳐지지 않았다**. production startup wiring 이 없기 때문에 operator-facing drift 는 아직 격리되어 있지만, live boot enable 전 정렬이 필요하다.
+- `auto_prompt_penny`, `require_user_confirmation_for`, `path_rules` application 은 현재 startup validation surface 까지 landed 되었고, live request flow 연결은 후속이다.
 
 운영자 touchpoint:
 
 - `GET /activity` 와 `GET /request_evidence` workbench surface 가 capture/evidence read model 을 노출한다.
 - Penny gadget 의 `workbench.candidates_pending` / `workbench.candidate_decide` 가 같은 shared-surface contract 를 소비한다.
-- [P2B] 현재 production boot 는 candidate plane 을 기본 wiring 하지 않으므로, live server 는 여전히 PSL-1 stub behavior 를 보일 수 있다. 현재 exit gate 는 `kc1_fixture_diff` integration test 다.
+- [P2B] 현재 production boot 는 candidate plane 을 기본 wiring 하지 않으므로, live server 는 여전히 PSL-1 stub behavior 를 보일 수 있다. 현재 landed verification gate 는 `kc1_fixture_diff` 와 `kc1b_canonical_write_e2e` 두 축이다.
 
 ### 2.4 이벤트와 후보 생성 규약
 
@@ -365,8 +385,8 @@ candidate 생성은 bundle 반환을 그대로 신뢰하지 않는다.
 
 1. bundle/runtime 이 `CandidateHint` 를 0..N 개 반환할 수 있다.
 2. core 는 actor, tenant, source capability, audit correlation 을 다시 주입한다.
-3. [P2B] 현재 landed slice 는 `proposed_path` 를 advisory `Option<String>` 으로 보존한다. authoritative path sanitize / ACL re-check / template expansion 은 materialization boundary 에서만 적용한다.
-4. [P2B] 현재 coordinator 는 전달된 힌트를 clamp + append 한다. 힌트가 없는 activity 에 대한 server-generated candidate 는 [P2B-next / P2C] 로 미룬다.
+3. [P2B] 현재 landed slice 는 `proposed_path` 를 advisory `Option<String>` 으로 보존한다. authoritative path sanitize / ACL re-check 는 materialization boundary 의 책임이며, `path_rules` template expansion 은 capture 시점에 hint path 가 비어 있을 때만 적용된다.
+4. [P2B] 현재 coordinator 는 전달된 힌트를 clamp + append 한다. hint 의 `proposed_path` 가 비어 있으면 `path_rules` 를 조회하고, 매칭이 없으면 `ops/journal/<YYYY-MM-DD>/<activity_kind>` fallback string 을 넣는다. 힌트가 전혀 없는 activity 에 대한 server-generated candidate 는 [P2B-next / P2C] 로 미룬다.
 5. external runtime 은 candidate 를 `Accepted` 상태로 만들 수 없다.
 
 자동 candidate 생성 예:
@@ -394,8 +414,8 @@ Penny 권한 경계:
 
 - Penny 는 `AuthenticatedContext` 를 caller 로 상속한다.
 - Penny 는 candidate 원문 사실 이벤트를 수정하지 못한다.
-- [P2B] 현재 accept 는 disposition update 만 수행하고 canonical write 를 트리거하지 않는다.
-- [P2B-next / KC-1b] materialization 이 들어와도 Penny accept 는 caller 권한을 넘지 못한다. caller 가 쓸 수 없는 scope/path 는 materialization 실패로 surface 한다.
+- [P2B] 현재 accept 는 disposition update 만 수행한다. canonical write 는 이후 별도의 `materialize_accepted_candidate()` 호출에서만 일어나며, coordinator 에 service 가 없으면 synthetic fallback 으로 끝난다.
+- [P2B] landed materialization 경로에서도 Penny accept 는 caller 권한을 넘지 못한다. caller 가 쓸 수 없는 scope/path 는 materialization 실패로 surface 한다.
 - Penny 의 rationale 은 candidate decision event 에 남지만, canonical knowledge 자체는 별도 write path 로 기록된다.
 
 same-turn 처리 원칙:
@@ -407,23 +427,23 @@ same-turn 처리 원칙:
 
 ### 2.6 Canonical write 승격 규칙
 
-이 문서가 authoritative 로 고정하는 핵심은 **`Accepted` 와 `materialized` 는 같은 상태가 아니다** 라는 점이다. 다만 그 두 단계 중 현재 trunk 에 landed 한 것은 앞 단계뿐이다.
+이 문서가 authoritative 로 고정하는 핵심은 **`Accepted` 와 `materialized` 는 같은 상태가 아니다** 라는 점이다. 2026-04-18 `origin/main` 기준으로는 두 단계가 모두 일부 landed 했지만, 후자의 operator-visible projection 은 아직 미완성이다.
 
-[P2B] current trunk / KC-1:
+[P2B] current trunk / KC-1b:
 
-1. `materialize_accepted_candidate()` 는 latest disposition 이 `Accepted` 인지 확인한다.
-2. 승인되지 않은 candidate 에 대해서는 `GadgetronError::Knowledge { kind = InvalidQuery }` 로 실패한다.
-3. 승인된 candidate 에 대해서는 `candidate.proposed_path` 또는 synthesized `"ops/journal/<uuid>"` fallback string 을 반환한다.
-4. `KnowledgeService::write`, `KnowledgeWriteback` 이벤트, `materialization_status` persistence 는 아직 없다.
+1. `materialize_accepted_candidate()` 는 `get_candidate()` fast-path 로 latest row 를 조회한다.
+2. latest disposition 이 `Accepted` 가 아니면 `GadgetronError::Knowledge { kind = InvalidQuery }` 로 실패한다.
+3. coordinator 에 `knowledge_service` 가 주입되어 있으면 `KnowledgeDocumentWrite` 를 `KnowledgePutRequest { path, markdown, create_only: false, overwrite: true }` 로 변환해 `KnowledgeService::write` 를 호출한다.
+4. canonical write 성공 시 `KnowledgeWriteReceipt.path` 를 반환한다.
+5. coordinator 에 `knowledge_service` 가 없으면 `candidate.proposed_path` 또는 synthetic fallback string 을 반환한다. 이 경로는 dev/test 및 아직 boot wiring 되지 않은 서버 경로 호환을 위한 것이다.
+6. `KnowledgeWriteback` activity append, `materialization_status` persistence, `canonical_path` projection 은 아직 없다.
 
-[P2B-next / KC-1b]:
+[P2B-next / KC-1c]:
 
-1. candidate latest disposition = `Accepted` 확인
-2. actor 가 target scope/path 에 write 가능한지 재검증
-3. typed `KnowledgeDocumentWrite` / `KnowledgePath` 생성
-4. `KnowledgeService::write` 호출
-5. 성공 시 activity stream 에 `KnowledgeWriteback` 이벤트 추가
-6. candidate projection 에 `canonical_path` 와 `materialization_status` / write correlation 추가
+1. startup path 가 coordinator + knowledge service + `path_rules` 를 한 번에 wiring 한다.
+2. actor 가 target scope/path 에 write 가능한지 재검증하는 operator-visible failure model 을 projection 까지 연결한다.
+3. canonical write 성공/실패가 activity stream, workbench projection, Penny follow-up 에 모두 반영된다.
+4. persistence-backed candidate store 와 retry/reporting surface 가 추가된다.
 
 중요한 점:
 
@@ -454,6 +474,7 @@ operator-facing error 원칙:
 필수 tracing/audit events:
 
 - [P2B landed] typed `PennyCandidateDecisionReceipt` / fixture-diff output 으로 candidate state 전이를 검증한다.
+- [P2B landed] `candidate.materialize` tracing span 이 `candidate_id`, `has_knowledge_service` 를 기록한다.
 - [P2B-next] 다음 이벤트를 tracing / audit 에 추가한다:
   - `activity_capture_appended`
   - `knowledge_candidate_created`
@@ -486,8 +507,8 @@ STRIDE 요약:
   - 기존 `serde`, `uuid`, `chrono`, `async-trait` 재사용
   - 신규 heavyweight dependency 추가 금지
 - `gadgetron-knowledge`
-  - [P2B] in-memory store / coordinator / curation config validation
-  - [P2B-next] `KnowledgeService` 와 연결
+  - [P2B] in-memory store / coordinator / curation config validation / optional `KnowledgeService` writeback
+  - [P2B-next] startup wiring / persistence / projection
 - `gadgetron-xaas`
   - [P2B-next / P2C] activity/candidate persistence schema 와 retention jobs 지원
 - `gadgetron-web`
@@ -509,7 +530,7 @@ user direct action / Penny gadget / system observation
        [P2B] ActivityCaptureStore append-only log
                      |
                      v
-          KnowledgeCandidate projection/read model
+  KnowledgeCandidate projection/read model + optional path_rules expansion
                |                         |
                v                         v
          Penny curation             bundle viewer UI
@@ -518,9 +539,12 @@ user direct action / Penny gadget / system observation
                             |
                             v
         [P2B] materialize_accepted_candidate() seam
-                            |
-                            v
-      [P2B-next] KnowledgeService::write -> canonical store / index / relation
+              |                               |
+              v                               v
+  [service wired] KnowledgeService::write   [service absent] synthetic path fallback
+              |
+              v
+      canonical store / index / relation
 ```
 
 ### 3.2 타 모듈과의 인터페이스 계약
@@ -543,8 +567,8 @@ user direct action / Penny gadget / system observation
 - `gadgetron-core`
   activity/candidate type, trait, config, error surface
 - `gadgetron-knowledge`
-  [P2B] in-memory store / coordinator / disposition policy
-  [P2B-next] knowledge write integration
+  [P2B] in-memory store / coordinator / disposition policy / optional knowledge write integration
+  [P2B-next] startup wiring helper / persistence / projection
 - `gadgetron-gateway`
   actor resolution, request correlation, Penny shared-surface adapter, fixture-diff integration gate
 - `gadgetron-web`
@@ -566,10 +590,14 @@ user direct action / Penny gadget / system observation
   - `inmem_store_append_then_list`
   - `inmem_store_decide_updates_disposition_{accept,reject,escalate}`
   - `inmem_store_list_only_pending_filters`
+  - `inmem_store_get_candidate_returns_exact_row`
   - `coordinator_capture_action_clamps_to_max_candidates`
+  - `coordinator_capture_action_expands_path_rules_when_hint_path_missing`
   - `coordinator_materialize_errors_when_not_accepted`
-  - `coordinator_materialize_returns_proposed_path_when_accepted`
+  - `coordinator_materialize_returns_proposed_path_when_unwired`
+  - `coordinator_materialize_writes_to_knowledge_service_when_wired`
   - gateway shared-surface pending/decide mapper tests
+  - gateway shared-context renderer emits `pending_penny_decision`
 - [P2B-next / P2C]
   - `candidate_hint_path_escape_rejected_at_materialization_boundary`
   - `accepted_candidate_requires_second_acl_check`
@@ -580,15 +608,15 @@ user direct action / Penny gadget / system observation
 
 ### 4.2 테스트 하네스
 
-- [P2B landed] in-memory append-only event store + fake workbench projection + deterministic fixture-diff normalizer
-- [P2B-next] fake `KnowledgeService` materializer + tempdir canonical path validator
+- [P2B landed] in-memory append-only event store + fake workbench projection + deterministic fixture-diff normalizer + tempdir wiki-backed `KnowledgeService`
+- [P2B-next] multi-user auth fixture + projection receipt assertions + canonical path validator
 - [P2C] property-based test:
   direct action -> Penny decision -> materialization sequence permutation 에서 불변식 유지
 
 ### 4.3 커버리지 목표
 
 - [P2B] `gadgetron-core::knowledge::candidate` / `gadgetron-knowledge::candidate`: branch 90% 이상
-- [P2B-next] materialization / ACL re-check path: branch 95% 이상
+- [P2B-next] startup wiring / ACL re-check / projection path: branch 95% 이상
 
 ---
 
@@ -597,23 +625,26 @@ user direct action / Penny gadget / system observation
 ### 5.1 통합 범위
 
 1. [P2B landed] `kc1_fixture_diff`: capture event -> 2 hints -> bootstrap render -> accept 1 candidate -> bootstrap render diff
-2. [P2B-next] direct workbench action -> capture -> pending candidate -> Penny accept -> canonical write
-3. [P2B-next] direct workbench action -> capture -> Penny escalate -> user confirm -> canonical write
-4. [P2B-next] direct workbench action -> capture -> Penny reject -> no canonical write
-5. [P2C] external runtime action -> candidate hint -> normalized candidate -> acceptance
-6. [P2B-next] accepted candidate + write failure -> read model surfaces failed materialization
+2. [P2B landed] `kc1b_canonical_write_e2e`: capture -> path_rules expansion -> accept -> materialize -> `knowledge.search()` 가 canonical page 를 찾는다
+3. [P2B-next] direct workbench action -> capture -> pending candidate -> Penny accept -> boot-wired canonical write
+4. [P2B-next] direct workbench action -> capture -> Penny escalate -> user confirm -> canonical write
+5. [P2B-next] direct workbench action -> capture -> Penny reject -> no canonical write
+6. [P2C] external runtime action -> candidate hint -> normalized candidate -> acceptance
+7. [P2B-next] accepted candidate + write failure -> read model surfaces failed materialization
 
 ### 5.2 테스트 환경
 
 - [P2B landed] in-memory store + fake projection + shared-context renderer
+- [P2B landed] tempdir wiki + `LlmWikiStore` + keyword index + `KnowledgeService`
 - [P2B-next] gateway auth fixture with multiple users/teams + Postgres testcontainers for append-only event tables + projection tables
-- [P2B-next] fake Penny decision provider + fake `KnowledgeService`
+- [P2B-next] fake Penny decision provider + boot-wired `KnowledgeService`
 - [P2B-next / P2C] web read-model contract tests for pending/accepted/rejected/materialization-warning rendering
 
 ### 5.3 회귀 방지
 
 - direct action 이 capture 없이 실행되면 실패해야 한다
 - candidate 가 승인 전 canonical search/citation 에 노출되면 실패해야 한다
+- [P2B landed] wired materialization 이 canonical wiki 에 기록하지 못하면 실패해야 한다
 - [P2B-next] Penny accept 가 caller write 권한을 우회하면 실패해야 한다
 - [P2B-next] write 실패가 candidate history 를 덮어쓰거나 삭제하면 실패해야 한다
 - external bundle 이 `Accepted` candidate 를 직접 반환해도 시스템이 받아들이면 실패해야 한다
@@ -627,21 +658,27 @@ user direct action / Penny gadget / system observation
 - append-only activity capture
 - `KnowledgeCandidate` lifecycle
 - in-memory store / coordinator
+- `ActivityCaptureStore::get_candidate`
+- builder-style `.with_knowledge_service()` / `.with_path_rules()`
+- `path_rules` 3-variable expansion on hint-less candidates
+- optional canonical materialization through `KnowledgeService::write`
 - Penny shared-surface pending/decide adapter
-- deterministic fixture-diff exit gate
+- wire-stable `pending_penny_decision` renderer
+- deterministic fixture-diff + canonical-write E2E exit gates
 - local `String`-based `KnowledgeDocumentWrite` / `proposed_path`
 
-### 6.2 [P2B-next] KC-1b
+### 6.2 [P2B-next] KC-1c-ready boot wiring
 
 - real server startup wiring (`AppState.activity_capture_store` / `candidate_coordinator`)
-- `KnowledgeService::write` materialization
-- typed `KnowledgePath` narrowing
+- production config `path_rules` 와 runtime key-space 정렬
+- `KnowledgeWriteback` / `canonical_path` / `materialization_status` projection
 - Postgres-backed capture store / projection / retention
-- `materialization_status` / canonical_path read model
+- workbench / Penny / web read model 이 같은 projection 을 소비하도록 정렬
 
 ### 6.3 [P2C] KC-1c and beyond
 
 - `require_user_confirmation_for` routing logic
+- typed `KnowledgePath` narrowing
 - richer candidate heuristics (incident/runbook/policy taxonomy)
 - relation-aware candidate summarization
 - candidate clustering / duplicate merge
@@ -832,3 +869,114 @@ user direct action / Penny gadget / system observation
 
 ### 최종 승인 — 2026-04-18 — PM
 **결론**: Approved (reconciled). 이 문서는 이제 KC-1 landed slice 와 KC-1b/c follow-up seam 을 동시에 설명하는 trunk-authoritative 설계 문서다.
+
+### Round 1 (KC-1b Conformance Amendment) — 2026-04-18 — @gateway-router-lead @xaas-platform-lead
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §1` 기준)
+- [x] 인터페이스 계약
+- [x] 크레이트 경계
+- [x] 타입 중복
+- [x] 에러 반환
+- [x] 동시성
+- [x] 의존성 방향
+- [x] Phase 태그
+- [x] 레거시 결정 준수
+
+**Action Items**:
+- A1: `ActivityCaptureStore::get_candidate()` 와 builder-style coordinator API(`with_knowledge_service`, `with_path_rules`)를 본문 시그니처와 phase 설명에 반영했다.
+- A2: KC-1a stub 설명을 제거하고, service wired / unwired 두 materialization path 를 같은 lifecycle 안에서 분리해 적었다.
+- A3: config default `path_rules` 와 KC-1b runtime key-space drift 를 startup wiring 미landing 사실과 함께 명시했다.
+
+**Open Questions**:
+- Q-1 ~ Q-4 유지
+
+**다음 라운드 조건**: 없음. Round 1.5 진행 가능.
+
+### Round 1.5 (KC-1b Conformance Amendment) — 2026-04-18 — @security-compliance-lead @dx-product-lead
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §1.5` 기준)
+- [x] 위협 모델 (필수)
+- [x] 신뢰 경계 입력 검증
+- [x] 인증·인가
+- [x] 시크릿 관리
+- [x] 공급망
+- [x] 암호화
+- [x] 감사 로그
+- [x] 에러 정보 누출
+- [x] LLM 특이 위협
+- [x] 컴플라이언스 매핑
+- [x] 사용자 touchpoint 워크스루
+- [x] 에러 메시지 3요소
+- [x] CLI flag
+- [x] API 응답 shape
+- [x] config 필드
+- [x] defaults 안전성
+- [x] 문서 5분 경로
+- [x] runbook playbook
+- [x] 하위 호환
+- [x] i18n 준비
+
+**Action Items**:
+- A1: operator-facing config surface 가 아직 startup 에 연결되지 않았다는 사실과, 연결 후 문제가 될 key-space drift 를 문서에 명확히 표기했다.
+- A2: canonical write 가 caller inheritance 를 유지한 채 optional service wiring 으로만 일어난다는 점을 보안/사용성 양쪽에서 다시 고정했다.
+- A3: shared-context renderer 의 `pending_penny_decision` wire string 이 audit/candidate plane 과 동일해야 한다는 계약을 반영했다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. Round 2 진행 가능.
+
+### Round 2 (KC-1b Conformance Amendment) — 2026-04-18 — @qa-test-architect
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §2` 기준)
+- [x] 단위 테스트 범위
+- [x] mock 가능성
+- [x] 결정론
+- [x] 통합 시나리오
+- [x] CI 재현성
+- [x] 성능 검증
+- [x] 회귀 테스트
+- [x] 테스트 데이터
+
+**Action Items**:
+- A1: landed test surface 를 `kc1_fixture_diff` 와 `kc1b_canonical_write_e2e` 두 축으로 재정리했다.
+- A2: unwired synthetic fallback path 와 wired canonical write path 를 별도 회귀 항목으로 분리했다.
+- A3: future boot wiring / projection persistence 는 [P2B-next] 시나리오로 남기고, current trunk assertions 와 섞지 않도록 수정했다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. Round 3 진행 가능.
+
+### Round 3 (KC-1b Conformance Amendment) — 2026-04-18 — @chief-architect
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §3` 기준)
+- [x] Rust 관용구
+- [x] 제로 비용 추상화
+- [x] 제네릭 vs 트레이트 객체
+- [x] 에러 전파
+- [x] 수명주기
+- [x] 의존성 추가
+- [x] 트레이트 설계
+- [x] 관측성
+- [x] hot path
+- [x] 문서화
+
+**Action Items**:
+- A1: current public trait surface(`get_candidate`, `materialize_accepted_candidate`)와 실제 builder API 를 trunk 기준으로 다시 고정했다.
+- A2: 아직 landed 하지 않은 typed `KnowledgePath` narrowing 을 future phase 로 되돌려 현재 구현 약속과 분리했다.
+- A3: persistence / row-locking 설명을 KC-1b 가 아니라 KC-1c follow-up 으로 재배치해 recent decision log 와 맞췄다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. 최종 승인 가능.
+
+### 최종 승인 (KC-1b Conformance Amendment) — 2026-04-18 — PM
+**결론**: Approved
+
+기존 승인 로그는 append-only 로 유지하고, 이번 revision 은 `W3-KC-1b` landed state 와 recent `origin/main` authority 를 맞추기 위한 conformance amendment 로 별도 재검토했다. 본 문서는 이제 candidate lifecycle 의 current trunk behavior, optional canonical write path, 그리고 KC-1c follow-up boundary 를 서로 충돌 없이 설명한다.
