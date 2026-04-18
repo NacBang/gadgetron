@@ -1,8 +1,9 @@
-//! Default in-process workbench projection — W3-WEB-2.
+//! Default in-process workbench projection — W3-WEB-2 + W3-WEB-2b.
 //!
 //! `InProcessWorkbenchProjection` reads from an optional `KnowledgeService`
-//! to build the bootstrap response. Activity and evidence stubs are wired
-//! in PSL-1 (Penny trace source).
+//! to build the bootstrap and knowledge-status responses. Descriptor listing
+//! delegates to the embedded `DescriptorCatalog`. Activity and evidence stubs
+//! are wired in PSL-1 (Penny trace source).
 //!
 //! Authority: `docs/design/gateway/workbench-projection-and-actions.md` §2.2.2
 
@@ -10,20 +11,23 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gadgetron_core::workbench::{
-    PlugHealth, WorkbenchActivityResponse, WorkbenchBootstrapResponse, WorkbenchKnowledgeSummary,
-    WorkbenchRequestEvidenceResponse,
+    PlugHealth, WorkbenchActivityResponse, WorkbenchBootstrapResponse,
+    WorkbenchKnowledgeStatusResponse, WorkbenchKnowledgeSummary,
+    WorkbenchRegisteredActionsResponse, WorkbenchRegisteredViewsResponse,
+    WorkbenchRequestEvidenceResponse, WorkbenchViewData,
 };
 use gadgetron_knowledge::service::KnowledgeService;
 use uuid::Uuid;
 
 use super::workbench::{WorkbenchHttpError, WorkbenchProjectionService};
+use crate::web::catalog::DescriptorCatalog;
 
 // ---------------------------------------------------------------------------
 // InProcessWorkbenchProjection
 // ---------------------------------------------------------------------------
 
 /// Default workbench projection that reads directly from the in-process
-/// `KnowledgeService`.
+/// `KnowledgeService` and the descriptor catalog snapshot.
 ///
 /// When `knowledge` is `None` (e.g. headless test builds), the bootstrap
 /// response marks the service as degraded rather than panicking.
@@ -32,6 +36,8 @@ pub struct InProcessWorkbenchProjection {
     pub knowledge: Option<Arc<KnowledgeService>>,
     /// Gateway crate version string (use `env!("CARGO_PKG_VERSION")`).
     pub gateway_version: &'static str,
+    /// Descriptor snapshot. Use `DescriptorCatalog::seed_p2b()` for P2B.
+    pub descriptor_catalog: DescriptorCatalog,
 }
 
 #[async_trait]
@@ -106,5 +112,79 @@ impl WorkbenchProjectionService for InProcessWorkbenchProjection {
     ) -> Result<WorkbenchRequestEvidenceResponse, WorkbenchHttpError> {
         // Evidence projection wires in PSL-1.
         Err(WorkbenchHttpError::RequestNotFound { request_id })
+    }
+
+    async fn knowledge_status(
+        &self,
+    ) -> Result<WorkbenchKnowledgeStatusResponse, WorkbenchHttpError> {
+        match &self.knowledge {
+            None => Ok(WorkbenchKnowledgeStatusResponse {
+                canonical_ready: false,
+                search_ready: false,
+                relation_ready: false,
+                stale_reasons: vec!["knowledge service not wired".into()],
+                last_ingest_at: None,
+            }),
+            Some(svc) => {
+                let snapshot = svc.plug_health_snapshot();
+                let canonical_ready = snapshot.iter().any(|p| p.role == "canonical" && p.healthy);
+                let search_ready = snapshot.iter().any(|p| p.role == "search" && p.healthy);
+                let relation_ready = snapshot.iter().any(|p| p.role == "relation" && p.healthy);
+
+                let mut stale_reasons = vec![];
+                if !canonical_ready {
+                    stale_reasons.push("canonical store not healthy".into());
+                }
+                if !search_ready {
+                    stale_reasons.push("search index not healthy".into());
+                }
+
+                Ok(WorkbenchKnowledgeStatusResponse {
+                    canonical_ready,
+                    search_ready,
+                    relation_ready,
+                    stale_reasons,
+                    last_ingest_at: None,
+                })
+            }
+        }
+    }
+
+    async fn views(&self) -> Result<WorkbenchRegisteredViewsResponse, WorkbenchHttpError> {
+        // TODO doc-10: replace &[Scope::OpenAiCompat] with actor.scopes when
+        // AuthenticatedContext carries identity. See §2.1.1 note in design doc.
+        use gadgetron_core::context::Scope;
+        let actor_scopes = [Scope::OpenAiCompat];
+        let views = self.descriptor_catalog.visible_views(&actor_scopes);
+        Ok(WorkbenchRegisteredViewsResponse { views })
+    }
+
+    async fn view_data(&self, view_id: &str) -> Result<WorkbenchViewData, WorkbenchHttpError> {
+        // TODO doc-10: check actor scope against descriptor.required_scope.
+        let descriptor = self.descriptor_catalog.find_view(view_id).ok_or_else(|| {
+            WorkbenchHttpError::ViewNotFound {
+                view_id: view_id.to_string(),
+            }
+        })?;
+
+        // Seed view: knowledge-activity-recent → stub empty timeline payload.
+        // Real data wiring is a follow-up (W3-WEB-3 / activity source integration).
+        let payload = match descriptor.id.as_str() {
+            "knowledge-activity-recent" => serde_json::json!({ "entries": [] }),
+            _ => serde_json::json!({}),
+        };
+
+        Ok(WorkbenchViewData {
+            view_id: view_id.to_string(),
+            payload,
+        })
+    }
+
+    async fn actions(&self) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError> {
+        // TODO doc-10: replace &[Scope::OpenAiCompat] with actor.scopes.
+        use gadgetron_core::context::Scope;
+        let actor_scopes = [Scope::OpenAiCompat];
+        let actions = self.descriptor_catalog.visible_actions(&actor_scopes);
+        Ok(WorkbenchRegisteredActionsResponse { actions })
     }
 }

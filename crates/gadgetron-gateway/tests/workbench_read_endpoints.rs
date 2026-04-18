@@ -16,7 +16,10 @@ use axum::{
 use gadgetron_core::{context::Scope, error::GadgetronError};
 use gadgetron_gateway::{
     server::{build_router, AppState},
-    web::{projection::InProcessWorkbenchProjection, workbench::GatewayWorkbenchService},
+    web::{
+        catalog::DescriptorCatalog, projection::InProcessWorkbenchProjection,
+        workbench::GatewayWorkbenchService,
+    },
 };
 use gadgetron_xaas::{
     audit::writer::AuditWriter,
@@ -69,6 +72,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
     let projection = Arc::new(InProcessWorkbenchProjection {
         knowledge: None,
         gateway_version: "0.0.0-test",
+        descriptor_catalog: DescriptorCatalog::seed_p2b(),
     });
     AppState {
         key_validator: Arc::new(MockKeyValidator::new(scopes)),
@@ -79,7 +83,10 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
         pg_pool: Some(lazy_pool()),
         no_db: false,
         tui_tx: None,
-        workbench: Some(Arc::new(GatewayWorkbenchService { projection })),
+        workbench: Some(Arc::new(GatewayWorkbenchService {
+            projection,
+            actions: None,
+        })),
         penny_shared_surface: None,
         penny_assembler: None,
         agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),

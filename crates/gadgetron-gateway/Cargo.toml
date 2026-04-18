@@ -25,6 +25,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 sqlx = { workspace = true }
+jsonschema = { workspace = true }
 
 [features]
 default = ["web-ui"]
@@ -35,7 +36,7 @@ web-ui = ["dep:gadgetron-web"]
 
 [dev-dependencies]
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 moka = { workspace = true }
 axum-test = { workspace = true }
 
