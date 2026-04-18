@@ -2392,4 +2392,70 @@ W3-KL-2 구현: ~1,500 LOC + 8-12 tests, ~3-4 agent-hours (chief-architect + qa)
 
 ---
 
+## D-20260418-12: W3-WEB-1 [P2A] 착수 (workbench 3-panel shell, 순수 프론트엔드)
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-KL-2 머지 직후, 10-min cron 2번째 사이클)
+**상태**: 🟢 승인 (2/2 agents, ux-interface-lead + codex-chief-advisor 만장 W3-WEB-1 투표)
+**관련 문서**: `docs/design/web/expert-knowledge-workbench.md` §6 [P2A]
+**Follows**: D-20260418-11 (W3-KL-2 시행 조건 "wire shape empirical freeze" 달성)
+
+### 배경
+
+W3-KL-2 (PR #69) 머지 후 2 에이전트 간소화 투표. 두 agent 모두 W3-WEB-1 [P2A] 선택:
+- ux-interface-lead: P2A 순수 프론트엔드, 추후 knowledge-layer PR 의 live testbed 역할
+- codex-chief-advisor: D-20260418-11 precondition "wire shape 실제 import 파이프라인 output 으로 empirically 확정" 달성. W3-KL-3/W3-KC-1/W3-XGR-1 은 [P2B], workbench surface 없이는 "empty theater"
+
+### Codex hidden dependency (채택)
+
+`expert-workbench §2.1.1` 의 `WorkbenchBootstrapResponse` (fields: `canonical_knowledge_plug`, `pending_approvals`, `pending_writebacks` 등) 는 [P2B] read-model endpoints. W3-WEB-1 [P2A] 가 **live bootstrap 을 요구하면 silent P2B drift** 발생.
+
+**대응**: W3-WEB-1 [P2A] 은 **stub/fixture 기반** — 프런트엔드가 mock `WorkbenchBootstrapResponse` 를 로컬 fixture 로 소비. P2B 백엔드 엔드포인트는 W3-KC-1 또는 별도 PR 에서 와이어링. 이 가드레일을 지키지 못하면 ordering flip (W3-KC-1 → W3-WEB-1).
+
+### W3-WEB-1 [P2A] scope
+
+`expert-knowledge-workbench.md §6 [P2A]` 라인 1194-1201 기준:
+1. 3-panel workbench shell (status strip + left rail + main chat column + collapsible evidence pane + failure panel)
+2. Typography / color / spacing 전면 재정비 (no AI-template aesthetics, §1.4 principle 6)
+3. Empty / failure / auth / offline 상태 교정 (§1.4 principle 7 "Failure is first-class")
+4. localStorage 기반 workbench prefs (panel width, evidence pane open/closed)
+5. Stub/fixture bootstrap payload (codex dependency guardrail)
+6. 기존 `assistant-ui` 채팅 surface 보존 — `WorkbenchShell` 이 `ThreadPrimitive.Root` 를 wrap 하는 outer layout
+
+### Non-scope (P2B 이후)
+
+- Live gateway read-model endpoints (`/v1/workbench/bootstrap`, `/v1/workbench/knowledge-status` 등)
+- `KnowledgeCandidate` lifecycle surface (W3-KC-1)
+- Capability view / action registry 렌더
+- Relation panel (P2C)
+
+### 테스트 게이트
+
+- Vitest unit: WorkbenchShell 3-panel render, evidence pane toggle, localStorage prefs, failure panel mount on `/health` 503
+- Playwright e2e (mocked `/health` 503): failure panel + recovery text, no empty assistant bubble
+- Snapshot: empty state does not contain "무엇이든 물어보세요" or "무엇을 도와드릴까요"
+- Merge gate: all Playwright green + `pnpm build` clean
+
+### 반려 옵션
+
+- **W3-KL-3 (PDF+RAG) 먼저** — CLI 로 이미 import 가능, PDF 는 format breadth 지 test path 가 아님. operator 가 visible 검증 불가
+- **W3-KC-1 (candidate curation) 먼저** — workbench surface 없으면 curation loop 의 UI path 공허
+- **W3-XGR-1 (external runtime) 먼저** — 사용자 directive ("knowledge layer 빠르게 테스트") 에 orthogonal
+
+### 예상 범위
+
+- `crates/gadgetron-web/web/` 내 frontend-only (Next.js + React + Tailwind + assistant-ui wrapper)
+- ~400-700 LOC TypeScript/TSX + tests
+- Backend 변경 없음 (기존 `/v1/chat/completions`, `/v1/models`, `/health` 만 소비)
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-web-1/workbench-p2a-shell` 오픈
+3. ux-interface-lead (doc owner) delegation: `WorkbenchShell` + 3 panels + empty/failure states + localStorage + fixtures
+4. `pnpm build` + Vitest + Playwright
+5. PR + CI (`cargo fmt/check/clippy/test` on workspace도 pass 유지) + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
