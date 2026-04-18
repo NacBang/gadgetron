@@ -280,6 +280,266 @@ curl -s http://localhost:8080/ready
 
 ---
 
+## Workbench endpoints (Phase 2A)
+
+The workbench projection API surfaces real-time activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes — and are available when `[knowledge]` is configured and the Web UI feature is enabled.
+
+All eight routes are mounted at `/api/v1/web/workbench/`. When the knowledge service is not wired (no `[knowledge]` section), they return HTTP 400 with `"code": "config_error"`.
+
+---
+
+### GET /api/v1/web/workbench/bootstrap
+
+Gateway version, default model, active plug health, and knowledge plane readiness. Called by the Web UI shell on mount; Gadgetron injects a copy into every `POST /v1/chat/completions` request as `<gadgetron_shared_context>`.
+
+**Auth:** `OpenAiCompat`
+
+**Response:**
+
+```json
+{
+  "gateway_version": "0.2.0",
+  "default_model": "penny",
+  "active_plugs": [
+    { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
+  ],
+  "degraded_reasons": [],
+  "knowledge": {
+    "canonical_ready": true,
+    "search_ready": false,
+    "relation_ready": false,
+    "last_ingest_at": "2026-04-19T12:00:00Z"
+  }
+}
+```
+
+`active_plugs[].role` is one of `"canonical"`, `"search"`, `"relation"`, `"extractor"`. `degraded_reasons` is non-empty when the bootstrap ran but one or more subsystems are unhealthy.
+
+---
+
+### GET /api/v1/web/workbench/activity
+
+Recent workbench activity feed: Penny turns, direct actions, system events.
+
+**Auth:** `OpenAiCompat`
+
+**Query parameters:**
+
+| Name | Type | Default | Range | Description |
+|------|------|---------|-------|-------------|
+| `limit` | integer | `50` | `[1, 100]` | Maximum entries to return |
+
+**Response:**
+
+```json
+{
+  "entries": [
+    {
+      "event_id": "uuid",
+      "at": "2026-04-19T12:00:00Z",
+      "origin": "penny",
+      "kind": "chat_turn",
+      "title": "Summarise last incident",
+      "request_id": "uuid",
+      "summary": null
+    }
+  ],
+  "is_truncated": true
+}
+```
+
+`origin`: `"penny"` | `"user_direct"` | `"system"`. `kind`: `"chat_turn"` | `"direct_action"` | `"system_event"`.
+
+---
+
+### GET /api/v1/web/workbench/requests/{request_id}/evidence
+
+Per-request evidence: tool traces, knowledge citations, and knowledge candidates created during that request.
+
+**Auth:** `OpenAiCompat`
+
+**Path parameters:** `request_id` — UUID of the gateway request.
+
+**Response:**
+
+```json
+{
+  "request_id": "uuid",
+  "tool_traces": [
+    { "gadget_name": "wiki.search", "args_digest": "a3f2...", "outcome": "success", "latency_ms": 42 }
+  ],
+  "citations": [
+    { "label": "^1", "page_name": "ops/incidents/2026-04-19", "anchor": null }
+  ],
+  "candidates": []
+}
+```
+
+`tool_traces[].outcome`: `"success"` | `"denied"` | `"error"`. `args_digest` is a 16-character SHA-256 prefix of the raw args — not the raw args.
+
+**Errors:** `404 workbench_request_not_found` when `request_id` is not visible to the actor.
+
+---
+
+### GET /api/v1/web/workbench/knowledge-status
+
+Knowledge plane readiness: canonical, search, and relation plug status plus last ingest timestamp.
+
+**Auth:** `OpenAiCompat`
+
+**Response:**
+
+```json
+{
+  "canonical_ready": true,
+  "search_ready": false,
+  "relation_ready": false,
+  "stale_reasons": ["search index last rebuilt >30s ago"],
+  "last_ingest_at": "2026-04-19T12:00:00Z"
+}
+```
+
+---
+
+### GET /api/v1/web/workbench/views
+
+Actor-visible registered view descriptors. The shell uses these to build the left rail and center panels.
+
+**Auth:** `OpenAiCompat`
+
+**Response:**
+
+```json
+{
+  "views": [
+    {
+      "id": "knowledge-activity-recent",
+      "title": "Recent Activity",
+      "owner_bundle": "gadgetron-knowledge",
+      "source_kind": "builtin",
+      "source_id": "activity_feed",
+      "placement": "left_rail",
+      "renderer": "timeline",
+      "data_endpoint": "/api/v1/web/workbench/views/knowledge-activity-recent/data",
+      "refresh_seconds": 30,
+      "action_ids": [],
+      "required_scope": null,
+      "disabled_reason": null
+    }
+  ]
+}
+```
+
+`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"`. `renderer`: `"table"` | `"timeline"` | `"cards"` | `"markdown_doc"`.
+
+---
+
+### GET /api/v1/web/workbench/views/{view_id}/data
+
+Payload for a single registered view. The shell calls `data_endpoint` from the view descriptor.
+
+**Auth:** `OpenAiCompat`
+
+**Path parameters:** `view_id` — string ID from `GET /views`.
+
+**Response:**
+
+```json
+{
+  "view_id": "knowledge-activity-recent",
+  "payload": { ... }
+}
+```
+
+`payload` shape is renderer-specific and typed at the bundle layer.
+
+**Errors:** `404 workbench_view_not_found`.
+
+---
+
+### GET /api/v1/web/workbench/actions
+
+Actor-visible registered action descriptors. The shell renders these as affordances.
+
+**Auth:** `OpenAiCompat`
+
+**Response:**
+
+```json
+{
+  "actions": [
+    {
+      "id": "wiki.write",
+      "title": "Save to Wiki",
+      "owner_bundle": "gadgetron-knowledge",
+      "source_kind": "gadget",
+      "source_id": "wiki.write",
+      "gadget_name": "wiki.write",
+      "placement": "context_menu",
+      "kind": "mutation",
+      "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } },
+      "destructive": false,
+      "requires_approval": false,
+      "knowledge_hint": "Write or update a wiki page",
+      "required_scope": null,
+      "disabled_reason": null
+    }
+  ]
+}
+```
+
+`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`.
+
+---
+
+### POST /api/v1/web/workbench/actions/{action_id}
+
+Invoke a registered direct action.
+
+**Auth:** `OpenAiCompat`
+
+**Path parameters:** `action_id` — string ID from `GET /actions`.
+
+**Request body:**
+
+```json
+{
+  "args": { "path": "ops/notes/my-note.md", "content": "..." },
+  "client_invocation_id": "uuid-or-null"
+}
+```
+
+`client_invocation_id` is optional. When provided, the server holds a 5-minute TTL replay cache keyed on `(tenant_id, action_id, client_invocation_id)` to deduplicate double-clicks and retries.
+
+**Response:**
+
+```json
+{
+  "result": {
+    "status": "ok",
+    "approval_id": null,
+    "activity_event_id": "uuid",
+    "audit_event_id": "uuid",
+    "refresh_view_ids": ["knowledge-activity-recent"],
+    "knowledge_candidates": [],
+    "payload": null
+  }
+}
+```
+
+`result.status`: `"ok"` | `"pending_approval"` (when `requires_approval = true` on the descriptor). When `pending_approval`, `approval_id` is set.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `workbench_action_not_found` | 404 | `action_id` not registered or not visible to actor |
+| `workbench_action_invalid_args` | 400 | `args` fails the descriptor's `input_schema` validation |
+| `forbidden` | 403 | This instance has disabled direct actions (`DirectActionsDisabled` policy) |
+| `config_error` | 400 | Workbench service not wired (no `[knowledge]` configured), or action service not wired in this build |
+
+---
+
 ## Admin endpoints (not yet implemented)
 
 The following routes are defined in the router but return HTTP 501 (not yet implemented). They require scope `Management`.
