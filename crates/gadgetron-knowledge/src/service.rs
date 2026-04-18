@@ -1059,6 +1059,7 @@ mod tests {
                     markdown: "# Home".into(),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -1095,6 +1096,7 @@ mod tests {
                     markdown: "# Home".into(),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -1128,6 +1130,7 @@ mod tests {
                     markdown: "# Home".into(),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await

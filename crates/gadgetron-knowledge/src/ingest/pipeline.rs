@@ -150,6 +150,8 @@ impl IngestPipeline {
                     markdown,
                     create_only: !request.overwrite,
                     overwrite: request.overwrite,
+                    // Ingest pipeline (RAW import) has no candidate provenance.
+                    provenance: Default::default(),
                 },
             )
             .await?;

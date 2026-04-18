@@ -349,6 +349,20 @@ pub struct KnowledgeDocument {
 /// `create_only` and `overwrite` are mutually exclusive hints; when both
 /// are `false` the store uses its default behavior (llm-wiki = overwrite
 /// on match, create otherwise).
+///
+/// # `provenance`
+///
+/// Free-form `BTreeMap<String, String>` carrying the audit/candidate
+/// trace that produced this write. Drift-fix PR 3 (D-20260418-27) added
+/// the field so candidate materialization can thread capture-time
+/// hint tags / rationale / source-bundle identifiers into the canonical
+/// store. Store implementations SHOULD persist the provenance verbatim
+/// (e.g. `LlmWikiStore` merges it into page frontmatter under
+/// `provenance:`) and MUST NOT drop unknown keys.
+///
+/// `BTreeMap` ordering is deterministic so the written frontmatter is
+/// byte-stable for audit replay. Empty map (default) is the legacy
+/// behaviour — no frontmatter delta, no visible operator change.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KnowledgePutRequest {
     pub path: String,
@@ -357,6 +371,8 @@ pub struct KnowledgePutRequest {
     pub create_only: bool,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provenance: std::collections::BTreeMap<String, String>,
 }
 
 /// Receipt returned by a successful write.
