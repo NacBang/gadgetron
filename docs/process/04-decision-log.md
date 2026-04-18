@@ -2670,4 +2670,84 @@ W3-WEB-2 merged (3 read endpoints + core workbench types + scope 예외). PR #77
 
 ---
 
+## D-20260418-16: W3-PSL-1b 착수 — Chat-completions handler wiring + graceful degrade
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-PSL-1 머지 직후, cron 8번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote)
+**관련 문서**: `docs/design/phase2/13-penny-shared-surface-loop.md` §2.2.2 (prompt binding), §2.2.4 (session resume), §2.2.5 (failure behavior), `docs/design/gateway/route-groups-and-scope-gates.md` (context)
+**Follows**: D-20260418-15 (W3-PSL-1)
+
+### 배경
+
+W3-PSL-1 (PR #80) 이 shared-context core types / service trait / 4 gadgets / `render_penny_shared_context()` pure function 까지 landing. 실제 `/v1/chat/completions` 주입은 미완 — "PSL-1 is dead code until wired". Docs #79, #81 (contract-hardening) 은 추가 구현 거리 없음.
+
+Codex cycle 8 추천: **PSL-1b 가 KC-1 보다 먼저** — operator 가 Penny 응답에서 shared context block 을 관찰 가능해야 KC-1 stub→real 교체를 fixture diff 로 검증 가능.
+
+### 결정: W3-PSL-1b (chat-handler wiring + graceful degrade)
+
+**근거** (codex):
+- PSL-1 types/service/render 는 이미 있음 → wiring 만 남음
+- 단일 PR 에서 end-to-end visibility 확보 (`POST /v1/chat/completions` 응답에 Penny 가 shared context 인식)
+- KC-1 (~1500-2000 LOC) 은 PSL-1b 이후에 stubs 를 real 로 바꾸면 됨
+- Feature flag `penny_shared_context_v1` 로 prod 롤아웃 제어
+
+### W3-PSL-1b tight scope (본 PR)
+
+1. **Config** (`gadgetron-core::agent::config::SharedContextConfig`):
+   - 기존 struct 에 `enabled: bool` 필드 추가, `default = true` (D-12 leaf 원칙 — core 에 추가, gateway 가 소비)
+   - validation 에서 `enabled = false` 는 허용 (flag gating — doc §2.3 의 `require_explicit_degraded_notice` 와 별개)
+2. **Handler wiring** (`crates/gadgetron-gateway/src/handlers.rs::chat_completions_handler`):
+   - ctx 확정 후 quota 체크 전:
+     - `state.penny_shared_surface.is_some() && config.shared_context.enabled == true` 일 때만 실행
+     - `DefaultPennyTurnContextAssembler::new(service, config)` 생성
+     - `build(&AuthenticatedContext::default(), req.conversation_id.as_deref(), ctx.request_id)` 호출
+     - **Err 시 graceful degrade**: warn-log + bootstrap 없이 원 `req` 로 계속 진행 (절대 5xx 금지)
+     - Ok 시 `render_penny_shared_context(&bootstrap, digest_summary_chars)` → String
+     - **Message 삽입 규칙**: `req.messages[0].role == System && content == Text(..)` 이면 해당 content 앞에 block prepend. 아니면 `Message::system(block)` 을 index 0 에 insert
+3. **Tracing span**: `penny_shared_context.inject` with `request_id`, `health`, `degraded_reasons_count`, `rendered_bytes`, `injection_mode: "prepend_to_system" | "insert_new_system" | "skipped"` (per doc §2.4.2)
+4. **Tests**:
+   - Handler-level (`crates/gadgetron-gateway/src/handlers.rs` `#[cfg(test)] mod tests`):
+     - `bootstrap_injected_when_service_is_some_and_flag_enabled`
+     - `bootstrap_skipped_when_service_none`
+     - `bootstrap_skipped_when_flag_disabled`
+     - `bootstrap_degrades_gracefully_when_assembler_returns_err`
+     - `bootstrap_prepended_to_existing_system_message`
+     - `bootstrap_inserted_as_new_system_message_when_none_exists`
+     - `bootstrap_reassembled_every_turn_even_with_conversation_id` (doc §2.2.4 session resume boundary)
+   - Integration (`crates/gadgetron-gateway/tests/chat_shared_context.rs` 신규):
+     - 실제 router + fake provider + `InProcessPennySharedSurfaceService` 로 end-to-end chat POST. Provider 가 받은 messages[0].content 에 `<gadgetron_shared_context>` 문자열 포함 검증
+5. **Feature flag default**: `enabled = true` (doc §2.3 "optional 기능이 아니다" 원칙 준수). 운영 긴급 롤백은 `[agent.shared_context] enabled = false` 로 가능하도록 startup validation 에서 false 를 허용.
+
+### Codex hidden caveat
+
+`config.shared_context.enabled = false` 와 `require_explicit_degraded_notice = false` 는 의미가 다름:
+- `enabled = false` → 전체 bootstrap 주입 skip (emergency rollback)
+- `require_explicit_degraded_notice = false` → "No silent degradation" 원칙 위반 → startup validation error
+
+두 필드가 혼동되지 않도록 doc comment 에 명시.
+
+### Non-scope (PSL-1c / KC-1 / P2C)
+
+- **PSL-1c**: multi-turn context invalidation semantics (여러 turn 간 bootstrap freshness). 지금은 매 turn 재조립 + stateless
+- **PSL-1c**: `/v1/completions` legacy route wiring (chat-only)
+- **KC-1**: pending_candidates / candidate_decide 의 real backing (stubs 그대로)
+- **P2C**: bootstrap 의 push-refresh / WebSocket subscription
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: `SharedContextConfig` 에 `enabled` 필드 1개 추가 (additive)
+- `gadgetron-gateway`: `handlers.rs` 주입 로직 + 새 integration test
+- 다른 크레이트 변경 없음
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-psl-1b/chat-handler-wiring` (생성됨)
+3. gateway-router-lead delegation
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
