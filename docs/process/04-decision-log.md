@@ -2458,4 +2458,66 @@ W3-KL-2 (PR #69) 머지 후 2 에이전트 간소화 투표. 두 agent 모두 W3
 
 ---
 
+## D-20260418-13: W3-KL-3 착수 — Penny RAG system prompt + citation + PDF extractor
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-WEB-1 머지 직후, cron 3번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote, 이전 사이클들 컨센서스 기반)
+**관련 문서**: `docs/design/phase2/11-raw-ingestion-and-rag.md` §9.3 (citation format)
+**Follows**: D-20260418-11 (W3-KL-2), D-20260418-12 (W3-WEB-1)
+
+### 배경
+
+W3-KL-2 merged (wiki.import E2E). W3-WEB-1 merged (shell with empty states). 다음 사이클 결정 — codex fast vote.
+
+### 결정: W3-KL-3
+
+**근거** (codex):
+- W3-KL-2 이미 `KnowledgeService::write` 가 semantic+keyword index 로 fanout → imported markdown 이 `wiki.search` 로 즉시 검색 가능
+- W3-KL-3 가 닫는 last gap: Penny system prompt + citation format + PDF extractor
+- "ask Penny → imported 페이지 인용된 응답" 경로가 단일 PR 에서 operator-visible
+- W3-KC-1 과 orthogonal (curation 은 write-back, RAG 는 read)
+- W3-KC-1 (~1500-2000 LOC) / W3-XGR-1 (~2000+ LOC) 은 single PR 에 user-visible value 없음
+
+### W3-KL-3 tight scope
+
+1. **Penny system prompt RAG extension** (`crates/gadgetron-penny/src/spawn.rs:110` extension point):
+   - 사용자 질의 시 `wiki.search` 호출 → top hits 를 context 에 주입 → 응답에 footnote citation
+2. **Citation format** (doc 11 §9.3): markdown footnote `[^1]` → `[^1]: <page_path>` 형태
+3. **PDF extractor** in `plugin-document-formats`:
+   - `[features] pdf = ["pdf-extract"]`
+   - `pdf.rs` module with `PdfExtractor`
+   - `supported_content_types() = ["application/pdf"]`
+4. **Integration test**: import markdown + PDF → ask Penny → response 에 citation 포함
+
+### Codex hidden caveat
+
+현재 `wiki.search` 가 whole-page hits 반환 (chunk 아님). Citation anchor 는 page-level 로 degrade (heading path 없는 경우). hybrid chunking 은 W3-KL-4 로 defer.
+
+### Non-scope (W3-KL-4+)
+
+- docx / pptx extractors
+- `web.fetch` / `plugin-web-scrape`
+- `wiki.enrich` (auto-enrich LLM call)
+- Hybrid chunking (heading-based chunk retrieval)
+- Blob-viewer endpoint (requires `FilesystemBlobStore` impl)
+- Knowledge candidate lifecycle (W3-KC-1 orthogonal)
+- External runtime impl (W3-XGR-1)
+
+### 예상 범위
+
+- Rust: ~600-900 LOC (spawn.rs prompt + pdf.rs + integration test)
+- Dependencies: `pdf-extract = "0.7"` optional feature, `plugin-document-formats` 만
+- Tests: ~150 LOC (pdf extractor + citation format + integration)
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-kl-3/penny-rag-pdf`
+3. chief-architect delegation (Rust)
+4. cargo test + fmt + clippy + integration test
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
