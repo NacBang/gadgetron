@@ -2318,4 +2318,78 @@ W2 freeze 에도 불구하고 Gate 1 MUST-LAND 완성을 위해 W3-XAAS-B 에서
 
 ---
 
+## D-20260418-11: W3-KL-2 우선 착수 (W3-WEB-1 다음 단계로 연기)
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-KL-1 머지 직후 + PR #67 expert-workbench doc 랜딩 이후 3-agent priority review)
+**상태**: 🟢 승인 (2/3 agents W3-KL-2, codex adversarial sequential 권고 채택)
+**관련 문서**: `docs/design/core/knowledge-plug-architecture.md` §6 [P2B], `docs/design/phase2/11-raw-ingestion-and-rag.md`, `docs/design/web/expert-knowledge-workbench.md` §6 [P2A]
+
+### 배경
+
+W3-KL-1 (PR #66 `5cde42e`) 머지 완료 — `KnowledgeService` + 3 plug traits + default impls 이 main. 동시에 PR #67 (`84bd80c`) 로 expert-workbench UI design 문서 랜딩 (Approved). 두 후보 중 우선순위 결정 필요.
+
+### 3-agent 수렴 결과
+
+| 에이전트 | 권고 | 핵심 근거 |
+|---|---|---|
+| ux-interface-lead | W3-WEB-1 FIRST | 사용자 "테스트하면서" = visible 테스트, shell-first 로 empirical gap 파악 |
+| chief-architect | PARALLEL (serial 이면 W3-KL-2) | 두 crate disjoint, `gadgetron-web` vs `gadgetron-core/knowledge/plugins` 파일 충돌 zero |
+| codex-chief-advisor | **W3-KL-2 FIRST** | 사용자 3턴 일관 지시 = 지식레이어 first, shell-first 는 empty theater (principle 7 "failure first-class" 위배 리스크), wire-shape coupling MAJOR (`WorkbenchCitation.source_kind` 등) |
+
+### 결정: W3-KL-2 FIRST
+
+- 사용자 3턴 일관 directive ("빨리 지식레이어 만들어서 테스트") 가 strongest signal
+- Codex adversarial reasoning: W3-WEB-1 단독 land 시 operator 가 import 시도하면 404/stub → expert-workbench §1.4 principle 7 violation, "knowledge workbench" 프레이밍 신뢰도 훼손
+- W3-KL-2 는 CLI+integration test 로 headless E2E 검증 가능 (testcontainers postgres + markdown RAW → retrieval)
+- W3-WEB-1 은 W3-KL-2 머지 후 착수 — wire shapes (`WorkbenchCitation`, `WorkbenchKnowledgeStatusResponse.last_ingest_at` 등) 가 empirical 검증된 후 frontend 가 consume
+
+### W3-KL-2 scope (tight single PR, ~1,500 LOC)
+
+1. `gadgetron-core::ingest` — `Extractor` trait + `ExtractedDocument` / `ExtractHints` / `ExtractError` / `StructureHint` (doc 11 §4.3 shape)
+2. `gadgetron-core::bundle::context::PlugHandles` — add `pub extractors: PlugRegistry<'a, dyn Extractor>` field (additive, existing `PlugHandles` not `#[non_exhaustive]` but only `pub(crate)` constructed)
+3. `gadgetron-core::bundle::bundle_registry::BundleRegistry` — add `extractors` BTreeMap + scratch-map atomicity + list_extractors()
+4. `plugins/plugin-document-formats/` 신규 crate (workspace member) with markdown extractor feature only — PDF/docx/pptx 는 W3-KL-3 feature-gate follow
+5. `gadgetron-knowledge::ingest::IngestPipeline` — extract → blob (stub FilesystemBlobStore in W3-KL-2) → KnowledgeService.write() → receipt
+6. `wiki.import` Gadget 추가 in `KnowledgeGadgetProvider` — ~6 MCP schema fields (bytes/content_type/scope/title/auto_enrich/overwrite)
+7. Integration test — testcontainers postgres, markdown RAW → import → search retrieval
+
+### Non-scope (W3-KL-3 이후)
+
+- PDF/docx/pptx extractors (feature-gate in plugin-document-formats)
+- Penny RAG system prompt + citation format (doc 11 §2 spec)
+- Config backward-compat sugar (`[knowledge] wiki_path` → `[knowledge.store.llm-wiki]`)
+- `plugin-web-scrape/` bundle
+- Auto-enrich LLM 호출 경로
+- Blob deduplication via content-hash
+
+### W3-WEB-1 시행 조건
+
+W3-KL-2 머지 완료 + `WorkbenchCitation` / `WorkbenchKnowledgeStatusResponse` 등 wire shape 가 실제 import 파이프라인 output 으로 empirically 확정 → 그 shape 을 frontend 가 consume.
+
+### 반려 옵션
+
+- **PARALLEL (chief-architect 제안)** — 정말 crate 는 disjoint 하지만 codex MAJOR-2 의 wire-shape coupling 리스크 실존. wire 타입 먼저 freeze 하려면 rev6 또는 별도 PR 가 선행되어야 하는데, 그 비용이 sequential 보다 크지 않음
+- **W3-WEB-1 FIRST (ux 제안)** — empty shell 은 demo-style empty state 로 귀결, principle 7 ("failure is first-class") violation 리스크. codex adversarial reasoning 설득력 있음
+
+### 리뷰 권고
+
+- chief-architect W3 구현 delegation 시 doc 11 §4.1 크레이트 레이아웃 + §4.3 Extractor trait signature + knowledge-plug-architecture §3.3 interface 계약 엄격 준수
+- W3-KL-2 PR 리뷰 시 `IngestPipeline` 이 `KnowledgeService.write()` 를 bypass 하지 않고 delegate 하는지 검증 (W3-KL-1 refactor regression 방지)
+
+### 비용
+
+W3-KL-2 구현: ~1,500 LOC + 8-12 tests, ~3-4 agent-hours (chief-architect + qa). calendar 하루 내 PR open 가능.
+
+### 시행 순서
+
+1. **지금 (본 커밋)**: D-20260418-11 land (docs-first)
+2. Feature branch `w3-kl-2/wiki-import-extractor` 오픈
+3. chief-architect delegation (Extractor trait + plugin-document-formats markdown + IngestPipeline + wiki.import Gadget + integration test)
+4. cargo check + clippy + test + fmt
+5. PR + CI + admin squash merge
+6. W3-WEB-1 [P2A] 착수 (wire shapes empirically freeze 후)
+
+---
+
 _(다음 엔트리는 아래에 append)_
