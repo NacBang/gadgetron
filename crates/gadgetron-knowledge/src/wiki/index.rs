@@ -133,6 +133,32 @@ impl InvertedIndex {
         }
     }
 
+    /// Drop all references to `name` from the index.
+    ///
+    /// O(terms) — walks every token bucket and removes the page from any
+    /// set that contained it. Empty buckets are NOT pruned (terms linger
+    /// for fast re-insert on re-add); this is fine at P2B's <10k pages
+    /// scale and keeps the method allocation-free.
+    ///
+    /// Added in W3-KL-1 to support the incremental `KnowledgeIndex::apply`
+    /// path in `keyword_index::WikiKeywordIndex`.
+    pub fn remove_page(&mut self, name: &str) {
+        let mut was_present = false;
+        for set in self.terms.values_mut() {
+            if set.remove(name) {
+                was_present = true;
+            }
+        }
+        if was_present {
+            self.page_count = self
+                .terms
+                .values()
+                .flat_map(|set| set.iter())
+                .collect::<HashSet<_>>()
+                .len();
+        }
+    }
+
     /// Search the index for up to `max_results` pages matching `query`.
     ///
     /// Results are sorted by descending score, then by ascending page

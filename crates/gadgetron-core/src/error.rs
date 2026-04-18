@@ -187,6 +187,49 @@ impl fmt::Display for WikiErrorKind {
     }
 }
 
+/// Knowledge plane nested error kinds (Phase 2B).
+///
+/// Paired with `GadgetronError::Knowledge { kind, message }`. See
+/// `docs/design/core/knowledge-plug-architecture.md §2.4.1` for the
+/// canonical specification and HTTP mapping. These kinds surface at the
+/// `KnowledgeService` boundary — the wrapped `LlmWikiStore` / keyword /
+/// semantic index implementations still use `WikiErrorKind` internally,
+/// but outward-facing errors are normalized to `KnowledgeErrorKind`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeErrorKind {
+    /// Plug id declared in `[knowledge] canonical_store/search_plugs/
+    /// relation_plugs` is not present in the relevant registry at startup.
+    /// HTTP 500 (operator-facing misconfiguration).
+    BackendNotRegistered { plug: String },
+    /// A registered backend returned a transport / timeout / health failure
+    /// — e.g. pgvector query timeout, graphify external runtime RPC failure.
+    /// HTTP 503.
+    BackendUnavailable { plug: String },
+    /// Requested canonical document path is not present in the canonical
+    /// store. HTTP 404.
+    DocumentNotFound { path: String },
+    /// Query validation rejected the caller's input (empty text, unknown
+    /// mode, bad traversal depth, etc.). HTTP 400.
+    InvalidQuery { reason: String },
+    /// Under `write_consistency = await_derived`, a derived index or
+    /// relation plug failed to apply a write. Surfaces a single plug id —
+    /// per `service.rs` write path the first failure wins. HTTP 500.
+    DerivedApplyFailed { plug: String },
+}
+
+impl fmt::Display for KnowledgeErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BackendNotRegistered { .. } => write!(f, "backend_not_registered"),
+            Self::BackendUnavailable { .. } => write!(f, "backend_unavailable"),
+            Self::DocumentNotFound { .. } => write!(f, "document_not_found"),
+            Self::InvalidQuery { .. } => write!(f, "invalid_query"),
+            Self::DerivedApplyFailed { .. } => write!(f, "derived_apply_failed"),
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum GadgetronError {
@@ -250,6 +293,16 @@ pub enum GadgetronError {
         message: String,
     },
 
+    /// Knowledge plane error (Phase 2B). Surfaces at the `KnowledgeService`
+    /// boundary when a write/search/traverse call hits backend registration,
+    /// availability, query validation, or derived fanout issues. Added by
+    /// `docs/design/core/knowledge-plug-architecture.md` §2.4.1.
+    #[error("Knowledge error ({kind}): {message}")]
+    Knowledge {
+        kind: KnowledgeErrorKind,
+        message: String,
+    },
+
     /// Bundle subsystem error (Phase 2B). Manifest parse failures, install
     /// hook errors, bundles-home resolution failures. Added by
     /// ADR-P2A-10-ADDENDUM-01 §4 / D-20260418-07 W1 foundation.
@@ -310,6 +363,15 @@ impl GadgetronError {
                 WikiErrorKind::GitCorruption { .. } => "wiki_git_corrupted",
                 WikiErrorKind::Conflict { .. } => "wiki_conflict",
                 WikiErrorKind::PageNotFound { .. } => "wiki_page_not_found",
+            },
+            Self::Knowledge { kind, .. } => match kind {
+                KnowledgeErrorKind::BackendNotRegistered { .. } => {
+                    "knowledge_backend_not_registered"
+                }
+                KnowledgeErrorKind::BackendUnavailable { .. } => "knowledge_backend_unavailable",
+                KnowledgeErrorKind::DocumentNotFound { .. } => "knowledge_document_not_found",
+                KnowledgeErrorKind::InvalidQuery { .. } => "knowledge_invalid_query",
+                KnowledgeErrorKind::DerivedApplyFailed { .. } => "knowledge_derived_apply_failed",
             },
             Self::Bundle(e) => match e {
                 crate::bundle::errors::BundleError::Manifest(_) => "bundle_manifest_error",
@@ -391,6 +453,23 @@ impl GadgetronError {
                 WikiErrorKind::PageNotFound { path } =>
                     format!("Wiki page not found: {path}. Check the page name; use `wiki.list` or `wiki.search` to find existing pages."),
             },
+            // Knowledge plane variants — operator-/user-facing surface from the
+            // `KnowledgeService` boundary. Plug ids and paths are operator-
+            // provided config / user-provided values, not secrets; safe to
+            // interpolate. The `BackendUnavailable` message deliberately does
+            // NOT echo upstream stack traces (per §2.4.3 STRIDE row 4).
+            Self::Knowledge { kind, .. } => match kind {
+                KnowledgeErrorKind::BackendNotRegistered { plug } =>
+                    format!("Knowledge backend {plug:?} is referenced in configuration but was not registered at startup. Check `[knowledge]` canonical_store / search_plugs / relation_plugs against the enabled bundles."),
+                KnowledgeErrorKind::BackendUnavailable { plug } =>
+                    format!("Knowledge backend {plug:?} is currently unavailable. Check the backend's health / connectivity (pgvector pool, external runtime) and retry."),
+                KnowledgeErrorKind::DocumentNotFound { path } =>
+                    format!("Knowledge document not found: {path}. Use `wiki.list` or `wiki.search` to discover existing paths."),
+                KnowledgeErrorKind::InvalidQuery { reason } =>
+                    format!("Knowledge query is invalid: {reason}."),
+                KnowledgeErrorKind::DerivedApplyFailed { plug } =>
+                    format!("Derived index / relation plug {plug:?} failed to apply a write. The canonical store succeeded; rerun `gadgetron reindex` to recover."),
+            },
             // Bundle errors surface the inner `BundleError` text verbatim —
             // these are operator-facing messages (startup / install time)
             // and the inner text already carries the remediation hint.
@@ -427,6 +506,16 @@ impl GadgetronError {
                 WikiErrorKind::PageTooLarge { .. } => "invalid_request_error",
                 WikiErrorKind::CredentialBlocked { .. } => "invalid_request_error",
                 WikiErrorKind::PageNotFound { .. } => "invalid_request_error",
+                _ => "server_error",
+            },
+            Self::Knowledge { kind, .. } => match kind {
+                // DocumentNotFound + InvalidQuery are caller-facing; map to
+                // OpenAI-taxonomy-aligned `invalid_request_error` so SDKs
+                // can `match` by type without a `kind` lookup.
+                KnowledgeErrorKind::DocumentNotFound { .. } => "invalid_request_error",
+                KnowledgeErrorKind::InvalidQuery { .. } => "invalid_request_error",
+                // BackendNotRegistered / BackendUnavailable / DerivedApplyFailed
+                // are daemon-side failures.
                 _ => "server_error",
             },
             // Bundle errors are config / install-time; `Manifest` + `PlugId`
@@ -484,6 +573,13 @@ impl GadgetronError {
                 WikiErrorKind::GitCorruption { .. } => 503,
                 WikiErrorKind::Conflict { .. } => 409,
                 WikiErrorKind::PageNotFound { .. } => 404,
+            },
+            Self::Knowledge { kind, .. } => match kind {
+                KnowledgeErrorKind::BackendNotRegistered { .. } => 500,
+                KnowledgeErrorKind::BackendUnavailable { .. } => 503,
+                KnowledgeErrorKind::DocumentNotFound { .. } => 404,
+                KnowledgeErrorKind::InvalidQuery { .. } => 400,
+                KnowledgeErrorKind::DerivedApplyFailed { .. } => 500,
             },
             // Bundle errors are configuration / install-time failures. `Manifest`
             // + `PlugId` classify as operator-fixable config mistakes (400);

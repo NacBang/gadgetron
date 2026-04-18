@@ -25,11 +25,33 @@ pub(crate) struct SemanticSearchHit {
     pub snippet: Option<String>,
 }
 
+/// Pgvector-backed semantic index engine.
+///
+/// Originally `pub(crate)` (P2A). Promoted to `pub` in W3-KL-1 so
+/// `SemanticPgVectorIndex` (which holds an `Arc<SemanticBackend>`) can
+/// expose a `pub fn new(...)` surface without leaking visibility. All
+/// associated methods stay `pub(crate)` — external callers still must
+/// route through `KnowledgeService` / `SemanticPgVectorIndex` for the
+/// knowledge plane surface.
 #[derive(Clone)]
-pub(crate) struct SemanticBackend {
+pub struct SemanticBackend {
     pool: PgPool,
     embedding: Arc<dyn EmbeddingProvider>,
     write_mode: EmbeddingWriteMode,
+}
+
+// Manual `Debug` — `PgPool` + `dyn EmbeddingProvider` are not Debug. The
+// knowledge plug architecture (`KnowledgeIndex: Debug`) requires
+// `Arc<SemanticBackend>` to satisfy Debug through `SemanticPgVectorIndex`.
+// The impl deliberately omits the pool / secret fields and only emits
+// shape-only fingerprints.
+impl std::fmt::Debug for SemanticBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SemanticBackend")
+            .field("write_mode", &self.write_mode)
+            .field("embedding_model", &self.embedding.model_name())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SemanticBackend {
@@ -73,6 +95,11 @@ impl SemanticBackend {
         }
     }
 
+    // Exposed for maintenance tooling; `KnowledgeGadgetProvider` stopped
+    // calling this directly after the W3-KL-1 cutover (fanout is always
+    // async via `FuturesUnordered`), but `maintenance::run_reindex` may
+    // consult the mode for dry-run vs sync decisions.
+    #[allow(dead_code)]
     pub(crate) fn write_mode(&self) -> EmbeddingWriteMode {
         self.write_mode
     }
