@@ -398,20 +398,28 @@ pub struct KnowledgeCurationConfig {
     /// accept unilaterally). Free-form strings for KC-1; KC-1c will narrow
     /// to an enum once the canonical vocabulary is finalized.
     pub require_user_confirmation_for: Vec<String>,
-    /// Path template rules keyed by category (e.g. `"operations"` →
-    /// `"ops/journal/%Y/%m/%d"`). Templates MUST NOT escape the canonical
-    /// knowledge root — validation rejects any `..` segment.
+    /// Path template rules keyed by `ActivityKind` snake_case label (e.g.
+    /// `"direct_action"` → `"ops/journal/{date}/{topic}"`). Supported
+    /// placeholders: `{date}` (UTC `YYYY-MM-DD`), `{topic}` (snake_case
+    /// `ActivityKind`), `{author}` (actor UUID). Templates MUST NOT escape
+    /// the canonical knowledge root — validation rejects any `..` segment.
     pub path_rules: BTreeMap<String, String>,
 }
 
 impl Default for KnowledgeCurationConfig {
     fn default() -> Self {
         let mut path_rules = BTreeMap::new();
-        path_rules.insert("operations".to_string(), "ops/journal/%Y/%m/%d".to_string());
-        path_rules.insert("incident".to_string(), "ops/incidents/%Y/%m/%d".to_string());
         path_rules.insert(
-            "research".to_string(),
-            "research/notes/%Y/%m/%d".to_string(),
+            "direct_action".to_string(),
+            "ops/journal/{date}/{topic}".to_string(),
+        );
+        path_rules.insert(
+            "gadget_tool_call".to_string(),
+            "ops/tools/{date}/{author}".to_string(),
+        );
+        path_rules.insert(
+            "runtime_observation".to_string(),
+            "ops/runtime/{date}/{topic}".to_string(),
         );
         Self {
             enabled: true,
@@ -984,16 +992,16 @@ stale_threshold_days = 30
             ]
         );
         assert_eq!(
-            cfg.path_rules.get("operations").map(String::as_str),
-            Some("ops/journal/%Y/%m/%d")
+            cfg.path_rules.get("direct_action").map(String::as_str),
+            Some("ops/journal/{date}/{topic}")
         );
         assert_eq!(
-            cfg.path_rules.get("incident").map(String::as_str),
-            Some("ops/incidents/%Y/%m/%d")
+            cfg.path_rules.get("gadget_tool_call").map(String::as_str),
+            Some("ops/tools/{date}/{author}")
         );
         assert_eq!(
-            cfg.path_rules.get("research").map(String::as_str),
-            Some("research/notes/%Y/%m/%d")
+            cfg.path_rules.get("runtime_observation").map(String::as_str),
+            Some("ops/runtime/{date}/{topic}")
         );
     }
 
