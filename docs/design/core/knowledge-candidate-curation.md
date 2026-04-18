@@ -3,10 +3,10 @@
 > **담당**: PM (Codex)
 > **상태**: Approved
 > **작성일**: 2026-04-18
-> **최종 업데이트**: 2026-04-18 (PSL-1c startup-wiring conformance reconcile for recent `origin/main`)
+> **최종 업데이트**: 2026-04-18 (PSL-1d chat-capture conformance reconcile for recent `origin/main`)
 > **관련 크레이트**: `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-cli`, `gadgetron-penny`, `gadgetron-gateway`, `gadgetron-web`, `gadgetron-xaas`
-> **Phase**: [P2B] landed in-memory slice + canonical materialization + production startup wiring / [P2B-next] per-event capture hooks + projection hardening / [P2C] richer heuristics + user-confirmation routing / [P3] automation candidates
-> **관련 문서**: `docs/design/core/knowledge-plug-architecture.md`, `docs/design/web/expert-knowledge-workbench.md`, `docs/design/phase2/10-penny-permission-inheritance.md`, `docs/design/phase2/11-raw-ingestion-and-rag.md`, `docs/design/phase2/12-external-gadget-runtime.md`, `docs/process/04-decision-log.md`
+> **Phase**: [P2B] landed in-memory slice + canonical materialization + production startup wiring + first chat-completion capture hook / [P2B-next] additional capture owners + projection hardening / [P2C] richer heuristics + user-confirmation routing / [P3] automation candidates
+> **관련 문서**: `docs/design/core/knowledge-plug-architecture.md`, `docs/design/web/expert-knowledge-workbench.md`, `docs/design/phase2/10-penny-permission-inheritance.md`, `docs/design/phase2/11-raw-ingestion-and-rag.md`, `docs/design/phase2/12-external-gadget-runtime.md`, `docs/design/phase2/13-penny-shared-surface-loop.md`, `docs/process/04-decision-log.md`
 
 ---
 
@@ -72,7 +72,7 @@ Trade-off:
 
 ### 1.5 현재 trunk 기준 landed slice
 
-2026-04-18 `origin/main` (`W3-KC-1` + `W3-KC-1b` + `W3-PSL-1c`, PR #85 / #87 / #89, `docs/process/04-decision-log.md` D-20260418-17 / D-20260418-18 / D-20260418-19) 기준 trunk 에 실제로 들어온 것은 "contract + in-memory slice + optional canonical writeback + production startup wiring + smoke gates" 까지다.
+2026-04-18 `origin/main` (`W3-KC-1` + `W3-KC-1b` + `W3-PSL-1c` + `W3-PSL-1d`, PR #85 / #87 / #89 / #91, `docs/process/04-decision-log.md` D-20260418-17 / D-20260418-18 / D-20260418-19 / D-20260418-20) 기준 trunk 에 실제로 들어온 것은 "contract + in-memory slice + optional canonical writeback + production startup wiring + first request-owner capture hook + smoke gates" 까지다.
 
 - [P2B] landed
   - `gadgetron-core::knowledge::candidate` 의 wire types / traits / serde contract
@@ -84,10 +84,14 @@ Trade-off:
   - `gadgetron-cli::init_serve_runtime()` 이 `[knowledge]` 설정을 읽어 `build_knowledge_service()`, `build_candidate_plane()`, `build_workbench()`, `build_penny_shared_context()` helper chain 으로 production `AppState` 를 조립
   - `[knowledge]` 가 없을 때도 `build_workbench(None)` 이 degraded projection 을 wiring 하므로, workbench bootstrap surface 는 404 대신 degraded contract 를 유지한다
   - `[knowledge]` + `[knowledge.curation].enabled = true` 일 때만 `activity_capture_store`, `candidate_coordinator`, `penny_shared_surface`, `penny_assembler` 가 live wiring 된다
+  - `gadgetron-gateway::handlers::capture_chat_completion()` 이 첫 production `capture_action()` owner hook 으로 landed 했고, 성공한 `/v1/chat/completions` 요청을 fire-and-forget activity event 로 append 한다
+  - non-streaming chat 성공 경로는 실제 `prompt_tokens` / `completion_tokens` 를 기록하고, streaming 경로는 dispatch 시점 `0/0` placeholder usage 로 capture 한다
+  - PSL-1d capture event 는 `origin = Penny`, `kind = GadgetToolCall`, `source_capability = "chat.completions"`, `actor_user_id = Uuid::nil()`, `audit_event_id = None`, `hints = []` 를 current trunk authority 로 사용한다
   - `gadgetron-gateway::penny::shared_context` 의 wire-stable `pending_penny_decision` renderer
-  - `crates/gadgetron-gateway/tests/kc1_fixture_diff.rs`, `crates/gadgetron-knowledge/tests/kc1b_canonical_write_e2e.rs`, `crates/gadgetron-cli/src/main.rs` 의 PSL-1c smoke tests
+  - `crates/gadgetron-gateway/tests/kc1_fixture_diff.rs`, `crates/gadgetron-knowledge/tests/kc1b_canonical_write_e2e.rs`, `crates/gadgetron-cli/src/main.rs` 의 PSL-1c smoke tests, `crates/gadgetron-gateway/tests/psl_1d_chat_capture.rs`
 - [P2B-next] follow-up still open
-  - chat completion / workbench action / approval decision owner 가 `capture_action()` call site 를 실제 request path 에 연결하는 것
+  - workbench action / approval decision owner 가 `capture_action()` call site 를 실제 request path 에 연결하는 것
+  - chat completion owner hook 에 real `actor_user_id`, `audit_event_id`, hint generation, streaming final usage accounting 을 연결하는 것
   - workbench/read-model 에 `canonical_path`, `materialization_status`, `audit_event_id` 를 영속적으로 반영하는 projection
   - config default `path_rules` 와 KC-1b runtime key-space(`direct_action`, `runtime_observation` 등) 의 정렬
   - startup-wired candidate plane 의 same-turn guarantee 를 실제 live request flow 에서 검증하는 HTTP-level smoke/e2e
@@ -277,6 +281,8 @@ pub trait KnowledgeCandidateCoordinator: Send + Sync + Debug {
 - `get_candidate(actor, id)` 는 materialization precondition 이 `list_candidates(usize::MAX, false)` 전체 스캔에 의존하지 않도록 만든 fast-path 이다. absent row 와 backend failure 를 구분해야 한다.
 - `materialize_accepted_candidate()` 는 **stable seam** 이다. [P2B] 현재 trunk 는 먼저 `Accepted` 여부를 확인한 뒤, coordinator 에 `knowledge_service` 가 있으면 `KnowledgeService::write` 를 호출하고, 없으면 KC-1a synthetic fallback 을 유지한다.
 - `proposed_path` 와 `KnowledgeDocumentWrite` 는 현재 trunk 에서 계속 `String` 기반 wire shape 로 유지한다. typed `KnowledgePath` narrowing 은 아직 landed 하지 않았고 [P2C+] follow-up 으로 남는다.
+- [P2B] 현재 trunk 의 첫 live owner hook 은 `gadgetron-gateway::handlers` 가 `capture_action()` 에 넘기는 `CapturedActivityEvent` 이다. 이 hook 은 `source_capability = "chat.completions"`, `origin = Penny`, `kind = GadgetToolCall`, `hints = []` 를 고정한다.
+- [P2B] chat completion capture payload 는 **non-PII** 다. 제목/요약/`facts` 에 사용자 message text, reasoning text, secret, raw prompt 를 넣지 않고 모델명, stream 여부, token count 만 허용한다.
 
 ### 2.2 내부 구조
 
@@ -341,6 +347,54 @@ CandidateHint normalization + optional path_rules expansion
 - [P2B] 현재 landed slice 는 optimistic version check 를 구현하지 않는다. 중복 decision 은 mutex 순서대로 기록된다.
 - [P2C / KC-1c] Postgres backing 이 들어오면 row-level locking 또는 explicit version check 로 conflict semantics 를 강화한다.
 
+#### 2.2.1 PSL-1d 첫 번째 live capture owner (`/v1/chat/completions`) [P2B landed]
+
+현재 trunk 는 첫 production `capture_action()` owner hook 을 `gadgetron-gateway::handlers` 에 둔다. 이는 "후보 승격"이 아니라 "사실 이벤트 append" 를 먼저 live traffic 에 연결하는 최소 단위다.
+
+```rust
+async fn capture_chat_completion(
+    coordinator: Arc<dyn KnowledgeCandidateCoordinator>,
+    tenant_id: Uuid,
+    request_id: Uuid,
+    model: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    stream: bool,
+) {
+    let event = CapturedActivityEvent {
+        tenant_id,
+        actor_user_id: Uuid::nil(),
+        request_id: Some(request_id),
+        origin: ActivityOrigin::Penny,
+        kind: ActivityKind::GadgetToolCall,
+        title: format!("chat completion: {model}"),
+        summary: format!(
+            "{prompt_tokens} input / {completion_tokens} output tokens, stream={stream}"
+        ),
+        source_bundle: None,
+        source_capability: Some("chat.completions".into()),
+        audit_event_id: None,
+        facts: json!({
+            "model": model,
+            "stream": stream,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }),
+        ..
+    };
+
+    coordinator.capture_action(&AuthenticatedContext, event, vec![]).await
+}
+```
+
+운영 계약:
+
+- `handle_non_streaming` 은 `router.chat(req).await` 의 `Ok(response)` arm 에서만 capture 를 spawn 한다. 실패 arm 은 [P2B] 범위 밖이다.
+- `handle_streaming` 은 dispatch 시점에 capture 를 spawn 하고, usage count 는 `0/0` placeholder 로 둔다. 정확한 streaming usage 는 [P2C] Drop-guard follow-up 이 소유한다.
+- capture 는 `tokio::spawn` fire-and-forget 이며, 실패해도 chat response 는 실패시키지 않는다.
+- warn log 키는 `penny_shared_context.capture_chat_failed` 다. bootstrap degrade 와 같은 철학으로 "관측성은 남기되 사용자 요청은 계속 처리" 가 current contract 다.
+- `hints = []` 이므로 이 hook 만으로는 `KnowledgeCandidate` 가 생성되지 않는다. 현재 landed 효과는 `recent_activity` 채우기이며, `pending_candidates` 증가는 여전히 다른 owner hook 또는 hint-generation follow-up 이 필요하다.
+
 ### 2.3 설정 스키마
 
 ```toml
@@ -382,8 +436,9 @@ research = "research/notes/%Y/%m/%d"
 - Penny gadget 의 `workbench.candidates_pending` / `workbench.candidate_decide` 가 같은 shared-surface contract 를 소비한다.
 - workbench bootstrap surface 는 현재 production boot 에서도 항상 wiring 되며, knowledge service 가 없으면 degraded projection 으로 응답한다.
 - `[knowledge]` + `[knowledge.curation].enabled = true` 인 서버에서는 candidate plane 과 Penny assembler 가 live 가 된다.
-- 다만 current trunk 는 아직 event owner 별 `capture_action()` hook 이 없으므로, live server 의 `pending_candidates` 는 빈 목록으로 시작하는 것이 정상이다.
-- 현재 landed verification gate 는 `kc1_fixture_diff`, `kc1b_canonical_write_e2e`, `psl_1c_startup_wires_penny_assembler_and_observability_fields`, `psl_1c_no_knowledge_section_leaves_observability_fields_none` 네 축이다.
+- current trunk 에서는 성공한 chat completion 이 실제 `CapturedActivityEvent` 로 append 되므로, coordinator 가 wiring 된 서버의 `recent_activity` 는 더 이상 항상 빈 목록이 아니다.
+- 반면 `pending_candidates` 는 여전히 빈 목록으로 시작하는 것이 정상이다. PSL-1d owner hook 이 `hints = []` 를 사용하고, workbench/approval owner hook 도 아직 landed 하지 않았기 때문이다.
+- 현재 landed verification gate 는 `kc1_fixture_diff`, `kc1b_canonical_write_e2e`, `psl_1c_startup_wires_penny_assembler_and_observability_fields`, `psl_1c_no_knowledge_section_leaves_observability_fields_none`, `psl_1d_successful_non_streaming_chat_completions_captures_one_event` 다섯 축이다.
 
 ### 2.4 이벤트와 후보 생성 규약
 
@@ -395,7 +450,8 @@ candidate 생성은 bundle 반환을 그대로 신뢰하지 않는다.
 2. core 는 actor, tenant, source capability, audit correlation 을 다시 주입한다.
 3. [P2B] 현재 landed slice 는 `proposed_path` 를 advisory `Option<String>` 으로 보존한다. authoritative path sanitize / ACL re-check 는 materialization boundary 의 책임이며, `path_rules` template expansion 은 capture 시점에 hint path 가 비어 있을 때만 적용된다.
 4. [P2B] 현재 coordinator 는 전달된 힌트를 clamp + append 한다. hint 의 `proposed_path` 가 비어 있으면 `path_rules` 를 조회하고, 매칭이 없으면 `ops/journal/<YYYY-MM-DD>/<activity_kind>` fallback string 을 넣는다. 힌트가 전혀 없는 activity 에 대한 server-generated candidate 는 [P2B-next / P2C] 로 미룬다.
-5. external runtime 은 candidate 를 `Accepted` 상태로 만들 수 없다.
+5. [P2B] 현재 landed `chat completion` owner hook 은 의도적으로 `vec![]` 힌트를 전달한다. 즉, 성공한 chat traffic 은 activity feed 를 채우지만 candidate inbox 를 직접 늘리지 않는다.
+6. external runtime 은 candidate 를 `Accepted` 상태로 만들 수 없다.
 
 자동 candidate 생성 예:
 
@@ -431,7 +487,8 @@ same-turn 처리 원칙:
 - explicit wiring 이 있는 서비스 인스턴스에서는 direct action 직후 activity / candidate projection 이 즉시 read model 에 반영된다.
 - Penny 스트림이 이미 열려 있다면, 다음 tool reasoning 단계에서 pending candidate 목록을 볼 수 있다.
 - Penny 스트림이 끝난 뒤에도 next-turn 에 candidate inbox 로 재진입할 수 있다.
-- production startup path 자체는 이제 candidate plane 을 wiring 할 수 있다. 다만 same-turn guarantee 가 live 로 성립하려면 해당 요청 owner 가 같은 요청 흐름에서 `capture_action()` 을 실제 호출해야 한다. 현재 trunk 에서는 이 훅들이 아직 없으므로, same-turn 보장은 service/test harness authority 로 유지된다.
+- production startup path 자체는 이제 candidate plane 을 wiring 할 수 있다. 또한 current trunk 는 성공한 chat completion 을 fire-and-forget capture 로 append 하므로 next-turn `recent_activity` freshness 는 live 로 성립한다.
+- 다만 same-turn guarantee 가 live 로 성립하려면 해당 요청 owner 가 같은 요청 흐름에서 `capture_action()` 과 적절한 hint generation 을 모두 제공해야 한다. 현재 trunk 에서는 workbench/approval owner hook, chat hint generation, streaming final usage accounting 이 아직 없으므로 pending candidate same-turn 보장은 service/test harness authority 로 더 넓게 남는다.
 
 ### 2.6 Canonical write 승격 규칙
 
@@ -484,6 +541,7 @@ operator-facing error 원칙:
 - [P2B landed] typed `PennyCandidateDecisionReceipt` / fixture-diff output 으로 candidate state 전이를 검증한다.
 - [P2B landed] `candidate.materialize` tracing span 이 `candidate_id`, `has_knowledge_service` 를 기록한다.
 - [P2B landed] `gadgetron-cli` startup smoke 는 `workbench`, `penny_shared_surface`, `penny_assembler`, `activity_capture_store`, `candidate_coordinator` field-presence gate 를 가진다.
+- [P2B landed] `gadgetron-gateway::handlers` 는 chat capture 실패 시 `penny_shared_context.capture_chat_failed` warn event 를 남기고, request 성공/실패 semantics 는 바꾸지 않는다.
 - [P2B-next] 다음 이벤트를 tracing / audit 에 추가한다:
   - `activity_capture_appended`
   - `knowledge_candidate_created`
@@ -585,7 +643,7 @@ user direct action / Penny gadget / system observation
   [P2B] startup assembly of `KnowledgeService`, workbench, candidate plane, Penny shared-surface bridge
   [P2B-next] request-owner capture hook wiring, config/runtime drift hardening
 - `gadgetron-gateway`
-  actor resolution, request correlation, Penny shared-surface adapter, fixture-diff integration gate
+  actor resolution, request correlation, Penny shared-surface adapter, first chat-completion capture owner hook, fixture-diff integration gate
 - `gadgetron-web`
   workbench projection 렌더링
 - `gadgetron-xaas`
@@ -615,6 +673,7 @@ user direct action / Penny gadget / system observation
   - gateway shared-context renderer emits `pending_penny_decision`
   - `psl_1c_startup_wires_penny_assembler_and_observability_fields`
   - `psl_1c_no_knowledge_section_leaves_observability_fields_none`
+  - `psl_1d_successful_non_streaming_chat_completions_captures_one_event`
 - [P2B-next / P2C]
   - `candidate_hint_path_escape_rejected_at_materialization_boundary`
   - `accepted_candidate_requires_second_acl_check`
@@ -622,11 +681,13 @@ user direct action / Penny gadget / system observation
   - `same_request_duplicate_hints_are_deduped`
   - `pending_candidates_filtered_by_actor_scope`
   - `external_runtime_hint_cannot_set_authoritative_fields`
+  - `streaming_chat_capture_reconciles_final_usage_after_drop_guard`
 
 ### 4.2 테스트 하네스
 
 - [P2B landed] in-memory append-only event store + fake workbench projection + deterministic fixture-diff normalizer + tempdir wiki-backed `KnowledgeService`
 - [P2B landed] tempdir `gadgetron.toml` fixture + `load_knowledge_config_from_path()` + `build_app_state(AppStateParts { ... })` smoke harness
+- [P2B landed] fake provider + real axum router + in-memory candidate coordinator + bounded settle wait (`tokio::time::sleep`) for fire-and-forget capture assertion
 - [P2B-next] multi-user auth fixture + projection receipt assertions + canonical path validator
 - [P2C] property-based test:
   direct action -> Penny decision -> materialization sequence permutation 에서 불변식 유지
@@ -645,16 +706,19 @@ user direct action / Penny gadget / system observation
 
 1. [P2B landed] `kc1_fixture_diff`: capture event -> 2 hints -> bootstrap render -> accept 1 candidate -> bootstrap render diff
 2. [P2B landed] `kc1b_canonical_write_e2e`: capture -> path_rules expansion -> accept -> materialize -> `knowledge.search()` 가 canonical page 를 찾는다
-3. [P2B-next] direct workbench action -> capture -> pending candidate -> Penny accept -> startup-wired canonical write
-4. [P2B-next] direct workbench action -> capture -> Penny escalate -> user confirm -> canonical write
-5. [P2B-next] direct workbench action -> capture -> Penny reject -> no canonical write
-6. [P2C] external runtime action -> candidate hint -> normalized candidate -> acceptance
-7. [P2B-next] accepted candidate + write failure -> read model surfaces failed materialization
+3. [P2B landed] `psl_1d_chat_capture`: successful non-streaming chat -> fire-and-forget capture -> in-memory store contains one `GadgetToolCall` activity event
+4. [P2B-next] successful chat -> next-turn bootstrap/render path 에서 live `recent_activity` entry 가 shared-context block 에 나타나는 HTTP-level smoke
+5. [P2B-next] direct workbench action -> capture -> pending candidate -> Penny accept -> startup-wired canonical write
+6. [P2B-next] direct workbench action -> capture -> Penny escalate -> user confirm -> canonical write
+7. [P2B-next] direct workbench action -> capture -> Penny reject -> no canonical write
+8. [P2C] external runtime action -> candidate hint -> normalized candidate -> acceptance
+9. [P2B-next] accepted candidate + write failure -> read model surfaces failed materialization
 
 ### 5.2 테스트 환경
 
 - [P2B landed] in-memory store + fake projection + shared-context renderer
 - [P2B landed] tempdir wiki + `LlmWikiStore` + keyword index + `KnowledgeService`
+- [P2B landed] fake `LlmProvider`, real gateway router, `InMemoryActivityCaptureStore`, real `InProcessCandidateCoordinator`
 - [P2B-next] real router + fake provider + startup-built `AppState` 에서 `<gadgetron_shared_context>` injected chat POST 검증
 - [P2B-next] gateway auth fixture with multiple users/teams + Postgres testcontainers for append-only event tables + projection tables
 - [P2B-next] fake Penny decision provider + boot-wired `KnowledgeService`
@@ -663,12 +727,14 @@ user direct action / Penny gadget / system observation
 ### 5.3 회귀 방지
 
 - direct action 이 capture 없이 실행되면 실패해야 한다
+- [P2B landed] successful non-streaming chat 이 coordinator wired 상태에서 activity event 를 남기지 못하면 실패해야 한다
 - candidate 가 승인 전 canonical search/citation 에 노출되면 실패해야 한다
 - [P2B landed] wired materialization 이 canonical wiki 에 기록하지 못하면 실패해야 한다
 - [P2B landed] `[knowledge]` + `curation.enabled=true` 인데 startup 후 `penny_assembler` 가 `None` 이면 실패해야 한다
 - [P2B landed] `[knowledge]` 가 없는데 degraded workbench projection 자체가 사라지면 실패해야 한다
 - [P2B-next] Penny accept 가 caller write 권한을 우회하면 실패해야 한다
 - [P2B-next] write 실패가 candidate history 를 덮어쓰거나 삭제하면 실패해야 한다
+- [P2B-next] streaming chat capture 가 final usage accounting 을 영구적으로 `0/0` 에 고정하면 실패해야 한다
 - external bundle 이 `Accepted` candidate 를 직접 반환해도 시스템이 받아들이면 실패해야 한다
 
 ---
@@ -685,14 +751,16 @@ user direct action / Penny gadget / system observation
 - `path_rules` 3-variable expansion on hint-less candidates
 - optional canonical materialization through `KnowledgeService::write`
 - production startup wiring for `knowledge_service` / workbench / candidate plane / Penny shared surface
+- first live `capture_action()` owner hook for successful `/v1/chat/completions`
 - Penny shared-surface pending/decide adapter
 - wire-stable `pending_penny_decision` renderer
-- deterministic fixture-diff + canonical-write E2E + startup smoke exit gates
+- deterministic fixture-diff + canonical-write E2E + startup smoke + chat-capture integration exit gates
 - local `String`-based `KnowledgeDocumentWrite` / `proposed_path`
 
 ### 6.2 [P2B-next] live capture hooks + projection hardening
 
-- request-owner `capture_action()` wiring (chat completion / workbench action / approval decision)
+- request-owner `capture_action()` wiring (workbench action / approval decision / other non-chat surfaces)
+- chat completion hint generation + real actor/audit correlation + next-turn bootstrap smoke
 - production config `path_rules` 와 runtime key-space 정렬
 - `KnowledgeWriteback` / `canonical_path` / `materialization_status` projection
 - Postgres-backed capture store / projection / retention
@@ -1113,3 +1181,104 @@ user direct action / Penny gadget / system observation
 **결론**: Approved. 이 문서는 이제 KC-1/KC-1b candidate lifecycle 과 PSL-1c production startup wiring 현실을 함께 설명하는 trunk-authoritative 설계 문서다.
 
 기존 승인 로그는 append-only 로 유지하고, 이번 revision 은 `W3-KC-1b` landed state 와 recent `origin/main` authority 를 맞추기 위한 conformance amendment 로 별도 재검토했다. 본 문서는 이제 candidate lifecycle 의 current trunk behavior, optional canonical write path, 그리고 KC-1c follow-up boundary 를 서로 충돌 없이 설명한다.
+
+### Round 1 (PSL-1d Chat Capture Conformance) — 2026-04-18 — @gateway-router-lead @xaas-platform-lead
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §1` 기준)
+- [x] 인터페이스 계약 — `CapturedActivityEvent` field mapping 과 empty-hint semantics 가 `handlers.rs` landed code 와 일치한다
+- [x] 크레이트 경계 — live owner hook 은 `gadgetron-gateway`, contract/traits 는 `gadgetron-core`, store/coordinator 는 `gadgetron-knowledge` 에 남는다
+- [x] 타입 중복 — chat capture payload shape 가 새 타입을 만들지 않고 기존 candidate contract 를 재사용한다
+- [x] 에러 반환 — capture failure 가 warn log 로 degrade 되고 HTTP chat contract 를 바꾸지 않음이 명시되었다
+- [x] 동시성 — fire-and-forget `tokio::spawn` 과 append-only mutex store 경계가 분리 서술되었다
+- [x] 의존성 방향 — gateway 는 coordinator trait object 만 호출하고 역방향 결합을 만들지 않는다
+- [x] Phase 태그 — landed chat hook 과 follow-up owner hooks / hint generation / projection hardening 이 분리되었다
+- [x] 레거시 결정 준수 — D-12 crate boundary 와 충돌하지 않는다
+
+**Action Items**:
+- A1: PSL-1d landed owner hook, remaining non-chat owner gaps, non-PII payload rule 을 본문 phase/flow/test 섹션에 반영했다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. Round 1.5 진행 가능.
+
+### Round 1.5 (PSL-1d Chat Capture Conformance) — 2026-04-18 — @security-compliance-lead @dx-product-lead
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §1.5` 기준)
+- [x] 위협 모델 (필수) — chat capture payload 가 non-PII 요약만 남기고 raw prompt/reasoning 을 저장하지 않음을 고정했다
+- [x] 신뢰 경계 입력 검증 — HTTP request 에서 넘어온 chat content 를 event title/summary/facts 에 재사용하지 않는 경계를 명시했다
+- [x] 인증·인가 — `actor_user_id = nil` placeholder 와 caller inheritance 후속 복원을 open follow-up 으로 유지했다
+- [x] 시크릿 관리 — model name / token count 외 시크릿 surface 가 추가되지 않는다
+- [x] 공급망 — 신규 dependency 요구 없음
+- [x] 암호화 — capture hook 추가가 기존 in-transit / at-rest 정책을 바꾸지 않는다
+- [x] 감사 로그 — `audit_event_id = None` 현상과 KC-1c follow-up 을 문서에 드러냈다
+- [x] 에러 정보 누출 — `penny_shared_context.capture_chat_failed` 는 warn 신호만 남기고 내부 구조를 사용자 응답에 노출하지 않는다
+- [x] LLM 특이 위협 — chat traffic 로부터 prompt text 를 candidate plane 으로 복제하지 않는다는 방어선을 명시했다
+- [x] 컴플라이언스 매핑 — CC6.6 / GDPR Art.32 / HIPAA 164.312(b) 서술이 chat capture path 기준으로도 유지된다
+- [x] 사용자 touchpoint 워크스루 — recent_activity 는 채워질 수 있지만 pending_candidates 는 여전히 비어 있을 수 있다는 운영 의미가 설명되었다
+- [x] 에러 메시지 3요소 — capture 실패가 request 실패가 아니라 observability issue 임을 operator 관점으로 이해 가능하다
+- [x] CLI flag — 새 CLI flag surface 없음
+- [x] API 응답 shape — chat capture hook 이 OpenAI-compatible 응답 body/SSE shape 를 바꾸지 않는다
+- [x] config 필드 — 기존 `[knowledge.curation]` gate 의미만 확장 없이 재확인했다
+- [x] defaults 안전성 — chat capture 는 hints 없이 시작해 과도한 자동 기록을 막는 기본값을 유지한다
+- [x] 문서 5분 경로 — coordinator wired 상태에서 recent activity 가 생기는 operational expectation 을 문서에 추가했다
+- [x] runbook playbook — "activity는 보이지만 candidate는 비어 있음" 이 정상일 수 있다는 구분이 가능하다
+- [x] 하위 호환 — 기존 chat endpoint 성공/실패 semantics 가 유지된다
+- [x] i18n 준비 — 사용자-facing 문자열이 payload contract 와 분리 가능하다
+
+**Action Items**:
+- A1: non-PII payload, placeholder actor/audit correlation, operator-visible recent_activity vs pending_candidates 의미를 본문에 반영했다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. Round 2 진행 가능.
+
+### Round 2 (PSL-1d Chat Capture Conformance) — 2026-04-18 — @qa-test-architect
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §2` 기준)
+- [x] 단위 테스트 범위 — PSL-1d non-streaming capture integration gate 가 landed test 목록에 추가되었다
+- [x] mock 가능성 — fake provider + real router + in-memory coordinator harness 가 구체적으로 적혔다
+- [x] 결정론 — fire-and-forget settle wait 를 bounded integration harness 로 설명했다
+- [x] 통합 시나리오 — "successful chat -> one activity event" 와 "next-turn bootstrap visibility" 를 landed/follow-up 로 분리했다
+- [x] CI 재현성 — current test 는 외부 DB 없이 재현 가능하고 heavier HTTP/bootstrap chain 은 후속으로 남긴다
+- [x] 성능 검증 — capture hook verification 이 hot path SLO 와 별개로 작동함을 명시했다
+- [x] 회귀 테스트 — successful non-streaming chat 이 activity event 를 남기지 않는 회귀를 명확히 막는다
+- [x] 테스트 데이터 — fake token counts 와 store snapshot assertion 전략이 드러난다
+
+**Action Items**:
+- A1: PSL-1d integration test, fake-provider harness, streaming final-usage follow-up test gap 을 단위/통합 섹션에 반영했다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. Round 3 진행 가능.
+
+### Round 3 (PSL-1d Chat Capture Conformance) — 2026-04-18 — @chief-architect
+**결론**: Pass
+
+**체크리스트**: (`03-review-rubric.md §3` 기준)
+- [x] Rust 관용구 — helper 가 기존 `CapturedActivityEvent` / coordinator trait surface 를 그대로 사용한다
+- [x] 제로 비용 추상화 — 새로운 public abstraction 없이 existing trait-object seam 에 owner hook 만 추가된다고 문서화했다
+- [x] 제네릭 vs 트레이트 객체 — gateway 가 `Arc<dyn KnowledgeCandidateCoordinator>` 만 의존함을 명시했다
+- [x] 에러 전파 — capture failure graceful degrade 와 materialization failure semantics 를 혼동하지 않도록 분리했다
+- [x] 수명주기 — request-local spawn 과 append-only store lifetime 경계가 분명하다
+- [x] 의존성 추가 — 신규 crate/dep 요구 없음
+- [x] 트레이트 설계 — `hints = []` 로도 현재 contract 가 유효하다는 점을 공용 API 기준으로 고정했다
+- [x] 관측성 — warn event 이름과 landed verification gate 가 current trunk 와 정렬된다
+- [x] hot path — streaming `0/0` placeholder 를 현재 truth 로 적고 future fix 로 분리했다
+- [x] 문서화 — PSL-1d landed reality 가 candidate lifecycle 문서에 합쳐져 authority drift 를 제거했다
+
+**Action Items**:
+- A1: first live owner hook 의 exact field semantics, streaming placeholder rule, future actor/audit restoration 을 architecture/phase/test sections 에 반영했다.
+
+**Open Questions**:
+- 없음
+
+**다음 라운드 조건**: 없음. 최종 승인 가능.
+
+### 최종 승인 (PSL-1d Chat Capture Conformance) — 2026-04-18 — PM
+**결론**: Approved. 이 문서는 이제 KC-1/KC-1b candidate lifecycle, PSL-1c startup wiring, PSL-1d first live chat capture hook 을 함께 설명하는 current-trunk authority 문서다.
