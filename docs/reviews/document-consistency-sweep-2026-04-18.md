@@ -71,7 +71,7 @@
 
 | ID | 질문 | 현재 추천 | 상태 |
 |---|---|---|---|
-| Q-1 | `07-plugin-server.md` 는 즉시 `07-bundle-server.md` 로 rename 할지 | 내용 sweep 후 rename | Open |
+| Q-1 | `07-plugin-server.md` 는 즉시 `07-bundle-server.md` 로 rename 할지 | 내용 sweep 후 rename | **Closed** — `07-bundle-server.md` 로 rename 완료. `04-mcp-tool-registry.md`, `06-backend-plugin-architecture.md` rename 은 의도적 연기 (cross-reference 20+ 건 보호). ADR-P2A-10 §Consequences #4 에 implementation note 추가로 기록 완료 |
 | Q-2 | seed/frontmatter 호환 필드 rename 은 문서 우선인지 코드 migration 우선인지 | 문서에 deprecated note 선명화 후 코드 migration | Open |
 
 ---
