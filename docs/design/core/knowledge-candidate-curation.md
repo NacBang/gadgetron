@@ -189,7 +189,8 @@ pub struct KnowledgeCandidate {
     pub tenant_id: Uuid,
     pub actor_user_id: Uuid,
     pub summary: String,
-    pub proposed_path: Option<String>,
+    // drift-fix PR 2 (D-20260418-26) narrowed this from `Option<String>`.
+    pub proposed_path: Option<gadgetron_core::knowledge::KnowledgePath>,
     pub provenance: BTreeMap<String, String>,
     pub disposition: KnowledgeCandidateDisposition,
     pub created_at: DateTime<Utc>,
@@ -198,7 +199,8 @@ pub struct KnowledgeCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateHint {
     pub summary: String,
-    pub proposed_path: Option<String>,
+    // drift-fix PR 2 (D-20260418-26) narrowed this from `Option<String>`.
+    pub proposed_path: Option<gadgetron_core::knowledge::KnowledgePath>,
     pub tags: Vec<String>,
     pub reason: Option<String>,
 }
@@ -280,7 +282,7 @@ pub trait KnowledgeCandidateCoordinator: Send + Sync + Debug {
 - `list_candidates(actor, limit, only_pending)` 는 newest-first projection read 의 유일한 공용 진입점이다.
 - `get_candidate(actor, id)` 는 materialization precondition 이 `list_candidates(usize::MAX, false)` 전체 스캔에 의존하지 않도록 만든 fast-path 이다. absent row 와 backend failure 를 구분해야 한다.
 - `materialize_accepted_candidate()` 는 **stable seam** 이다. [P2B] 현재 trunk 는 먼저 `Accepted` 여부를 확인한 뒤, coordinator 에 `knowledge_service` 가 있으면 `KnowledgeService::write` 를 호출하고, 없으면 KC-1a synthetic fallback 을 유지한다.
-- `proposed_path` 와 `KnowledgeDocumentWrite` 는 현재 trunk 에서 계속 `String` 기반 wire shape 로 유지한다. typed `KnowledgePath` narrowing 은 아직 landed 하지 않았고 [P2C+] follow-up 으로 남는다.
+- ~~`proposed_path` 와 `KnowledgeDocumentWrite` 는 현재 trunk 에서 계속 `String` 기반 wire shape 로 유지한다.~~ **(업데이트 2026-04-18)** drift-fix PR 2 (D-20260418-26) 에서 `CandidateHint.proposed_path` / `KnowledgeCandidate.proposed_path` / `KnowledgeDocumentWrite.path` / `PennyCandidateDigest.proposed_path` / `PennyCandidateDecisionReceipt.canonical_path` 및 `materialize_accepted_candidate` 리턴을 모두 `gadgetron_core::knowledge::KnowledgePath` 로 narrow. wire shape (JSON bare string) 는 동일하게 유지됨 — `#[serde(try_from = "String", into = "String")]` 로 routing. `KnowledgeStore`-API 쪽 `KnowledgeDocument.path` / `KnowledgePutRequest.path` / `KnowledgeWriteReceipt.path` 는 여전히 `String` (별도 PR 로 narrow 고려).
 - [P2B] 현재 trunk 의 첫 live owner hook 은 `gadgetron-gateway::handlers` 가 `capture_action()` 에 넘기는 `CapturedActivityEvent` 이다. 이 hook 은 `source_capability = "chat.completions"`, `origin = Penny`, `kind = GadgetToolCall`, `hints = []` 를 고정한다.
 - [P2B] chat completion capture payload 는 **non-PII** 다. 제목/요약/`facts` 에 사용자 message text, reasoning text, secret, raw prompt 를 넣지 않고 모델명, stream 여부, token count 만 허용한다.
 

@@ -142,7 +142,9 @@ async fn kc1c_pg_store_round_trip_append_list_decide() {
 
     let hint_no_gate = CandidateHint {
         summary: "safe observation".into(),
-        proposed_path: Some("ops/journal/safe".into()),
+        proposed_path: Some(
+            gadgetron_core::knowledge::KnowledgePath::new("ops/journal/safe").unwrap(),
+        ),
         tags: vec!["monitoring".into()],
         reason: Some("routine check".into()),
     };
@@ -170,7 +172,9 @@ async fn kc1c_pg_store_round_trip_append_list_decide() {
 
     let hint_gate = CandidateHint {
         summary: "org policy change".into(),
-        proposed_path: Some("ops/policy/change".into()),
+        proposed_path: Some(
+            gadgetron_core::knowledge::KnowledgePath::new("ops/policy/change").unwrap(),
+        ),
         tags: vec!["infra".into(), "org_write".into()],
         reason: Some("org-level change".into()),
     };

@@ -3564,4 +3564,85 @@ Pre-implementation 재검토 결과:
 
 ---
 
+## D-20260418-26: Drift-fix PR 2 — `KnowledgePath` newtype + `proposed_path` narrowing
+
+**날짜**: 2026-04-18
+**유형**: Follow-up fix (drift-fix PR 4 머지 직후, 5-min cron iteration 4)
+**상태**: 🟢 승인 (codex cycle-15 sequencing note — "PR 5 → PR 4 → PR 2")
+**관련 문서**: D-20260418-23 (drift-fix PR 1 — M1 flagged), `docs/design/core/knowledge-candidate-curation.md` §2.1
+**Follows**: D-20260418-25 (drift-fix PR 4)
+
+### 배경
+
+KC-1 (D-20260418-17) 이 `KnowledgeCandidate.proposed_path: Option<String>` 로 착수 — `KnowledgePath` 타입이 존재하지 않아서 `Option<String>` 로 임시 처리했고 TODO KC-1b 마커 를 candidate.rs:162 에 남겼다. Cycle-14 drift audit 이 이를 Material M1 drift 로 분류: "doc 71 §2.1 shows `Option<KnowledgePath>`; trunk lacks type → `String` used".
+
+목표: `KnowledgePath` newtype 도입, 모든 `proposed_path` / `canonical_path` / `KnowledgeDocumentWrite.path` 를 narrow.
+
+### 결정: PR 2 (KnowledgePath introduction)
+
+1. **`gadgetron-core::knowledge::KnowledgePath`** (새 pub struct):
+   - `#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]`
+   - `#[serde(transparent)]` — wire 는 여전히 bare string
+   - 내부: `String`
+   - `pub fn new(raw: impl Into<String>) -> Result<Self, KnowledgePathError>` — validation:
+     - 비어있지 않음
+     - `..` / leading `/` / 제어문자 금지 (path traversal 방지)
+     - max 1024 bytes
+   - `Display` / `AsRef<str>` / `From<KnowledgePath> for String`
+   - `FromStr` (for TOML / config path parsing)
+2. **`KnowledgePathError` enum**:
+   - `Empty` / `Traversal` / `ControlChar` / `TooLong` 변이
+   - `#[non_exhaustive]`
+   - `impl Display + Error`
+3. **Migrate 5 fields**:
+   - `CandidateHint.proposed_path: Option<String>` → `Option<KnowledgePath>`
+   - `KnowledgeCandidate.proposed_path: Option<String>` → `Option<KnowledgePath>`
+   - `KnowledgeDocumentWrite.path: String` → `KnowledgePath`
+   - `PennyCandidateDigest.proposed_path: Option<String>` → `Option<KnowledgePath>`
+   - `PennyCandidateDecisionReceipt.canonical_path: Option<String>` → `Option<KnowledgePath>`
+4. **`materialize_accepted_candidate` 리턴 타입**:
+   - `CaptureResult<String>` → `CaptureResult<KnowledgePath>`
+   - `InProcessCandidateCoordinator` synthetic fallback 이 `KnowledgePath::new(...)` 로 생성
+   - `KnowledgeService::write` 리턴 `KnowledgeWriteReceipt.path` 도 narrow 대상 — 본 PR 이 scope 에 추가
+5. **Pg bindings**:
+   - `PgActivityCaptureStore` SELECT/INSERT 에서 `KnowledgePath` 바인딩 시 `AsRef<str>` 또는 `.to_string()` 으로 변환. schema 변경 없음 (TEXT column).
+6. **Call sites**:
+   - `path_rules` expansion 은 `String` 을 반환하지만 coordinator 가 `KnowledgePath::new(expanded)?` 로 validate
+   - 모든 test fixture (~15 개) 에서 `Some("path".into())` → `Some(KnowledgePath::new("path").expect("valid"))`
+   - `render_penny_shared_context` renderer 는 `proposed_path.as_deref()` 대신 `proposed_path.as_ref().map(|p| p.as_ref())` 패턴
+7. **Tests**:
+   - `KnowledgePath::new` validation unit tests (happy + 4 fail paths)
+   - serde round-trip (transparent serialization to bare string)
+   - 기존 테스트는 새 타입 사용으로 업데이트
+
+### Codex hidden caveat
+
+- `KnowledgePath` 가 `Ord` / `PartialOrd` 를 derive 하면 Pg `ORDER BY proposed_path` 가 Rust-side sort 와 다를 수 있음. Pg 는 byte-order, Rust `String` 은 UTF-8 codepoint order. ASCII-only path 에서는 동일, non-ASCII 에서는 divergent. path 가 주로 ASCII path segment 이므로 non-issue 지만 주석에 명시.
+- `KnowledgePath::new("")` 는 fail. `Option<KnowledgePath>` 는 "no path" 의미로 그대로 유지. 빈 string 이 의미없는 path 로 들어오는 것을 원천 차단.
+
+### Non-scope
+
+- `KnowledgePath` 를 gadgetron-web / TUI 등 frontend 레이어까지 전파 (현재는 `String` 그대로 UI 에 serialize)
+- 기존 `page_name: String` (knowledge search hit) narrow — 별도 타입 `KnowledgePageName` 필요 가능성
+- Pg column type 변경 (TEXT 유지)
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: 새 타입 + 5 field migration (~150 LOC)
+- `gadgetron-knowledge`: InMemory/Pg store 양쪽 + coordinator + 테스트 fixtures (~100 LOC)
+- `gadgetron-gateway`: penny::shared_context PennyCandidateDigest 매핑 + workbench_awareness dispatch + 테스트 fixtures (~50 LOC)
+- 문서: doc 71 §2.1 KnowledgePath 계약 + TODO KC-1b 마커 제거 (~30 LOC)
+
+**Total 예상**: ~300-400 LOC
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `fix/drift-pr2-knowledge-path` (생성됨)
+3. chief-architect delegation (cross-crate type migration)
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_

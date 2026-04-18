@@ -173,7 +173,9 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
         .bind(candidate_id)
         .bind(activity_event_id)
         .bind(&hint.summary)
-        .bind(&hint.proposed_path)
+        // Bind KnowledgePath as TEXT via `.as_str()` — sqlx's `Encode`
+        // for `Option<&str>` handles NULL mapping.
+        .bind(hint.proposed_path.as_ref().map(|p| p.as_str()))
         .bind(&provenance_json)
         .bind(&disposition_label)
         .bind(now)
@@ -375,13 +377,30 @@ impl CandidateRow {
     ) -> CaptureResult<KnowledgeCandidate> {
         let provenance: BTreeMap<String, String> =
             serde_json::from_value(self.provenance).unwrap_or_default();
+        // Validate proposed_path through KnowledgePath::new on read. A row
+        // with a pre-drift-fix-PR-2 invalid path would surface as a Database
+        // error here instead of leaking unchecked strings into Penny.
+        let proposed_path = match self.proposed_path {
+            None => None,
+            Some(s) => {
+                Some(gadgetron_core::knowledge::KnowledgePath::new(s.clone()).map_err(|e| {
+                    GadgetronError::Database {
+                        kind: DatabaseErrorKind::QueryFailed,
+                        message: format!(
+                            "knowledge_candidates.proposed_path={s:?} in row {} fails KnowledgePath validation: {e}",
+                            self.id
+                        ),
+                    }
+                })?)
+            }
+        };
         Ok(KnowledgeCandidate {
             id: self.id,
             activity_event_id: self.activity_event_id,
             tenant_id: self.tenant_id,
             actor_user_id: self.actor_user_id,
             summary: self.summary,
-            proposed_path: self.proposed_path,
+            proposed_path,
             provenance,
             disposition,
             created_at: self.created_at,

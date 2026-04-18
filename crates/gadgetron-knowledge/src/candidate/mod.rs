@@ -434,18 +434,31 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
                 // Try path_rules expansion first; fall back to the
                 // journal-style synthetic path. Keeps KC-1a behavior for
                 // tests that wire an empty `path_rules` map.
-                let resolved = resolve_path_from_rules(&self.path_rules, &event_snapshot);
-                hint.proposed_path = Some(resolved.unwrap_or_else(|| {
-                    // Cheap deterministic fallback — uses event date +
-                    // a sentinel so the path is predictable in the
-                    // "no rules, no hint" case. The candidate uuid will
-                    // be swapped into this slot at append time.
-                    format!(
-                        "ops/journal/{}/{}",
-                        event_snapshot.created_at.format("%Y-%m-%d"),
-                        snake_case_label(&event_snapshot_kind)
-                    )
-                }));
+                let resolved_str = resolve_path_from_rules(&self.path_rules, &event_snapshot)
+                    .unwrap_or_else(|| {
+                        // Cheap deterministic fallback — uses event date +
+                        // a sentinel so the path is predictable in the
+                        // "no rules, no hint" case.
+                        format!(
+                            "ops/journal/{}/{}",
+                            event_snapshot.created_at.format("%Y-%m-%d"),
+                            snake_case_label(&event_snapshot_kind)
+                        )
+                    });
+                // Validate through `KnowledgePath::new` — malformed
+                // path_rules templates now surface at hint-creation time
+                // rather than silently flowing to the store.
+                let validated = gadgetron_core::knowledge::KnowledgePath::new(resolved_str)
+                    .map_err(|e| GadgetronError::Knowledge {
+                        kind: KnowledgeErrorKind::InvalidQuery {
+                            reason: format!(
+                                "path_rules expansion produced an invalid knowledge path: {e}"
+                            ),
+                        },
+                        message: "path_rules expansion produced an invalid knowledge path"
+                            .to_string(),
+                    })?;
+                hint.proposed_path = Some(validated);
             }
             let candidate = self.store.append_candidate(actor, event_id, hint).await?;
             created.push(candidate);
@@ -467,7 +480,7 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
         actor: &AuthenticatedContext,
         candidate_id: Uuid,
         write: KnowledgeDocumentWrite,
-    ) -> CaptureResult<String> {
+    ) -> CaptureResult<gadgetron_core::knowledge::KnowledgePath> {
         let candidate = self
             .store
             .get_candidate(actor, candidate_id)
@@ -502,13 +515,24 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
             // drop provenance on the floor; Penny still has the candidate
             // row with its provenance intact for audit replay.
             let request = KnowledgePutRequest {
-                path: write.path.clone(),
+                path: write.path.to_string(),
                 markdown: write.content.clone(),
                 create_only: false,
                 overwrite: true,
             };
             let receipt = svc.write(actor, request).await?;
-            return Ok(receipt.path);
+            // `KnowledgeWriteReceipt.path` is still `String` (see D-12 boundary —
+            // the store-API path type narrows in a later PR). Rewrap here.
+            return gadgetron_core::knowledge::KnowledgePath::new(receipt.path).map_err(|e| {
+                GadgetronError::Knowledge {
+                    kind: KnowledgeErrorKind::InvalidQuery {
+                        reason: format!(
+                            "KnowledgeService::write returned an invalid path: {e}"
+                        ),
+                    },
+                    message: "KnowledgeService::write returned a path that fails KnowledgePath validation".to_string(),
+                }
+            });
         }
 
         // Fallback: no KnowledgeService wired — return the proposed path
@@ -517,9 +541,12 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
         let resolved_path = candidate.proposed_path.clone().unwrap_or_else(|| {
             // Reconstruct a synthetic path without re-scanning the event
             // log: the candidate's own id is enough when we don't have a
-            // date-bearing event in reach. The 1-arg form preserves the
-            // pre-KC-1b path exactly.
-            format!("ops/journal/{candidate_id}")
+            // date-bearing event in reach. The synthetic form
+            // `ops/journal/<uuid>` passes KnowledgePath validation, so
+            // `expect` is safe (tested in
+            // `coordinator_materialize_returns_proposed_path_when_accepted`).
+            gadgetron_core::knowledge::KnowledgePath::new(format!("ops/journal/{candidate_id}"))
+                .expect("synthetic fallback path is always well-formed")
         });
         Ok(resolved_path)
     }
@@ -565,7 +592,10 @@ mod tests {
     fn make_hint(n: u32) -> CandidateHint {
         CandidateHint {
             summary: format!("hint summary {n}"),
-            proposed_path: Some(format!("ops/journal/hint-{n}")),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new(format!("ops/journal/hint-{n}"))
+                    .unwrap(),
+            ),
             tags: vec!["ops".to_string()],
             reason: Some("direct_action".to_string()),
         }
@@ -764,7 +794,7 @@ mod tests {
 
         // Default disposition is PendingPennyDecision → materialize must fail.
         let write = KnowledgeDocumentWrite {
-            path: "ops/journal/x".to_string(),
+            path: gadgetron_core::knowledge::KnowledgePath::new("ops/journal/x").unwrap(),
             content: "body".to_string(),
             provenance: BTreeMap::new(),
         };
@@ -793,7 +823,9 @@ mod tests {
         let event = make_event(8);
         let hints = vec![CandidateHint {
             summary: "op".into(),
-            proposed_path: Some("ops/journal/accepted".into()),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new("ops/journal/accepted").unwrap(),
+            ),
             tags: vec![],
             reason: None,
         }];
@@ -817,7 +849,7 @@ mod tests {
             .unwrap();
 
         let write = KnowledgeDocumentWrite {
-            path: "ops/journal/accepted".to_string(),
+            path: gadgetron_core::knowledge::KnowledgePath::new("ops/journal/accepted").unwrap(),
             content: "# body".to_string(),
             provenance: BTreeMap::new(),
         };
@@ -825,7 +857,7 @@ mod tests {
             .materialize_accepted_candidate(&actor(), candidate_id, write)
             .await
             .unwrap();
-        assert_eq!(path, "ops/journal/accepted");
+        assert_eq!(path.as_str(), "ops/journal/accepted");
     }
 
     // ------------------------------------------------------------------

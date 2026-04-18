@@ -148,10 +148,12 @@ pub enum CandidateDecisionKind {
 /// A knowledge candidate — the projection of activity event(s) into a
 /// "should we remember this?" record.
 ///
-/// `proposed_path` is `Option<String>` in KC-1. KC-1b will narrow it to a
-/// typed `KnowledgePath` (see TODO below). `provenance` is a deterministic
-/// `BTreeMap<String, String>` so serialization is byte-stable for the
-/// fixture-diff contract tests and for audit replay.
+/// `proposed_path` is a typed [`KnowledgePath`] that rejects empty strings,
+/// path-traversal, and control characters at the type boundary (drift-fix
+/// PR 2 / D-20260418-26 narrowed this from `Option<String>`).
+/// `provenance` is a deterministic `BTreeMap<String, String>` so
+/// serialization is byte-stable for the fixture-diff contract tests and
+/// for audit replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeCandidate {
     pub id: Uuid,
@@ -159,10 +161,7 @@ pub struct KnowledgeCandidate {
     pub tenant_id: Uuid,
     pub actor_user_id: Uuid,
     pub summary: String,
-    // TODO KC-1b: narrow `proposed_path` to `Option<gadgetron_core::knowledge::KnowledgePath>`
-    // once that type exists (or is introduced in KC-1b). Keeping `String` here
-    // avoids a cross-crate ordering dependency for KC-1.
-    pub proposed_path: Option<String>,
+    pub proposed_path: Option<crate::knowledge::KnowledgePath>,
     pub provenance: BTreeMap<String, String>,
     pub disposition: KnowledgeCandidateDisposition,
     pub created_at: DateTime<Utc>,
@@ -173,11 +172,12 @@ pub struct KnowledgeCandidate {
 ///
 /// Per the authority doc §2.4 rule 1-2: hints are advisory and never
 /// authoritative — core re-injects actor/tenant/capability before persisting,
-/// and `proposed_path` is sanitized before being retained.
+/// and `proposed_path` is sanitized before being retained. The
+/// [`KnowledgePath`] wrapper enforces "sanitized" at the type layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateHint {
     pub summary: String,
-    pub proposed_path: Option<String>,
+    pub proposed_path: Option<crate::knowledge::KnowledgePath>,
     pub tags: Vec<String>,
     pub reason: Option<String>,
 }
@@ -197,17 +197,13 @@ pub struct CandidateDecision {
 
 /// Canonical-store write payload for a materialized candidate.
 ///
-/// KC-1 uses this shape so the coordinator signature is already the one
-/// KC-1b needs — at KC-1b we replace the `materialize_accepted_candidate`
-/// body with a real `KnowledgeService::write` call, not the trait signature.
-///
-/// # TODO KC-1b
-///
-/// Narrow `path: String` → `KnowledgePath` and `content: String` → typed
-/// `KnowledgeDocumentWrite` once the knowledge-plane write contract lands.
+/// `path` is a validated [`KnowledgePath`] (drift-fix PR 2 /
+/// D-20260418-26). `content` is still free-form markdown. `provenance`
+/// is retained for future audit enrichment but is not yet forwarded to
+/// `KnowledgePutRequest` — that plumbing is drift-fix PR 3 (M2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeDocumentWrite {
-    pub path: String,
+    pub path: crate::knowledge::KnowledgePath,
     pub content: String,
     pub provenance: BTreeMap<String, String>,
 }
@@ -316,7 +312,7 @@ pub trait KnowledgeCandidateCoordinator: Send + Sync + std::fmt::Debug {
         actor: &crate::knowledge::AuthenticatedContext,
         candidate_id: Uuid,
         write: KnowledgeDocumentWrite,
-    ) -> CaptureResult<String>;
+    ) -> CaptureResult<crate::knowledge::KnowledgePath>;
 }
 
 /// Wire-stable snake_case label for any `#[serde(rename_all = "snake_case")]` enum.
@@ -500,7 +496,7 @@ mod tests {
             tenant_id: fixed_uuid(9),
             actor_user_id: fixed_uuid(10),
             summary: "note".to_string(),
-            proposed_path: Some("ops/journal/test".to_string()),
+            proposed_path: Some(crate::knowledge::KnowledgePath::new("ops/journal/test").unwrap()),
             provenance,
             disposition: KnowledgeCandidateDisposition::PendingPennyDecision,
             created_at: fixed_time(),

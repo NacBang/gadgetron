@@ -143,12 +143,14 @@ async fn kc1b_capture_accept_materialize_then_wiki_search_finds_it() {
     let candidate = &created[0];
 
     // Template-derived path: `ops/journal/<YYYY-MM-DD>/direct_action`.
-    let expected_path = format!("ops/journal/{event_date}/direct_action");
+    let expected_path_str = format!("ops/journal/{event_date}/direct_action");
+    let expected_path =
+        gadgetron_core::knowledge::KnowledgePath::new(expected_path_str.clone()).unwrap();
     assert_eq!(
-        candidate.proposed_path.as_deref(),
-        Some(expected_path.as_str()),
+        candidate.proposed_path.as_ref().map(|p| p.as_str()),
+        Some(expected_path_str.as_str()),
         "path_rules expansion must land at the template-derived path; \
-         got {:?}, expected {expected_path}",
+         got {:?}, expected {expected_path_str}",
         candidate.proposed_path,
     );
     let candidate_id = candidate.id;
@@ -181,7 +183,7 @@ async fn kc1b_capture_accept_materialize_then_wiki_search_finds_it() {
         .await
         .expect("materialize must succeed when service is wired");
     assert!(
-        resolved_path.starts_with("ops/journal/"),
+        resolved_path.as_str().starts_with("ops/journal/"),
         "materialized path must live under ops/journal/; got {resolved_path}"
     );
     assert_eq!(
@@ -205,9 +207,12 @@ async fn kc1b_capture_accept_materialize_then_wiki_search_finds_it() {
         !hits.is_empty(),
         "search('kafka') must return at least one hit after materialization; got {hits:?}"
     );
+    // `hits[N].path` is still `String` (D-12 — KnowledgeStore-API paths
+    // remain `String`; only the candidate plane narrowed to `KnowledgePath`
+    // in drift-fix PR 2 / D-20260418-26). Compare via `.as_str()`.
     let match_hit = hits
         .iter()
-        .find(|h| h.path == resolved_path)
+        .find(|h| h.path.as_str() == resolved_path.as_str())
         .unwrap_or_else(|| {
             panic!(
                 "expected a hit with path == {resolved_path}; got paths={:?}",
@@ -215,7 +220,8 @@ async fn kc1b_capture_accept_materialize_then_wiki_search_finds_it() {
             )
         });
     assert_eq!(
-        match_hit.path, resolved_path,
+        match_hit.path.as_str(),
+        resolved_path.as_str(),
         "search hit path must match the materialized path verbatim"
     );
 }

@@ -177,13 +177,19 @@ async fn kc1_fixture_diff_shared_context_reflects_decide_candidate() {
     let hints = vec![
         CandidateHint {
             summary: "restart-grafana".to_string(),
-            proposed_path: Some("ops/journal/restart-grafana".to_string()),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new("ops/journal/restart-grafana")
+                    .unwrap(),
+            ),
             tags: vec!["ops".to_string()],
             reason: Some("direct_action".to_string()),
         },
         CandidateHint {
             summary: "tap-runbook-delta".to_string(),
-            proposed_path: Some("ops/journal/tap-runbook-delta".to_string()),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new("ops/journal/tap-runbook-delta")
+                    .unwrap(),
+            ),
             tags: vec!["runbook".to_string()],
             reason: Some("runbook_delta".to_string()),
         },
