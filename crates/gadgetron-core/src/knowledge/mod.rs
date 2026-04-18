@@ -56,6 +56,8 @@
 //! into `gadgetron.toml`, audit JSON, and MCP tool arguments — they MUST
 //! NOT change without a wire-compat decision log entry.
 
+pub mod candidate;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

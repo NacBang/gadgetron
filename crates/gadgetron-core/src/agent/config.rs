@@ -146,6 +146,14 @@ pub struct AgentConfig {
     /// writable by the current effective UID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_store_path: Option<std::path::PathBuf>,
+
+    /// Shared surface awareness configuration (P2B).
+    ///
+    /// Controls limits and character caps for the per-turn bootstrap digest
+    /// injected into Penny's context. Authority:
+    /// `docs/design/phase2/13-penny-shared-surface-loop.md §2.3`.
+    #[serde(default)]
+    pub shared_context: SharedContextConfig,
 }
 
 fn default_agent_binary() -> String {
@@ -167,6 +175,101 @@ fn default_session_store_max_entries() -> usize {
     10_000
 }
 
+// ---------------------------------------------------------------------------
+// SharedContextConfig (P2B — 13-penny-shared-surface-loop.md §2.3)
+// ---------------------------------------------------------------------------
+
+/// Tuning parameters for the per-turn Penny shared-context bootstrap.
+///
+/// These fields are ADDITIVE config only — they adjust limits and caps, not
+/// whether the feature is active. The feature is not optional per doc §2.3:
+/// "direct action parity and shared surface awareness are … P2B Penny
+/// contract". There is no `enabled = false` toggle.
+///
+/// # Validation rules
+///
+/// - `bootstrap_activity_limit`: `1..=20`
+/// - `bootstrap_candidate_limit`: `1..=12`
+/// - `bootstrap_approval_limit`: `0..=10`
+/// - `digest_summary_chars`: `80..=512`
+/// - `require_explicit_degraded_notice`: MUST be `true` (cannot be disabled)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SharedContextConfig {
+    /// How many recent activity entries to include in the bootstrap.
+    /// Default `6`. Range `1..=20`.
+    pub bootstrap_activity_limit: u32,
+    /// How many pending knowledge candidates to include.
+    /// Default `4`. Range `1..=12`.
+    pub bootstrap_candidate_limit: u32,
+    /// How many pending approval requests to include.
+    /// Default `3`. Range `0..=10`.
+    pub bootstrap_approval_limit: u32,
+    /// Maximum Unicode scalar values (code points) for each summary/title
+    /// in the rendered prompt block. Longer strings are clipped with `…`.
+    /// Default `240`. Range `80..=512`.
+    pub digest_summary_chars: u32,
+    /// Enforce that degraded bootstrap conditions are explicitly surfaced to
+    /// Penny and in tracing. MUST remain `true`. Startup validation rejects
+    /// `false` to prevent "No silent degradation" principle violations
+    /// (doc §1.4 rule 4 / §2.3).
+    pub require_explicit_degraded_notice: bool,
+}
+
+impl Default for SharedContextConfig {
+    fn default() -> Self {
+        Self {
+            bootstrap_activity_limit: 6,
+            bootstrap_candidate_limit: 4,
+            bootstrap_approval_limit: 3,
+            digest_summary_chars: 240,
+            require_explicit_degraded_notice: true,
+        }
+    }
+}
+
+impl SharedContextConfig {
+    /// Validate all field ranges and the `require_explicit_degraded_notice`
+    /// invariant. Returns `GadgetronError::Config` with a diagnostic message
+    /// on the first violation found.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=20).contains(&self.bootstrap_activity_limit) {
+            return Err(GadgetronError::Config(format!(
+                "[agent.shared_context] bootstrap_activity_limit must be 1..=20, got {}",
+                self.bootstrap_activity_limit
+            )));
+        }
+        if !(1..=12).contains(&self.bootstrap_candidate_limit) {
+            return Err(GadgetronError::Config(format!(
+                "[agent.shared_context] bootstrap_candidate_limit must be 1..=12, got {}",
+                self.bootstrap_candidate_limit
+            )));
+        }
+        if self.bootstrap_approval_limit > 10 {
+            return Err(GadgetronError::Config(format!(
+                "[agent.shared_context] bootstrap_approval_limit must be 0..=10, got {}",
+                self.bootstrap_approval_limit
+            )));
+        }
+        if !(80..=512).contains(&self.digest_summary_chars) {
+            return Err(GadgetronError::Config(format!(
+                "[agent.shared_context] digest_summary_chars must be 80..=512, got {}",
+                self.digest_summary_chars
+            )));
+        }
+        if !self.require_explicit_degraded_notice {
+            return Err(GadgetronError::Config(
+                "[agent.shared_context] require_explicit_degraded_notice = false is not \
+                 permitted. Disabling degraded notices violates the 'No silent degradation' \
+                 principle (13-penny-shared-surface-loop.md §2.3). Remove the field or set it \
+                 to true."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -180,6 +283,7 @@ impl Default for AgentConfig {
             session_ttl_secs: default_session_ttl_secs(),
             session_store_max_entries: default_session_store_max_entries(),
             session_store_path: None,
+            shared_context: SharedContextConfig::default(),
         }
     }
 }
@@ -987,5 +1091,91 @@ mod config_tests {
     fn agent_config_default_validates_ok() {
         let cfg = AgentConfig::default();
         assert!(cfg.validate(&empty_providers()).is_ok());
+    }
+
+    // ---- SharedContextConfig validation (13-penny-shared-surface-loop.md §2.3) ----
+
+    #[test]
+    fn shared_context_config_defaults_pass_validation() {
+        let cfg = SharedContextConfig::default();
+        assert!(
+            cfg.validate().is_ok(),
+            "default SharedContextConfig must pass validation"
+        );
+    }
+
+    #[test]
+    fn shared_context_config_rejects_require_explicit_degraded_notice_false() {
+        let mut cfg = SharedContextConfig::default();
+        cfg.require_explicit_degraded_notice = false;
+        let err = cfg.validate().expect_err("false must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("require_explicit_degraded_notice"),
+            "error must name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn shared_context_config_rejects_limits_out_of_range() {
+        // bootstrap_activity_limit = 0 (below minimum 1)
+        let mut cfg = SharedContextConfig::default();
+        cfg.bootstrap_activity_limit = 0;
+        assert!(
+            cfg.validate().is_err(),
+            "activity_limit = 0 must be rejected"
+        );
+
+        // bootstrap_activity_limit = 21 (above maximum 20)
+        cfg.bootstrap_activity_limit = 21;
+        assert!(
+            cfg.validate().is_err(),
+            "activity_limit = 21 must be rejected"
+        );
+
+        // bootstrap_candidate_limit = 0 (below minimum 1)
+        let mut cfg = SharedContextConfig::default();
+        cfg.bootstrap_candidate_limit = 0;
+        assert!(
+            cfg.validate().is_err(),
+            "candidate_limit = 0 must be rejected"
+        );
+
+        // bootstrap_candidate_limit = 13 (above maximum 12)
+        cfg.bootstrap_candidate_limit = 13;
+        assert!(
+            cfg.validate().is_err(),
+            "candidate_limit = 13 must be rejected"
+        );
+
+        // bootstrap_approval_limit = 11 (above maximum 10)
+        let mut cfg = SharedContextConfig::default();
+        cfg.bootstrap_approval_limit = 11;
+        assert!(
+            cfg.validate().is_err(),
+            "approval_limit = 11 must be rejected"
+        );
+
+        // bootstrap_approval_limit = 0 is fine
+        cfg.bootstrap_approval_limit = 0;
+        assert!(
+            cfg.validate().is_ok(),
+            "approval_limit = 0 (inclusive) must be accepted"
+        );
+
+        // digest_summary_chars = 79 (below minimum 80)
+        let mut cfg = SharedContextConfig::default();
+        cfg.digest_summary_chars = 79;
+        assert!(
+            cfg.validate().is_err(),
+            "digest_summary_chars = 79 must be rejected"
+        );
+
+        // digest_summary_chars = 513 (above maximum 512)
+        cfg.digest_summary_chars = 513;
+        assert!(
+            cfg.validate().is_err(),
+            "digest_summary_chars = 513 must be rejected"
+        );
     }
 }

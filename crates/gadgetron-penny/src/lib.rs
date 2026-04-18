@@ -41,6 +41,7 @@ pub mod session;
 pub mod session_store;
 pub mod spawn;
 pub mod stream;
+pub mod workbench_awareness;
 
 pub use gadget_config::{build_config_json, write_config_file};
 pub use gadget_registry::{GadgetRegistry, GadgetRegistryBuilder};

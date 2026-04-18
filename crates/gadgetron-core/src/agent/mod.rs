@@ -14,6 +14,7 @@
 //!   `GadgetResult`, `GadgetError`
 
 pub mod config;
+pub mod shared_context;
 pub mod tools;
 
 pub use config::{
