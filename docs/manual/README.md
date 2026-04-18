@@ -66,6 +66,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron wiki audit [--config <path>]` — report stale pages and pages without frontmatter
 - `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
 - Embedded Web UI at `/web` when built with the default `web-ui` feature and `[web].enabled = true`
+- Workbench projection API at `/api/v1/web/workbench/` (Phase 2A): `bootstrap`, `activity`, `requests/{id}/evidence`, `knowledge-status`, `views`, `views/{id}/data`, `actions`, `actions/{id}` — require `OpenAiCompat` scope, available when `[knowledge]` is configured
 - `gadgetron-testing` crate — `FakeLlmProvider` and `FailingProvider` for use in unit and integration tests
 
 **Stubbed (HTTP 501):**

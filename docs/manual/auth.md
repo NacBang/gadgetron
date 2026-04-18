@@ -65,22 +65,23 @@ Each API key holds a list of scopes. A scope is a coarse-grained permission. The
 
 | Scope | String value in DB | What it permits |
 |-------|--------------------|-----------------|
-| `OpenAiCompat` | `"OpenAiCompat"` | All `/v1/` routes: `POST /v1/chat/completions`, `GET /v1/models` |
-| `Management` | `"Management"` | All `/api/v1/` routes (nodes, model deploy, usage, costs) |
+| `OpenAiCompat` | `"OpenAiCompat"` | All `/v1/` routes (`POST /v1/chat/completions`, `GET /v1/models`) **and** all `/api/v1/web/workbench/` routes |
+| `Management` | `"Management"` | All other `/api/v1/` routes (nodes, model deploy, usage, costs) |
 | `XaasAdmin` | `"XaasAdmin"` | All `/api/v1/xaas/` routes (reserved for internal XaaS administration) |
 
 A key can hold multiple scopes. The `api_keys.scopes` column is a `TEXT[]` (PostgreSQL array). The default when inserting a new key without specifying scopes is `ARRAY['OpenAiCompat']`.
 
 **Scope enforcement** is performed by `scope_guard_middleware` (layer 6, innermost of the auth stack):
 
-| Path prefix | Required scope |
-|-------------|----------------|
-| `/v1/` | `OpenAiCompat` |
-| `/api/v1/xaas/` | `XaasAdmin` |
-| `/api/v1/` | `Management` |
-| `/health`, `/ready` | none (public, never reach this layer) |
+| Path prefix | Required scope | Note |
+|-------------|----------------|------|
+| `/v1/` | `OpenAiCompat` | |
+| `/api/v1/web/workbench/` | `OpenAiCompat` | W3-WEB-2 exception — workbench uses the same scope as `/v1/` |
+| `/api/v1/xaas/` | `XaasAdmin` | |
+| `/api/v1/` | `Management` | Catch-all for admin routes |
+| `/health`, `/ready` | none | Public; never reach this layer |
 
-A key with `OpenAiCompat` scope that requests `GET /api/v1/nodes` (which requires `Management`) will receive HTTP 403.
+A key with `OpenAiCompat` scope can access `/v1/` routes and `/api/v1/web/workbench/` routes. It cannot access other `/api/v1/` routes (which require `Management`) and will receive HTTP 403 if it tries.
 
 ---
 
