@@ -340,27 +340,16 @@ impl InProcessCandidateCoordinator {
         self
     }
 
-    /// Propagate the confirmation gate list into the underlying store.
-    ///
-    /// Both `InMemoryActivityCaptureStore` and `PgActivityCaptureStore` own their
-    /// own policy copy. This builder method replaces the store with a new instance
-    /// that has the gate applied. Calling it after construction is intentional —
-    /// the coordinator should not need to know which concrete store type is used.
-    ///
-    /// Panics if the inner `Arc` is not an `InMemoryActivityCaptureStore` or
-    /// `PgActivityCaptureStore`. In practice this is called only from `build_candidate_plane`
-    /// in `gadgetron-cli`, which controls the concrete type.
-    ///
-    /// For now the gate is only threaded through the store at CLI wiring time
-    /// (see `build_candidate_plane`), so this method exists for symmetry with
-    /// the single-store builders. KC-1c policy is store-level, not coordinator-level.
-    pub fn with_confirmation_gate(self, _gates: Vec<String>) -> Self {
-        // The coordinator delegates gate decisions to its store. The CLI calls
-        // `store.with_confirmation_gate(...)` before wrapping in Arc, so the
-        // coordinator does not need to forward the list at this layer.
-        // This builder exists for API symmetry and future use.
-        self
-    }
+    // Note: an earlier draft exposed `with_confirmation_gate(gates)` here for
+    // "API symmetry with the stores". It was a no-op — the coordinator never
+    // owned the gate list, and `build_candidate_plane` calls
+    // `store.with_confirmation_gate(...)` BEFORE wrapping the store in `Arc`,
+    // so the coordinator method could not forward to the store even if it
+    // wanted to. Drift-fix PR 4 (D-20260418-25) removed it as dead code.
+    // If a future `P2C` coordinator-level gate is needed, add a real impl
+    // (requires extending the `ActivityCaptureStore` trait with a
+    // `set_confirmation_gate` method or similar) — DO NOT reintroduce the
+    // no-op.
 }
 
 /// Postgres-backed implementation. Gated on the `sqlx` dependency already
