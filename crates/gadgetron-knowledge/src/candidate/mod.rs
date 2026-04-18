@@ -12,8 +12,23 @@
 //!   `Vec` / `BTreeMap` persistence that satisfies
 //!   [`gadgetron_core::knowledge::candidate::ActivityCaptureStore`].
 //! - [`InProcessCandidateCoordinator`] — a `KnowledgeCandidateCoordinator`
-//!   that clamps hint counts to `max_candidates_per_request` and delegates
-//!   append / decide / list calls to the store above.
+//!   that clamps hint counts to `max_candidates_per_request`, expands
+//!   `path_rules` templates for hint-less proposed paths, and routes
+//!   accepted candidates through `KnowledgeService::write` when the
+//!   service is wired via [`InProcessCandidateCoordinator::with_knowledge_service`].
+//!
+//! # `{date}` / `{topic}` / `{author}` template expansion
+//!
+//! `path_rules` uses a minimal 3-variable grammar at KC-1b: `{date}`
+//! (YYYY-MM-DD UTC from the activity event's `created_at`), `{topic}`
+//! (the snake_case `ActivityKind`, e.g. `direct_action`), and `{author}`
+//! (the `actor_user_id` rendered as a bare UUID). Operators target a
+//! key that matches the snake_case `ActivityKind` variant — a hint with
+//! no `proposed_path` + a `DirectAction` event looks up the
+//! `"direct_action"` key, expands it, and falls back to
+//! `ops/journal/<YYYY-MM-DD>/<candidate_uuid>` when no rule matches.
+//! Anything richer (e.g. `{tenant}`, `{request_id}`) is deferred to
+//! KC-1c so the KC-1b surface stays small and wire-stable.
 //!
 //! # Concurrency model
 //!
@@ -39,15 +54,17 @@ use gadgetron_core::{
     error::{GadgetronError, KnowledgeErrorKind},
     knowledge::{
         candidate::{
-            ActivityCaptureStore, CandidateDecision, CandidateDecisionKind, CandidateHint,
-            CaptureResult, CapturedActivityEvent, KnowledgeCandidate,
+            ActivityCaptureStore, ActivityKind, CandidateDecision, CandidateDecisionKind,
+            CandidateHint, CaptureResult, CapturedActivityEvent, KnowledgeCandidate,
             KnowledgeCandidateCoordinator, KnowledgeCandidateDisposition, KnowledgeDocumentWrite,
         },
-        AuthenticatedContext,
+        AuthenticatedContext, KnowledgePutRequest,
     },
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use crate::service::KnowledgeService;
 
 /// In-memory append-only store for activity events, candidates, and decisions.
 ///
@@ -229,23 +246,119 @@ impl ActivityCaptureStore for InMemoryActivityCaptureStore {
         rows.truncate(limit);
         Ok(rows)
     }
+
+    async fn get_candidate(
+        &self,
+        _actor: &AuthenticatedContext,
+        id: Uuid,
+    ) -> CaptureResult<Option<KnowledgeCandidate>> {
+        // `BTreeMap::get` is O(log n); cloning the row keeps the lock
+        // scope tight so other capture-plane callers are not blocked on a
+        // hot path.
+        let candidates = self.candidates.lock().await;
+        Ok(candidates.get(&id).cloned())
+    }
 }
 
 /// In-process coordinator — appends activity + candidates, clamps to
-/// `max_candidates_per_request`, and stubs materialization until KC-1b.
+/// `max_candidates_per_request`, expands `path_rules` templates when a hint
+/// leaves `proposed_path` unset, and routes accepted candidates through
+/// `KnowledgeService::write` when a service is wired.
+///
+/// Construction is intentionally builder-style so tests that only exercise
+/// the capture plane (no canonical writeback) stay unchanged:
+///
+/// ```ignore
+/// let coord = InProcessCandidateCoordinator::new(store, 8)
+///     .with_knowledge_service(knowledge_service)
+///     .with_path_rules(BTreeMap::from([(
+///         "direct_action".into(),
+///         "ops/journal/{date}/{topic}".into(),
+///     )]));
+/// ```
 #[derive(Debug)]
 pub struct InProcessCandidateCoordinator {
     pub store: Arc<dyn ActivityCaptureStore>,
+    /// Optional canonical writeback target. `None` keeps the KC-1a
+    /// synthetic-path fallback behavior for tests that only want to
+    /// exercise the capture plane.
+    pub knowledge_service: Option<Arc<KnowledgeService>>,
     pub max_candidates_per_request: usize,
+    /// Template rules keyed by `ActivityKind` snake_case label (e.g.
+    /// `"direct_action"`). An empty map disables template expansion —
+    /// hints without a `proposed_path` then fall back to
+    /// `ops/journal/<YYYY-MM-DD>/<candidate_uuid>`.
+    pub path_rules: BTreeMap<String, String>,
 }
 
 impl InProcessCandidateCoordinator {
     pub fn new(store: Arc<dyn ActivityCaptureStore>, max_candidates_per_request: usize) -> Self {
         Self {
             store,
+            knowledge_service: None,
             max_candidates_per_request,
+            path_rules: BTreeMap::new(),
         }
     }
+
+    /// Wire the canonical knowledge writeback target. Consumers who omit
+    /// this keep the KC-1a synthetic-path fallback, which is what the
+    /// fixture-diff test and the in-memory PSL-1 tests rely on.
+    pub fn with_knowledge_service(mut self, svc: Arc<KnowledgeService>) -> Self {
+        self.knowledge_service = Some(svc);
+        self
+    }
+
+    /// Provide `path_rules` for `{date}` / `{topic}` / `{author}` template
+    /// expansion. Called by the CLI with
+    /// `config.knowledge.curation.path_rules.clone()`.
+    pub fn with_path_rules(mut self, rules: BTreeMap<String, String>) -> Self {
+        self.path_rules = rules;
+        self
+    }
+}
+
+/// Serialize a `#[serde(rename_all = "snake_case")]` enum into its wire
+/// label. Falls back to `"unknown"` for the (impossible) JSON-not-a-string
+/// case so callers can keep the signature infallible.
+///
+/// Re-used by the gateway's `render_penny_shared_context` after KC-1b to
+/// emit `[pending_penny_decision]` instead of the old
+/// `format!("{:?}").to_lowercase()` collapse.
+fn enum_snake_case_label<E: serde::Serialize>(e: &E) -> String {
+    serde_json::to_value(e)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Expand `{date}` / `{topic}` / `{author}` in a `path_rules` template
+/// against a captured activity event.
+///
+/// - `{date}` → UTC `YYYY-MM-DD` of `event.created_at`.
+/// - `{topic}` → snake_case `ActivityKind` label (e.g. `direct_action`).
+/// - `{author}` → `event.actor_user_id` rendered as a bare UUID.
+///
+/// Unknown placeholders are left untouched; KC-1c will add validation at
+/// config-load time once the vocabulary stabilizes.
+fn expand_path_rule(rule: &str, event: &CapturedActivityEvent) -> String {
+    let date = event.created_at.format("%Y-%m-%d").to_string();
+    let topic = enum_snake_case_label(&event.kind);
+    let author = event.actor_user_id.to_string();
+    rule.replace("{date}", &date)
+        .replace("{topic}", &topic)
+        .replace("{author}", &author)
+}
+
+/// Look up a `path_rules` key for an `ActivityKind` and expand against
+/// the event. Returns `None` when the coordinator has no rule for this
+/// kind so the caller can decide on the journal-style fallback.
+fn resolve_path_from_rules(
+    rules: &BTreeMap<String, String>,
+    event: &CapturedActivityEvent,
+) -> Option<String> {
+    let key = enum_snake_case_label(&event.kind);
+    rules.get(&key).map(|rule| expand_path_rule(rule, event))
 }
 
 #[async_trait]
@@ -257,34 +370,58 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
         hints: Vec<CandidateHint>,
     ) -> CaptureResult<Vec<KnowledgeCandidate>> {
         let event_id = event.id;
+        // Snapshot the two fields we need for template expansion before
+        // the event is moved into `append_activity`. Kind is `Copy`;
+        // `created_at` is `DateTime<Utc>` which is also `Copy`.
+        let event_snapshot_kind: ActivityKind = event.kind;
+        let event_snapshot = event.clone();
         self.store.append_activity(actor, event).await?;
 
         let clamp = self.max_candidates_per_request.min(hints.len());
         let mut created = Vec::with_capacity(clamp);
-        for hint in hints.into_iter().take(clamp) {
+        for mut hint in hints.into_iter().take(clamp) {
+            if hint.proposed_path.is_none() {
+                // Try path_rules expansion first; fall back to the
+                // journal-style synthetic path. Keeps KC-1a behavior for
+                // tests that wire an empty `path_rules` map.
+                let resolved = resolve_path_from_rules(&self.path_rules, &event_snapshot);
+                hint.proposed_path = Some(resolved.unwrap_or_else(|| {
+                    // Cheap deterministic fallback — uses event date +
+                    // a sentinel so the path is predictable in the
+                    // "no rules, no hint" case. The candidate uuid will
+                    // be swapped into this slot at append time.
+                    format!(
+                        "ops/journal/{}/{}",
+                        event_snapshot.created_at.format("%Y-%m-%d"),
+                        enum_snake_case_label(&event_snapshot_kind)
+                    )
+                }));
+            }
             let candidate = self.store.append_candidate(actor, event_id, hint).await?;
             created.push(candidate);
         }
         Ok(created)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "candidate.materialize",
+        skip(self, actor, write),
+        fields(
+            candidate_id = %candidate_id,
+            has_knowledge_service = self.knowledge_service.is_some()
+        )
+    )]
     async fn materialize_accepted_candidate(
         &self,
         actor: &AuthenticatedContext,
         candidate_id: Uuid,
-        _write: KnowledgeDocumentWrite,
+        write: KnowledgeDocumentWrite,
     ) -> CaptureResult<String> {
-        // KC-1: find the candidate via the read projection (limit high
-        // enough to match any row; only_pending=false so Accepted rows
-        // surface too). Replace with a typed `get_candidate` helper at
-        // KC-1b when we have a real store index by id.
-        let list = self
+        let candidate = self
             .store
-            .list_candidates(actor, usize::MAX, /*only_pending=*/ false)
-            .await?;
-        let candidate = list
-            .into_iter()
-            .find(|c| c.id == candidate_id)
+            .get_candidate(actor, candidate_id)
+            .await?
             .ok_or_else(|| GadgetronError::Knowledge {
                 kind: KnowledgeErrorKind::DocumentNotFound {
                     path: format!("candidate/{candidate_id}"),
@@ -306,12 +443,34 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
             });
         }
 
-        // KC-1 stub: return the proposed_path, or a synthesized journal path.
-        // KC-1b will replace this body with a real `KnowledgeService::write`
-        // call and return the canonical `KnowledgePath`.
-        let resolved_path = candidate
-            .proposed_path
-            .unwrap_or_else(|| format!("ops/journal/{candidate_id}"));
+        // Happy path: canonical writeback through `KnowledgeService::write`.
+        if let Some(svc) = self.knowledge_service.as_ref() {
+            // TODO KC-1c: surface `write.provenance` on
+            // `KnowledgePutRequest` so the candidate's `hint_reason` /
+            // `hint_tags` plumb through to wiki frontmatter. For KC-1b we
+            // accept the payload to keep the trait signature stable and
+            // drop provenance on the floor; Penny still has the candidate
+            // row with its provenance intact for audit replay.
+            let request = KnowledgePutRequest {
+                path: write.path.clone(),
+                markdown: write.content.clone(),
+                create_only: false,
+                overwrite: true,
+            };
+            let receipt = svc.write(actor, request).await?;
+            return Ok(receipt.path);
+        }
+
+        // Fallback: no KnowledgeService wired — return the proposed path
+        // or synthesize a journal path. Mirrors the KC-1a behavior the
+        // fixture-diff test + existing PSL-1 tests depend on.
+        let resolved_path = candidate.proposed_path.clone().unwrap_or_else(|| {
+            // Reconstruct a synthetic path without re-scanning the event
+            // log: the candidate's own id is enough when we don't have a
+            // date-bearing event in reach. The 1-arg form preserves the
+            // pre-KC-1b path exactly.
+            format!("ops/journal/{candidate_id}")
+        });
         Ok(resolved_path)
     }
 }

@@ -186,11 +186,12 @@ async fn kc1_fixture_diff_shared_context_reflects_decide_candidate() {
         normalized_pre.contains("tap-runbook-delta"),
         "tap-runbook-delta must appear before any decide call: {normalized_pre}"
     );
-    // `pending_penny_decision` is emitted as a lower-cased Debug derivative.
-    let pending_count = normalized_pre.matches("[pendingpennydecision]").count();
+    // Wire-stable snake_case (matches the serde rename of
+    // `KnowledgeCandidateDisposition::PendingPennyDecision`).
+    let pending_count = normalized_pre.matches("[pending_penny_decision]").count();
     assert_eq!(
         pending_count, 2,
-        "both candidates must render as pendingpennydecision: {normalized_pre}"
+        "both candidates must render as pending_penny_decision: {normalized_pre}"
     );
 
     // Determinism: render twice with the same bootstrap — bytes must match
@@ -238,7 +239,7 @@ async fn kc1_fixture_diff_shared_context_reflects_decide_candidate() {
         normalized_post.contains(&remaining_summary),
         "non-accepted candidate must still be present: {normalized_post}"
     );
-    let pending_post = normalized_post.matches("[pendingpennydecision]").count();
+    let pending_post = normalized_post.matches("[pending_penny_decision]").count();
     assert_eq!(
         pending_post, 1,
         "exactly one candidate should remain pending: {normalized_post}"
