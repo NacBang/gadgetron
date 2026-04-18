@@ -54,6 +54,8 @@ fn make_state() -> AppState {
         tui_tx: None,
         workbench: None,
         penny_shared_surface: None,
+        penny_assembler: None,
+        agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
     }
 }
 

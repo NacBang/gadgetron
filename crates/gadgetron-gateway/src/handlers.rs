@@ -14,11 +14,14 @@ use axum::{
 use gadgetron_core::{
     context::TenantContext,
     error::GadgetronError,
+    knowledge::AuthenticatedContext,
+    message::{Content, Message, Role},
     provider::{ChatRequest, ModelInfo},
 };
 use gadgetron_xaas::audit::writer::{AuditEntry, AuditStatus};
 
 use crate::error::ApiError;
+use crate::penny::shared_context::render_penny_shared_context;
 use crate::server::AppState;
 use crate::sse::chat_chunk_to_sse;
 
@@ -57,6 +60,51 @@ pub async fn chat_completions_handler(
             }
         }
     }
+
+    // W3-PSL-1b: inject shared-context bootstrap before dispatch.
+    // Graceful degrade: never 5xx the chat endpoint on bootstrap failure.
+    // Authority: docs/design/phase2/13-penny-shared-surface-loop.md §2.2.2,
+    // §2.2.4, §2.2.5.
+    let shared_cfg = &state.agent_config.shared_context;
+    if shared_cfg.enabled {
+        if let Some(assembler) = state.penny_assembler.as_ref() {
+            let actor = AuthenticatedContext;
+            match assembler
+                .build(&actor, req.conversation_id.as_deref(), ctx.request_id)
+                .await
+            {
+                Ok(bootstrap) => {
+                    let block = render_penny_shared_context(
+                        &bootstrap,
+                        shared_cfg.digest_summary_chars as usize,
+                    );
+                    let injection_mode = inject_shared_context_block(&mut req.messages, &block);
+                    // Record a tracing event for observability. Using
+                    // `tracing::info!` (not info_span!) because we want an
+                    // event; the handler already runs inside the TraceLayer span.
+                    tracing::info!(
+                        target: "penny_shared_context.inject",
+                        request_id = %ctx.request_id,
+                        health = ?bootstrap.health,
+                        degraded_reasons = bootstrap.degraded_reasons.len(),
+                        rendered_bytes = block.len(),
+                        injection_mode = %injection_mode,
+                        "shared context block injected"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "penny_shared_context",
+                        request_id = %ctx.request_id,
+                        error = %e,
+                        "penny_shared_context.build_failed — degrading gracefully"
+                    );
+                    // Continue with original req; do NOT fail the chat request.
+                }
+            }
+        }
+    }
+
     // 1. Resolve the LLM router — return 503 if not configured.
     let router = match &state.router {
         Some(r) => r.clone(),
@@ -240,6 +288,41 @@ pub async fn list_models_handler(State(state): State<AppState>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// inject_shared_context_block — PSL-1b helper
+// ---------------------------------------------------------------------------
+
+/// Prepend the shared-context block to a chat message slice.
+///
+/// Returns a tracing label for the injection mode:
+///
+/// - `"prepend_to_system"` — the first message was a `System` message with
+///   `Content::Text`; the block was prepended to its text.
+/// - `"insert_new_system"` — no suitable system message was found at index 0
+///   (empty vec, first message is not System, or first message is System with
+///   `Content::Parts`); a new `Message::system(block)` was inserted at index 0.
+///
+/// Rule for `Content::Parts` system messages: inserting a new system message
+/// ahead of a Parts system message keeps structured parts intact.
+fn inject_shared_context_block(messages: &mut Vec<Message>, block: &str) -> &'static str {
+    if let Some(first) = messages.first_mut() {
+        if first.role == Role::System {
+            if let Content::Text(text) = &mut first.content {
+                let mut prefixed = String::with_capacity(block.len() + 2 + text.len());
+                prefixed.push_str(block);
+                prefixed.push_str("\n\n");
+                prefixed.push_str(text);
+                *text = prefixed;
+                return "prepend_to_system";
+            }
+            // System message with Parts content — insert a new system msg
+            // ahead of it so we don't mangle structured parts.
+        }
+    }
+    messages.insert(0, Message::system(block));
+    "insert_new_system"
+}
+
+// ---------------------------------------------------------------------------
 // Tests — TDD (written before full integration, red → green)
 // ---------------------------------------------------------------------------
 
@@ -255,9 +338,10 @@ mod tests {
     };
     use futures::stream;
     use gadgetron_core::{
+        agent::config::AgentConfig,
         context::Scope,
         error::GadgetronError,
-        message::{Content, Message, Role},
+        message::{Content, ContentPart, Message, Role},
         provider::{
             ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, LlmProvider,
             ModelInfo, Usage,
@@ -273,7 +357,11 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    use crate::penny::shared_context::{
+        DefaultPennyTurnContextAssembler, PennySharedSurfaceService,
+    };
     use crate::test_helpers::{lazy_pool, TEST_AUDIT_CAPACITY, VALID_TOKEN};
+    use gadgetron_core::agent::shared_context::PennyTurnContextAssembler;
 
     // -----------------------------------------------------------------------
     // Constants for FakeLlmProvider fixed responses
@@ -505,6 +593,8 @@ mod tests {
             tui_tx: None,
             workbench: None,
             penny_shared_surface: None,
+            agent_config: Arc::new(AgentConfig::default()),
+            penny_assembler: None,
         }
     }
 
@@ -709,6 +799,411 @@ mod tests {
         assert!(
             ids.contains(&"fake-gpt-4"),
             "model 'fake-gpt-4' must appear in the listing, got: {ids:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PSL-1b: inject_shared_context_block unit tests
+    // -----------------------------------------------------------------------
+
+    const TEST_BLOCK: &str =
+        "<gadgetron_shared_context>\nhealth: healthy\n</gadgetron_shared_context>";
+
+    /// Prepend to existing system message that has Text content.
+    /// After injection, content must start with the block and end with
+    /// the original system text.
+    #[test]
+    fn inject_prepends_to_existing_system_message_with_text_content() {
+        let original_text = "you are helpful";
+        let mut messages = vec![Message::system(original_text), Message::user("hi")];
+        let mode = inject_shared_context_block(&mut messages, TEST_BLOCK);
+        assert_eq!(mode, "prepend_to_system");
+        assert_eq!(messages.len(), 2, "no new messages should be inserted");
+        match &messages[0].content {
+            Content::Text(text) => {
+                assert!(
+                    text.starts_with(TEST_BLOCK),
+                    "content must start with block; got: {text:?}"
+                );
+                assert!(
+                    text.ends_with(original_text),
+                    "content must end with original text; got: {text:?}"
+                );
+                assert!(
+                    text.contains("\n\n"),
+                    "block and original must be separated by \\n\\n"
+                );
+            }
+            other => panic!("expected Content::Text, got {other:?}"),
+        }
+    }
+
+    /// Insert new system message when messages vec starts with a user message.
+    #[test]
+    fn inject_inserts_new_system_when_messages_empty_of_system() {
+        let mut messages = vec![Message::user("hi")];
+        let mode = inject_shared_context_block(&mut messages, TEST_BLOCK);
+        assert_eq!(mode, "insert_new_system");
+        assert_eq!(messages.len(), 2, "a new system message must be prepended");
+        assert_eq!(
+            messages[0].role,
+            Role::System,
+            "injected message must have System role"
+        );
+        match &messages[0].content {
+            Content::Text(text) => assert_eq!(text, TEST_BLOCK),
+            other => panic!("expected Content::Text, got {other:?}"),
+        }
+        assert_eq!(
+            messages[1].role,
+            Role::User,
+            "original user message must remain at index 1"
+        );
+    }
+
+    /// When the first message is System with Parts content, insert a NEW system
+    /// message at index 0 rather than mangling the structured parts.
+    #[test]
+    fn inject_inserts_new_system_when_first_message_is_parts_content() {
+        let parts_message = Message {
+            role: Role::System,
+            content: Content::Parts(vec![ContentPart::Text {
+                text: "structured system".to_string(),
+            }]),
+            reasoning_content: None,
+        };
+        let mut messages = vec![parts_message];
+        let mode = inject_shared_context_block(&mut messages, TEST_BLOCK);
+        assert_eq!(mode, "insert_new_system");
+        assert_eq!(messages.len(), 2);
+        // Index 0 is the newly inserted plain-text system message.
+        assert_eq!(messages[0].role, Role::System);
+        match &messages[0].content {
+            Content::Text(text) => assert_eq!(text, TEST_BLOCK),
+            other => panic!("expected Content::Text, got {other:?}"),
+        }
+        // Index 1 is the original Parts system message (unmodified).
+        match &messages[1].content {
+            Content::Parts(_) => {}
+            other => panic!("original Parts message must be unchanged, got {other:?}"),
+        }
+    }
+
+    /// When messages is empty, a new system message is inserted at index 0.
+    #[test]
+    fn inject_inserts_new_system_when_messages_vec_is_empty() {
+        let mut messages: Vec<Message> = vec![];
+        let mode = inject_shared_context_block(&mut messages, TEST_BLOCK);
+        assert_eq!(mode, "insert_new_system");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::System);
+    }
+
+    // -----------------------------------------------------------------------
+    // PSL-1b: handler-level graceful degrade tests
+    // -----------------------------------------------------------------------
+
+    /// Fake surface service that returns errors for all read operations.
+    struct AllErrorService;
+
+    #[async_trait]
+    impl PennySharedSurfaceService for AllErrorService {
+        async fn recent_activity(
+            &self,
+            _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+            _limit: u32,
+        ) -> gadgetron_core::error::Result<
+            Vec<gadgetron_core::agent::shared_context::PennyActivityDigest>,
+        > {
+            Err(GadgetronError::Provider("activity down".into()))
+        }
+        async fn pending_candidates(
+            &self,
+            _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+            _limit: u32,
+        ) -> gadgetron_core::error::Result<
+            Vec<gadgetron_core::agent::shared_context::PennyCandidateDigest>,
+        > {
+            Err(GadgetronError::Provider("candidates down".into()))
+        }
+        async fn pending_approvals(
+            &self,
+            _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+            _limit: u32,
+        ) -> gadgetron_core::error::Result<
+            Vec<gadgetron_core::agent::shared_context::PennyApprovalDigest>,
+        > {
+            Err(GadgetronError::Provider("approvals down".into()))
+        }
+        async fn request_evidence(
+            &self,
+            _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+            _request_id: Uuid,
+        ) -> gadgetron_core::error::Result<
+            gadgetron_core::workbench::WorkbenchRequestEvidenceResponse,
+        > {
+            Err(GadgetronError::Forbidden)
+        }
+        async fn decide_candidate(
+            &self,
+            _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+            _request: gadgetron_core::agent::shared_context::PennyCandidateDecisionRequest,
+        ) -> gadgetron_core::error::Result<
+            gadgetron_core::agent::shared_context::PennyCandidateDecisionReceipt,
+        > {
+            Err(GadgetronError::Forbidden)
+        }
+    }
+
+    fn make_state_with_psl_service(
+        provider: impl LlmProvider + 'static,
+        provider_name: &str,
+        surface: Option<Arc<dyn PennySharedSurfaceService>>,
+        agent_cfg: AgentConfig,
+    ) -> AppState {
+        let (audit_writer, _rx) = AuditWriter::new(TEST_AUDIT_CAPACITY);
+        let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+        providers.insert(provider_name.to_string(), Arc::new(provider));
+
+        let metrics = Arc::new(MetricsStore::new());
+        let routing_config = gadgetron_core::routing::RoutingConfig {
+            default_strategy: gadgetron_core::routing::RoutingStrategy::RoundRobin,
+            fallbacks: HashMap::new(),
+            costs: HashMap::new(),
+        };
+        let lrouter = LlmRouter::new(providers.clone(), routing_config, metrics);
+
+        let providers_for_state: HashMap<String, Arc<dyn LlmProvider + Send + Sync>> = providers
+            .into_iter()
+            .map(|(k, v)| (k, v as Arc<dyn LlmProvider + Send + Sync>))
+            .collect();
+
+        // Build the penny_assembler from the surface if present.
+        // Uses DefaultPennyTurnContextAssembler which requires a Sized S.
+        // We use the Arc<dyn PennySharedSurfaceService> blanket impl.
+        let penny_assembler: Option<Arc<dyn PennyTurnContextAssembler>> =
+            surface.as_ref().map(|svc| {
+                let assembler = DefaultPennyTurnContextAssembler {
+                    service: Arc::new(svc.clone()),
+                    config: agent_cfg.shared_context.clone(),
+                };
+                Arc::new(assembler) as Arc<dyn PennyTurnContextAssembler>
+            });
+
+        AppState {
+            key_validator: Arc::new(AlwaysAcceptValidator::new(vec![Scope::OpenAiCompat])),
+            quota_enforcer: Arc::new(InMemoryQuotaEnforcer),
+            audit_writer: Arc::new(audit_writer),
+            providers: Arc::new(providers_for_state),
+            router: Some(Arc::new(lrouter)),
+            pg_pool: Some(lazy_pool()),
+            no_db: false,
+            tui_tx: None,
+            workbench: None,
+            penny_shared_surface: surface,
+            agent_config: Arc::new(agent_cfg),
+            penny_assembler,
+        }
+    }
+
+    /// When `penny_shared_surface` is `None`, the request proceeds without any
+    /// bootstrap injection — messages are unchanged.
+    #[tokio::test]
+    async fn inject_does_nothing_when_service_none() {
+        let state = make_state_with_psl_service(
+            FakeLlmProvider::new("fake-model"),
+            "fake",
+            None,
+            AgentConfig::default(),
+        );
+        let app = build_test_app(state);
+
+        let body_json = serde_json::to_vec(&chat_request_body(false)).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::from(body_json))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Handler must return 200 normally — no bootstrap injection.
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// When `agent_config.shared_context.enabled = false`, no bootstrap is
+    /// injected even if the service is configured.
+    #[tokio::test]
+    async fn inject_does_nothing_when_flag_disabled() {
+        let mut cfg = AgentConfig::default();
+        cfg.shared_context.enabled = false;
+
+        let state = make_state_with_psl_service(
+            FakeLlmProvider::new("fake-model"),
+            "fake",
+            Some(Arc::new(AllErrorService)),
+            cfg,
+        );
+        let app = build_test_app(state);
+
+        let body_json = serde_json::to_vec(&chat_request_body(false)).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::from(body_json))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Must return 200 — AllErrorService never gets called.
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// When the assembler's service returns errors for all reads, the handler
+    /// must still return 200 (graceful degrade — no 5xx caused by bootstrap failure).
+    #[tokio::test]
+    async fn inject_degrades_gracefully_when_assembler_errs() {
+        // AllErrorService causes degraded bootstrap but assembler returns Ok(degraded).
+        let state = make_state_with_psl_service(
+            FakeLlmProvider::new("fake-model"),
+            "fake",
+            Some(Arc::new(AllErrorService)),
+            AgentConfig::default(),
+        );
+        let app = build_test_app(state);
+
+        let body_json = serde_json::to_vec(&chat_request_body(false)).unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::from(body_json))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Key invariant: bootstrap failure must NOT produce a 5xx response.
+        let status = resp.status().as_u16();
+        assert!(
+            status < 500,
+            "bootstrap service failure must not cause 5xx; got {status}"
+        );
+        assert_eq!(status, 200, "degraded bootstrap still produces 200 OK");
+    }
+
+    /// Calling the handler twice with the same conversation_id must invoke the
+    /// assembler both times — session store does NOT short-circuit bootstrap
+    /// (doc §2.2.4: "every turn gets a fresh bootstrap").
+    #[tokio::test]
+    async fn inject_reassembles_every_turn_even_with_conversation_id() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Service that counts how many times `recent_activity` was called.
+        struct CountingService {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl PennySharedSurfaceService for CountingService {
+            async fn recent_activity(
+                &self,
+                _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+                _limit: u32,
+            ) -> gadgetron_core::error::Result<
+                Vec<gadgetron_core::agent::shared_context::PennyActivityDigest>,
+            > {
+                self.call_count.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![])
+            }
+            async fn pending_candidates(
+                &self,
+                _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+                _limit: u32,
+            ) -> gadgetron_core::error::Result<
+                Vec<gadgetron_core::agent::shared_context::PennyCandidateDigest>,
+            > {
+                Ok(vec![])
+            }
+            async fn pending_approvals(
+                &self,
+                _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+                _limit: u32,
+            ) -> gadgetron_core::error::Result<
+                Vec<gadgetron_core::agent::shared_context::PennyApprovalDigest>,
+            > {
+                Ok(vec![])
+            }
+            async fn request_evidence(
+                &self,
+                _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+                _request_id: Uuid,
+            ) -> gadgetron_core::error::Result<
+                gadgetron_core::workbench::WorkbenchRequestEvidenceResponse,
+            > {
+                Err(GadgetronError::Forbidden)
+            }
+            async fn decide_candidate(
+                &self,
+                _actor: &gadgetron_core::knowledge::AuthenticatedContext,
+                _request: gadgetron_core::agent::shared_context::PennyCandidateDecisionRequest,
+            ) -> gadgetron_core::error::Result<
+                gadgetron_core::agent::shared_context::PennyCandidateDecisionReceipt,
+            > {
+                Err(GadgetronError::Forbidden)
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(CountingService {
+            call_count: call_count.clone(),
+        });
+
+        let state = make_state_with_psl_service(
+            FakeLlmProvider::new("fake-model"),
+            "fake",
+            Some(service as Arc<dyn PennySharedSurfaceService>),
+            AgentConfig::default(),
+        );
+        let app = build_test_app(state);
+
+        // Use a fixed conversation_id in both requests.
+        let body_json = serde_json::to_vec(&serde_json::json!({
+            "model": "fake-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false,
+            "conversation_id": "conv-resume-test"
+        }))
+        .unwrap();
+
+        // First request.
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::from(body_json.clone()))
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // Second request with the same conversation_id.
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::from(body_json))
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Assembler must have been called twice (once per turn).
+        let count = call_count.load(Ordering::Relaxed);
+        assert_eq!(
+            count, 2,
+            "assembler must be invoked on every turn regardless of conversation_id; got {count}"
         );
     }
 }

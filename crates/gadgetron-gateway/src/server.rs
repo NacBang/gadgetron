@@ -27,6 +27,7 @@ use crate::middleware::{
 };
 use crate::penny::shared_context::PennySharedSurfaceService;
 use crate::web::workbench::{workbench_routes, GatewayWorkbenchService};
+use gadgetron_core::agent::config::AgentConfig;
 
 /// 4 MiB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
 /// Rationale: 128k-token window × ~4 bytes/token ≈ 512 KB; 8× headroom.
@@ -121,6 +122,16 @@ pub struct AppState {
     /// production binary. PSL-1b will populate this from the production
     /// `InProcessPennySharedSurfaceService`.
     pub penny_shared_surface: Option<Arc<dyn PennySharedSurfaceService>>,
+    /// Agent configuration — shared_context sub-section drives PSL-1b bootstrap
+    /// injection. Arc so clone is a pointer increment; handler reads only
+    /// `agent_config.shared_context.enabled` and limit fields.
+    pub agent_config: Arc<AgentConfig>,
+    /// Per-turn bootstrap assembler — wired at startup from
+    /// `DefaultPennyTurnContextAssembler` with `penny_shared_surface`. `None`
+    /// until PSL-1b is wired in the production binary. The handler uses this
+    /// trait object to avoid handling the generic type parameter inline.
+    pub penny_assembler:
+        Option<Arc<dyn gadgetron_core::agent::shared_context::PennyTurnContextAssembler>>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -404,6 +415,8 @@ mod tests {
             tui_tx: None,
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(AgentConfig::default()),
         }
     }
 
@@ -420,6 +433,8 @@ mod tests {
             tui_tx: None,
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(AgentConfig::default()),
         }
     }
 
@@ -753,6 +768,8 @@ mod tests {
             tui_tx: Some(tx),
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(AgentConfig::default()),
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -826,6 +843,8 @@ mod tests {
             tui_tx: None,
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(AgentConfig::default()),
         };
 
         let app = build_router(state);

@@ -100,6 +100,8 @@ impl GatewayHarness {
             tui_tx: None,
             workbench: None,
             penny_shared_surface: None,
+            penny_assembler: None,
+            agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
         };
 
         let router = build_router(state);
