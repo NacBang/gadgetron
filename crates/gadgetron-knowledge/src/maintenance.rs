@@ -297,7 +297,9 @@ mod tests {
     use gadgetron_testing::harness::pg::PgHarness;
     use tempfile::TempDir;
 
-    use crate::config::{EmbeddingConfig, EmbeddingWriteMode, ReindexConfig};
+    use crate::config::{
+        EmbeddingConfig, EmbeddingWriteMode, KnowledgeCurationConfig, ReindexConfig,
+    };
     use crate::embedding::{EmbeddingError, EmbeddingProvider};
 
     #[derive(Clone)]
@@ -346,6 +348,7 @@ mod tests {
                 ..EmbeddingConfig::default()
             }),
             reindex: ReindexConfig::default(),
+            curation: KnowledgeCurationConfig::default(),
         }
     }
 

@@ -27,6 +27,7 @@ once_cell = { workspace = true }
 libc = { workspace = true }
 include_dir = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
 sha2 = "0.10"
 hex = "0.4"
 # wiki.import arg shape carries bytes as base64 — RFC 4648 std alphabet.

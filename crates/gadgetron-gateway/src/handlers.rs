@@ -595,6 +595,8 @@ mod tests {
             penny_shared_surface: None,
             agent_config: Arc::new(AgentConfig::default()),
             penny_assembler: None,
+            activity_capture_store: None,
+            candidate_coordinator: None,
         }
     }
 
@@ -1003,6 +1005,8 @@ mod tests {
             penny_shared_surface: surface,
             agent_config: Arc::new(agent_cfg),
             penny_assembler,
+            activity_capture_store: None,
+            candidate_coordinator: None,
         }
     }
 

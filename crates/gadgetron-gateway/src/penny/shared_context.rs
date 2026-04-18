@@ -34,7 +34,13 @@ use gadgetron_core::{
         PennyTurnBootstrap, PennyTurnContextAssembler,
     },
     error::GadgetronError,
-    knowledge::AuthenticatedContext,
+    knowledge::{
+        candidate::{
+            ActivityCaptureStore, CandidateDecision, KnowledgeCandidate,
+            KnowledgeCandidateCoordinator, KnowledgeCandidateDisposition,
+        },
+        AuthenticatedContext,
+    },
     workbench::WorkbenchRequestEvidenceResponse,
 };
 use uuid::Uuid;
@@ -166,8 +172,55 @@ impl PennySharedSurfaceService for Arc<dyn PennySharedSurfaceService> {
 /// Wired at startup with the same `Arc<dyn WorkbenchProjectionService>` that
 /// the workbench HTTP routes use — ensures both surfaces read from the same
 /// backing store with the same filter rules (doc §2.1.2 design rule 1).
+///
+/// # W3-KC-1 — optional candidate wiring
+///
+/// `candidate_store` and `candidate_coordinator` are `Option` so existing
+/// PSL-1 callers (and tests that predate KC-1) continue to compile with
+/// `None`. When `Some`, `pending_candidates` serves a live projection and
+/// `decide_candidate` routes through the real coordinator; when `None`,
+/// `pending_candidates` returns `Ok(vec![])` and `decide_candidate` returns
+/// the preserved PSL-1 `ToolDenied` stub so the gateway still boots cleanly
+/// against production TOML that hasn't wired the KC-1 store yet.
 pub struct InProcessPennySharedSurfaceService {
     pub workbench_projection: Arc<dyn WorkbenchProjectionService>,
+    /// Capture-plane store backing `pending_candidates` and `decide_candidate`.
+    /// `None` preserves the PSL-1 behavior.
+    pub candidate_store: Option<Arc<dyn ActivityCaptureStore>>,
+    /// Capture-plane coordinator — reserved for future use by `capture_action`
+    /// through this service. Held as a field now so the wiring surface is in
+    /// place even though KC-1's read paths only need `candidate_store`.
+    pub candidate_coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+}
+
+impl InProcessPennySharedSurfaceService {
+    /// Construct with just the workbench projection (matches existing PSL-1
+    /// call sites). Leaves the capture-plane wiring unset.
+    pub fn new(workbench_projection: Arc<dyn WorkbenchProjectionService>) -> Self {
+        Self {
+            workbench_projection,
+            candidate_store: None,
+            candidate_coordinator: None,
+        }
+    }
+
+    /// Wire the KC-1 capture-plane dependencies onto an existing service.
+    ///
+    /// Returns `self` so construction can be chained:
+    ///
+    /// ```ignore
+    /// let svc = InProcessPennySharedSurfaceService::new(projection)
+    ///     .with_candidate_plane(store, coordinator);
+    /// ```
+    pub fn with_candidate_plane(
+        mut self,
+        store: Arc<dyn ActivityCaptureStore>,
+        coordinator: Arc<dyn KnowledgeCandidateCoordinator>,
+    ) -> Self {
+        self.candidate_store = Some(store);
+        self.candidate_coordinator = Some(coordinator);
+        self
+    }
 }
 
 #[async_trait]
@@ -204,12 +257,21 @@ impl PennySharedSurfaceService for InProcessPennySharedSurfaceService {
 
     async fn pending_candidates(
         &self,
-        _actor: &AuthenticatedContext,
+        actor: &AuthenticatedContext,
         limit: u32,
     ) -> Result<Vec<PennyCandidateDigest>, GadgetronError> {
-        // KC-1 will replace this stub with a real candidate projection query.
-        let _limit = limit.clamp(1, 20);
-        Ok(vec![])
+        let limit = limit.clamp(1, 20);
+        // W3-KC-1: when the capture store is wired, serve a live projection.
+        // Preserves the PSL-1 empty-vec behavior when `candidate_store` is None
+        // so the gateway still boots cleanly against production TOML that
+        // hasn't wired KC-1 yet.
+        let Some(store) = self.candidate_store.as_ref() else {
+            return Ok(vec![]);
+        };
+        let rows = store
+            .list_candidates(actor, limit as usize, /*only_pending=*/ true)
+            .await?;
+        Ok(rows.into_iter().map(candidate_to_digest).collect())
     }
 
     async fn pending_approvals(
@@ -235,17 +297,61 @@ impl PennySharedSurfaceService for InProcessPennySharedSurfaceService {
 
     async fn decide_candidate(
         &self,
-        _actor: &AuthenticatedContext,
-        _request: PennyCandidateDecisionRequest,
+        actor: &AuthenticatedContext,
+        request: PennyCandidateDecisionRequest,
     ) -> Result<PennyCandidateDecisionReceipt, GadgetronError> {
-        // KC-1 will wire the real KnowledgeCandidateCoordinator here.
-        Err(GadgetronError::Penny {
-            kind: gadgetron_core::error::PennyErrorKind::ToolDenied {
-                reason: "W3-KC-1 pending (see doc 71): candidate decisions are not yet wired"
+        // W3-KC-1: when the capture store is wired, route decisions through
+        // the real coordinator. Preserves the PSL-1 `ToolDenied` stub when
+        // `candidate_store` is None so callers still get a typed 403-equivalent
+        // if the capture plane hasn't been started yet.
+        let Some(store) = self.candidate_store.as_ref() else {
+            return Err(GadgetronError::Penny {
+                kind: gadgetron_core::error::PennyErrorKind::ToolDenied {
+                    reason:
+                        "W3-KC-1 capture store is not wired for this gateway; cannot record decisions"
+                            .to_string(),
+                },
+                message: "decide_candidate requires the capture-plane store to be wired"
                     .to_string(),
-            },
-            message: "decide_candidate is not implemented until W3-KC-1".to_string(),
+            });
+        };
+
+        let decision = CandidateDecision {
+            candidate_id: request.candidate_id,
+            decision: request.decision,
+            decided_by_user_id: None,
+            decided_by_penny: true,
+            rationale: request.rationale,
+        };
+        let updated = store.decide_candidate(actor, decision).await?;
+        Ok(PennyCandidateDecisionReceipt {
+            candidate_id: updated.id,
+            disposition: updated.disposition,
+            canonical_path: updated.proposed_path.clone(),
+            // KC-1 does not actually materialize yet; that lands in KC-1b.
+            materialization_status: None,
+            activity_event_id: updated.activity_event_id,
         })
+    }
+}
+
+/// Map a `KnowledgeCandidate` from the capture plane into the Penny-facing
+/// digest shape. Kept as a free function so unit tests can exercise the
+/// mapping without constructing a full service.
+fn candidate_to_digest(candidate: KnowledgeCandidate) -> PennyCandidateDigest {
+    let requires_user_confirmation = matches!(
+        candidate.disposition,
+        KnowledgeCandidateDisposition::PendingUserConfirmation
+    );
+    PennyCandidateDigest {
+        candidate_id: candidate.id,
+        activity_event_id: candidate.activity_event_id,
+        summary: candidate.summary,
+        disposition: candidate.disposition,
+        proposed_path: candidate.proposed_path,
+        requires_user_confirmation,
+        // KC-1 does not materialize; KC-1b adds status tracking.
+        materialization_status: None,
     }
 }
 
@@ -539,9 +645,7 @@ mod tests {
     }
 
     fn make_service() -> InProcessPennySharedSurfaceService {
-        InProcessPennySharedSurfaceService {
-            workbench_projection: Arc::new(FakeProjectionEmpty),
-        }
+        InProcessPennySharedSurfaceService::new(Arc::new(FakeProjectionEmpty))
     }
 
     fn actor() -> AuthenticatedContext {
@@ -600,7 +704,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decide_candidate_returns_unsupported() {
+    async fn pending_candidates_returns_empty_when_store_none() {
+        // Preserves the PSL-1 behavior — when `candidate_store` is None,
+        // the read serves an empty Vec without contacting any backend.
+        let svc = make_service();
+        let rows = svc.pending_candidates(&actor(), 5).await.unwrap();
+        assert!(rows.is_empty(), "must return empty when store is None");
+    }
+
+    #[tokio::test]
+    async fn decide_candidate_denied_when_store_none() {
+        // Preserves the PSL-1 stub behavior as a typed 403-equivalent so
+        // production TOML that hasn't wired KC-1 still gives Penny a clean
+        // error rather than a panic.
         let svc = make_service();
         let req = PennyCandidateDecisionRequest {
             candidate_id: Uuid::new_v4(),
@@ -614,12 +730,119 @@ mod tests {
                 ..
             } => {
                 assert!(
-                    reason.contains("W3-KC-1"),
-                    "reason must mention W3-KC-1: {reason}"
+                    reason.contains("capture store"),
+                    "reason must mention capture store: {reason}"
                 );
             }
             other => panic!("expected ToolDenied, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn pending_candidates_returns_live_when_store_some() {
+        use gadgetron_core::knowledge::candidate::{
+            ActivityKind, ActivityOrigin, CandidateHint, CapturedActivityEvent,
+        };
+        use gadgetron_knowledge::candidate::{
+            InMemoryActivityCaptureStore, InProcessCandidateCoordinator,
+        };
+
+        let store: Arc<dyn ActivityCaptureStore> = Arc::new(InMemoryActivityCaptureStore::new());
+        let coord: Arc<dyn KnowledgeCandidateCoordinator> = Arc::new(
+            InProcessCandidateCoordinator::new(store.clone(), /*max=*/ 8),
+        );
+        let svc = InProcessPennySharedSurfaceService::new(Arc::new(FakeProjectionEmpty))
+            .with_candidate_plane(store.clone(), coord.clone());
+
+        let event = CapturedActivityEvent {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            actor_user_id: Uuid::new_v4(),
+            request_id: None,
+            origin: ActivityOrigin::UserDirect,
+            kind: ActivityKind::DirectAction,
+            title: "demo".into(),
+            summary: "demo event".into(),
+            source_bundle: None,
+            source_capability: None,
+            audit_event_id: None,
+            facts: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+        };
+        let hints = vec![CandidateHint {
+            summary: "demo candidate".into(),
+            proposed_path: Some("ops/journal/demo".into()),
+            tags: vec!["ops".into()],
+            reason: Some("live_test".into()),
+        }];
+        coord.capture_action(&actor(), event, hints).await.unwrap();
+
+        let rows = svc.pending_candidates(&actor(), 5).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary, "demo candidate");
+        assert_eq!(
+            rows[0].disposition,
+            gadgetron_core::knowledge::candidate::KnowledgeCandidateDisposition::PendingPennyDecision
+        );
+        assert!(!rows[0].requires_user_confirmation);
+    }
+
+    #[tokio::test]
+    async fn decide_candidate_returns_receipt_when_store_some() {
+        use gadgetron_core::knowledge::candidate::{
+            ActivityKind, ActivityOrigin, CandidateDecisionKind, CandidateHint,
+            CapturedActivityEvent, KnowledgeCandidateDisposition,
+        };
+        use gadgetron_knowledge::candidate::{
+            InMemoryActivityCaptureStore, InProcessCandidateCoordinator,
+        };
+
+        let store: Arc<dyn ActivityCaptureStore> = Arc::new(InMemoryActivityCaptureStore::new());
+        let coord: Arc<dyn KnowledgeCandidateCoordinator> =
+            Arc::new(InProcessCandidateCoordinator::new(store.clone(), 8));
+        let svc = InProcessPennySharedSurfaceService::new(Arc::new(FakeProjectionEmpty))
+            .with_candidate_plane(store.clone(), coord.clone());
+
+        let event = CapturedActivityEvent {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            actor_user_id: Uuid::new_v4(),
+            request_id: None,
+            origin: ActivityOrigin::Penny,
+            kind: ActivityKind::GadgetToolCall,
+            title: "tool".into(),
+            summary: "tool call".into(),
+            source_bundle: None,
+            source_capability: None,
+            audit_event_id: None,
+            facts: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+        };
+        let hints = vec![CandidateHint {
+            summary: "tool call summary".into(),
+            proposed_path: Some("ops/journal/tool".into()),
+            tags: vec![],
+            reason: None,
+        }];
+        let created = coord.capture_action(&actor(), event, hints).await.unwrap();
+        let candidate_id = created[0].id;
+
+        let receipt = svc
+            .decide_candidate(
+                &actor(),
+                PennyCandidateDecisionRequest {
+                    candidate_id,
+                    decision: CandidateDecisionKind::Accept,
+                    rationale: Some("worth saving".into()),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.candidate_id, candidate_id);
+        assert_eq!(receipt.disposition, KnowledgeCandidateDisposition::Accepted);
+        assert_eq!(receipt.canonical_path.as_deref(), Some("ops/journal/tool"));
+        assert!(receipt.materialization_status.is_none());
     }
 
     // ----------------------------------------------------------------

@@ -18,6 +18,7 @@
 //! and `docs/architecture/glossary.md` for the Bundle / Plug / Gadget
 //! vocabulary.
 
+pub mod candidate;
 pub mod config;
 pub mod embedding;
 pub mod error;
