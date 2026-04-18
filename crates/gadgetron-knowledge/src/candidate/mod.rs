@@ -93,6 +93,18 @@ impl InMemoryActivityCaptureStore {
     pub async fn decision_count(&self) -> usize {
         self.decisions.lock().await.len()
     }
+
+    /// Test-only snapshot of captured activity events. Used by integration
+    /// tests to assert capture call sites without exposing the internal
+    /// Mutex<Vec<_>> directly.
+    ///
+    /// Spec: docs/design/core/knowledge-candidate-curation.md §2.1 — PSL-1d
+    /// integration test access path. Mirrors the existing `event_count` /
+    /// `decision_count` helpers on this struct.
+    #[doc(hidden)]
+    pub async fn events_snapshot(&self) -> Vec<CapturedActivityEvent> {
+        self.events.lock().await.clone()
+    }
 }
 
 #[async_trait]
