@@ -100,7 +100,19 @@ impl DescriptorCatalog {
     // Builder modifiers
     // -----------------------------------------------------------------------
 
-    /// Override `allow_direct_actions` policy.
+    /// Override the **instance-level** `allow_direct_actions` policy.
+    ///
+    /// This is **not** a per-actor access gate. Actor-scope filtering lives
+    /// on the descriptor itself (`WorkbenchActionDescriptor.required_scope`)
+    /// and is enforced in `visible_actions` via `scope_allowed(..)`.
+    ///
+    /// | Gate | Layer | When | Effect |
+    /// |---|---|---|---|
+    /// | `required_scope` | per-descriptor | actor lacks scope | descriptor is **stripped** from the response |
+    /// | `allow_direct_actions = false` | per-instance | policy disabled | every descriptor is returned **with** `disabled_reason` set |
+    ///
+    /// Doc 74 §2.3 + §2.4.1 codify this split; drift audit PR 4
+    /// (D-20260418-25) closed U-D as "spec-correct, no code change".
     pub fn with_allow_direct_actions(mut self, allow: bool) -> Self {
         self.allow_direct_actions = allow;
         self
@@ -166,7 +178,10 @@ impl DescriptorCatalog {
             .collect()
     }
 
-    /// Whether direct action invocations are permitted by instance policy.
+    /// Whether direct action invocations are permitted by **instance-level
+    /// policy**. Distinct from `required_scope` (per-descriptor actor filter)
+    /// — see [`DescriptorCatalog::with_allow_direct_actions`] for the full
+    /// dual-gate table.
     pub fn allow_direct_actions(&self) -> bool {
         self.allow_direct_actions
     }
