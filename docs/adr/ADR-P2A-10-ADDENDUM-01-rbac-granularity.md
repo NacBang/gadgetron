@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ACCEPTED — rev3 (xaas + codex round-2 feedback integrated 2026-04-18) |
-| **Date** | 2026-04-18 (v1 / rev2 / rev3) |
-| **Author** | security-compliance-lead (v1), PM-directed team synthesis (rev2), PM integration of xaas round-2 + codex round-2 (rev3) |
+| **Status** | ACCEPTED — rev4 (W2 kickoff team synthesis integrated 2026-04-18) |
+| **Date** | 2026-04-18 (v1 / rev2 / rev3 / rev4) |
+| **Author** | security-compliance-lead (v1), PM-directed team synthesis (rev2-rev3), PM integration of W2 kickoff 4-agent review (rev4) |
 | **Parent** | ADR-P2A-10 (bundle-plug-gadget-terminology) |
 | **Amends** | ADR-P2A-10 §Decision — adds per-Plug enablement axis, `requires_plugs` cascade, external Gadget runtime RBAC, `bundle info` CLI shape, `GadgetronBundlesHome` resolver |
 | **Blocks** | `docs/design/phase2/12-external-gadget-runtime.md` (pending), `bundle.toml` schema v1 freeze, `gadgetron bundle info` CLI output, `gadgetron-core::bundle` trait scaffold |
@@ -17,6 +17,7 @@
 - **v1** (2026-04-18, security-compliance-lead) — initial addendum: 3-axis RBAC, 5 external-runtime enforcement points, 3 open questions for PM.
 - **rev2** (2026-04-18, team synthesis) — PM questions resolved, 4 new blockers surfaced by cross-team review incorporated, `requires_plugs` promoted from deferred to P2B-alpha ship, `GadgetronBundlesHome` resolver added, `tenant_overrides` reserved schema, `admin_detail` leak-safety, `PlugId` newtype / `#[must_use] RegistrationOutcome` Rust shape.
 - **rev3** (2026-04-18, round-2 team feedback integration) — xaas: `tenant_workdir_quota.last_synced_at` column + FD-open check step 3b in cascade + P2B admin annotation on `tenant_overrides`. codex-chief-advisor: `requires_plugs` completeness lint, enforcement floors 6 (Resource ceilings) + 7 (Egress policy), `admin_detail` choke-point named + extended to `Denied`/`Execution` variants + regression test, `tenant_overrides` upgraded to `warn!` + CFG-045 operator ack gate, `GadgetronBundlesHome` tier-resolution logging, timing-oracle threat noted in STRIDE.
+- **rev4** (2026-04-18, W2 kickoff team synthesis) — 4-agent review of §4 trait shape prior to W2 implementation. codex-chief-advisor 3 MAJORs integrated: (1) `BundleRegistry` is **metadata-only**, live `dyn Bundle` values are dropped after `install` returns — never stored as `Vec<Arc<dyn Bundle>>`; (2) `RegistrationOutcome::SkippedByAvailability` carries `missing: Vec<PlugId>` for operator debugging; (3) field-form access (`ctx.plugs.*` / `ctx.gadgets.*`) standardized across ADR + glossary, method-form (`gadgets_mut()`) no longer used. security-compliance-lead 6 W2 deliverables added as trait-freeze conditions: panic isolation (`catch_unwind`), duplicate-id rejection, `register()` log field redaction, `let _` audit-completeness guarantee, `CoreAuditEvent::PlugSkippedByConfig` structured variant (Gate 1 MUST-LAND schema freeze preview), Bundle trait rustdoc trust constraints (P2B in-tree only, audit target operator-only, in-core full-trust).
 
 ---
 
@@ -170,8 +171,8 @@ impl BundleContext<'_> {
 #[must_use = "ignoring a RegistrationOutcome hides whether the plug was actually wired"]
 pub enum RegistrationOutcome {
     Registered,
-    SkippedByConfig,        // [bundles.<>.plugs.<>] enabled = false
-    SkippedByAvailability,  // require_plugs missing; see `requires_plugs`
+    SkippedByConfig,                                 // [bundles.<>.plugs.<>] enabled = false
+    SkippedByAvailability { missing: Vec<PlugId> },  // rev4: carries missing IDs per codex MAJOR 2
 }
 
 impl<T: ?Sized> PlugRegistry<'_, T> {
@@ -195,6 +196,14 @@ impl<T: ?Sized> PlugRegistry<'_, T> {
 `#[must_use]` gives Bundle authors compile-time nudge without `?` ceremony. Discard with `let _ = ...` when intentional.
 
 **D. Core-internal `pub(crate)` discipline**: the registry's inner map is `pub(crate) within gadgetron-core::bundle`. Bundle crates consume `BundleContext` (a core type) and never reach into `config::*` or `registry.inner` directly. Coupling direction stays D-12-compliant: core→core for mechanism, Bundle→core for call site.
+
+**E. `BundleRegistry` is metadata-only** (rev4, codex MAJOR 1): `BundleRegistry` stores **`BundleDescriptor` + registered Plug/Gadget inventory + install status only**. Live `dyn Bundle` values are **not** stored — they are constructed once at startup, `install()` is called sequentially, and the `Box<dyn Bundle>` is dropped after `install` returns. Do **not** use `Vec<Arc<dyn Bundle>>` — that makes the `&mut self` mutability contract incoherent (Arc::get_mut only works at refcount-1) and creates the first-reinstall-forces-supersedes failure mode. Any state that must outlive `install` lives in the registered services (the `Arc<T>` stored in each `PlugRegistry<T>`), not in the Bundle object itself.
+
+**F. `Bundle::install` panic isolation** (rev4, security-compliance-lead W2 deliverable #1): `BundleRegistry::install_all(&self, bundles: Vec<Box<dyn Bundle>>)` invokes each `bundle.install(&mut ctx)` inside `std::panic::catch_unwind(AssertUnwindSafe(...))`. A panicking Bundle is recorded as `PlugStatusKind::RegistrationFailed { reason: "panic: <msg>" }` in `BundleRegistry`; other Bundles continue to install. A panicking Bundle does NOT terminate the daemon — that would be a DoS trivially triggered by any mis-built Bundle.
+
+**G. Duplicate-id rejection** (rev4, security-compliance-lead W2 deliverable #2): `BundleRegistry::install_all` checks `BundleDescriptor.name` uniqueness before invoking `install`. A duplicate name returns `BundleError::Install("bundle already installed: {id}")`. Re-installing the same Bundle would shadow/overwrite previous Plug registrations and break the audit trail — explicit rejection is correct.
+
+**H. `register()` log-field redaction** (rev4, security-compliance-lead W2 deliverable #3): the `tracing::info!` emitted inside `PlugRegistry::register` MUST carry only `bundle`, `plug` (id string), and `axis`. The `plug: Arc<T>` argument itself MUST NEVER be logged via `Debug`, `{:?}`, or field binding. Rationale: `T` may embed secrets (provider API keys). Regression test `register_log_contains_only_id_bundle_axis` asserts the JSON field whitelist.
 
 ### §5. External Gadget runtime RBAC — five enforcement points + runtime metadata
 

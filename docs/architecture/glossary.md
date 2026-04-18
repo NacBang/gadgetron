@@ -85,12 +85,14 @@ Every Gadget has:
 
 Rust trait: **`GadgetProvider`**. See `gadgetron-core::gadget`.
 
-Gadget registration happens inside `Bundle::install` via `ctx.gadgets_mut()`:
+Gadget registration happens inside `Bundle::install` via `ctx.gadgets.*` (field form, consistent with `ctx.plugs.*` per ADR-P2A-10-ADDENDUM-01 rev4):
 
 ```rust
-ctx.gadgets_mut().register(Arc::new(GpuListGadget::new(nvml.clone())));
-ctx.gadgets_mut().register(Arc::new(ModelLoadGadget::new(scheduler.clone())));
+ctx.gadgets.knowledge.register(Arc::new(WikiListGadget::new(wiki.clone())));
+ctx.gadgets.infra.register(Arc::new(GpuListGadget::new(nvml.clone())));
 ```
+
+`ctx.plugs` and `ctx.gadgets` are both plain fields on `BundleContext`. Borrow-checker permits disjoint simultaneous `&mut` on these sibling fields per standard NLL rules.
 
 ---
 

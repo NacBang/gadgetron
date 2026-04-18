@@ -165,6 +165,79 @@ impl NoopGadgetAuditEventSink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Core-level audit events (ADR-P2A-10-ADDENDUM-01 rev4 §4 / Gate 1 preview)
+// ---------------------------------------------------------------------------
+
+/// Core-level audit events — wire format consumed by the P2B DB writer.
+///
+/// `GadgetAuditEvent` (above) covers Gadget call completions.
+/// `CoreAuditEvent` is the umbrella introduced in W2 so that Plug-level
+/// registration skip events have a structured home beyond `tracing`.
+///
+/// # Wire freeze (rev4 §4 Gate 1 MUST-LAND preview)
+///
+/// The variant names and field names below are persisted. Changes
+/// require a decision-log supersedes entry in `docs/process/04-decision-log.md`.
+/// The P2B DB writer (W3+) maps these variants to SQL rows; renaming a
+/// field here without updating the writer breaks the audit pipeline.
+///
+/// # Injection (deferred to W3)
+///
+/// The variant shape ships in W2; wiring a `CoreAuditEventSink` into
+/// `BundleRegistry::install_all` — so the DB writer receives structured
+/// events alongside the `tracing::info!` emit — is a W3 task. W2
+/// consumers use the `tracing` emit in `PlugRegistry::register` directly.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreAuditEvent {
+    /// A Plug was skipped during `Bundle::install` because of config
+    /// (either bundle-disabled or per-Plug disabled).
+    PlugSkippedByConfig {
+        /// Bundle name as declared in the manifest.
+        bundle: String,
+        /// Plug id (kebab-case) that was skipped.
+        plug: String,
+        /// Axis label — e.g. `"llm_provider"`, `"scheduler"`. Static
+        /// strings come from `PlugRegistry::axis`.
+        axis: String,
+    },
+    /// A Plug registration failed (`Bundle::install` returned `Err` or
+    /// panicked). `reason` carries the inner error text or `"panic: <msg>"`
+    /// for `catch_unwind` rescues.
+    PlugRegistrationFailed {
+        bundle: String,
+        plug: String,
+        axis: String,
+        reason: String,
+    },
+}
+
+/// Core-level audit sink. Like `GadgetAuditEventSink` but for core
+/// events. Implementors deliver events to their persistence backend
+/// (PostgreSQL, tracing, test capture, etc.).
+///
+/// Fire-and-forget semantics — no `.await`, no `Result`, no back-pressure.
+/// Async writers wrap a bounded channel or `tokio::spawn` internally.
+pub trait CoreAuditEventSink: Send + Sync + std::fmt::Debug {
+    fn send(&self, event: CoreAuditEvent);
+}
+
+/// Default sink that drops every event. Used when core audit
+/// persistence is not configured and as the test harness default.
+#[derive(Debug, Clone, Default)]
+pub struct NoopCoreAuditEventSink;
+
+impl CoreAuditEventSink for NoopCoreAuditEventSink {
+    fn send(&self, _event: CoreAuditEvent) {}
+}
+
+impl NoopCoreAuditEventSink {
+    pub fn new_arc() -> Arc<dyn CoreAuditEventSink> {
+        Arc::new(Self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +304,55 @@ mod tests {
             GadgetTier::from(AgentTier::Destructive),
             GadgetTier::Destructive
         );
+    }
+
+    // ---- CoreAuditEvent (rev4 §4 Gate 1 wire-preview) ----
+
+    #[test]
+    fn core_audit_event_plug_skipped_variant_constructs_and_matches() {
+        // Regression lock: the variant name `PlugSkippedByConfig` and
+        // its three fields (`bundle`, `plug`, `axis`) are wire-frozen
+        // per rev4 §4 Gate 1 MUST-LAND preview. Any rename requires a
+        // decision-log supersedes entry.
+        let evt = CoreAuditEvent::PlugSkippedByConfig {
+            bundle: "ai-infra".into(),
+            plug: "anthropic-llm".into(),
+            axis: "llm_provider".into(),
+        };
+        match evt {
+            CoreAuditEvent::PlugSkippedByConfig { bundle, plug, axis } => {
+                assert_eq!(bundle, "ai-infra");
+                assert_eq!(plug, "anthropic-llm");
+                assert_eq!(axis, "llm_provider");
+            }
+            _ => panic!("variant mismatch"),
+        }
+    }
+
+    #[test]
+    fn core_audit_event_registration_failed_carries_reason() {
+        let evt = CoreAuditEvent::PlugRegistrationFailed {
+            bundle: "ai-infra".into(),
+            plug: "anthropic-llm".into(),
+            axis: "llm_provider".into(),
+            reason: "panic: boom".into(),
+        };
+        match evt {
+            CoreAuditEvent::PlugRegistrationFailed { reason, .. } => {
+                assert!(reason.contains("panic"));
+            }
+            _ => panic!("variant mismatch"),
+        }
+    }
+
+    #[test]
+    fn noop_core_audit_sink_drops_events() {
+        let sink = NoopCoreAuditEventSink;
+        sink.send(CoreAuditEvent::PlugSkippedByConfig {
+            bundle: "foo".into(),
+            plug: "bar".into(),
+            axis: "llm_provider".into(),
+        });
+        // No panic, no side effect — compile + run = success.
     }
 }
