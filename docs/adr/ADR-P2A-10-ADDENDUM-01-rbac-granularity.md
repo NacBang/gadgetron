@@ -700,7 +700,7 @@ W3-DEVOPS 가 `cargo xtask check-bundles` 를 ship 할 때 기본 모드는 **`-
 - D-20260418-05 `docs/process/04-decision-log.md` — Driver → Plug rename amendment
 - D-20260418-06 `docs/process/04-decision-log.md` — Team synthesis rev2 (this document)
 - `docs/design/phase2/10-penny-permission-inheritance.md` §D5-a — `AuthenticatedContext` strict inheritance
-- `docs/design/phase2/04-gadget-registry.md` §6 L3 — per-dispatch mode re-check gate
-- `docs/design/phase2/06-bundle-architecture.md` §Config — `[bundles.<name>.gadgets]` override table
+- `docs/design/phase2/04-mcp-tool-registry.md` §6 L3 — per-dispatch mode re-check gate (filesystem rename to `04-gadget-registry.md` deferred per ADR-P2A-10 §Implementation note)
+- `docs/design/phase2/06-backend-plugin-architecture.md` §Config — `[bundles.<name>.gadgets]` override table (filesystem rename to `06-bundle-architecture.md` deferred per ADR-P2A-10 §Implementation note)
 - ADR-P2A-06 Stabilization sprint item 1 — `ToolCallCompleted` audit schema (extended by `GadgetCallCompleted` per §5)
 - `docs/architecture/glossary.md` — `Bundle`, `Plug`, `Gadget`, `PlugId`, `GadgetronBundlesHome` definitions (updated rev2)
