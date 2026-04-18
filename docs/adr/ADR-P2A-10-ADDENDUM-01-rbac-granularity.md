@@ -2,9 +2,9 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ACCEPTED — rev4 (W2 kickoff team synthesis integrated 2026-04-18) |
-| **Date** | 2026-04-18 (v1 / rev2 / rev3 / rev4) |
-| **Author** | security-compliance-lead (v1), PM-directed team synthesis (rev2-rev3), PM integration of W2 kickoff 4-agent review (rev4) |
+| **Status** | ACCEPTED — rev5 (W3 kickoff 5-agent synthesis + knowledge-layer priority reframing 2026-04-18) |
+| **Date** | 2026-04-18 (v1 / rev2 / rev3 / rev4 / rev5) |
+| **Author** | security-compliance-lead (v1), PM-directed team synthesis (rev2-rev4), PM integration of W3 kickoff 5-agent review + user knowledge-first directive (rev5) |
 | **Parent** | ADR-P2A-10 (bundle-plug-gadget-terminology) |
 | **Amends** | ADR-P2A-10 §Decision — adds per-Plug enablement axis, `requires_plugs` cascade, external Gadget runtime RBAC, `bundle info` CLI shape, `GadgetronBundlesHome` resolver |
 | **Blocks** | `docs/design/phase2/12-external-gadget-runtime.md` (pending), `bundle.toml` schema v1 freeze, `gadgetron bundle info` CLI output, `gadgetron-core::bundle` trait scaffold |
@@ -18,6 +18,7 @@
 - **rev2** (2026-04-18, team synthesis) — PM questions resolved, 4 new blockers surfaced by cross-team review incorporated, `requires_plugs` promoted from deferred to P2B-alpha ship, `GadgetronBundlesHome` resolver added, `tenant_overrides` reserved schema, `admin_detail` leak-safety, `PlugId` newtype / `#[must_use] RegistrationOutcome` Rust shape.
 - **rev3** (2026-04-18, round-2 team feedback integration) — xaas: `tenant_workdir_quota.last_synced_at` column + FD-open check step 3b in cascade + P2B admin annotation on `tenant_overrides`. codex-chief-advisor: `requires_plugs` completeness lint, enforcement floors 6 (Resource ceilings) + 7 (Egress policy), `admin_detail` choke-point named + extended to `Denied`/`Execution` variants + regression test, `tenant_overrides` upgraded to `warn!` + CFG-045 operator ack gate, `GadgetronBundlesHome` tier-resolution logging, timing-oracle threat noted in STRIDE.
 - **rev4** (2026-04-18, W2 kickoff team synthesis) — 4-agent review of §4 trait shape prior to W2 implementation. codex-chief-advisor 3 MAJORs integrated: (1) `BundleRegistry` is **metadata-only**, live `dyn Bundle` values are dropped after `install` returns — never stored as `Vec<Arc<dyn Bundle>>`; (2) `RegistrationOutcome::SkippedByAvailability` carries `missing: Vec<PlugId>` for operator debugging; (3) field-form access (`ctx.plugs.*` / `ctx.gadgets.*`) standardized across ADR + glossary, method-form (`gadgets_mut()`) no longer used. security-compliance-lead 6 W2 deliverables added as trait-freeze conditions: panic isolation (`catch_unwind`), duplicate-id rejection, `register()` log field redaction, `let _` audit-completeness guarantee, `CoreAuditEvent::PlugSkippedByConfig` structured variant (Gate 1 MUST-LAND schema freeze preview), Bundle trait rustdoc trust constraints (P2B in-tree only, audit target operator-only, in-core full-trust).
+- **rev5** (2026-04-18, W3 kickoff team synthesis + **knowledge-layer priority reframing**) — 5-agent review (chief-architect / devops / qa / xaas / codex) for W3, with user directive overriding scope: "지식 레이어를 빠르게 만들어 테스트하면서 다른 기능을 구현". Codex 5 MAJORs + chief-architect `#[non_exhaustive]` locks integrated. Most significantly, **W3 is not a single PR and not purely Bundle plumbing** — it is split into a DAG and re-sequenced so knowledge-layer end-to-end testability lands first. See §W3 scope (rewritten) + §Gadget trait decision + §install_all signature policy + §check-bundles tolerance policy.
 
 ---
 
@@ -615,6 +616,80 @@ Net-positive for security posture vs v1. rev3 explicitly addresses 3 codex MAJOR
 rev3 is the final shape for P2B-alpha opening. No further external round required.
 
 ---
+
+## W3 scope — rev5 rewrite (knowledge-first DAG)
+
+**Principle (user directive, 2026-04-18)**: 지식 레이어를 빠르게 end-to-end 로 돌려서 테스트하면서 다른 기능(Bundle 인프라 확장) 을 점진적으로 구현한다. W3 를 추상적 registry plumbing 중심으로 진행하지 않고, **실제 사용자 가치(wiki.import RAW ingestion 경로 + E2E 검증)** 가 먼저 land 되도록 재프레이밍.
+
+### §W3 split DAG
+
+W3 는 단일 PR 이 아니다. 의존 DAG:
+
+```
+                    W2 merged (bundle trait)
+                           │
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+     W3-KL-1           W3-BUN-1          W3-XAAS
+ (지식 E2E             (rev5 non_         (migrations
+  wiki.import          exhaustive         000001/000002
+  + Extractor          locks + cascade    no deps)
+  + PDF extractor)     resolver)
+         │                 │                 │
+     W3-KL-2               │             W3-XAAS-B
+ (Penny RAG               │             (CoreAuditEventWriter
+  system prompt            │              + WorkdirPurgeJob)
+  + citations)             │
+         │             W3-BUN-2              │
+         │         (populated GadgetHandles  │
+         │          + additional plug axes)  │
+         │                 │                 │
+         └─────────────────┴─────────────────┘
+                           │
+                     W3-DEVOPS
+              (xtask check-bundles (warn)
+               + CI test-cpu/integration split
+               + Helm + Prometheus)
+                           │
+                    P2B-alpha release tag
+                    (2 MUST-LAND gates verified)
+```
+
+**critical path = W3-KL-1 → W3-KL-2 → P2B-alpha tag** (user directive). Other PRs land in parallel as they don't block E2E knowledge layer validation.
+
+### §W3-KL-1 scope (highest priority, land first)
+
+- `plugins/plugin-document-formats/` 스켈레톤 (markdown extractor only in first cut; PDF/docx/pptx via feature gates follow)
+- `Extractor` trait (core-facing Plug) + registration into `BundleContext.plugs.extractors`
+- `IngestPipeline::import(bytes, content_type, opts)` in `gadgetron-knowledge::ingest`
+- `wiki.import` Gadget (new entry in `KnowledgeGadgetProvider`)
+- End-to-end integration test: markdown RAW → Extractor → chunking → frontmatter → wiki write → pgvector embed → semantic search retrieval — all on a testcontainers postgres harness
+- 예상 ~900 LOC + 6-8 tests
+
+### §Gadget trait decision (rev5, codex MAJOR 3)
+
+**`Gadget` trait 은 추가하지 않는다. `GadgetProvider` 유지.** `GadgetProvider::gadget_schemas()` + `GadgetProvider::call(name, args)` 패턴이 이미 "one provider = many gadgets" 시나리오를 지원하고, 새로 `trait Gadget` 을 item 단위로 도입하면 Bundle 저자가 이중 trait 구현 + JSON schema 중복을 감수해야 함. `GadgetHandles<'a>` 는 category 단위 handle 을 `Arc<dyn GadgetProvider>` 로 holding. Glossary §Gadget 에 해당 문구 유지.
+
+### §BundleRegistry::install_all signature policy (rev5, codex MAJOR 5)
+
+W2 가 `install_all(config, bundles)` 를 freeze 했으나 Gate 1 MUST-LAND 를 위해 W3-XAAS-B 에서 `install_all(config, bundles, sink: Arc<dyn CoreAuditEventSink>)` 로 확장 가능. 마지막 positional 파라미터 추가는 **rev5 에서 명시적으로 허용** — non-sink 호출자는 `NoopCoreAuditEventSink::new_arc()` 전달 pattern 사용. supersedes D-entry 별도 불필요 (이 문단 자체가 변경 승인).
+
+### §check-bundles tolerance policy (rev5, codex MAJOR 4)
+
+W3-DEVOPS 가 `cargo xtask check-bundles` 를 ship 할 때 기본 모드는 **`--warn-only`**. `--deny` 플래그는 존재하지만 CI 는 호출하지 않음. `gadgetron_xtask_check_bundles_warnings_total{bundle, kind}` Prometheus 카운터로 3 sprint 관찰 후 false-positive 0 확인되면 `--deny` 기본값 전환. 전환은 별도 PR + D-entry + dx 의 operator changelog 공지.
+
+### §`#[non_exhaustive]` 확정 (rev5, chief-architect)
+
+다음 타입들은 W3-BUN-1 첫 커밋에서 `#[non_exhaustive]` 적용 (향후 필드/variant 추가가 non-breaking 이 되도록):
+
+- `PlugHandles<'a>` — 추가 Plug 축 (Extractor / BlobStore / Scheduler / EmbeddingProvider / EntityKind / HTTP routes) 로 확장
+- `GadgetHandles<'a>` — category 별 handle (knowledge / infra / cicd / …) 로 확장
+- `BundleRegistry` — W3 에서 cascade resolver + CoreAuditEventSink 필드 추가
+- `PlugStatusKind` — W3 에서 `SkippedByAvailability { missing_plugs }` 케이스 추가 가능
+
+### §W3 cfg-gated callsite policy (rev5, qa)
+
+`#[cfg(feature = "...")]` 로 gated 된 `ctx.plugs.<port>.get(id)` callsite 는 W3-DEVOPS `xtask check-bundles` 에서 warn-only 로 처리 (hard-fail 안 함). W4 hardening 단계에서 policy 확정. fixture `tests/fixtures/cfg_gated/` 은 W3 에 포함하되 assertion 은 exit 0 + stderr warn 패턴.
 
 ## References
 

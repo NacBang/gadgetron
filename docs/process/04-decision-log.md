@@ -2205,4 +2205,117 @@ W1 (PR #62 `aa080de`) 머지 완료 후 W2 (`Bundle` trait + `BundleContext` + `
 
 ---
 
+## D-20260418-10: W3 재프레이밍 — 지식 레이어 우선 + 5 codex MAJOR 반영
+
+**날짜**: 2026-04-18
+**유형**: Execution plan reframing (user directive 반영, ADR rev5 supersedes D-20260418-07 §W3 부분)
+**상태**: 🟢 승인 (사용자 두 직접 지시 + 5-agent W3 kickoff synthesis)
+**관련 문서**: `docs/adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md` rev5 §W3 scope
+**Supersedes**: D-20260418-07 §W3 — W3 단일 5-dev-day 플래닝이 user 방향과 codex 분석 모두에서 현실성 부족 확인됨. 본 D-entry 가 rewrite.
+
+### 배경
+
+W1 (PR #62 aa080de) + W2 (PR #63 1109ee8) 머지 완료. W3 kickoff 5-agent 리뷰 결과:
+
+- codex: APPROVE WITH CONCERNS, 5 MAJOR 제기 (scope 폭발 / Gate 1 wiring / Gadget trait / check-bundles tolerance / install_all signature break)
+- chief-architect: split 필수, 4-PR DAG 제시 (W3.1 ~ W3.4)
+- devops: +MINOR 4건, prometheus/metrics dep 미존재
+- xaas: migrations 먼저 land 가능 (병렬), WorkdirPurgeJob 독립
+- qa: 28-30 테스트 범위, fakes promote W3.1 초반
+
+사용자 두 지시 (2026-04-18):
+
+> 만약 문서가 미흡한것이 있거나 잘못된게 있으면 추가하거나 수정하고 구현을 해야합니다. 문서가 구현보다 우선되는거 아시죠?
+
+> 참고로 지금 구현의 방향은 빨리 지식레이어를 만들어서 테스트를 하면서 다른 기능을 구현하는것입니다.
+
+### 결정
+
+#### (1) 문서 우선 원칙 재확인 + ADR rev5 land
+
+codex 5 MAJOR + chief-architect `#[non_exhaustive]` 정책 + qa cfg-gated policy 전부 ADR rev5 에 명시. rev5 가 merge 되지 않으면 W3 구현 PR 오픈 금지.
+
+#### (2) W3 는 단일 PR 아님 — DAG 로 split
+
+```
+W3-KL-1 (최우선, critical path) — 지식 레이어 RAW ingestion E2E
+W3-KL-2 (critical path cont.)   — Penny RAG system prompt + citations
+W3-BUN-1                          — #[non_exhaustive] lock + cascade resolver
+W3-BUN-2                          — populated GadgetHandles + additional plug axes
+W3-XAAS-A                         — migrations 000001/000002 (no deps)
+W3-XAAS-B                         — CoreAuditEventWriter + WorkdirPurgeJob
+W3-DEVOPS                         — xtask check-bundles (warn-only) + CI split + Helm + Prometheus
+```
+
+**critical path**: `W3-KL-1 → W3-KL-2 → P2B-alpha release tag`. 나머지 PR 은 병렬.
+
+#### (3) W3-KL-1 scope (즉시 착수)
+
+- `plugins/plugin-document-formats/` 스켈레톤 (markdown extractor 먼저; PDF/docx/pptx 는 feature gate follow)
+- `Extractor` core trait + `BundleContext.plugs.extractors` axis 추가 (rev5 §BUN-1 의 plug axis 확장 중 extractor 만 먼저)
+- `gadgetron-knowledge::ingest::IngestPipeline` (extract → blob → wiki → chunk → embed)
+- `wiki.import` Gadget 추가 (기존 `KnowledgeGadgetProvider` 확장)
+- E2E integration test (testcontainers postgres, markdown RAW → 검색 retrieval 까지)
+- 예상 ~900 LOC + 6-8 tests
+
+#### (4) Gadget trait 미추가 (codex MAJOR 3)
+
+W3.2 의 canonical `Gadget` trait 도입은 **기각**. `GadgetProvider` 유지. rev5 §Gadget trait decision 에 명시.
+
+#### (5) `BundleRegistry::install_all` signature 확장 허용 (codex MAJOR 5)
+
+W2 freeze 에도 불구하고 Gate 1 MUST-LAND 완성을 위해 W3-XAAS-B 에서 `install_all(config, bundles, sink)` 로 확장. rev5 §install_all signature policy 에 명시 — 별도 supersedes D-entry 불필요.
+
+#### (6) `check-bundles` warn-only 3 sprint (codex MAJOR 4)
+
+`cargo xtask check-bundles` W3-DEVOPS 랜딩 시 기본 `--warn-only`. Prometheus 카운터로 3 sprint 관찰 후 `--deny` 전환. rev5 §check-bundles tolerance policy 명시.
+
+#### (7) `#[non_exhaustive]` locks (chief-architect)
+
+`PlugHandles` / `GadgetHandles` / `BundleRegistry` / `PlugStatusKind` 에 W3-BUN-1 첫 커밋에서 `#[non_exhaustive]` 추가. rev5 §non_exhaustive 섹션 참조.
+
+### 반려 옵션
+
+- **W3 단일 PR (원 D-20260418-07 plan)** — 3000+ LOC PR 리뷰 불가, user 우선순위 반영 불가
+- **Bundle 인프라 먼저 완성 후 지식 레이어** — user 직접 지시 위배 ("빨리 지식 레이어 만들어 테스트")
+- **Gadget trait 도입 강행** — Bundle 저자 DX 저하 + schema 중복, 실익 없음 (codex MAJOR 3)
+- **check-bundles hard-block 부터** — R4 리스크 (false-positive 로 dev 차단) 증폭, codex MAJOR 4
+
+### 사용자 결정
+
+**2026-04-18**: 사용자 두 직접 지시 (docs first + knowledge layer first) 로 승인. 추가 PM 질의 불필요.
+
+### 영향 받는 문서/크레이트
+
+**수정**:
+- `docs/adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md` — rev5 (W3 scope rewrite + 5 codex MAJOR 결정 + `#[non_exhaustive]` + cfg-gated policy)
+- `docs/process/04-decision-log.md` — 본 D-entry
+
+**W3-KL-1 PR 범위 (다음 단계)**:
+- `plugins/plugin-document-formats/` — 신규 crate
+- `crates/gadgetron-core/src/bundle/context.rs` — `PlugHandles` 에 `pub extractors: PlugRegistry<'a, dyn Extractor>` 추가, `#[non_exhaustive]` 붙임
+- `crates/gadgetron-core/src/ingest/` — 신규 모듈 (BlobStore / Extractor / ExtractedDocument 타입)
+- `crates/gadgetron-knowledge/src/ingest/` — 신규 모듈 (IngestPipeline)
+- `crates/gadgetron-knowledge/src/gadget.rs` — `wiki.import` Gadget 추가
+- 테스트: integration (testcontainers)
+
+### 비용
+
+- rev5 + D-entry (본 커밋): 0.5일 — 완료
+- W3-KL-1 구현: ~1.5-2 engineer-days (chief-architect + qa)
+- W3-KL-2 구현: ~1 engineer-day
+- W3-BUN-1/2, W3-XAAS-A/B, W3-DEVOPS: 병렬 실행, 각 0.5-2일
+- **총 calendar 5-7일** (4 agent 병렬)
+
+### 시행 순서
+
+1. **지금 (본 커밋)**: rev5 + D-20260418-10 land (docs-first)
+2. **다음**: W3-KL-1 브랜치 `w3-kl/wiki-import-e2e` 오픈 + chief-architect delegation
+3. W3-KL-1 머지 후: W3-KL-2 + (병렬) W3-BUN-1 + W3-XAAS-A
+4. W3-XAAS-B (CoreAuditEventWriter) — Gate 1 MUST-LAND 완성
+5. W3-DEVOPS + W3-BUN-2
+6. P2B-alpha release tag verification (2 MUST-LAND gates)
+
+---
+
 _(다음 엔트리는 아래에 append)_
