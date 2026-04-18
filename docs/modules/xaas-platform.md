@@ -547,7 +547,7 @@ CREATE INDEX audit_log_request_idx   ON audit_log(request_id);
 3. **2차 fallback: S3 batch upload**
    - 1차 fallback 이 disk full 상태이거나 PG 장애가 15분 이상 지속될 때 발동.
    - tenant 별 prefix (`s3://gadgetron-audit/<tenant_id>/YYYY/MM/DD/*.jsonl.gz`), 15분 flush 윈도우.
-   - Phase 2 설계 문서 `docs/design/xaas/phase2-audit-fallback.md` 에 상세 (TBD).
+   - 상세 사양은 위 (1)–(4) 항목에 인라인 명시; 별도 설계 문서 미작성.
 4. **Graceful shutdown chain**: `PgAuditWriter::flush() → WAL flush → S3 upload`, 전체 30 초 timeout.
 5. **Compliance 체크리스트**: 90일 retention, 30/90일 GDPR 익명화, 검색 indexing (Elasticsearch 또는 OpenSearch), sensitive field masking (`system prompt`, `tool args`).
 
