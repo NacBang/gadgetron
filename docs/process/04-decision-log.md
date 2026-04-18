@@ -1432,4 +1432,253 @@ Audit schema 확장: `actor_user_id`, `actor_api_key_id`, `impersonated_by ('pen
 
 ---
 
+## D-20260418-03: RAW 데이터 ingestion + RAG foundation (I1–I7)
+
+**날짜**: 2026-04-18
+**유형**: Architecture / Ingestion pipeline (사용자 직접 지시, 2026-04-18 세션 interview mode B)
+**상태**: 🟢 승인 (7 개 sub-decision I1–I7 인터뷰 방식으로 확정)
+**관련 문서**: `docs/adr/ADR-P2A-09-raw-ingestion-pipeline.md` (신설), `docs/design/phase2/11-raw-ingestion-and-rag.md` (신설)
+**Supersedes (부분)**: `docs/adr/ADR-P2A-07-semantic-wiki-pgvector.md` §Context 의 "청킹 알고리즘 TODO" — I3 로 확정. 그 외 ADR-P2A-07 는 **유효**하고 이 결정은 그 위에 ingestion pipeline 을 얹음.
+
+### 배경
+
+사용자 2026-04-18 세션 지시 (D-20260418-02 직후):
+
+> 다음으로 좀 불투명한 부분이 RAW 데이터를 제공했을때 어떻게 Wiki에 올리거나 인덱싱을 하거나 RAG를 할것인지에 대한 것을 잘 모르겠다.
+
+ADR-P2A-07 은 "wiki.write → 청킹 → 임베딩" 의 downstream 경로만 설계했고, PDF/docx/HTML/URL 같은 RAW 소스가 wiki 페이지가 되는 **upstream** 경로는 공백. D-20260418-02 (multi-user + ACL) 에서 확정된 scope / owner / locked / search pre-filter 규칙을 soup 하지 않으면 실제로 RAG 가 동작하지 않음.
+
+Interview 모드(B)로 7 개 sub-decision 순차 확정.
+
+### 결정 (7 sub-decision)
+
+#### (I1-b+c) 입력 타입 — text 계열 + HTML/URL
+
+**v1 지원**: `text/markdown`, `text/plain`, `application/pdf`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document` (.docx), `application/vnd.openxmlformats-officedocument.presentationml.presentation` (.pptx), `text/html`.
+
+**반려**: A (markdown-only) 실사용 미흡, D (OCR·ASR) 범위 폭증. D 는 P2C+ 에 `plugin-ai-infra` 기반 ASR extractor 로 연장 가능.
+
+**의존**: URL fetch 는 core 가 하지 않음. `plugin-web-scrape` 가 fetch → bytes → `wiki.import` 호출.
+
+#### (I2-a+) 저장 모델 — wiki markdown + 원본 blob 보존
+
+RAW → `ingested_blobs` (보존) → Extract → `wiki_pages` (frontmatter 에 `source_blob_id`) → `wiki_chunks` (ADR-P2A-07 파이프라인 재사용).
+
+**반려**: A (원본 폐기) 감사·재추출 불가, B (blob primary) 검색·ACL 이중화, C (LLM 요약 card) 품질 종속 + 이중화.
+
+**스키마 추가**: `ingested_blobs` 테이블 하나. `wiki_pages` 는 frontmatter 만 확장 (컬럼 추가 없음, ADR-P2A-07 의 `frontmatter JSONB` 활용).
+
+#### (I6-d) Plugin 경계 — Core trait + Plugin 구현
+
+- **Core (`gadgetron-core`)**: `BlobStore` trait, `Extractor` trait, `ExtractedDocument`·`BlobMetadata` 타입
+- **Core (`gadgetron-knowledge`)**: `IngestPipeline` 오케스트레이션 (extract → blob → wiki → chunk → embed → audit), `wiki.import` MCP tool 제공
+- **Plugin**: Extractor 구현체. v1 에 두 개:
+  - `plugins/plugin-document-formats/` — PDF / docx / pptx / markdown (feature-gated)
+  - `plugins/plugin-web-scrape/` — HTML extractor + `web.fetch` MCP tool (URL fetch)
+
+**반려**: A (core 에 bulky 의존), B (별도 plugin-ingest 로 pipeline 이동) 는 wiki_pages 무결성 책임 분할, C (format 별 plugin 분산) 공통 로직 중복.
+
+**플러그인 간 호출**: `plugin-web-scrape.web.fetch(url)` → bytes → `wiki.import(bytes, "text/html")` → core 가 등록된 HTML extractor 선택. flat-taxonomy + D-20260418-01 의 의존 DAG 일관.
+
+#### (I3-d) 청킹 전략 — Hybrid (heading 1차 + fixed-size 2차 + 원자 블록)
+
+**규칙**:
+1. Frontmatter 제거 (embedding 대상 아님)
+2. Markdown heading 으로 1차 split (depth 3 = H1/H2/H3)
+3. 섹션이 `max_tokens=1500` 초과 시 paragraph 경계 → fixed-size + overlap 으로 2차 split
+4. 코드 블록 / 표 / 리스트는 atomic (가능한 한 분리 금지). 코드 블록이 `max_tokens` 초과 시 강제 split + warning
+5. `min_tokens=100` 미만 chunk 는 sibling 과 merge
+6. Target 500 / max 1500 / min 100 / overlap 50 tokens (tiktoken cl100k_base 기준)
+
+**Chunk 메타데이터**: `heading_path: Vec<String>`, `position: u32`, `byte_start/end`, `token_count`, `source_page_hint: Option<u32>` (PDF page hint extractor 가 제공 시), `has_code_block`, `has_table`.
+
+**Token count**: `EmbeddingProvider::token_count(text)` trait method 로 provider-specific. OpenAI embed → tiktoken, 로컬 → sentence-transformers tokenizer.
+
+**Re-chunking**: `gadgetron reindex --rechunk` 서브커맨드 (config 변경 시). 자동 감지 없음.
+
+**Config 노출**:
+```toml
+[knowledge.chunking]
+strategy = "hybrid"          # fixed | heading | hybrid
+target_tokens = 500
+max_tokens = 1500
+min_tokens = 100
+overlap_tokens = 50
+heading_depth = 3
+preserve_code_blocks = true
+preserve_tables = true
+
+[knowledge.chunking.per_source]
+"application/pdf" = { target_tokens = 700 }
+"text/html" = { target_tokens = 400 }
+```
+
+**반려**: A (fixed-only) 구조 상실, B (heading-only) 크기 편차 극심, C (format-specific) 추출 후 정보 손실.
+
+#### (I4-d) Frontmatter enrichment — Caller opt-in
+
+**자동 채움** (논쟁 없음): `source="imported"`, `source_filename`, `source_content_type`, `source_blob_id`, `source_bytes_hash`, `source_imported_at`, `imported_by`, `owner_user_id`, `created`, `updated`, `title` (4-step fallback: caller arg → extractor metadata → filename → timestamp+hash).
+
+**Enrichment opt-in**: `wiki.import(..., auto_enrich: bool)`. `true` 시 Penny 가 호출되어 `tags` (3–7), `type` (runbook/reference/policy/note/meeting/decision/incident/dataset 중 convention), `summary` (≤ 500 chars) 제안. 결과에 `auto_enriched_by="penny"`, `auto_enriched_confidence`, `reviewed_by=null` 마커.
+
+**Caller 권한**: enrich LLM 호출은 caller `AuthenticatedContext` 로 수행 (10 doc D5 일관). quota·audit 도 caller 단위.
+
+**반려**: A (수동 only) bulk 방치, B (항상 enrich) 비용 통제 불가, C (클릭 시만) bulk 대응 안 됨.
+
+**후속 enrich**: `wiki.enrich(page_id)` 별 MCP tool 로 언제든 재실행.
+
+#### (I5-c) Dedup / Update / Citation
+
+##### (I5a-c) Dedup
+
+- `ingested_blobs.content_hash UNIQUE (tenant_id, content_hash)` — blob 은 tenant 단위 dedup
+- 같은 caller + 같은 target_path 재upload → 기존 page 반환 (idempotent)
+- 다른 caller 또는 다른 target_path → 새 wiki_pages 생성, blob 재사용
+- Blob reference counting (lazy GC) — `gadgetron gc --blobs` cron
+
+##### (I5b-c) Update / Supersession
+
+- Target path 충돌 시 caller 가 `overwrite: bool` 명시. 기본 `false` (충돌 에러)
+- `overwrite: true` + 기존 page 에 `superseded_at = now`, `superseded_by_page_id = <new>` 기록. 새 페이지에 `supersedes_page_id = <old>`
+- Wiki 검색 기본 필터: `superseded_at IS NULL` (최신만)
+- URL re-scrape (`plugin-web-scrape`) 기본: timeline 모드 (매 fetch 새 페이지, supersedes chain). Opt-in `overwrite` 모드.
+- Auto detection (같은 filename / title 에 자동 chain) **없음** — caller 명시
+
+##### (I5c-c) Citation — Markdown footnote
+
+Penny 응답 포맷:
+```
+본문 [^1] [^2] ...
+
+[^1]: [<page title> §<heading_path>](/#/wiki/<path>) · 원본 [`<source_filename>` p.<page_hint>](/api/v1/blobs/<blob_id>/view)
+[^2]: ...
+```
+
+- System prompt 지침으로 강제 (chunk metadata 기반)
+- Blob viewer (`GET /api/v1/blobs/<id>/view`) 는 blob 참조 wiki_pages 중 caller read 가능한 것이 하나라도 있으면 서빙. 불가 시 404 (info leakage 방지, 09 doc §8 일관)
+- imported 가 아닌 user-written wiki 페이지는 원본 링크 생략
+
+#### (I7-a) ACL at ingestion
+
+##### (I7a-a) Scope 기본 `private`
+
+- 09 doc §4.3 wiki 페이지 기본값 일관
+- Caller 가 `wiki.import(..., scope: "team:platform" | "org")` 명시 override
+- 권한 밖 scope 지정 → permission_denied (09 doc §5 can_write 규칙)
+
+##### (I7b-a) Locked 기본 `false`
+
+- User-contributed content 는 위키식 오픈 편집 자연
+- Plugin seed 는 `locked=true` 기본 (09 doc §7) 과 분리 — import 는 user 능동적 업로드이지 plugin 자동 주입 아님
+- Policy-grade 문서는 caller 가 `locked: true` 명시
+
+##### (I7c) Blob ACL — 참조 페이지 read ACL 의 union
+
+- Blob 자체 ACL 없음. `GET /api/v1/blobs/<id>/view` 는 blob 참조하는 wiki_pages 중 caller 가 read 가능한 것 하나라도 있으면 허용
+- 실패 시 404 (not 403)
+- Edge case: Alice 가 private 로 import → Bob 이 같은 bytes 를 org 로 import → blob 재사용, Bob 의 org page 로 인해 모든 org member 가 blob 접근. Alice 의 private 문맥은 유출되지 않음 (scope 는 wiki_pages 레벨)
+
+##### (I7d) Penny import — caller 상속
+
+10 doc D5 그대로 적용. `wiki.import` tool 이 `AuthenticatedContext` 받음. scope/target_path 검증은 caller 권한으로. `impersonated_by='penny', parent_request_id=<caller req>` audit.
+
+### 근거
+
+- 사용자 2026-04-18 세션: "RAW 데이터 제공 시 wiki / 인덱싱 / RAG 경로 불투명"
+- 7 개 sub-decision 모두 interview 형식 (B 옵션) 으로 순차 확정
+- ADR-P2A-07 의 "wiki.write → 청킹 → 임베딩" 파이프라인은 유효, 그 위에 **upstream ingestion** 레이어를 얹음
+- D-20260418-01 (flat plugin) + D-20260418-02 (ACL foundation) 의 귀결로 "core pipeline + plugin extractor" (I6-d), "caller 상속" (I7d), "scope 기본 private" (I7a) 가 자연스럽게 수렴
+
+### 구현 영향
+
+**즉시 landing (이 세션 후속)**:
+
+- `docs/adr/ADR-P2A-09-raw-ingestion-pipeline.md` (신설)
+- `docs/design/phase2/11-raw-ingestion-and-rag.md` (신설, draft v0)
+- `docs/adr/README.md` — §목록에 ADR-P2A-09 추가
+
+**P2B 구현 시 landing**:
+
+- `gadgetron-core::ingest::{BlobStore, Extractor, BlobMetadata, ExtractedDocument, ExtractHints, ImportOpts}` 타입 신설
+- `gadgetron-core::ingest::BlobRef`, `ChunkingConfig` 신설
+- `gadgetron-core::plugin::PluginContext` 에 `register_extractor`, `register_blob_store` 메서드 추가
+- `gadgetron-knowledge::ingest::IngestPipeline` 신설 (파이프라인 오케스트레이션)
+- `gadgetron-knowledge::chunking::chunk_hybrid` 함수 (I3 알고리즘)
+- `gadgetron-knowledge::mcp::WikiImportToolProvider` — `wiki.import`, `wiki.enrich` MCP tool
+- `gadgetron-xaas` schema 마이그레이션:
+  ```sql
+  -- 20260418_000003_ingested_blobs.sql
+  CREATE TABLE ingested_blobs (
+      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id       UUID NOT NULL REFERENCES tenants(id),
+      content_hash    TEXT NOT NULL,
+      content_type    TEXT NOT NULL,
+      filename        TEXT NOT NULL,
+      byte_size       BIGINT NOT NULL,
+      storage_uri     TEXT NOT NULL,
+      imported_by     UUID NOT NULL REFERENCES users(id),
+      imported_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (tenant_id, content_hash)
+  );
+  CREATE INDEX idx_blobs_hash ON ingested_blobs (content_hash);
+  CREATE INDEX idx_blobs_user ON ingested_blobs (imported_by, imported_at DESC);
+
+  CREATE INDEX idx_wiki_source_blob ON wiki_pages
+      ((frontmatter->>'source_blob_id'))
+      WHERE frontmatter->>'source_blob_id' IS NOT NULL;
+  ```
+- `gadgetron-core::blob::{FilesystemBlobStore}` — v1 기본 구현
+- `plugins/plugin-document-formats/` 크레이트 신설:
+  - `PdfExtractor` (pdf-extract crate)
+  - `DocxExtractor` (docx-rs or pandoc subprocess)
+  - `PptxExtractor` (pandoc subprocess)
+  - `MarkdownExtractor` (near-noop, structure_hints 추출만)
+- `plugins/plugin-web-scrape/` 크레이트 신설:
+  - `web.fetch` MCP tool (HTTP client + robots.txt 존중)
+  - `HtmlExtractor` (html2md crate)
+- `gadgetron-cli` 서브커맨드:
+  - `gadgetron wiki import <file> [--scope] [--target-path] [--auto-enrich] [--overwrite]`
+  - `gadgetron wiki enrich <page>`
+  - `gadgetron reindex --rechunk` — config 변경 후
+  - `gadgetron gc --blobs` — 고아 blob 정리
+- `gadgetron-web`:
+  - 업로드 UI (drag-drop → `/v1/wiki/import` 엔드포인트)
+  - 페이지 상세에 "View original" 버튼 (blob link)
+  - "Suggest tags" 버튼 (wiki.enrich)
+  - Supersession chain 표시 (past versions toggle)
+- `gadgetron.toml` 에 신규 섹션:
+  - `[knowledge.chunking]` (I3 config)
+  - `[knowledge.blob_store]` (storage_uri, max_file_bytes)
+  - `[plugins.document-formats]` (feature flags per format)
+  - `[plugins.web-scrape]` (robots.txt 정책, user-agent)
+
+**P2C 로 유보**:
+
+- S3BlobStore / PostgresLoBlobStore 구현
+- OCR (Tesseract) / ASR (Whisper) extractor — `plugin-ai-infra` 위에서
+- Large file streaming (> 50 MB)
+- Materialized per-user accessible_ids cache (D-20260418-02 D6 C 옵션)
+- Email / Slack archive import extractor
+- Binary content chunking (CSV, image, audio)
+
+### 리뷰 권고
+
+- `@security-compliance-lead`: 11 doc §STRIDE — URL fetch SSRF 방어, blob ACL leak 경로, PDF extractor 의 xpdf CVE 이력, LLM enrich 의 prompt injection (사용자 업로드 PDF 가 Penny 시스템 프롬프트 탈취 시도)
+- `@chief-architect`: `BlobStore`/`Extractor` trait 이 `gadgetron-core` leaf 원칙 (D-12) 준수, `PluginContext::register_extractor` 가 D-20260418-01 (e) 의 registration 패턴 일관
+- `@qa-test-architect`: 11 doc §Test plan — chunking fixture 5 종 (heading 있음/없음/큰 섹션/코드 블록/표), dedup 경계 케이스, supersession chain, citation 포맷 회귀
+- `@dx-product-lead`: CLI `gadgetron wiki import` 동선, 업로드 UX (drag-drop · progress · enrich 체크박스), 에러 메시지 (unsupported_content_type / permission_denied / overwrite_required)
+
+### 영향 받는 문서/크레이트
+
+- `docs/adr/ADR-P2A-09-raw-ingestion-pipeline.md` (신설, umbrella)
+- `docs/design/phase2/11-raw-ingestion-and-rag.md` (신설, draft v0)
+- `docs/adr/ADR-P2A-07-semantic-wiki-pgvector.md` — 청킹 알고리즘 TODO 섹션에 "I3 로 확정, 11 doc §6 참조" note 추가 필요 (본 PR 에서는 deferred)
+- `docs/design/phase2/05-knowledge-semantic.md` — 청킹 설계 세부가 11 doc 으로 이동 (cross-reference 추가 필요)
+- `docs/design/phase2/09-knowledge-acl.md` — §6 `wiki.write` 시맨틱에 `wiki.import` 관련 subsection 추가 필요
+- `docs/design/phase2/10-penny-permission-inheritance.md` — Penny 의 `wiki.import` 호출 흐름은 이미 §3.1 원칙으로 커버됨. 명시적 예시 추가 가능
+- `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-xaas` — 스키마/타입/서비스 확장
+- `plugins/plugin-document-formats/`, `plugins/plugin-web-scrape/` — 신설 크레이트 2 개
+
+---
+
 _(다음 엔트리는 아래에 append)_
