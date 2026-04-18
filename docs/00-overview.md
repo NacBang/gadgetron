@@ -466,7 +466,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - `gadgetron-penny` — Claude Code subprocess 브릿지 + `GadgetRegistry` + `LlmProvider` 구현 (`model = "penny"`).
 - `gadgetron-web` — embedded assistant-ui Web UI (`/web`).
 
-**서브-스프린트 4종 (P2A→P2D, 각 4주)**, 배포 형태 3종 (Local / On-prem / Cloud, 같은 코드 경로, 스토리지만 swap), 보안 위협 모델 M1–M8은 [`docs/design/phase2/00-overview.md`](design/phase2/00-overview.md)에 통합되어 있다. 핵심 ADR은 [`docs/adr/`](adr/) ADR-P2A-01 ~ ADR-P2A-07.
+**서브-스프린트 4종 (P2A→P2D, 각 4주)**, 배포 형태 3종 (Local / On-prem / Cloud, 같은 코드 경로, 스토리지만 swap), 보안 위협 모델 M1–M8은 [`docs/design/phase2/00-overview.md`](design/phase2/00-overview.md)에 통합되어 있다. 핵심 ADR은 [`docs/adr/README.md`](adr/README.md) 참조.
 
 ### Phase 3 — Cluster Ops Hardening & Rich Automation (v1.0)
 
