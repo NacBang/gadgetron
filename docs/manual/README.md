@@ -62,6 +62,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron init` — generate an annotated baseline `gadgetron.toml` (assistant blocks still require manual authoring on trunk)
 - `gadgetron doctor` — check configuration, database connectivity, provider reachability, and `/health`
 - `gadgetron gadget serve` — stdio MCP server used by the Penny subprocess bridge and available for manual smoke tests (`gadgetron mcp serve` is a deprecated alias removed in v0.5 — ADR-P2A-10)
+- `gadgetron gadget list` — list every Gadget Penny can see. Stubbed in P2A; prints `"gadget list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."`
 - `gadgetron reindex [--full]` — rebuild pgvector semantic index from wiki filesystem; `--full` forces all pages, default is incremental
 - `gadgetron wiki audit [--config <path>]` — report stale pages and pages without frontmatter
 - `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section

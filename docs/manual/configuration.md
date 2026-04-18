@@ -362,9 +362,22 @@ wiki_write = "auto"            # wiki.write / wiki.create / wiki.delete (기본 
 infra_write = "ask"            # infra 쓰기 도구 (P2C)
 scheduler_write = "ask"        # 스케줄러 쓰기 도구 (P3)
 provider_mutate = "ask"        # provider 변경 도구 (P2C)
+
+[agent.gadgets.destructive]
+enabled = false                # true로 설정해야 T3 도구가 allowed-tools에 노출됨
+max_per_hour = 3               # 시간당 최대 승인 카드 수 (전역). enabled=true 시 > 0 필수 (V5)
+extra_confirmation = "none"    # "none" | "env" | "file"
+# extra_confirmation_token_file = "/run/secrets/gadgetron-destructive-token"
 ```
 
 `read` 티어(T1)는 항상 `auto`이며 변경할 수 없습니다 (V1).
+
+`[agent.gadgets.destructive]` 세부 필드:
+
+- `enabled`: `false`(기본)이면 T3 도구는 `--allowed-tools`에서 완전히 제외됩니다. `true`로 설정해야 T3 승인 카드가 활성화됩니다. T3 모드는 항상 `ask`이며 변경할 수 없습니다.
+- `max_per_hour`: 시간당 T3 승인 카드 발행 상한 (전역). `enabled = true`일 때 0이면 startup error (V5).
+- `extra_confirmation`: 승인 카드 외 추가 확인 레이어. `"none"` (기본, 승인 카드만), `"env"` (`GADGETRON_DESTRUCTIVE_TOKEN` 환경변수와 일치 필요), `"file"` (`extra_confirmation_token_file` 파일 내용과 일치 필요).
+- `extra_confirmation_token_file`: `extra_confirmation = "file"` 시 토큰 파일 경로. 파일은 존재해야 하며 퍼미션 0400 또는 0600이어야 합니다 (V6).
 
 ### `[agent.shared_context]`
 
@@ -459,6 +472,25 @@ stale_threshold_days = 90           # stale 청크 기준 일수 (1–3650)
 ```
 
 수동 full reindex: `gadgetron reindex --full` (서버 중단 불필요).
+
+`gadgetron wiki audit` 출력 예시 (`stale_threshold_days = 90` 기준):
+
+```
+Wiki audit report - 2026-04-19T00:00:00+00:00
+Wiki path: /home/user/.gadgetron/wiki
+Total pages: 47
+
+## Stale pages (updated more than 90 days ago)
+- ops/journal/2025-12-01/incident-summary
+  updated: 2025-12-01 (139 days ago)
+  suggestion: review for current relevance
+
+## Pages without frontmatter
+- ops/tools/2026-01-15/ad-hoc-query
+  suggestion: add frontmatter (tags, type, created)
+```
+
+문제가 없으면 각 섹션에 `- none`이 출력됩니다.
 
 ### `[knowledge.curation]`
 
