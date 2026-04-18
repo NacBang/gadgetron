@@ -15,17 +15,17 @@ Decision **D-20260418-01** (`docs/process/04-decision-log.md`) refines several a
 
 1. **"Tier" concept dropped** — plugins are **flat peers**, not hierarchical tiers (Tier 1 primitive / Tier 2 workflow / Tier 3 persona bundle were considered and rejected). Workflow plugins are not needed — workflows emerge from Penny + wiki + primitive plugin tools.
 2. **`plugin-ai-infra` split into 3 primitives** — original §2/§6 envisioned a single `plugin-ai-infra` housing provider + scheduler + node + GPU. D-20260418-01 (b) splits these into:
-   - `plugin-server` — SSH/OS primitive (any Linux host, not AI-specific). Own design doc: [`07-plugin-server.md`](07-plugin-server.md)
+   - `plugin-server` — SSH/OS primitive (any Linux host, not AI-specific). Own design doc: [`07-bundle-server.md`](07-bundle-server.md)
    - `plugin-gpu` — NVML/ROCm primitive (GPU hardware, usable without inference). Own design doc: `08-plugin-gpu.md` (planned)
    - `plugin-ai-infra` — inference engines + LLM providers + **router (6 strategies)** + **scheduler (VRAM/LRU)** + model catalog. This matches the §6 "Target (P2B end)" original layout.
 3. **Core vs plugin rule** — the test is "does it operate on a domain entity?" (not "does it talk to an external system?"). Router and scheduler both operate on LLM-specific entities → they live **inside `plugin-ai-infra`**, not in core. See D-20260418-01 (c).
 4. **EntityRef / EntityTree is a forest, not a single tree** — to accommodate unrelated plugins (e.g., `plugin-newspaper` whose entities don't touch the infra tree). Core provides `entity.schema`, `entity.tree`, `entity.get` generic MCP tools. See D-20260418-01 (d)–(e).
-5. **Cluster = wiki page, not a Postgres table** — "cluster" membership is defined by a `type = "cluster"` wiki page with a label selector. Plugins consume the selector; knowledge layer provides the definition. See D-20260418-01 (g) + `07-plugin-server.md §7`.
+5. **Cluster = wiki page, not a Postgres table** — "cluster" membership is defined by a `type = "cluster"` wiki page with a label selector. Plugins consume the selector; knowledge layer provides the definition. See D-20260418-01 (g) + `07-bundle-server.md §2.3`.
 6. **Plugin dependency is a DAG, not a parent-child tree** — plugins remain independently activatable (plugin-gpu alone, plugin-server alone). Inter-plugin use goes through `PluginContext::get_service::<T>("<plugin-name>")`, presented to operators as a dependency tree in the enable UX but not enforced as strict containment at code level.
 
 When this document is re-rewritten as v2, these six points will be woven into §2 (architecture diagram), §3 (trait definition — add `register_entity_kind`, `get_service`), §6 (crate boundary — `plugins/` directory with three entries), and new §7.5 (EntityTree forest).
 
-**For now**: read this document for the `BackendPlugin` trait scaffold (§3), seed-page mechanics (§4), lifecycle matrix (§5), and migration phasing (§9). Consult D-20260418-01 + `07-plugin-server.md` for the post-2026-04-18 structural decisions.
+**For now**: read this document for the `BackendPlugin` trait scaffold (§3), seed-page mechanics (§4), lifecycle matrix (§5), and migration phasing (§9). Consult D-20260418-01 + `07-bundle-server.md` for the post-2026-04-18 structural decisions.
 
 ---
 
