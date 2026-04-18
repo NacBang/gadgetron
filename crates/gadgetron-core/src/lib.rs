@@ -20,3 +20,4 @@ pub mod provider;
 pub mod routing;
 pub mod secret;
 pub mod ui;
+pub mod workbench;

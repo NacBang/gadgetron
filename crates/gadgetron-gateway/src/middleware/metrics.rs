@@ -142,6 +142,7 @@ mod tests {
             pg_pool: Some(lazy_pool()),
             no_db: false,
             tui_tx: Some(tui_tx),
+            workbench: None,
         }
     }
 
@@ -207,6 +208,7 @@ mod tests {
             pg_pool: Some(lazy_pool()),
             no_db: false,
             tui_tx: None,
+            workbench: None,
         };
         let app = build_router(state);
 

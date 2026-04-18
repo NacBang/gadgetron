@@ -161,6 +161,61 @@ impl KnowledgeService {
     pub fn write_consistency(&self) -> KnowledgeWriteConsistency {
         self.write_consistency
     }
+
+    /// Return a lightweight health snapshot of all registered plugs.
+    ///
+    /// Used by the workbench gateway projection (W3-WEB-2) to build the
+    /// bootstrap response without coupling the gateway to internal plug types.
+    ///
+    /// Health is currently structural (plug registered = healthy). Runtime
+    /// liveness checks (stale index, backend ping) are deferred to P2B
+    /// health monitors.
+    pub fn plug_health_snapshot(&self) -> Vec<PlugSnapshot> {
+        let mut snaps: Vec<PlugSnapshot> = Vec::new();
+
+        // Canonical store is always role "canonical".
+        snaps.push(PlugSnapshot {
+            id: self.canonical_store.plug_id().as_str().to_string(),
+            role: "canonical".into(),
+            healthy: true,
+            note: None,
+        });
+
+        // Each index is role "search".
+        for id in self.indexes.keys() {
+            snaps.push(PlugSnapshot {
+                id: id.as_str().to_string(),
+                role: "search".into(),
+                healthy: true,
+                note: None,
+            });
+        }
+
+        // Each relation engine is role "relation".
+        for id in self.relation_engines.keys() {
+            snaps.push(PlugSnapshot {
+                id: id.as_str().to_string(),
+                role: "relation".into(),
+                healthy: true,
+                note: None,
+            });
+        }
+
+        snaps
+    }
+}
+
+/// Lightweight health descriptor for a single knowledge plug.
+///
+/// Produced by [`KnowledgeService::plug_health_snapshot`] and consumed by
+/// the workbench bootstrap projection.
+#[derive(Debug, Clone)]
+pub struct PlugSnapshot {
+    pub id: String,
+    /// `"canonical"` | `"search"` | `"relation"`
+    pub role: String,
+    pub healthy: bool,
+    pub note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

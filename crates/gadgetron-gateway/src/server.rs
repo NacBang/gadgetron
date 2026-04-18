@@ -25,6 +25,7 @@ use crate::middleware::{
     auth::auth_middleware, metrics::metrics_middleware, request_id::request_id_middleware,
     scope::scope_guard_middleware, tenant_context::tenant_context_middleware,
 };
+use crate::web::workbench::{workbench_routes, GatewayWorkbenchService};
 
 /// 4 MiB body limit. SEC-M2 / §2.B.8 layer 1 (outermost).
 /// Rationale: 128k-token window × ~4 bytes/token ≈ 512 KB; 8× headroom.
@@ -111,6 +112,10 @@ pub struct AppState {
     /// Capacity: 1_024 (1_000 QPS ceiling × ~1s TUI drain period + 24 headroom).
     /// `broadcast::Sender<T>` is `Clone` — clone is an Arc pointer increment.
     pub tui_tx: Option<broadcast::Sender<WsMessage>>,
+    /// Workbench projection service — `None` until W3-WEB-2 is wired in the
+    /// production binary. Existing tests that build `AppState` without this
+    /// field use `..Default::default()` or set `workbench: None` explicitly.
+    pub workbench: Option<Arc<GatewayWorkbenchService>>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -211,6 +216,7 @@ pub fn build_router(state: AppState) -> Router {
     let authenticated_routes = Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/v1/models", get(list_models_handler))
+        .nest("/api/v1/web/workbench", workbench_routes())
         .route("/api/v1/nodes", get(list_nodes_handler))
         .route("/api/v1/models/deploy", post(deploy_model_handler))
         .route(
@@ -391,6 +397,7 @@ mod tests {
             pg_pool: Some(lazy_pool()),
             no_db: false,
             tui_tx: None,
+            workbench: None,
         }
     }
 
@@ -405,6 +412,7 @@ mod tests {
             pg_pool: Some(lazy_pool()),
             no_db: false,
             tui_tx: None,
+            workbench: None,
         }
     }
 
@@ -736,6 +744,7 @@ mod tests {
             pg_pool: Some(lazy_pool()),
             no_db: false,
             tui_tx: Some(tx),
+            workbench: None,
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -807,6 +816,7 @@ mod tests {
             pg_pool: Some(pool),
             no_db: false,
             tui_tx: None,
+            workbench: None,
         };
 
         let app = build_router(state);

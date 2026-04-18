@@ -503,6 +503,7 @@ mod tests {
             pg_pool: Some(lazy_pool()),
             no_db: false,
             tui_tx: None,
+            workbench: None,
         }
     }
 
