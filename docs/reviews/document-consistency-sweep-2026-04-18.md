@@ -21,7 +21,7 @@
 
 | ID | 축 | 충돌 내용 | 대표 파일 | 우선순위 | 상태 |
 |---|---|---|---|---|---|
-| C-1 | 용어 | `plugin` vs `Bundle / Plug / Gadget` | `README.md`, `docs/00-overview.md`, `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/process/04-decision-log.md` | P0 | Open |
+| C-1 | 용어 | `plugin` vs `Bundle / Plug / Gadget` | `README.md`, `docs/00-overview.md`, `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/process/04-decision-log.md` | P0 | **Closed** — README/00-overview: 정렬 완료. 06: legacy draft 선언. decision-log: `plugin.enable`→`bundle.enable` + "plugin이"→"Bundle이" 수정(D-20260418-02). 나머지 `plugin` 참조는 D-20260418-01 역사 기록 (D-20260418-04 가 용어 부분 supersede 명시) |
 | C-2 | 경계 | `ADR-P2A-10` 의 Plug consumer wording / crate-path note 가 `router` 를 core-owned 로 오독하게 만들 수 있었음 | `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md`, `README.md`, `docs/00-overview.md`, `docs/architecture/glossary.md` | P0 | Closed |
 | C-3 | 실행 경로 | `README` / manual 의 no-db, plain Postgres, `demo.sh`, pgvector 전제가 서로 다름 | `README.md`, `docs/manual/quickstart.md`, `docs/manual/web.md`, `docs/manual/installation.md` | P0 | Closed |
 | C-4 | legacy 설계 문서 | `06-backend-plugin-architecture.md`, `07-plugin-server.md` 가 legacy 용어를 강하게 드러내지 못함 | `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/design/phase2/07-plugin-server.md` | P1 | Closed |
@@ -90,6 +90,10 @@
 - 2026-04-18 reconciliation pass (ADR index entrypoint):
   - `README.md` 의 stale ADR count/range 문구를 제거하고 `docs/adr/README.md` 를 유일한 maintained index 로 재고정
   - tracker 에 C-7 을 추가하고 같은 패스에서 Closed 처리
+- 2026-04-18 reconciliation pass (C-1 close — decision-log D-20260418-02 terminology):
+  - `docs/process/04-decision-log.md` D-20260418-02 §D5-a: `plugin.enable` → `bundle.enable`, "plugin 이" → "Bundle 이" (active ACL design section, not historical)
+  - 잔여 `plugin` 참조는 전부 D-20260418-01 역사 기록이며 D-20260418-04가 용어 부분 supersede를 명시하므로 변경 불필요
+  - C-1 Closed
 - 2026-04-18 reconciliation pass (ownership authority note):
   - `ADR-P2A-10` 이 Plug 의 consumer boundary 와 crate ownership 을 분리해서 설명하도록 정정
   - `ADR-P2A-10` 의 current-path note 를 `router/provider/scheduler/node` canonical ownership (`ai-infra`, `server`, `gpu`) 과 충돌하지 않게 정렬
