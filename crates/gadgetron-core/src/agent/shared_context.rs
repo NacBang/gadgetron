@@ -129,8 +129,10 @@ pub struct PennyCandidateDigest {
     pub summary: String,
     /// Current lifecycle state.
     pub disposition: KnowledgeCandidateDisposition,
-    /// Intended knowledge-store path, if already determined.
-    pub proposed_path: Option<String>,
+    /// Intended knowledge-store path, if already determined. Drift-fix
+    /// PR 2 (D-20260418-26) narrowed this from `Option<String>` to
+    /// [`KnowledgePath`](crate::knowledge::KnowledgePath).
+    pub proposed_path: Option<crate::knowledge::KnowledgePath>,
     /// Whether a user confirmation step is required before writeback.
     pub requires_user_confirmation: bool,
     /// Materialization outcome for accepted candidates. `None` if not yet
@@ -180,7 +182,9 @@ pub struct PennyCandidateDecisionReceipt {
     /// Updated disposition after the decision was recorded.
     pub disposition: KnowledgeCandidateDisposition,
     /// Canonical store path where the candidate was written, if any.
-    pub canonical_path: Option<String>,
+    /// Drift-fix PR 2 (D-20260418-26) narrowed this to
+    /// [`KnowledgePath`](crate::knowledge::KnowledgePath).
+    pub canonical_path: Option<crate::knowledge::KnowledgePath>,
     /// Writeback outcome for `Accepted` decisions.
     pub materialization_status: Option<String>,
     /// Activity event associated with the decision for audit correlation.

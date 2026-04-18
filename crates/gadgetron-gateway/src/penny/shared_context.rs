@@ -836,7 +836,9 @@ mod tests {
         };
         let hints = vec![CandidateHint {
             summary: "demo candidate".into(),
-            proposed_path: Some("ops/journal/demo".into()),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new("ops/journal/demo").unwrap(),
+            ),
             tags: vec!["ops".into()],
             reason: Some("live_test".into()),
         }];
@@ -885,7 +887,9 @@ mod tests {
         };
         let hints = vec![CandidateHint {
             summary: "tool call summary".into(),
-            proposed_path: Some("ops/journal/tool".into()),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new("ops/journal/tool").unwrap(),
+            ),
             tags: vec![],
             reason: None,
         }];
@@ -906,7 +910,10 @@ mod tests {
 
         assert_eq!(receipt.candidate_id, candidate_id);
         assert_eq!(receipt.disposition, KnowledgeCandidateDisposition::Accepted);
-        assert_eq!(receipt.canonical_path.as_deref(), Some("ops/journal/tool"));
+        assert_eq!(
+            receipt.canonical_path.as_ref().map(|p| p.as_str()),
+            Some("ops/journal/tool")
+        );
         assert!(receipt.materialization_status.is_none());
     }
 

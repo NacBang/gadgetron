@@ -158,6 +158,175 @@ pub enum KnowledgeHitKind {
     RelationEdge,
 }
 
+/// A canonical knowledge-layer path.
+///
+/// Wraps a validated path string shaped like `"ops/journal/2026-04-18/restart"`.
+/// Used everywhere a path identifies a *knowledge artifact* — not a filesystem
+/// file — including [`KnowledgeDocumentWrite`], candidate `proposed_path`,
+/// Penny digest `proposed_path` / `canonical_path`, and materialize receipts.
+///
+/// # Wire shape
+///
+/// Serialized as a bare JSON string (routed through `String` via
+/// `#[serde(try_from = "String", into = "String")]`), so operators and
+/// downstream consumers see unchanged wire bytes compared to the
+/// pre-drift-fix `String` representation. Deserialization runs
+/// [`KnowledgePath::new`] validation — malformed paths reject at the type
+/// boundary rather than leaking into downstream stores.
+///
+/// # Validation rules
+///
+/// - **non-empty** — `""` rejects as [`KnowledgePathError::Empty`]. Use
+///   `Option<KnowledgePath>` to express "no path".
+/// - **no path traversal** — `".."` segment, leading `/`, or trailing `/`
+///   rejects as [`KnowledgePathError::Traversal`]. Knowledge paths are
+///   relative to a canonical root and MUST NOT escape it.
+/// - **no control characters** — ASCII `0x00..=0x1F` rejects as
+///   [`KnowledgePathError::ControlChar`]. Prevents log / audit / SQL
+///   injection via newline-tabbed paths.
+/// - **max 1024 bytes** — paths longer than 1 KiB reject as
+///   [`KnowledgePathError::TooLong`]. Matches `wiki_max_page_bytes`
+///   semantic ceiling; longer paths indicate a bug (e.g. path_rules
+///   template expansion loop).
+///
+/// # Ordering caveat
+///
+/// Derives `Ord` / `PartialOrd` on the inner `String`, i.e. Rust UTF-8
+/// codepoint order. PostgreSQL `ORDER BY path` uses byte order by default —
+/// identical for ASCII-only paths, divergent for non-ASCII. In practice
+/// path segments are ASCII (`path_rules` expansion uses `YYYY-MM-DD` +
+/// snake_case kind + UUIDs), so this is a non-issue. Callers that need
+/// deterministic cross-store sort should sort in Rust after fetch.
+///
+/// # Pg binding
+///
+/// Bind as `TEXT` via `AsRef<str>` or `.to_string()`. No schema change.
+///
+/// # Authority
+///
+/// Spec: `docs/design/core/knowledge-candidate-curation.md` §2.1.
+/// Drift-fix PR 2 (D-20260418-26) landed this type; KC-1 had
+/// `Option<String>` with a `TODO KC-1b` marker.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// `try_from = "String"` + `into = "String"` route (de)serialization through
+// the String conversions, producing a bare-string wire shape AND running
+// validation on deserialize. `#[serde(transparent)]` conflicts with the
+// try_from/into attrs and is not needed here.
+#[serde(try_from = "String", into = "String")]
+pub struct KnowledgePath(String);
+
+/// Failure modes for [`KnowledgePath::new`] / [`KnowledgePath::try_from`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KnowledgePathError {
+    /// The path string is empty. Use `Option<KnowledgePath>` for "no path".
+    Empty,
+    /// The path contains `..`, a leading `/`, or a trailing `/`.
+    /// Canonical paths MUST stay under a relative root.
+    Traversal,
+    /// The path contains an ASCII control character (`0x00..=0x1F`).
+    ControlChar,
+    /// The path exceeds `KnowledgePath::MAX_LEN` bytes.
+    TooLong {
+        /// Actual byte length of the rejected input.
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for KnowledgePathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("knowledge path must not be empty"),
+            Self::Traversal => {
+                f.write_str("knowledge path must not contain '..', lead with '/', or end with '/'")
+            }
+            Self::ControlChar => {
+                f.write_str("knowledge path must not contain ASCII control characters")
+            }
+            Self::TooLong { actual } => write!(
+                f,
+                "knowledge path must be ≤ {} bytes; got {} bytes",
+                KnowledgePath::MAX_LEN,
+                actual
+            ),
+        }
+    }
+}
+
+impl std::error::Error for KnowledgePathError {}
+
+impl KnowledgePath {
+    /// Maximum byte length of a [`KnowledgePath`].
+    pub const MAX_LEN: usize = 1024;
+
+    /// Construct a validated [`KnowledgePath`].
+    pub fn new(raw: impl Into<String>) -> Result<Self, KnowledgePathError> {
+        let s = raw.into();
+        if s.is_empty() {
+            return Err(KnowledgePathError::Empty);
+        }
+        if s.len() > Self::MAX_LEN {
+            return Err(KnowledgePathError::TooLong { actual: s.len() });
+        }
+        if s.starts_with('/') || s.ends_with('/') {
+            return Err(KnowledgePathError::Traversal);
+        }
+        for segment in s.split('/') {
+            if segment == ".." {
+                return Err(KnowledgePathError::Traversal);
+            }
+        }
+        if s.chars().any(|c| c.is_ascii_control()) {
+            return Err(KnowledgePathError::ControlChar);
+        }
+        Ok(Self(s))
+    }
+
+    /// Borrow as `&str` — zero-cost view, safe for log / audit / SQL bind.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for KnowledgePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for KnowledgePath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<KnowledgePath> for String {
+    fn from(p: KnowledgePath) -> String {
+        p.0
+    }
+}
+
+impl TryFrom<String> for KnowledgePath {
+    type Error = KnowledgePathError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl TryFrom<&str> for KnowledgePath {
+    type Error = KnowledgePathError;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl std::str::FromStr for KnowledgePath {
+    type Err = KnowledgePathError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
 /// Canonical knowledge document served by a [`KnowledgeStore`].
 ///
 /// `frontmatter` is free-form JSON so wiki YAML/TOML frontmatter or
@@ -481,6 +650,96 @@ mod tests {
 
     fn plug(s: &str) -> PlugId {
         PlugId::new(s).expect("valid plug id")
+    }
+
+    // ---- KnowledgePath — drift-fix PR 2 (D-20260418-26) ----
+
+    #[test]
+    fn knowledge_path_accepts_typical_candidate_paths() {
+        for ok in [
+            "ops/journal/2026-04-18/direct_action",
+            "ops/incidents/2026-04-18/fan-boot",
+            "README",
+            "imports/q4-runbook",
+            "ops/journal/2026-04-18/uuid-abcdef",
+        ] {
+            KnowledgePath::new(ok).unwrap_or_else(|e| panic!("{ok:?} rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn knowledge_path_rejects_empty() {
+        assert_eq!(KnowledgePath::new(""), Err(KnowledgePathError::Empty));
+    }
+
+    #[test]
+    fn knowledge_path_rejects_leading_slash() {
+        assert_eq!(
+            KnowledgePath::new("/etc/passwd"),
+            Err(KnowledgePathError::Traversal)
+        );
+    }
+
+    #[test]
+    fn knowledge_path_rejects_trailing_slash() {
+        assert_eq!(
+            KnowledgePath::new("ops/journal/"),
+            Err(KnowledgePathError::Traversal)
+        );
+    }
+
+    #[test]
+    fn knowledge_path_rejects_parent_traversal_segment() {
+        assert_eq!(
+            KnowledgePath::new("ops/../secrets"),
+            Err(KnowledgePathError::Traversal)
+        );
+    }
+
+    #[test]
+    fn knowledge_path_rejects_control_character() {
+        assert_eq!(
+            KnowledgePath::new("ops/journal\n/x"),
+            Err(KnowledgePathError::ControlChar)
+        );
+    }
+
+    #[test]
+    fn knowledge_path_rejects_too_long() {
+        let s = "a".repeat(KnowledgePath::MAX_LEN + 1);
+        match KnowledgePath::new(s) {
+            Err(KnowledgePathError::TooLong { actual }) => {
+                assert_eq!(actual, KnowledgePath::MAX_LEN + 1);
+            }
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn knowledge_path_serializes_as_bare_string() {
+        let p = KnowledgePath::new("ops/journal/2026-04-18").unwrap();
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(s, "\"ops/journal/2026-04-18\"");
+        let back: KnowledgePath = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn knowledge_path_deserialize_validates() {
+        let invalid = "\"/etc/passwd\"";
+        let result: Result<KnowledgePath, _> = serde_json::from_str(invalid);
+        assert!(
+            result.is_err(),
+            "deserialize MUST reject path-traversal input, not silently accept it"
+        );
+    }
+
+    #[test]
+    fn knowledge_path_as_str_and_display_match() {
+        let p = KnowledgePath::new("ops/journal/x").unwrap();
+        assert_eq!(p.as_str(), "ops/journal/x");
+        assert_eq!(format!("{p}"), "ops/journal/x");
+        assert_eq!(p.as_ref(), "ops/journal/x");
     }
 
     // ---- KnowledgeWriteConsistency ----
