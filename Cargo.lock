@@ -1122,6 +1122,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "futures",
  "gadgetron-core",
  "gadgetron-testing",
  "git2",

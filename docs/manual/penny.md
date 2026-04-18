@@ -5,6 +5,8 @@
 
 Penny는 Claude Code CLI를 Gadgetron의 `model = "penny"` 뒤에 붙인 런타임입니다. 사용자가 Penny로 채팅을 보내면 Gadgetron은 Claude Code를 서브프로세스로 띄우고, 로컬 markdown 위키와 선택적 SearXNG 검색을 MCP 도구로 제공합니다. 향후 P2C/P3에서는 같은 런타임이 infra/scheduler/cluster 도구까지 확장되는 방향을 전제합니다.
 
+로컬 canonical operator loop 는 `./demo.sh build|start|status|logs|stop` 이며, 기본 데모 경로는 pgvector-enabled PostgreSQL 을 전제로 합니다. no-db 경로는 빠른 평가용 예외 경로이지 기본 운영 경로가 아닙니다.
+
 ---
 
 ## 프라이버시 및 보안
@@ -66,9 +68,24 @@ Penny는 Claude Code에 딸려오는 내장 도구(`Bash`, `Read`, `Write`, `Edi
 
 ## 빠른 시작
 
-### 1. 설정 파일 준비
+### 1. 기본 로컬 런타임 준비
 
-`gadgetron init`은 아직 `[agent]` / `[knowledge]` 블록을 자동으로 생성하지 않습니다. 가장 빠른 방법은 직접 `gadgetron.toml`을 작성하는 것입니다.
+```sh
+docker run -d \
+  --name gadgetron-pgvector \
+  -e POSTGRES_USER=gadgetron \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=gadgetron_demo \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+
+./demo.sh build
+./target/release/gadgetron init --yes
+```
+
+### 2. 설정 파일 준비
+
+`gadgetron init`은 아직 `[agent]` / `[knowledge]` 블록을 자동으로 생성하지 않습니다. 따라서 `init`이 만든 baseline `gadgetron.toml`에 아래 블록을 **추가**해야 합니다.
 
 ```sh
 mkdir -p .gadgetron
@@ -99,41 +116,30 @@ TOML
 
 `wiki_path`의 부모 디렉터리는 미리 존재해야 합니다. 위 예시에서는 `mkdir -p .gadgetron`이 그 역할을 합니다.
 
-### 2. API 키 준비
+### 3. API 키 준비
 
-로컬 no-db 경로:
-
-```sh
-./target/release/gadgetron key create
-```
-
-PostgreSQL 기반 영속 키 경로:
+Canonical PostgreSQL-backed 경로:
 
 ```sh
 ./target/release/gadgetron tenant create --name "my-team"
 ./target/release/gadgetron key create --tenant-id <tenant-uuid>
 ```
 
+빠른 평가용 no-db 예외 경로에서는 `./target/release/gadgetron key create` 만으로도 키를 만들 수 있지만, 이 문서의 기본 경로는 PostgreSQL-backed 경로입니다.
+
 출력된 `gad_live_...` 키를 보관하십시오.
 
-### 3. 서버 기동
-
-no-db 예시:
+### 4. 서버 기동
 
 ```sh
-./target/release/gadgetron serve --config gadgetron.toml --no-db
+export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadgetron_demo"
+./demo.sh start
+./demo.sh status
 ```
 
-PostgreSQL 예시:
+정상 등록 시 로그에 `penny: registered`가 나타나고, `/v1/models`에 `penny`가 포함됩니다. 상세 로그가 필요하면 `./demo.sh logs -f` 를 사용하십시오.
 
-```sh
-export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadgetron"
-./target/release/gadgetron serve --config gadgetron.toml
-```
-
-정상 등록 시 로그에 `penny: registered`가 나타나고, `/v1/models`에 `penny`가 포함됩니다.
-
-### 4. 첫 요청 보내기
+### 5. 첫 요청 보내기
 
 ```sh
 curl -sN http://127.0.0.1:8080/v1/chat/completions \

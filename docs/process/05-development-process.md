@@ -32,6 +32,7 @@
    └→ Red: 실패 테스트 먼저
    └→ Green: 최소 구현
    └→ Refactor
+   └→ 서비스 경로를 바꿨다면 `build/start/stop/status/logs` 스크립트 또는 동등 자동화까지 같이 구현
 
 ⑥ 리팩토링 (스프린트 종료 후)
    └→ 코드: clippy 0 warnings, fmt, dead code 삭제
@@ -47,6 +48,7 @@
 ⑧ 매뉴얼 업데이트 (push 전 필수)
    └→ docs/manual/ 에 구현된 내용 반영
    └→ 새 endpoint, CLI, config, 에러 코드 모두 매뉴얼에 포함
+   └→ 서비스 완전 기동 경로와 운영 루프(build/start/stop/status/logs)도 매뉴얼에 포함
    └→ 매뉴얼에 없는 기능 = push 금지
 
 ⑨ PR + Merge
@@ -67,6 +69,7 @@
 | 7 | **PM 권한** — 실행 결정은 PM 자율. 전략적 결정만 사용자 escalation |
 | 8 | **테스트 방안 필수** — 모듈 테스트 + 실제 동작 테스트 + 검증 방안 |
 | 9 | **도구 설치 자유** — 구현/테스트/검증에 필요한 툴·플러그인·MCP 사전 승인 |
+| 10 | **서비스 제공 완결성** — 실행 경로를 바꾸는 작업은 서비스를 끝까지 띄우는 스크립트/자동화와 운영 문서까지 함께 제출해야 완료 |
 
 ## 5. 구현 후 검증 계약
 
@@ -75,6 +78,7 @@
 3. **공용/파급 큰 crate 변경은 자동으로 더 넓게 검증한다.** `gadgetron-core`, `provider`, `router`, `gateway`, `xaas`, 루트 manifest, CI workflow 변경은 `changed` 모드에서도 workspace 검증으로 올린다.
 4. **Penny/Knowledge/Web 같은 결합 영역은 fan-out 검증을 포함한다.** 예: `gadgetron-penny`/`gadgetron-knowledge` 변경 시 `gadgetron-cli`도 함께 검증하고, `gadgetron-web` 변경 시 `gadgetron-gateway`도 함께 검증한다.
 5. **스크립트가 끝이 아니다.** 실제 동작 smoke, eval harness, 수동 UX 확인이 필요한 작업은 해당 검증을 추가로 실행하고, 최종 보고에 명시한다.
+6. **실행 경로 변경은 운영 루프까지 검증한다.** 새로 도입/수정한 `build/start/stop/status/logs` 경로 또는 동등 자동화로 서비스가 실제로 올라와야 한다.
 
 ## 3. 서브에이전트 역할 분담
 

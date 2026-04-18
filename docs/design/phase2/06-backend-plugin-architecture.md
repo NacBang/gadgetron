@@ -1,4 +1,4 @@
-# 06 — Backend Plugin Architecture
+# 06 — Bundle Architecture (legacy filename: backend-plugin-architecture)
 
 > **Status**: Draft v1 (2026-04-16) — user-directed via session discussion. **v2 rewrite scheduled** (see note below).
 > **Author**: PM (Claude)
@@ -10,6 +10,14 @@
 ---
 
 ## ⚠️ Update note — 2026-04-18 (supersedes parts of this draft)
+
+This file is a **legacy draft that predates the Bundle / Plug / Gadget terminology cleanup**. For implementers:
+
+- canonical extension vocabulary comes from `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md`
+- canonical ownership rules come from `docs/process/04-decision-log.md` D-20260418-01
+- any raw use of "plugin" in this file is legacy wording unless explicitly quoted or discussing compatibility history
+
+Do **not** implement new work from the old wording alone.
 
 Decision **D-20260418-01** (`docs/process/04-decision-log.md`) refines several assumptions in this draft. Until a v2 rewrite of this document lands, **the D-entry is authoritative** on the following points:
 

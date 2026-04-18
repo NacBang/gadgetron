@@ -1,6 +1,6 @@
 # Installation
 
-Gadgetron runs on **Linux** (Ubuntu 22.04+) and **macOS** (13+). This guide covers a fresh-system install — no prior Rust or PostgreSQL required.
+Gadgetron runs on **Linux** (Ubuntu 22.04+) and **macOS** (13+). This guide covers a fresh-system install and aligns to the current canonical local runtime: PostgreSQL with `pgvector` plus the repo-local `./demo.sh` operator loop.
 
 ---
 
@@ -30,7 +30,7 @@ cargo --version
 ```bash
 git clone https://github.com/NacBang/gadgetron.git
 cd gadgetron
-cargo build --release -p gadgetron-cli
+./demo.sh build
 ```
 
 Build time: ~3-5 minutes on a cold cache. The binary is at `target/release/gadgetron`.
@@ -38,13 +38,17 @@ Build time: ~3-5 minutes on a cold cache. The binary is at `target/release/gadge
 ### Step 4: PostgreSQL setup
 
 ```bash
-# Start PostgreSQL
-sudo service postgresql start
-
-# Create user and database
-sudo -u postgres createuser -s $USER
-createdb gadgetron
+# Recommended local path: run pgvector in Docker
+docker run -d \
+  --name gadgetron-pgvector \
+  -e POSTGRES_USER=gadgetron \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=gadgetron_demo \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
 ```
+
+If you use a host-installed PostgreSQL instead of Docker, install the matching `pgvector` extension package for your distribution and verify that `CREATE EXTENSION vector` succeeds in the target database. Without `pgvector`, the current knowledge-backed runtime will fail during migrations.
 
 ### Step 5: Verify
 
@@ -59,11 +63,14 @@ cargo test --workspace --lib
 ### Step 6: First run
 
 ```bash
-export GADGETRON_DATABASE_URL="postgresql://localhost:5432/gadgetron"
-./target/release/gadgetron serve --config gadgetron.toml
+./target/release/gadgetron init --yes
+export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadgetron_demo"
+./demo.sh start
+./demo.sh status
+./demo.sh logs
 ```
 
-See [quickstart.md](quickstart.md) for creating a tenant, API key, and sending your first request.
+`quickstart.md` covers the provider block you need in `gadgetron.toml`, tenant/API-key creation, and the first request path. `./demo.sh stop` shuts the local demo down.
 
 ---
 
@@ -95,15 +102,22 @@ rustc --version   # must be 1.80 or later
 ```bash
 git clone https://github.com/NacBang/gadgetron.git
 cd gadgetron
-cargo build --release -p gadgetron-cli
+./demo.sh build
 ```
 
 ### Step 5: PostgreSQL setup
 
 ```bash
-brew services start postgresql@16
-createdb gadgetron
+docker run -d \
+  --name gadgetron-pgvector \
+  -e POSTGRES_USER=gadgetron \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=gadgetron_demo \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
 ```
+
+If you prefer a Homebrew PostgreSQL instead of Docker, install a matching `pgvector` extension locally and verify that the target database can execute `CREATE EXTENSION vector`.
 
 ### Step 6: Verify
 
@@ -115,8 +129,11 @@ cargo test --workspace --lib
 ### Step 7: First run
 
 ```bash
-export GADGETRON_DATABASE_URL="postgresql://$(whoami)@localhost:5432/gadgetron"
-./target/release/gadgetron serve --config gadgetron.toml
+./target/release/gadgetron init --yes
+export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadgetron_demo"
+./demo.sh start
+./demo.sh status
+./demo.sh logs
 ```
 
 ---
@@ -126,7 +143,8 @@ export GADGETRON_DATABASE_URL="postgresql://$(whoami)@localhost:5432/gadgetron"
 | Component | Minimum version | Install command |
 |-----------|----------------|-----------------|
 | Rust | 1.80 | `rustup` (see above) |
-| PostgreSQL | 14+ (16 recommended) | `apt install postgresql` / `brew install postgresql@16` |
+| PostgreSQL | 16 recommended | `apt install postgresql` / `brew install postgresql@16` |
+| `pgvector` | must match the PostgreSQL major version | Docker `pgvector/pgvector:pg16` or your distro's pgvector package |
 | OpenSSL dev | any | `apt install libssl-dev` (Ubuntu only; macOS includes it) |
 | C compiler | any | `apt install build-essential` / Xcode CLT (macOS) |
 
@@ -170,7 +188,7 @@ The `/web/*` subtree is not registered and returns the generic 404 — no indica
 | Node.js | 20.19.0 (pinned via `crates/gadgetron-web/web/.nvmrc`) | `nvm install 20.19.0` / `brew install node@20` |
 | npm | bundled with Node 20 (npm 10+) | — |
 
-If `npm` is not on PATH when building the default profile and you do NOT want the Web UI, set `GADGETRON_SKIP_WEB_BUILD=1` to embed a fallback `index.html` that displays "Gadgetron Web UI unavailable" — or use the `headless` alias above for a clean build.
+If `npm` is not on PATH when building the default profile and you do NOT want the Web UI, set `GADGETRON_SKIP_WEB_BUILD=1` to embed a fallback `index.html` that displays "Gadgetron Web UI unavailable" — or use the `headless` alias above for a clean build. The canonical local path remains `./demo.sh build` / `start`; `start` auto-rebuilds the release binary when tracked source files are newer.
 
 Related: `docs/manual/web.md` (Web UI setup), `docs/design/phase2/03-gadgetron-web.md §20` (feature flag topology).
 
@@ -189,6 +207,7 @@ Docker support is planned for a future sprint. No official image has been publis
 | `rustc: command not found` after install | Run `source $HOME/.cargo/env` or restart your shell |
 | `error: linker cc not found` | Install `build-essential` (Ubuntu) or Xcode CLT: `xcode-select --install` (macOS) |
 | `openssl/ssl.h: No such file` | Install `libssl-dev` (Ubuntu): `sudo apt install libssl-dev` |
-| `could not connect to server` (PostgreSQL) | Start PG: `sudo service postgresql start` (Ubuntu) / `brew services start postgresql@16` (macOS) |
+| `could not connect to server` (PostgreSQL) | Start your pgvector-capable PostgreSQL and verify the URL in `GADGETRON_DATABASE_URL` |
 | `createdb: database creation failed` | Ensure your user has PG superuser role: `sudo -u postgres createuser -s $USER` |
+| `extension "vector" is not available` | Your PostgreSQL server does not provide `pgvector`; use `pgvector/pgvector:pg16` or install the matching pgvector package locally |
 | `cargo build` timeout or OOM | Ensure at least 4 GB RAM and 2 GB disk for compilation |

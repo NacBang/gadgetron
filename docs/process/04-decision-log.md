@@ -2319,3 +2319,103 @@ W2 freeze 에도 불구하고 Gate 1 MUST-LAND 완성을 위해 W3-XAAS-B 에서
 ---
 
 _(다음 엔트리는 아래에 append)_
+
+## D-20260418-11 — 문서 개선에는 완전 기동 스크립트와 운영 루프까지 포함한다
+
+### 요청 배경
+
+사용자 지시: "다음 문서 개선할때 서비스를 완전히 띄워서 제공하기 위한 스크립트 등도 완비 해야한다고 적어주세요"
+
+최근 문서/데모 드리프트에서 반복 확인된 문제는 동일했다. 설계 문서와 사용자 매뉴얼이 런타임 경로를 설명하더라도, 실제로 build/start/stop/status/logs 를 책임지는 스크립트와 smoke path 가 없으면 서비스 제공 품질이 문서보다 뒤처진다.
+
+### 결정
+
+앞으로 **서비스 실행 경로를 추가하거나 바꾸는 모든 문서 개선 작업**은 다음을 완료 조건으로 가진다.
+
+1. 서비스를 실제로 끝까지 띄워 제공하기 위한 스크립트 또는 동등한 자동화가 준비되어 있어야 한다.
+2. 최소 운영 루프 `build/start/stop/status/logs` 의 제공 방식과 책임 경로가 문서에 명시되어야 한다.
+3. 검증 단계에서 해당 스크립트/운영 경로로 실제 서비스가 기동되는지 확인해야 한다.
+4. "문서상 설명만 있고 운영자가 수동으로 조합해야 하는 상태" 는 미완성으로 본다.
+
+### 반영 위치
+
+- `docs/process/01-workflow.md`
+- `docs/process/02-document-template.md`
+- 이후 관련 설계 문서의 `2.6 서비스 기동 / 제공 경로`, `5.4 운영 검증`
+
+### 사용자 결정
+
+**2026-04-18 승인** — 별도 추가 질의 불필요.
+
+---
+
+_(다음 엔트리는 아래에 append)_
+
+## D-20260418-12 — 10분 문서화 루프는 user/admin/developer 문서도 주기적으로 개선한다
+
+### 요청 배경
+
+사용자 지시: "그리고 10분마다 하는 문서화에서 유저나 관리자, 개발자에게 제공되는 문서도 개선을 주기적으로 합시다."
+
+기존 unattended 문서화 루프는 design gap 중심으로 잘 작동했지만, 실제 사용자는 설계 문서만 읽지 않는다. 사용자 매뉴얼, 운영자 runbook, 개발자용 README/프로세스 문서가 뒤처지면 제품 제공 품질과 구현 세션 품질이 동시에 떨어진다.
+
+### 결정
+
+10분 주기 문서화 루프는 앞으로 문서 대상을 다음 네 범주로 본다.
+
+1. 설계 문서 (`docs/design/`)
+2. 사용자 문서 (`docs/manual/`, onboarding, quickstart, web, penny 등)
+3. 관리자/운영자 문서 (runbook, operations, deployment, service bring-up)
+4. 개발자 문서 (`README.md`, process docs, workflow, implementation guidance)
+
+각 실행은 최근 `origin/main` 변경과 현재 문서 드리프트를 기준으로 **가장 우선순위 높은 한 문서**를 고르되, 장기적으로는 위 네 audience 를 주기적으로 순환하며 개선한다.
+
+### 운영 원칙
+
+- 설계 문서만 반복적으로 고르지 않는다.
+- user/admin/developer 문서도 production-accurate 상태를 유지하도록 PR 후보에 포함한다.
+- 실행/배포 경로를 다루는 문서는 `build/start/stop/status/logs` 또는 동등 운영 루프를 함께 다룬다.
+- 자동화 프롬프트와 repo 내부 프로세스 문서가 이 규칙을 공유해야 한다.
+
+### 사용자 결정
+
+**2026-04-18 승인** — 즉시 자동화 프롬프트와 후속 문서 작업에 반영.
+
+---
+
+_(다음 엔트리는 아래에 append)_
+
+## D-20260418-13 — 문서 정합성 gate 가 닫히기 전까지 10분 루프는 reconciliation 전용으로 동작한다
+
+### 요청 배경
+
+사용자 지시:
+
+- "문서를 정합성을 맞추는 작업을 하겠습니다. 충돌 나는 부분을 샅샅히 찾아서 정리합시다."
+- "10분 작업 예약은 문서 정합성이 완벽해 질때까지 그것만 합니다."
+- "구현하는 사람이 헷갈릴만한 소지를 남기면 안됩니다, 기본 철학에 모두 맞춰야합니다."
+
+### 결정
+
+문서 정합성 backlog 가 남아 있는 동안 10분 자동 문서화 루프는 **reconciliation-only** 모드로 동작한다.
+
+의미:
+
+1. 새 설계 주제 확장보다 기존 문서 충돌 해소를 우선한다.
+2. `README.md`, `docs/00-overview.md`, `docs/architecture/glossary.md`, active manual, active design docs 의 충돌을 먼저 닫는다.
+3. 구현자가 읽는 문서는 **canonical answer를 먼저** 제시해야 하며, 현재 코드 위치는 보조 정보로만 적는다.
+4. tracker `docs/reviews/document-consistency-sweep-2026-04-18.md` 의 open cluster 가 0 이 되기 전까지는 새로운 문서 surface 확대를 우선순위로 두지 않는다.
+
+### 관련 문서
+
+- `docs/process/07-document-authority-and-reconciliation.md`
+- `docs/reviews/document-consistency-sweep-2026-04-18.md`
+- 자동화 프롬프트: `~/.config/gadgetron/automation/auto-doc-loop.prompt.md`
+
+### 사용자 결정
+
+**2026-04-18 승인** — 즉시 적용.
+
+---
+
+_(다음 엔트리는 아래에 append)_

@@ -853,8 +853,8 @@ TDD Red → Green → Refactor. Each step is a PR; cross-crate PRs are fine but 
 9. `gadgetron-core::agent::tools` startup warning emitter: when any `WriteToolsConfig.*` field resolves to `Ask`, emit `tracing::warn!("agent.tools.{field}=ask has no effect in Phase 2A — approval flow is deferred to P2B per ADR-P2A-06")`
 
 **Phase 3 — MCP registry + knowledge provider**
-10. `gadgetron-penny::registry::{McpToolRegistryBuilder, McpToolRegistry}` builder/freeze pattern per `04 v2 §2.1`
-11. `gadgetron-knowledge::mcp::KnowledgeToolProvider` — first `McpToolProvider` implementation
+10. `gadgetron-penny::gadget_registry::{GadgetRegistryBuilder, GadgetRegistry}` builder/freeze pattern per `04 v2 §2.1`
+11. `gadgetron-knowledge::gadget::KnowledgeGadgetProvider` — first `GadgetProvider` implementation
 12. `gadgetron-knowledge::tests::mcp_conformance` — `tools/list` / `tools/call` / unknown-tool conformance tests
 13. `gadgetron-testing::mocks::mcp::fake_tool_provider::FakeToolProvider` — per `04 v2 §16` (QA-MCP-B2 live item)
 14. `gadgetron-penny::tests::registry` — builder + freeze + dispatch + `build_allowed_tools` tests (including 2 proptests)
@@ -872,8 +872,8 @@ TDD Red → Green → Refactor. Each step is a PR; cross-crate PRs are fine but 
 
 > **Ordering note (2026-04-15)**: Step 22 previously preceded Step 23, but `mcp_config.rs` hardcodes `["mcp", "serve"]` as the argv it writes into the tempfile for Claude Code to invoke. Without Step 23 in place, the assembled CLI from Step 22 would spawn a `gadgetron mcp serve` subcommand that does not exist. Step 23 is therefore implemented **first**; Step 22 then composes the main registry and binds `PennyProvider` on top of a CLI that already exposes the subcommand.
 
-22. `gadgetron-cli::mcp_serve` — new `gadgetron mcp serve` subcommand (stdio MCP server dispatching via `McpToolRegistry`). Standalone test: invoke the binary with `mcp serve`, pipe a `tools/list` JSON-RPC request on stdin, assert the registered tool names on stdout.
-23. `gadgetron-cli::bin::gadgetron` — compose `McpToolRegistryBuilder` + all providers in `main()`, pass frozen registry to `PennyProvider`, register `PennyProvider` with the router. Depends on Step 22 so that `mcp_config.rs` can assume `gadgetron mcp serve` is a valid argv.
+22. `gadgetron-cli::mcp_serve` — new `gadgetron mcp serve` subcommand (stdio MCP server dispatching via `GadgetRegistry`). Standalone test: invoke the binary with `mcp serve`, pipe a `tools/list` JSON-RPC request on stdin, assert the registered tool names on stdout.
+23. `gadgetron-cli::bin::gadgetron` — compose `GadgetRegistryBuilder` + all providers in `main()`, pass frozen registry to `PennyProvider`, register `PennyProvider` with the router. Depends on Step 22 so that `mcp_config.rs` can assume `gadgetron mcp serve` is a valid argv.
 24. `gadgetron-cli::penny_init` — patch to emit full `[agent]` section (DX-MCP-B1)
 25. `gadgetron-cli::features` — declare `web-ui`, `agent-read`, `agent-write`, `agent-destructive`, `infra-tools`, `scheduler-tools`, `slurm`, `k8s` per `04 v2 §6.1` + `headless_build_strips_write_tools` test
 26. `gadgetron-gateway` — no new handlers on `/v1/*` beyond existing. `/v1/approvals/{id}` is **NOT** in P2A.

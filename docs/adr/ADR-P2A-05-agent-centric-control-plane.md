@@ -12,6 +12,8 @@
 
 ---
 
+**Canonical terminology note**: this ADR predates the Bundle/Plug/Gadget rename. Current code and canonical docs use `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. Historical references in this ADR to `McpToolProvider`, `McpToolRegistry`, and `KnowledgeToolProvider` should be read through that mapping.
+
 ## Context
 
 Phase 2 의 기존 프레이밍은 "하방(Phase 1 LLM 오케스트레이션 인프라) + 상방(Penny 지식 레이어 기반 개인 비서)" 로 두 레이어가 동등하게 존재했다. Penny 는 wiki + 웹 검색 도구를 가진 한 개의 LlmProvider 로서 라우터 provider map 에 다른 provider 와 병렬 등록되었다. 인프라 제어(노드 상태, GPU 이용률, 라우팅 전략, 클러스터 관리) 는 운영자가 TUI·HTTP API 로 별도 제어하는 별개 경로였다.
@@ -21,7 +23,7 @@ Phase 2 의 기존 프레이밍은 "하방(Phase 1 LLM 오케스트레이션 인
 1. **에이전트 = 플랫폼의 브레인이자 중추**. Claude Code CLI 는 "하나의 모델" 이 아니라 Gadgetron 이 제공하는 대화형 경험의 단일 진입점
 2. **모든 입력 → 에이전트**. 기본 사용 동선에서 사용자 입력은 에이전트에게 전달되고, 에이전트가 도구를 선택·조합하여 응답 생성
 3. **인프라는 에이전트의 도구**. Phase 1 의 router/provider/node/scheduler/cluster 관리 기능은 에이전트가 호출하는 MCP 도구로 재노출
-4. **확장 가능한 tool registry**. P2A 에서부터 stable plugin 인터페이스로 설계해, P2B(inference tools) / P2C(infra tools) / P3(scheduler/cluster tools) 를 단순 추가로 처리
+4. **확장 가능한 tool registry**. P2A 에서부터 stable extension interface 로 설계해, P2B(inference tools) / P2C(infra tools) / P3(scheduler/cluster tools) 를 단순 추가로 처리
 
 우회 경로(사용자 편의성): 사용자가 `POST /v1/chat/completions` 에 `model=vllm/llama3` 같이 직접 지정하면 에이전트를 통과하지 않고 바로 provider 로. `gadgetron-web` 드롭다운에서 `penny` 가 기본이지만 다른 모델도 선택 가능.
 

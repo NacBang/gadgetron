@@ -6,12 +6,13 @@
 > **Date (v4)**: 2026-04-14
 > **Parent**: `docs/design/phase2/00-overview.md` v3, `04-mcp-tool-registry.md` v2 (new source of truth for `[agent]` config)
 > **Sibling**: `docs/design/phase2/01-knowledge-layer.md` v3, `03-gadgetron-web.md` v2.1, `04-mcp-tool-registry.md` v2
-> **Scope (v4)**: `gadgetron-penny` crate + `gadgetron-core::error::GadgetronError::Penny` variant + subprocess spawn discipline. Agent-centric control plane types (`McpToolProvider`, `AgentConfig`) live in `gadgetron-core::agent::*` per `04 v2`. Approval flow (`ApprovalRegistry`, SSE emit, `POST /v1/approvals/{id}`) is **deferred to Phase 2B per ADR-P2A-06**.
+> **Scope (v4)**: `gadgetron-penny` crate + `gadgetron-core::error::GadgetronError::Penny` variant + subprocess spawn discipline. Agent-centric control plane types (`GadgetProvider`, `AgentConfig`) live in `gadgetron-core::agent::*` per `04 v2`. Approval flow (`ApprovalRegistry`, SSE emit, `POST /v1/approvals/{id}`) is **deferred to Phase 2B per ADR-P2A-06**.
 > **Implementation determinism**: every type, function, error, and test is explicit. No TBD, no hand-waving — any competent contributor must be able to produce the same code from this doc.
 > **Provenance**:
 > - v2 → v3: Round 2 review (chief-architect CA-B1/B2/B3/DET1, security SEC-B1/B3/B4, dx DX-B3, qa QA-NB2/DET1/DET2/DET3/NIT4, gap GAP-3) addressed 2026-04-13
 > - v3 → v4: Agent-centric pivot alignment (D-20260414-04, ADR-P2A-05, ADR-P2A-06). Config namespace `[penny]` is now **legacy** — the canonical P2A schema is `[agent]` + `[agent.brain]` in `04 v2 §4`. This doc's §10 retains the v3 `PennyConfig` as an **internal struct** fed from `[agent.brain]` via the loader; the legacy `[penny]` TOML example is retained for migration reference only (see `04 v2 §11.1`).
 > **Current trunk note**: references below to `gadgetron penny init` are design-history / bootstrap-UX debt, not the shipped CLI surface. Current trunk uses manual `[agent]` + `[agent.brain]` + `[knowledge]` authoring plus `gadgetron mcp serve`.
+> **Canonical terminology note**: current code names are `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. Historical references later in this doc to `McpToolProvider`, `McpToolRegistry`, or `KnowledgeToolProvider` are legacy design-era names.
 
 ## Table of Contents
 

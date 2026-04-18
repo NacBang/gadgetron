@@ -1,58 +1,64 @@
-# Quickstart: zero to first request in 5 minutes
+# Quickstart: local demo with PostgreSQL + `demo.sh`
 
-This guide walks through every step required to run Gadgetron and make a successful chat completion request. All commands are copy-pasteable and intended to run in order.
+This is the canonical local operator path for Gadgetron trunk. The supported local loop is:
 
-As of Sprint 7, Gadgetron routes to real LLM providers and includes CLI commands for tenant and API key management. Two quickstart paths are provided: one using OpenAI (requires an OpenAI API key), and one using a self-hosted vLLM instance (no external API key).
+- `./demo.sh build`
+- `./demo.sh start`
+- `./demo.sh status`
+- `./demo.sh logs`
+- `./demo.sh stop`
 
-**Prerequisites (OpenAI path):** Rust 1.80+, Docker (for the PostgreSQL one-liner), an OpenAI API key.
-
-**Prerequisites (vLLM path):** Rust 1.80+, Docker (for the PostgreSQL one-liner), a reachable vLLM HTTP endpoint.
+The demo path assumes a PostgreSQL server with the `vector` extension available. A plain PostgreSQL image without `pgvector` is not sufficient for the current knowledge-backed runtime.
 
 ---
 
-## Step 1 — Start PostgreSQL
+## Step 1 — Start a pgvector-enabled PostgreSQL
 
 ```sh
 docker run -d \
-  --name gadgetron-pg \
+  --name gadgetron-pgvector \
   -e POSTGRES_USER=gadgetron \
   -e POSTGRES_PASSWORD=secret \
-  -e POSTGRES_DB=gadgetron \
+  -e POSTGRES_DB=gadgetron_demo \
   -p 5432:5432 \
-  postgres:16
+  pgvector/pgvector:pg16
 ```
 
-Wait approximately 5 seconds for PostgreSQL to become ready:
+Wait until PostgreSQL is ready:
 
 ```sh
-docker exec gadgetron-pg pg_isready -U gadgetron
+docker exec gadgetron-pgvector pg_isready -U gadgetron -d gadgetron_demo
 ```
 
 Expected output: `localhost:5432 - accepting connections`
 
 ---
 
-## Step 2 — Clone and build
+## Step 2 — Build the release binary
 
 ```sh
 git clone https://github.com/NacBang/gadgetron.git
 cd gadgetron
-cargo build --release -p gadgetron-cli
+./demo.sh build
 ```
 
-The binary is at `./target/release/gadgetron`.
+`./demo.sh build` compiles `gadgetron-cli` in release mode and prepares the binary that `./demo.sh start` will run.
 
 ---
 
-## Step 3 — Write a minimal config file
+## Step 3 — Generate a baseline config, then enable a provider
 
-Create `gadgetron.toml` in the directory where you will run the server.
+Generate an annotated `gadgetron.toml`:
 
-**Option A — OpenAI provider:**
+```sh
+./target/release/gadgetron init --yes
+```
+
+Then edit `gadgetron.toml` and enable at least one provider. The fastest success path is OpenAI:
 
 ```toml
 [server]
-bind = "0.0.0.0:8080"
+bind = "127.0.0.1:8080"
 
 [providers.openai]
 type = "openai"
@@ -60,129 +66,58 @@ api_key = "${OPENAI_API_KEY}"
 models = ["gpt-4o-mini"]
 ```
 
-**Option B — vLLM provider (self-hosted, no external API key):**
-
-```toml
-[server]
-bind = "0.0.0.0:8080"
-
-[providers.gemma4]
-type = "vllm"
-endpoint = "http://10.100.1.5:8100"
-models = ["gemma-4-27b-it"]
-```
-
-Replace `10.100.1.5:8100` with the host and port of your vLLM instance. The model name must match the `--served-model-name` value (or the default model name) that vLLM reports.
+If you want the full assistant surface (`penny` model + `/web`), add the canonical `[agent]`, `[agent.brain]`, and `[knowledge]` blocks from [penny.md](penny.md). Do not rely on legacy `[penny]` examples.
 
 ---
 
-## Step 4 — Create a tenant and API key
-
-The server must have run at least once so that migrations create the schema. Start it briefly to apply migrations, then stop it with Ctrl-C.
-
-For the OpenAI path:
+## Step 4 — Export runtime environment
 
 ```sh
-export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadgetron"
-export OPENAI_API_KEY="sk-your-openai-key-here"
-./target/release/gadgetron
-# Wait for "listening" log line, then press Ctrl-C
+export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadgetron_demo"
+export OPENAI_API_KEY="sk-your-openai-key"
 ```
 
-For the vLLM path:
+If you are using a self-hosted provider such as vLLM or Ollama, export only the variables your chosen provider block requires.
+
+---
+
+## Step 5 — Start the demo and verify health
 
 ```sh
-export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadgetron"
-./target/release/gadgetron
-# Wait for "listening" log line, then press Ctrl-C
+./demo.sh start
+./demo.sh status
+./demo.sh logs
 ```
 
-Expected log output (last line before you press Ctrl-C):
+`status` should report a running process and an `OK` health check. If startup fails with a `vector` extension message, your PostgreSQL server is reachable but does not provide `pgvector`; replace it with a pgvector-enabled server and retry.
 
-```
-INFO gadgetron starting bind=0.0.0.0:8080
-INFO database migrations applied
-INFO provider registered name=openai
-INFO listening addr=0.0.0.0:8080
-```
-
-The `provider registered` line shows the key you chose under `[providers.*]` (e.g. `name=gemma4` for the vLLM example).
-
-Now create a tenant and API key using the CLI.
-
-### Standard path (with database)
+For a live tail:
 
 ```sh
-# Create a tenant. Prints the assigned UUID.
+./demo.sh logs -f
+```
+
+---
+
+## Step 6 — Create a tenant and API key
+
+The server must be running for migrations and key management.
+
+```sh
 ./target/release/gadgetron tenant create --name "my-team"
-# Example output: tenant created id=00000000-0000-0000-0000-000000000001
-
-# Create an API key for that tenant. Prints the raw key — save it now.
-# The raw key is shown exactly once and cannot be recovered later.
-./target/release/gadgetron key create --tenant-id 00000000-0000-0000-0000-000000000001
-# Example output:
-#   key created name=default id=00000000-0000-0000-0000-000000000002
-#   key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+./target/release/gadgetron key create --tenant-id <tenant_uuid>
 ```
 
-Substitute the UUID printed by `tenant create` into the `key create` command. The raw key value (the `key:` line) is what you supply as the Bearer token in Step 6.
-
-### No-database path (`--no-db` mode)
-
-If you are evaluating Gadgetron without a PostgreSQL instance, omit `--tenant-id`:
-
-```sh
-./target/release/gadgetron key create
-# Example output:
-#   API Key Created
-#   ...
-#   Key:     gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
-```
-
-In no-db mode, Gadgetron does not persist or validate key hashes against PostgreSQL. The generated key is a convenience value; the built-in validator accepts any syntactically valid `gad_live_*` or `gad_test_*` key while the server is running without a database. Start the server in this mode by leaving `GADGETRON_DATABASE_URL` unset or by passing `gadgetron serve --no-db`.
+The second command prints the raw `gad_live_...` key once. Use that Bearer token for API and Web UI access.
 
 ---
 
-## Step 5 — Start the server
-
-For the OpenAI path:
+## Step 7 — Send the first request
 
 ```sh
-export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadgetron"
-export OPENAI_API_KEY="sk-your-openai-key-here"
-./target/release/gadgetron
-```
-
-For the vLLM path (no upstream API key needed):
-
-```sh
-export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadgetron"
-./target/release/gadgetron
-```
-
-Expected log output:
-
-```
-INFO gadgetron starting bind=0.0.0.0:8080
-INFO database migrations applied
-INFO provider registered name=openai
-INFO listening addr=0.0.0.0:8080
-```
-
-The server is ready when the `listening` line appears.
-
----
-
-## Step 6 — Send your first request
-
-Open a second terminal. Replace `gad_live_quickstart0000000000000000` with your actual key secret.
-
-**OpenAI provider example:**
-
-```sh
-curl -s http://localhost:8080/v1/chat/completions \
+curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer gad_live_quickstart0000000000000000" \
+  -H "Authorization: Bearer gad_live_replace_me" \
   -d '{
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Say hello in one sentence."}],
@@ -190,105 +125,22 @@ curl -s http://localhost:8080/v1/chat/completions \
   }' | jq .
 ```
 
-**vLLM provider example** (substitute the model name you configured):
+If you enabled Penny, `GET /v1/models` should also include `penny`, and `http://127.0.0.1:8080/web` should serve the embedded Web UI.
+
+---
+
+## Step 8 — Stop the demo
 
 ```sh
-curl -s http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer gad_live_quickstart0000000000000000" \
-  -d '{
-    "model": "gemma-4-27b-it",
-    "messages": [{"role": "user", "content": "Say hello in one sentence."}],
-    "stream": false
-  }' | jq .
-```
-
-### Expected response (non-streaming)
-
-```json
-{
-  "id": "chatcmpl-abc123",
-  "object": "chat.completion",
-  "created": 1700000000,
-  "model": "gpt-4o-mini",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "Hello! I'm here and ready to assist you today."
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 15,
-    "completion_tokens": 14,
-    "total_tokens": 29
-  }
-}
+./demo.sh stop
 ```
 
 ---
 
-## Streaming request
+## Notes
 
-```sh
-curl -N http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer gad_live_quickstart0000000000000000" \
-  -d '{
-    "model": "gpt-4o-mini",
-    "messages": [{"role": "user", "content": "Count to three."}],
-    "stream": true
-  }'
-```
-
-### Expected streaming output
-
-```
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"1"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":", 2"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":", 3."},"finish_reason":"stop"}]}
-
-data: [DONE]
-```
-
-The final line is always `data: [DONE]`. Each intermediate chunk contains a `delta` with incremental content. The `finish_reason` field is `null` for all chunks except the last, where it is `"stop"` (or another reason such as `"length"`).
-
----
-
-## Verify health probes (no auth required)
-
-```sh
-curl -s http://localhost:8080/health | jq .
-# {"status":"ok"}
-
-curl -s http://localhost:8080/ready | jq .
-# {"status":"ready"}
-```
-
----
-
-## What's next
-
-- Add more providers: see [configuration.md](configuration.md)
-- Understand the auth and scope system: see [auth.md](auth.md)
-- Full API reference: see [api-reference.md](api-reference.md)
-- Troubleshoot errors: see [troubleshooting.md](troubleshooting.md)
-
----
-
-## Optional: open the TUI dashboard
-
-The terminal dashboard is embedded in `gadgetron serve`. Instead of running the server headless, start it with `--tui`:
-
-```sh
-./target/release/gadgetron serve --tui --config gadgetron.toml
-```
-
-The dashboard shows a 3-column layout (Nodes / Models / Requests) with color-coded GPU metrics. As of Sprint 6+ it renders live data streamed from the gateway via an internal broadcast channel (request entries, GPU metrics, model states). Press `q` or `Esc` to exit — the server shuts down gracefully with a 5-second audit drain.
-
-`--tui` requires a real interactive terminal (both stdin and stdout must be TTYs). If you run it under systemd, CI, or with piped input, it exits immediately with code 2 and a clear error message. See [tui.md](tui.md) for the full reference and the TTY requirement.
+- `./demo.sh start` auto-rebuilds the release binary if tracked source files are newer than `target/release/gadgetron`, unless you explicitly set `GADGETRON_DEMO_SKIP_BUILD=1`.
+- `./demo.sh start` also checks the target PostgreSQL and enables `CREATE EXTENSION vector` automatically when the server provides it but the current database has not enabled it yet.
+- For install prerequisites, see [installation.md](installation.md).
+- For Web UI operation, see [web.md](web.md).
+- For Penny-specific config, see [penny.md](penny.md).

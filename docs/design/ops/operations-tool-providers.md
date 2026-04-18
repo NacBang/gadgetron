@@ -7,6 +7,8 @@
 > **관련 크레이트**: `gadgetron-core`, `gadgetron-penny`, `gadgetron-gateway`, `gadgetron-xaas`, `gadgetron-scheduler`, `gadgetron-node`, future `gadgetron-infra`, future `gadgetron-scheduler-tools`, future `gadgetron-cluster`
 > **Phase**: [P2C] / [P3] / [P4]
 > **관련 문서**: `docs/design/ops/agentic-cluster-collaboration.md`, `docs/design/phase2/04-mcp-tool-registry.md`, `docs/architecture/platform-architecture.md`
+>
+> **Canonical terminology note**: this draft retains "tool provider" wording, but the current canonical seam is `GadgetProvider` / `GadgetRegistry`. Historical `McpToolProvider` / `McpToolRegistry` names below must be read through that mapping.
 
 ---
 
@@ -14,7 +16,7 @@
 
 ### 1.1 문제 한 문장
 
-현재 Gadgetron은 operations/execution substrate 를 이미 갖고 있지만, assistant plane 이 실제 cluster operator 로 진화하려면 lower-plane 기능을 명시적인 tool provider 들로 분해한 canonical 설계가 필요하다.
+현재 Gadgetron은 operations/execution substrate 를 이미 갖고 있지만, assistant plane 이 실제 cluster operator 로 진화하려면 lower-plane 기능을 명시적인 `GadgetProvider` families 로 분해한 canonical 설계가 필요하다.
 
 ### 1.2 제품 비전과의 연결
 
@@ -84,7 +86,7 @@ pub struct VirtualizationToolProvider<B: VirtualizationBackend> {
 }
 ```
 
-Each provider implements `McpToolProvider`.
+Each provider implements `GadgetProvider`.
 
 #### 2.1.2 Backend traits
 
@@ -358,7 +360,7 @@ This section is required for Round 1.5 per `docs/process/03-review-rubric.md §1
 
 | ID | Boundary | Crosses | Auth mechanism |
 |----|----------|---------|----------------|
-| B-O1 | agent runtime → `McpToolRegistry` | in-process tool dispatch | tenant/auth context from gateway |
+| B-O1 | agent runtime → `GadgetRegistry` | in-process tool dispatch | tenant/auth context from gateway |
 | B-O2 | provider → in-process Gadgetron runtime | runtime mutation/read path | internal Rust API |
 | B-O3 | provider → Kubernetes API | external cluster control plane | kubeconfig / service account |
 | B-O4 | provider → Slurm CLI/backend | external scheduler boundary | local OS user / scheduler ACL |
@@ -430,8 +432,8 @@ administrator / user
 PennyProvider / CollaborationCoordinator
         │
         ▼
-McpToolRegistry
-   ├── KnowledgeToolProvider
+GadgetRegistry
+   ├── KnowledgeGadgetProvider
    ├── InfraToolProvider
    ├── SchedulerToolProvider
    ├── ClusterToolProvider

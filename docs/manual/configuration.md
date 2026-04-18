@@ -1,6 +1,8 @@
 # Configuration
 
-Gadgetron is configured through three mechanisms: CLI flags, environment variables, and `gadgetron.toml`. When the same setting is supplied by more than one mechanism, the order of precedence from highest to lowest is:
+Gadgetron is configured through three mechanisms: CLI flags, environment variables, and `gadgetron.toml`. For the current canonical local operator loop, use [quickstart.md](quickstart.md): `./demo.sh build|start|status|logs|stop` with a pgvector-enabled PostgreSQL. This page is the field reference and precedence guide.
+
+When the same setting is supplied by more than one mechanism, the order of precedence from highest to lowest is:
 
 1. **CLI flags** — always win
 2. **Environment variables** — override the config file
@@ -74,7 +76,7 @@ When set, Gadgetron skips config file loading, injects one synthetic provider na
 
 ## `gadgetron init` — generate an annotated config file
 
-`gadgetron init` writes a fully-annotated `gadgetron.toml` to the current directory. Every field is present with its default value and a comment explaining what it does and which environment variable overrides it. This is the recommended starting point for any new deployment.
+`gadgetron init` writes an annotated baseline `gadgetron.toml` to the current directory. Today that template is still **gateway-first**: it emits the shipped baseline sections for server/router/provider setup, but it does **not** yet emit the assistant-specific `[agent]`, `[agent.brain]`, `[knowledge]`, or `[knowledge.search]` blocks.
 
 ```sh
 ./target/release/gadgetron init
@@ -84,7 +86,7 @@ When set, Gadgetron skips config file loading, injects one synthetic provider na
 
 If the target file already exists and `--yes` is not passed, the command prompts before overwriting it. In non-interactive mode without `--yes`, it leaves the existing file unchanged and exits successfully.
 
-After running `gadgetron init`, open the generated file and follow the inline comments. If you want a zero-config single-provider test instead, use `gadgetron serve --provider <URL>`.
+After running `gadgetron init`, open the generated file and follow the inline comments. If you need Penny and the knowledge layer, add the `[agent]`, `[agent.brain]`, `[knowledge]`, and optional `[knowledge.search]` blocks manually per [penny.md](penny.md). If you want a zero-config single-provider test instead, use `gadgetron serve --provider <URL>`.
 
 ---
 
@@ -357,7 +359,7 @@ max_results = 10
 
 ### Minimal working `gadgetron.toml`
 
-The following file is the minimum configuration to serve requests through a single OpenAI provider. Copy it verbatim and substitute your API key.
+The following file is the minimum configuration to serve requests through a single OpenAI provider. It is a **field-minimal example**, not the full canonical local demo path. For the full local path with PostgreSQL, Web UI, and optional Penny, follow [quickstart.md](quickstart.md) and [penny.md](penny.md).
 
 ```toml
 [server]

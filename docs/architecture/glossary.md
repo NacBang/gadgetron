@@ -149,11 +149,10 @@ Spec: `docs/design/phase2/02-penny-agent.md`.
 
 ### Core
 
-The always-present set of Gadgetron crates that ship in the single binary by default:
+Core is the always-present product substrate. Canonically it owns the framework and cross-cutting layers:
 
 - `gadgetron-core` — types, traits, config, errors
 - `gadgetron-gateway` — HTTP entry, SSE streaming, auth
-- `gadgetron-router` — LLM routing strategies
 - `gadgetron-penny` — agent runtime, Gadget registry
 - `gadgetron-knowledge` — wiki, chunking, embedding, pgvector search
 - `gadgetron-xaas` — multi-tenant, billing, audit
@@ -162,7 +161,14 @@ The always-present set of Gadgetron crates that ship in the single binary by def
 - `gadgetron-tui` — terminal UI
 - `gadgetron-testing` — shared test harness
 
-Everything outside `crates/gadgetron-*` is a Bundle.
+Current codebase note: `gadgetron-provider`, `gadgetron-router`, `gadgetron-scheduler`, and `gadgetron-node` still exist as top-level crates today, but **canonical ownership** follows D-20260418-01:
+
+- `provider`, `router`, `scheduler` → `ai-infra` Bundle ownership
+- `node` → split across `server`, `gpu`, and `ai-infra` Bundle ownership
+
+Implementers should follow the canonical ownership rule above, not infer architecture from the temporary directory layout alone.
+
+Everything outside the canonical core surface is Bundle-owned, even when the migration still lives in `crates/gadgetron-*` during transition.
 
 ### Seed page
 

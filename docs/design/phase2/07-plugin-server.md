@@ -7,6 +7,10 @@
 > **관련 크레이트**: `gadgetron-core` (EntityTree, ApprovalGate, SecretCell 확장), `plugins/plugin-server/` (신설)
 > **Phase**: [P2B]
 > **Glossary**: §2.1
+>
+> **Canonical terminology note**: Gadgetron 의 제품 용어는 **Bundle / Plug / Gadget** 이다. 이 문서가 `plugin-server` 라는 이름을 유지하는 이유는 현재 파일명, 작업 스트림명, planned crate/directory identifier, 기존 decision-log 엔트리와 맞추기 위해서다. 구현자는 이를 경쟁 개념으로 읽지 말고, **`server` Bundle 의 working identifier** 로 읽어야 한다.
+>
+> **Authority note**: 이 문서 아래의 raw `plugin` 표현은 주로 working identifier 또는 legacy phrasing 이다. 구현 기준의 정답은 `docs/process/04-decision-log.md` D-20260418-01 과 `docs/process/07-document-authority-and-reconciliation.md` 이며, 현재 경로/이름보다 canonical ownership 과 철학이 우선한다.
 
 ---
 
@@ -769,7 +773,7 @@ plugins/plugin-server/
 │   ├── audit/
 │   │   └── writer.rs                        — plugin_server.exec_audit + xaas audit_log
 │   └── mcp_tools/
-│       ├── mod.rs                           — McpToolProvider impl
+│       ├── mod.rs                           — GadgetProvider impl
 │       ├── server_list.rs
 │       ├── server_exec.rs
 │       ├── log_tail.rs

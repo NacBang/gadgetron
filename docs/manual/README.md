@@ -27,7 +27,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 |------|---------------|
 | [installation.md](installation.md) | Prerequisites, build from source, Docker (future) |
 | [configuration.md](configuration.md) | Environment variables, `gadgetron.toml` reference, provider setup |
-| [quickstart.md](quickstart.md) | Zero to first chat completion in 5 minutes |
+| [quickstart.md](quickstart.md) | Canonical local demo path: `demo.sh` + pgvector PostgreSQL + first request |
 | [tui.md](tui.md) | Terminal dashboard: layout, key bindings, color scheme, live gateway connection (`--tui`) |
 | [api-reference.md](api-reference.md) | Every endpoint: method, path, auth, request/response, error codes |
 | [auth.md](auth.md) | API key format, how auth works, scope system |
@@ -59,7 +59,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron key create --tenant-id <uuid>` for persistent keys
 - `gadgetron key create` for no-db/local development convenience
 - `gadgetron key list --tenant-id <uuid>` and `gadgetron key revoke --key-id <uuid>`
-- `gadgetron init` — generate an annotated `gadgetron.toml`
+- `gadgetron init` — generate an annotated baseline `gadgetron.toml` (assistant blocks still require manual authoring on trunk)
 - `gadgetron doctor` — check configuration, database connectivity, provider reachability, and `/health`
 - `gadgetron mcp serve` — stdio MCP server used by the Penny subprocess bridge and available for manual smoke tests
 - `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
