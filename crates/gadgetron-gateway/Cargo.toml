@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 gadgetron-core = { workspace = true }
+gadgetron-knowledge = { workspace = true }
 gadgetron-provider = { workspace = true }
 gadgetron-router = { workspace = true }
 gadgetron-xaas = { workspace = true }

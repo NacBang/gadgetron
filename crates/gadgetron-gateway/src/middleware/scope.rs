@@ -12,10 +12,11 @@ use crate::{error::ApiError, server::AppState};
 /// Enforces per-route scope requirements using `TenantContext` from extensions.
 ///
 /// Route → required scope mapping (§2.A.3):
-///   `/v1/*`              → `Scope::OpenAiCompat`
-///   `/api/v1/xaas/*`     → `Scope::XaasAdmin`
-///   `/api/v1/*`          → `Scope::Management`
-///   anything else        → no scope check (public routes never reach this layer)
+///   `/v1/*`                       → `Scope::OpenAiCompat`
+///   `/api/v1/xaas/*`              → `Scope::XaasAdmin`
+///   `/api/v1/web/workbench/*`     → `Scope::OpenAiCompat`  (W3-WEB-2 exception)
+///   `/api/v1/*`                   → `Scope::Management`
+///   anything else                 → no scope check (public routes never reach this layer)
 ///
 /// On scope denial: audit entry emitted (SOC2 CC6.7) and HTTP 403 returned.
 ///
@@ -34,6 +35,12 @@ pub async fn scope_guard_middleware(
         Some(Scope::OpenAiCompat)
     } else if path.starts_with("/api/v1/xaas/") {
         Some(Scope::XaasAdmin)
+    } else if path.starts_with("/api/v1/web/workbench/") {
+        // W3-WEB-2: workbench projection lives under /api/v1/* but uses
+        // OpenAiCompat base scope (same as /v1/*). Finer-grained access
+        // control lives in descriptor metadata (W3-WEB-2b).
+        // Must appear BEFORE the /api/v1/* catch-all below.
+        Some(Scope::OpenAiCompat)
     } else if path.starts_with("/api/v1/") {
         Some(Scope::Management)
     } else {

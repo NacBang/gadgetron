@@ -98,6 +98,7 @@ impl GatewayHarness {
             pg_pool: Some(pg.pool().clone()),
             no_db: false,
             tui_tx: None,
+            workbench: None,
         };
 
         let router = build_router(state);

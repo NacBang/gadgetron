@@ -1162,6 +1162,7 @@ dependencies = [
  "criterion",
  "futures",
  "gadgetron-core",
+ "gadgetron-knowledge",
  "gadgetron-provider",
  "gadgetron-router",
  "gadgetron-web",

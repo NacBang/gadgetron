@@ -52,6 +52,7 @@ fn make_state() -> AppState {
         pg_pool: None,
         no_db: true,
         tui_tx: None,
+        workbench: None,
     }
 }
 
