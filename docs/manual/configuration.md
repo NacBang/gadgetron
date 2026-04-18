@@ -333,6 +333,7 @@ mode = "claude_max"
 [knowledge]
 wiki_path = "./.gadgetron/wiki"   # config 파일 위치 기준 상대 경로 OK
 wiki_autocommit = true
+wiki_git_author = "Gadgetron <penny@gadgetron.local>"  # 생략 시 git 전역 설정 또는 기본값 사용
 wiki_max_page_bytes = 1048576
 ```
 
@@ -342,7 +343,8 @@ wiki_max_page_bytes = 1048576
   Penny가 `gadgetron mcp serve`를 `~/.gadgetron/penny/work/` cwd로
   spawn 하더라도 상대 경로가 올바르게 풀립니다.
 - `wiki_autocommit`: 쓰기마다 자동 git commit 수행 여부
-- `wiki_max_page_bytes`: 페이지 최대 크기
+- `wiki_git_author`: git commit 작성자 (`"Name <email>"` 형식). 생략 시 전역 gitconfig에서 자동 감지, 없으면 `"Penny <penny@gadgetron.local>"` 사용.
+- `wiki_max_page_bytes`: 페이지 최대 크기 (범위: 1 ~ 100 MiB)
 
 ### `[knowledge.search]`
 
@@ -397,6 +399,33 @@ stale_threshold_days = 90           # stale 청크 기준 일수 (1–3650)
 ```
 
 수동 full reindex: `gadgetron reindex --full` (서버 중단 불필요).
+
+### `[knowledge.curation]`
+
+지식 후보(Knowledge Candidate) 수집 및 Penny 큐레이션 루프를 제어합니다. 이 섹션을 생략하면 모든 항목이 기본값으로 활성화됩니다. `[knowledge]` 섹션 없이 `enabled = true`를 설정하면 서버 시작 오류가 발생합니다.
+
+```toml
+[knowledge.curation]
+enabled = true                          # false로 설정하면 후보 생성 루프 비활성화 (audit capture는 유지)
+capture_retention_days = 90             # raw activity 이벤트 보존 기간 (최소 7일)
+candidate_retention_days = 30           # 후보 행 보존 기간 (capture_retention_days 이하)
+max_candidates_per_request = 8          # 요청당 최대 후보 수 (범위 1–32)
+auto_prompt_penny = true                # 새 후보 발생 시 Penny에 자동 큐레이션 요청
+require_user_confirmation_for = ["org_write", "policy_note", "destructive_action"]
+
+[knowledge.curation.path_rules]
+operations = "ops/journal/%Y/%m/%d"
+incident   = "ops/incidents/%Y/%m/%d"
+research   = "research/notes/%Y/%m/%d"
+```
+
+- `enabled`: `false`로 설정 시 후보 생성 루프를 비활성화합니다. 단, activity audit capture는 계속 동작합니다.
+- `capture_retention_days`: raw activity 이벤트 보존 기간. 최소 7일 (인시던트 리뷰 보장).
+- `candidate_retention_days`: 후보 행 보존 기간. `capture_retention_days` 이하여야 합니다.
+- `max_candidates_per_request`: 단일 capture 호출당 최대 후보 수. 범위 [1, 32].
+- `auto_prompt_penny`: 새 대기 후보 발생 시 Penny에 자동 큐레이션 프롬프트를 주입할지 여부.
+- `require_user_confirmation_for`: Penny가 단독으로 accept할 수 없는 후보 class 목록. 각 항목은 비어 있지 않은 문자열이어야 합니다.
+- `path_rules`: 후보 category별 wiki 경로 템플릿 (`%Y/%m/%d` strftime 지원). `..` 세그먼트가 경로의 어느 위치에 있더라도 허용되지 않습니다 (정규 루트 탈출 방지).
 
 ---
 
