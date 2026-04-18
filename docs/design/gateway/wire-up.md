@@ -7,6 +7,8 @@
 > **관련 크레이트**: `gadgetron-gateway`, `gadgetron-router`, `gadgetron-xaas`, `gadgetron-core`, `gadgetron-cli`
 > **Phase**: [P1]
 
+> ⚠ **2026-04-18 authority notice**: This document is the Sprint 3 gateway wire-up draft ([P1]) and is retained for historical context. Current trunk authority for route-group classification, scope gates, `AppState` optional field semantics, and `openai_shape_413` shaping is [`docs/design/gateway/route-groups-and-scope-gates.md`](route-groups-and-scope-gates.md) (Approved, 2026-04-18). Workbench route group and actor-aware projection rules are [`docs/design/gateway/workbench-projection-and-actions.md`](workbench-projection-and-actions.md) (Approved, 2026-04-18).
+
 ---
 
 ## 1. 철학 & 컨셉 (Why)
