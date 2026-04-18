@@ -630,6 +630,33 @@ impl KnowledgeGadgetProvider {
         }
     }
 
+    /// Dispatch `wiki.import`. Only the built-in markdown extractor is
+    /// wired here; content-type `application/pdf` is rejected at the
+    /// gadget layer with an `InvalidArgs`.
+    ///
+    /// # W3-KL-3 deferred (D-20260418-13): PDF path via Bundle install
+    ///
+    /// Importing PDFs through `wiki.import` requires the
+    /// `DocumentFormatsBundle` (with the `pdf` feature enabled) to
+    /// register a `PdfExtractor` on the `extractors` axis of the bundle
+    /// registry. That registry wiring is not yet part of the production
+    /// startup path — it lands with W3-BUN-1 / W3-KL-4.
+    ///
+    /// Until then, PDF extraction is exercised in two places:
+    ///
+    /// 1. **Crate-level unit tests** — `plugins/plugin-document-formats/
+    ///    src/pdf.rs` validates `PdfExtractor::extract` end-to-end
+    ///    against a hand-crafted PDF fixture.
+    /// 2. **Bundle-level integration test** — `crates/gadgetron-
+    ///    knowledge/tests/rag_citation_e2e.rs::pdf_extractor_produces_
+    ///    pipeline_ready_output` constructs a `PdfExtractor`
+    ///    directly (simulating what `BundleRegistry::install_all` will
+    ///    do) and confirms the `ExtractedDocument` shape matches what
+    ///    `IngestPipeline::import` consumes.
+    ///
+    /// Once the Bundle install path is live, this method will look up
+    /// an `Arc<dyn Extractor>` by content-type prefix from the registry
+    /// instead of always reaching for `default_markdown_extractor`.
     async fn call_wiki_import(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let bytes_b64 = required_string_arg(&args, "bytes")?;
         let content_type = required_string_arg(&args, "content_type")?;

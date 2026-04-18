@@ -2,22 +2,22 @@
 //!
 //! Spec: `docs/design/phase2/11-raw-ingestion-and-rag.md` §4.1, §4.5, §8.
 //!
-//! # W3-KL-2 scope
+//! # W3-KL-2 / W3-KL-3 scope
 //!
-//! Ships only the `markdown` feature (always on). The MarkdownExtractor is a
-//! near-noop that accepts UTF-8 markdown / plain text, copies it to
-//! [`gadgetron_core::ingest::ExtractedDocument::plain_text`], and emits a
-//! [`gadgetron_core::ingest::StructureHint::Heading`] for each `#`-prefix
-//! line so the chunker can split on section boundaries.
+//! Default build ships the `markdown` feature (always on). When compiled
+//! with `--features pdf` the `PdfExtractor` is also registered on the
+//! `extractors` axis — gated so build environments that do not need PDF
+//! ingestion skip the transitive `lopdf` / `encoding_rs` /
+//! `adobe-cmap-parser` chain (~10 crates).
 //!
-//! # Deferred (W3-KL-3)
+//! # Deferred (W3-KL-4)
 //!
-//! - `pdf` feature: `PdfExtractor` via the `pdf-extract` crate.
 //! - `docx` / `pptx` features: pandoc-subprocess extractors.
-//! - Full `Bundle::install` wiring (needs a real `BundleRegistry` to drive;
-//!   W3-KL-2 keeps the Bundle impl minimal because
+//! - Full `Bundle::install` wiring via a real `BundleRegistry` (today
 //!   `KnowledgeGadgetProvider` uses an internal markdown extractor
-//!   directly — see `gadgetron-knowledge::gadget`).
+//!   directly — see `gadgetron-knowledge::gadget`; PDF goes through
+//!   the bundle install path validated by this crate's test suite and
+//!   by `crates/gadgetron-knowledge/tests/rag_citation_e2e.rs`).
 //!
 //! # Registration
 //!
@@ -27,7 +27,8 @@
 //! ```
 //!
 //! After install, `registry.extractor(&PlugId::new("markdown")?)` returns
-//! the `MarkdownExtractor` instance.
+//! the `MarkdownExtractor` and (when `pdf` is enabled)
+//! `registry.extractor(&PlugId::new("pdf")?)` returns the `PdfExtractor`.
 
 use std::sync::Arc;
 
@@ -37,8 +38,12 @@ use gadgetron_core::bundle::manifest::BundleManifest;
 use gadgetron_core::bundle::trait_def::{Bundle, BundleDescriptor, DisableBehavior};
 
 pub mod markdown;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 
 pub use markdown::MarkdownExtractor;
+#[cfg(feature = "pdf")]
+pub use pdf::PdfExtractor;
 
 /// The Bundle entry-point for document-format extractors.
 ///
@@ -70,6 +75,10 @@ impl DocumentFormatsBundle {
         #[cfg(feature = "markdown")]
         {
             plugs.push(PlugId::new("markdown").expect("markdown is a valid PlugId"));
+        }
+        #[cfg(feature = "pdf")]
+        {
+            plugs.push(PlugId::new("pdf").expect("pdf is a valid PlugId"));
         }
         let manifest = BundleManifest {
             name: "document-formats".into(),
@@ -116,6 +125,15 @@ impl Bundle for DocumentFormatsBundle {
                 .extractors
                 .register(id, Arc::new(markdown::MarkdownExtractor::new()));
         }
+        #[cfg(feature = "pdf")]
+        {
+            let id = PlugId::new("pdf")
+                .map_err(|e| BundleError::Install(format!("pdf plug id: {e}")))?;
+            let _outcome = ctx
+                .plugs
+                .extractors
+                .register(id, Arc::new(pdf::PdfExtractor::new()));
+        }
         Ok(())
     }
 
@@ -147,6 +165,23 @@ mod tests {
         );
         #[cfg(not(feature = "markdown"))]
         assert!(!ids.contains(&"markdown"));
+    }
+
+    #[test]
+    fn pdf_plug_is_declared_when_feature_enabled() {
+        // Companion of the markdown test. Regression lock for
+        // W3-KL-3 D-20260418-13 — manifest drift-check depends on
+        // the `pdf` PlugId appearing iff the `pdf` feature was
+        // compiled in.
+        let b = DocumentFormatsBundle::new();
+        let ids: Vec<&str> = b.manifest().plugs.iter().map(|p| p.as_str()).collect();
+        #[cfg(feature = "pdf")]
+        assert!(
+            ids.contains(&"pdf"),
+            "pdf plug must appear in manifest when feature=pdf; got {ids:?}"
+        );
+        #[cfg(not(feature = "pdf"))]
+        assert!(!ids.contains(&"pdf"));
     }
 
     #[test]

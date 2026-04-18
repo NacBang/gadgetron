@@ -30,6 +30,7 @@
 // extensively. See the matching cfg_attr in gadgetron-core/src/lib.rs.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
+pub mod citation;
 pub mod gadget_config;
 pub mod gadget_registry;
 pub mod gadget_server;
