@@ -217,7 +217,7 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 
 ### Architecture Decision Records
 
-7 ACCEPTED ADRs (P2A-01 through P2A-07). See [`docs/adr/README.md`](docs/adr/README.md) for the full index with status, date, and one-line summary of each. New ADRs update that file only — this section intentionally stays link-only to avoid drift.
+The authoritative ADR index lives in [`docs/adr/README.md`](docs/adr/README.md). This README intentionally does not restate ADR counts or ranges, because the index is the only place that should change when new decisions land.
 
 ## Phase 2A Progress
 
