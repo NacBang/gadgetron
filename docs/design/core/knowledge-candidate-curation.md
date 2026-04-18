@@ -93,7 +93,6 @@ Trade-off:
   - workbench action / approval decision owner 가 `capture_action()` call site 를 실제 request path 에 연결하는 것
   - chat completion owner hook 에 real `actor_user_id`, `audit_event_id`, hint generation, streaming final usage accounting 을 연결하는 것
   - workbench/read-model 에 `canonical_path`, `materialization_status`, `audit_event_id` 를 영속적으로 반영하는 projection
-  - config default `path_rules` 와 KC-1b runtime key-space(`direct_action`, `runtime_observation` 등) 의 정렬
   - startup-wired candidate plane 의 same-turn guarantee 를 실제 live request flow 에서 검증하는 HTTP-level smoke/e2e
 - [P2C+] intentionally deferred
   - `PgActivityCaptureStore` / retention jobs / projection persistence
@@ -441,16 +440,11 @@ max_candidates_per_request = 8
 auto_prompt_penny = true
 require_user_confirmation_for = ["org_write", "policy_note", "destructive_action"]
 
-# 현재 `KnowledgeCurationConfig::default()` 가 실제로 제공하는 기본값
+# `KnowledgeCurationConfig::default()` 가 실제로 제공하는 기본값
 [knowledge.curation.path_rules]
-operations = "ops/journal/%Y/%m/%d"
-incident = "ops/incidents/%Y/%m/%d"
-research = "research/notes/%Y/%m/%d"
-
-# KC-1b coordinator runtime semantics (startup wiring landed 후 의도되는 키 공간)
-# direct_action = "ops/journal/{date}/{topic}"
-# gadget_tool_call = "ops/tools/{date}/{author}"
-# runtime_observation = "ops/runtime/{date}/{topic}"
+direct_action      = "ops/journal/{date}/{topic}"
+gadget_tool_call   = "ops/tools/{date}/{author}"
+runtime_observation = "ops/runtime/{date}/{topic}"
 ```
 
 검증 규칙:
@@ -460,9 +454,9 @@ research = "research/notes/%Y/%m/%d"
 - `candidate_retention_days` 는 `capture_retention_days` 보다 클 수 없다.
 - `max_candidates_per_request` 는 1 이상 32 이하로 제한한다.
 - `require_user_confirmation_for` 는 [P2B] 현재 비어 있지 않은 string label 만 요구한다. enum narrowing 은 [P2C] user-confirmation semantics 와 함께 굳힌다.
-- `path_rules.*` 는 [P2B] 현재 validation 시 parent traversal (`../`, `..` segment) 만 거부한다. placeholder vocabulary, key-space(`operations` vs `direct_action`) 는 아직 validate 하지 않는다.
-- `InProcessCandidateCoordinator::with_path_rules()` 로 주입된 map 은 [P2B] 현재 `ActivityKind` snake_case key (`direct_action`, `gadget_tool_call`, `runtime_observation`, ...) 를 기준으로 `{date}` / `{topic}` / `{author}` 만 확장한다.
-- 따라서 current trunk 는 **config default surface 와 coordinator runtime semantics 가 아직 완전히 합쳐지지 않았다**. PSL-1c 로 startup wiring 이 landed 하면서 이 drift 는 더 이상 test-only 가 아니고, hint 에 `proposed_path = None` 인 live capture call site 가 붙는 순간 operator-facing 동작으로 드러난다.
+- `path_rules.*` 는 [P2B] 현재 validation 시 parent traversal (`../`, `..` segment) 만 거부한다. placeholder vocabulary 는 아직 validate 하지 않는다.
+- `InProcessCandidateCoordinator::with_path_rules()` 로 주입된 map 은 `ActivityKind` snake_case key (`direct_action`, `gadget_tool_call`, `runtime_observation`, ...) 를 기준으로 `{date}` / `{topic}` / `{author}` 만 확장한다.
+- config default key-space 와 coordinator runtime semantics 의 정렬은 완료되었다 — `KnowledgeCurationConfig::default()` 가 `direct_action`, `gadget_tool_call`, `runtime_observation` 키와 `{date}/{topic}/{author}` 템플릿을 사용한다.
 - `auto_prompt_penny`, `require_user_confirmation_for`, `path_rules` application 은 config surface 와 coordinator/service layer 까지 landed 했다. 다만 실제 request path 에서 `capture_action()` 을 호출하는 owner hook 은 후속이다.
 
 운영자 touchpoint:
@@ -826,7 +820,7 @@ user direct action / Penny gadget / system observation
 | Q-2 | candidate retention 만료 시 projection 처리 | A. hide only / B. auto-reject | **A** | 🟡 |
 | Q-3 | Penny auto-accept 허용 범위 | A. personal/private note only / B. wider org scope | **A** | 🟡 |
 | Q-4 | candidate dedup key | A. request+capability+summary / B. semantic similarity | **A** first | 🟢 |
-| Q-5 | `path_rules` 기본 key(`operations`, `incident`, `research`) 와 runtime `ActivityKind` key(`direct_action`, `runtime_observation` 등) 를 어떻게 정렬할 것인가 | A. default key-space 를 runtime snake_case 로 맞춤 / B. startup alias translation 추가 | **A** | 🟡 |
+| Q-5 | `path_rules` 기본 key 와 runtime `ActivityKind` key(`direct_action`, `runtime_observation` 등) 를 어떻게 정렬할 것인가 | A. default key-space 를 runtime snake_case 로 맞춤 / B. startup alias translation 추가 | **A** | 🟢 |
 
 ---
 

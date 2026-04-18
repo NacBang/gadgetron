@@ -414,9 +414,9 @@ auto_prompt_penny = true                # 새 후보 발생 시 Penny에 자동 
 require_user_confirmation_for = ["org_write", "policy_note", "destructive_action"]
 
 [knowledge.curation.path_rules]
-operations = "ops/journal/%Y/%m/%d"
-incident   = "ops/incidents/%Y/%m/%d"
-research   = "research/notes/%Y/%m/%d"
+direct_action      = "ops/journal/{date}/{topic}"
+gadget_tool_call   = "ops/tools/{date}/{author}"
+runtime_observation = "ops/runtime/{date}/{topic}"
 ```
 
 - `enabled`: `false`로 설정 시 후보 생성 루프를 비활성화합니다. 단, activity audit capture는 계속 동작합니다.
@@ -425,7 +425,12 @@ research   = "research/notes/%Y/%m/%d"
 - `max_candidates_per_request`: 단일 capture 호출당 최대 후보 수. 범위 [1, 32].
 - `auto_prompt_penny`: 새 대기 후보 발생 시 Penny에 자동 큐레이션 프롬프트를 주입할지 여부.
 - `require_user_confirmation_for`: Penny가 단독으로 accept할 수 없는 후보 class 목록. 각 항목은 비어 있지 않은 문자열이어야 합니다.
-- `path_rules`: 후보 category별 wiki 경로 템플릿 (`%Y/%m/%d` strftime 지원). `..` 세그먼트가 경로의 어느 위치에 있더라도 허용되지 않습니다 (정규 루트 탈출 방지).
+- `path_rules`: 활동 종류별 wiki 경로 템플릿. 키는 `ActivityKind`의 snake_case 값(`direct_action`, `gadget_tool_call`, `approval_decision`, `runtime_observation`, `knowledge_writeback`)이어야 합니다. 매칭되는 규칙이 없으면 `ops/journal/<YYYY-MM-DD>/<candidate_uuid>` fallback 경로가 사용됩니다. `..` 세그먼트가 경로의 어느 위치에 있더라도 허용되지 않습니다.
+
+  템플릿 변수:
+  - `{date}` → 이벤트 `created_at`의 UTC `YYYY-MM-DD`
+  - `{topic}` → snake_case `ActivityKind` 레이블 (예: `direct_action`)
+  - `{author}` → actor UUID (bare, 하이픈 포함)
 
 ---
 
