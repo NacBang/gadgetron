@@ -5,6 +5,24 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
+    /// Per-entry correlation key. A single `request_id` can produce multiple
+    /// audit entries (Ok + Err, streaming start + stream_interrupted, PR 6
+    /// Drop-guard Ok + stream-end amendment) and each row needs its own
+    /// identity so downstream consumers — PostgreSQL `audit_log.id`,
+    /// `CapturedActivityEvent.audit_event_id` on the shared-surface plane —
+    /// can JOIN without ambiguity.
+    ///
+    /// Callers generate this via `Uuid::new_v4()` at the point of emit and
+    /// pass the same UUID to any correlated capture / write side so the
+    /// audit row and the activity row agree on correlation identity.
+    ///
+    /// Distinct from `request_id`: `request_id` is the HTTP request scope
+    /// (one per inbound request), `event_id` is the audit-row scope (one
+    /// per `AuditWriter::send`). Setting `event_id = request_id` is a
+    /// bug — covered by the `event_id_distinct_from_request_id` unit test.
+    ///
+    /// Spec: D-20260418-24 (drift-fix PR 5).
+    pub event_id: Uuid,
     pub tenant_id: Uuid,
     pub api_key_id: Uuid,
     pub request_id: Uuid,
@@ -66,6 +84,7 @@ mod tests {
 
     fn make_entry() -> AuditEntry {
         AuditEntry {
+            event_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             api_key_id: Uuid::new_v4(),
             request_id: Uuid::new_v4(),
@@ -130,6 +149,7 @@ mod tests {
     async fn entry_fields_preserved() {
         let (writer, mut rx) = AuditWriter::new(16);
         let entry = AuditEntry {
+            event_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
             api_key_id: Uuid::nil(),
             request_id: Uuid::nil(),
@@ -145,5 +165,66 @@ mod tests {
         let received = rx.recv().await.unwrap();
         assert_eq!(received.status, AuditStatus::StreamInterrupted);
         assert!(received.model.is_none());
+    }
+
+    // Drift-fix PR 5 (D-20260418-24): event_id contract tests
+
+    #[tokio::test]
+    async fn event_id_round_trips_through_send_recv() {
+        let (writer, mut rx) = AuditWriter::new(16);
+        let expected = Uuid::new_v4();
+        let mut entry = make_entry();
+        entry.event_id = expected;
+        writer.send(entry);
+        let received = rx.recv().await.unwrap();
+        assert_eq!(
+            received.event_id, expected,
+            "event_id must round-trip verbatim through the channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_id_unique_across_multiple_sends() {
+        let (writer, mut rx) = AuditWriter::new(16);
+        writer.send(make_entry());
+        writer.send(make_entry());
+        writer.send(make_entry());
+        let mut seen: Vec<Uuid> = Vec::new();
+        while let Ok(entry) = rx.try_recv() {
+            assert!(
+                !seen.contains(&entry.event_id),
+                "duplicate event_id {} emitted — make_entry MUST call Uuid::new_v4() per call",
+                entry.event_id
+            );
+            seen.push(entry.event_id);
+        }
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn event_id_distinct_from_request_id_on_same_request_multiple_entries() {
+        // A single request can produce multiple audit entries — for example
+        // streaming emits an `Ok` at dispatch then (PR 6) a `StreamInterrupted`
+        // or token-amended entry at stream-end. Each audit row must carry its
+        // own `event_id` so `audit_log.id` stays a real primary key; the
+        // shared `request_id` stitches them together under trace continuity.
+        let (writer, mut rx) = AuditWriter::new(16);
+        let request_id = Uuid::new_v4();
+        for _ in 0..2 {
+            let mut entry = make_entry();
+            entry.request_id = request_id;
+            writer.send(entry);
+        }
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        assert_eq!(first.request_id, second.request_id, "request_id shared");
+        assert_ne!(
+            first.event_id, second.event_id,
+            "event_id MUST differ between two audit rows on the same request"
+        );
+        assert_ne!(
+            first.event_id, first.request_id,
+            "event_id and request_id MUST NOT collapse into the same Uuid"
+        );
     }
 }

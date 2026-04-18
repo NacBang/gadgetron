@@ -71,6 +71,7 @@ pub async fn auth_middleware(
 /// no ValidatedKey is available to supply real UUIDs.
 fn emit_auth_failure_audit(state: &AppState) {
     state.audit_writer.send(AuditEntry {
+        event_id: Uuid::new_v4(),
         tenant_id: Uuid::nil(),
         api_key_id: Uuid::nil(),
         request_id: Uuid::new_v4(),
