@@ -461,9 +461,7 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn cmd_bundle_install_stub(name: &str) -> Result<()> {
-    println!(
-        "bundle install {name}: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."
-    );
+    println!("bundle install {name}: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI.");
     Ok(())
 }
 

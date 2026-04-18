@@ -111,8 +111,7 @@ mod tests {
             "expected Manifest variant, got {err:?}"
         );
         assert!(
-            err.to_string().contains("Uppercase-Plug")
-                || err.to_string().contains("kebab-case"),
+            err.to_string().contains("Uppercase-Plug") || err.to_string().contains("kebab-case"),
             "err must mention the invalid id: {err}"
         );
     }

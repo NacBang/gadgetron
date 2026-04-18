@@ -371,9 +371,7 @@ impl AppConfig {
     /// `CFG-045`. With the toggle, parser emits `tracing::warn!` per
     /// bundle/plug pairing naming the reserved stanza.
     fn validate_bundles(&self) -> crate::error::Result<()> {
-        let ack = self
-            .features
-            .tenant_plug_overrides_accepted_as_reserved;
+        let ack = self.features.tenant_plug_overrides_accepted_as_reserved;
         for (bundle_name, bundle) in &self.bundles {
             for (plug_name, plug) in &bundle.plugs {
                 if plug.tenant_overrides.is_empty() {

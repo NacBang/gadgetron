@@ -227,6 +227,9 @@ mod tests {
         use crate::agent::tools::GadgetTier as AgentTier;
         assert_eq!(GadgetTier::from(AgentTier::Read), GadgetTier::Read);
         assert_eq!(GadgetTier::from(AgentTier::Write), GadgetTier::Write);
-        assert_eq!(GadgetTier::from(AgentTier::Destructive), GadgetTier::Destructive);
+        assert_eq!(
+            GadgetTier::from(AgentTier::Destructive),
+            GadgetTier::Destructive
+        );
     }
 }

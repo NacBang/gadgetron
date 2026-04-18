@@ -34,7 +34,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use gadgetron_core::agent::config::AgentConfig;
-use gadgetron_core::audit::{NoopGadgetAuditEventSink, GadgetAuditEventSink};
+use gadgetron_core::audit::{GadgetAuditEventSink, NoopGadgetAuditEventSink};
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::{Content, Message, Role};
 use gadgetron_core::provider::{

@@ -170,11 +170,7 @@ mod tests {
     #[test]
     fn bundles_home_tier1_config_override_wins() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
 
         let tmp = TempDir::new().unwrap();
         // Set lower-tier env vars pointing elsewhere; tier 1 must still win.
@@ -191,11 +187,7 @@ mod tests {
     #[test]
     fn bundles_home_tier2_env_var_when_config_absent() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
 
         let tmp = TempDir::new().unwrap();
         std::env::set_var("GADGETRON_BUNDLES_HOME", tmp.path());
@@ -211,11 +203,7 @@ mod tests {
     #[test]
     fn bundles_home_tier3_data_dir_fallback() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
 
         let tmp = TempDir::new().unwrap();
         std::env::set_var("GADGETRON_DATA_DIR", tmp.path());
@@ -230,11 +218,7 @@ mod tests {
     #[test]
     fn bundles_home_tier4_home_dir_fallback() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
 
         let tmp = TempDir::new().unwrap();
         std::env::set_var("HOME", tmp.path());
@@ -248,11 +232,7 @@ mod tests {
     fn bundles_home_resolver_fail_closed_on_root_home() {
         // ADDENDUM-01 §Consequences mandatory test — no silent fallback to /.
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
 
         std::env::set_var("HOME", "/");
 
@@ -263,11 +243,7 @@ mod tests {
     #[test]
     fn bundles_home_no_home_when_all_tiers_empty() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
 
         // No config override, no env, no HOME → NoHome.
         let err = resolve_bundles_home_raw(None).unwrap_err();
@@ -291,11 +267,7 @@ mod tests {
         // the `_raw` form and emits tracing::info!). No subscriber is
         // installed in the unit test — the call must simply succeed.
         let _lock = ENV_MUTEX.lock().unwrap();
-        let _guard = EnvGuard::new(vec![
-            "GADGETRON_BUNDLES_HOME",
-            "GADGETRON_DATA_DIR",
-            "HOME",
-        ]);
+        let _guard = EnvGuard::new(vec!["GADGETRON_BUNDLES_HOME", "GADGETRON_DATA_DIR", "HOME"]);
         let tmp = TempDir::new().unwrap();
         let path = resolve_bundles_home(Some(tmp.path().to_str().unwrap())).unwrap();
         assert_eq!(path, tmp.path());

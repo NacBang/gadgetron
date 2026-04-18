@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gadgetron_core::agent::config::{EnvResolver, StdEnv};
-use gadgetron_core::agent::tools::{GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier};
+use gadgetron_core::agent::tools::{
+    GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
+};
 use gadgetron_core::error::WikiErrorKind;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -593,7 +595,9 @@ fn required_string_arg(args: &Value, field: &str) -> Result<String, GadgetError>
 
 fn map_wiki_err_generic(err: WikiError) -> GadgetError {
     match err.kind_ref() {
-        Some(WikiErrorKind::PathEscape { .. }) => GadgetError::InvalidArgs("invalid page path".into()),
+        Some(WikiErrorKind::PathEscape { .. }) => {
+            GadgetError::InvalidArgs("invalid page path".into())
+        }
         _ => GadgetError::Execution("wiki operation failed".into()),
     }
 }
@@ -609,10 +613,12 @@ fn map_wiki_err_read(err: WikiError, name: &str) -> GadgetError {
 
 fn map_wiki_err_write(err: WikiError, _name: &str) -> GadgetError {
     match err.kind_ref() {
-        Some(WikiErrorKind::PathEscape { .. }) => GadgetError::InvalidArgs("invalid page path".into()),
-        Some(WikiErrorKind::PageTooLarge { bytes, limit, .. }) => GadgetError::InvalidArgs(format!(
-            "page too large: {bytes} bytes exceeds the {limit}-byte limit"
-        )),
+        Some(WikiErrorKind::PathEscape { .. }) => {
+            GadgetError::InvalidArgs("invalid page path".into())
+        }
+        Some(WikiErrorKind::PageTooLarge { bytes, limit, .. }) => GadgetError::InvalidArgs(
+            format!("page too large: {bytes} bytes exceeds the {limit}-byte limit"),
+        ),
         Some(WikiErrorKind::CredentialBlocked { pattern, .. }) => GadgetError::Denied {
             reason: format!(
                 "credential pattern {pattern:?} detected in content — refusing to write"

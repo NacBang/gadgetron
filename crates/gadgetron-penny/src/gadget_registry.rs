@@ -659,7 +659,12 @@ mod tests {
     fn build_allowed_tools_t1_always_present() {
         let reg = registry_with_full_set();
         // Even with all writes never and destructive disabled, T1 reads remain.
-        let cfg = cfg_with_overrides(GadgetMode::Never, GadgetMode::Never, GadgetMode::Never, false);
+        let cfg = cfg_with_overrides(
+            GadgetMode::Never,
+            GadgetMode::Never,
+            GadgetMode::Never,
+            false,
+        );
         let tools = reg.build_allowed_tools(&cfg);
         assert!(tools.contains(&"wiki.read".to_string()));
         assert!(tools.contains(&"web.search".to_string()));
@@ -669,7 +674,12 @@ mod tests {
     #[test]
     fn build_allowed_tools_wiki_write_auto_included() {
         let reg = registry_with_full_set();
-        let cfg = cfg_with_overrides(GadgetMode::Never, GadgetMode::Auto, GadgetMode::Never, false);
+        let cfg = cfg_with_overrides(
+            GadgetMode::Never,
+            GadgetMode::Auto,
+            GadgetMode::Never,
+            false,
+        );
         let tools = reg.build_allowed_tools(&cfg);
         assert!(tools.contains(&"wiki.write".to_string()));
         // infra.deploy_model is still Never.

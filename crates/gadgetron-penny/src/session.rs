@@ -58,8 +58,8 @@ use std::time::Duration;
 use futures::Stream;
 use gadgetron_core::agent::config::{AgentConfig, SessionMode, StdEnv};
 use gadgetron_core::audit::{
-    NoopGadgetAuditEventSink, GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome, GadgetMetadata,
-    GadgetTier,
+    GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome, GadgetMetadata, GadgetTier,
+    NoopGadgetAuditEventSink,
 };
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::Role;
@@ -71,8 +71,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::home::PennyHome;
 use crate::gadget_config::write_config_file;
+use crate::home::PennyHome;
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
 use crate::spawn::{build_claude_command_with_session, ClaudeSessionMode};
