@@ -1260,13 +1260,15 @@ fn build_workbench(
     Some(Arc::new(GatewayWorkbenchService { projection }))
 }
 
-/// Build the in-memory candidate capture plane.
+/// Build the candidate capture plane, backed by Postgres when a pool is
+/// provided, or by the in-memory store otherwise.
 ///
 /// Returns the `ActivityCaptureStore` and `KnowledgeCandidateCoordinator`
 /// as trait-object `Arc`s ready for `AppState`.
 fn build_candidate_plane(
     knowledge_service: &Arc<gadgetron_knowledge::service::KnowledgeService>,
     curation_cfg: &gadgetron_knowledge::config::KnowledgeCurationConfig,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> (
     Arc<dyn gadgetron_core::knowledge::candidate::ActivityCaptureStore>,
     Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
@@ -1275,8 +1277,15 @@ fn build_candidate_plane(
         InMemoryActivityCaptureStore, InProcessCandidateCoordinator,
     };
 
+    let gates = curation_cfg.require_user_confirmation_for.clone();
+
     let store: Arc<dyn gadgetron_core::knowledge::candidate::ActivityCaptureStore> =
-        Arc::new(InMemoryActivityCaptureStore::new());
+        if let Some(pool) = pg_pool {
+            use gadgetron_knowledge::candidate::pg::PgActivityCaptureStore;
+            Arc::new(PgActivityCaptureStore::new(pool).with_confirmation_gate(gates))
+        } else {
+            Arc::new(InMemoryActivityCaptureStore::new().with_confirmation_gate(gates))
+        };
 
     let coordinator: Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator> =
         Arc::new(
@@ -1421,7 +1430,10 @@ async fn init_serve_runtime(
     let (activity_capture_store, candidate_coordinator) =
         match (knowledge_service.as_ref(), knowledge_cfg.as_ref()) {
             (Some(svc), Some(kcfg)) if kcfg.curation.enabled => {
-                let (s, c) = build_candidate_plane(svc, &kcfg.curation);
+                // Pass pg_pool so production wiring uses PgActivityCaptureStore.
+                // The pool is cloned here; the outer pool remains available for
+                // other subsystems (audit writer, key validator, etc.).
+                let (s, c) = build_candidate_plane(svc, &kcfg.curation, pg_pool.clone());
                 (Some(s), Some(c))
             }
             _ => (None, None),
@@ -3435,8 +3447,9 @@ wiki_max_page_bytes = 1048576
             "workbench must be Some when knowledge_service is Some"
         );
 
+        // No pg_pool in unit tests — keyword-only mode uses InMemory store.
         let (activity_store, candidate_coordinator) =
-            build_candidate_plane(&knowledge_service, &knowledge_cfg.curation);
+            build_candidate_plane(&knowledge_service, &knowledge_cfg.curation, None);
 
         let agent_cfg = gadgetron_core::agent::config::AgentConfig::default();
         let wb = workbench.as_ref().unwrap();

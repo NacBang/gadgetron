@@ -289,4 +289,17 @@ async fn psl_1d_successful_non_streaming_chat_completions_captures_one_event() {
         Some("chat.completions"),
         "source_capability must be 'chat.completions'"
     );
+
+    // W3-KC-1c: audit_event_id must be Some(request_id) to correlate with audit row.
+    // The request_id comes from TenantContext injected by the middleware in the test app;
+    // we assert it is Some (non-nil) — the exact UUID is opaque to this test.
+    assert!(
+        ev.audit_event_id.is_some(),
+        "audit_event_id must be Some(request_id) for correlation; got None"
+    );
+    assert_ne!(
+        ev.audit_event_id,
+        Some(uuid::Uuid::nil()),
+        "audit_event_id must not be the nil UUID"
+    );
 }
