@@ -49,13 +49,14 @@ fn registry_accepts_knowledge_provider() {
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     assert!(!registry.is_empty(), "registry must have tools registered");
-    // Knowledge provider exposes: wiki.{list,get,search,write,delete,rename}.
+    // Knowledge provider exposes: wiki.{list,get,search,write,delete,rename,import}.
+    // `wiki.import` added in W3-KL-2 (RAW ingestion pipeline).
     // `web.search` is only added when `[knowledge.search]` is configured, so
-    // the no-search provider built by `fresh_provider` stops at six.
+    // the no-search provider built by `fresh_provider` stops at seven.
     assert_eq!(
         registry.len(),
-        6,
-        "no-search knowledge provider exposes 6 tools (list/get/search/write/delete/rename)"
+        7,
+        "no-search knowledge provider exposes 7 tools (list/get/search/write/delete/rename/import)"
     );
 }
 
@@ -80,8 +81,9 @@ fn registry_all_schemas_contains_every_knowledge_tool() {
 fn build_allowed_tools_with_default_config_exposes_read_and_wiki_write() {
     // Default AgentConfig has wiki_write = Auto, other write subcats = Ask.
     // With T1 reads always present and every wiki.* T2 tool (write/delete/
-    // rename) mapped to the `wiki_write` subcategory (Auto by default), the
-    // filtered list should contain all six knowledge tools.
+    // rename/import) mapped to the `wiki_write` subcategory (Auto by default),
+    // the filtered list should contain all seven knowledge tools. `wiki.import`
+    // added in W3-KL-2 (RAW ingestion pipeline).
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     let cfg = AgentConfig::default();
@@ -92,7 +94,8 @@ fn build_allowed_tools_with_default_config_exposes_read_and_wiki_write() {
     assert!(allowed.contains(&"wiki.write".to_string()));
     assert!(allowed.contains(&"wiki.delete".to_string()));
     assert!(allowed.contains(&"wiki.rename".to_string()));
-    assert_eq!(allowed.len(), 6);
+    assert!(allowed.contains(&"wiki.import".to_string()));
+    assert_eq!(allowed.len(), 7);
 }
 
 #[test]

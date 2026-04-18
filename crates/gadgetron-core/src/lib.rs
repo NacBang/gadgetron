@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod ingest;
 pub mod knowledge;
 pub mod message;
 pub mod model;

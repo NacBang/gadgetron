@@ -237,6 +237,14 @@ mod tests {
         BTreeMap::new()
     }
 
+    /// Companion helper for the extractor-axis scratch map introduced in
+    /// W3-KL-2. Every existing LlmProvider-focused test now allocates a
+    /// second empty map alongside `empty_inner` so `BundleContext::new`'s
+    /// dual-axis signature compiles.
+    fn empty_extractors() -> BTreeMap<PlugId, Arc<dyn crate::ingest::Extractor>> {
+        BTreeMap::new()
+    }
+
     // ---- Contract tests ----
 
     #[test]
@@ -256,7 +264,8 @@ mod tests {
         let desc = descriptor("foo");
         let preds = build_predicates(&cfg, &desc);
         let mut inner = empty_inner();
-        let mut ctx = BundleContext::new(&preds, &mut inner);
+        let mut extractor_inner = empty_extractors();
+        let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
         let id = PlugId::new("bar").unwrap();
         let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider { name: "bar".into() });
         let outcome = ctx.plugs.llm_providers.register(id.clone(), plug);
@@ -290,7 +299,8 @@ mod tests {
             });
             let preds = build_predicates(&cfg, &desc);
             let mut inner = empty_inner();
-            let ctx = BundleContext::new(&preds, &mut inner);
+            let mut extractor_inner = empty_extractors();
+            let ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             assert!(
                 ctx.is_plug_enabled(&id_bar),
                 "bundle=true, plug=true → enabled"
@@ -311,7 +321,8 @@ mod tests {
             });
             let preds = build_predicates(&cfg, &desc);
             let mut inner = empty_inner();
-            let ctx = BundleContext::new(&preds, &mut inner);
+            let mut extractor_inner = empty_extractors();
+            let ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             assert!(
                 !ctx.is_plug_enabled(&id_bar),
                 "bundle=true, plug=false → disabled"
@@ -332,7 +343,8 @@ mod tests {
             });
             let preds = build_predicates(&cfg, &desc);
             let mut inner = empty_inner();
-            let ctx = BundleContext::new(&preds, &mut inner);
+            let mut extractor_inner = empty_extractors();
+            let ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             assert!(
                 !ctx.is_plug_enabled(&id_bar),
                 "bundle=false, plug=true → disabled"
@@ -357,7 +369,8 @@ mod tests {
         let desc = descriptor("foo");
         let preds = build_predicates(&cfg, &desc);
         let mut inner = empty_inner();
-        let mut ctx = BundleContext::new(&preds, &mut inner);
+        let mut extractor_inner = empty_extractors();
+        let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
         let id = PlugId::new("bar").unwrap();
         let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider { name: "bar".into() });
         let outcome = ctx.plugs.llm_providers.register(id.clone(), plug);
@@ -381,7 +394,8 @@ mod tests {
         let desc = descriptor("foo");
         let preds = build_predicates(&cfg, &desc);
         let mut inner = empty_inner();
-        let mut ctx = BundleContext::new(&preds, &mut inner);
+        let mut extractor_inner = empty_extractors();
+        let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
         let id = PlugId::new("bar").unwrap();
         assert!(ctx.is_plug_enabled(&id));
         let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider { name: "bar".into() });
@@ -452,10 +466,11 @@ mod tests {
         let desc = descriptor("foo");
         let preds = build_predicates(&cfg, &desc);
         let mut inner = empty_inner();
+        let mut extractor_inner = empty_extractors();
 
         let (buf, sub) = capture_subscriber();
         tracing::subscriber::with_default(sub, || {
-            let mut ctx = BundleContext::new(&preds, &mut inner);
+            let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             let id = PlugId::new("bar").unwrap();
             let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider {
                 // Sentinel we'd notice if someone added a `plug = ?plug`
@@ -524,10 +539,11 @@ mod tests {
         let desc = descriptor("foo");
         let preds = build_predicates(&cfg, &desc);
         let mut inner = empty_inner();
+        let mut extractor_inner = empty_extractors();
 
         let (buf, sub) = capture_subscriber();
         tracing::subscriber::with_default(sub, || {
-            let mut ctx = BundleContext::new(&preds, &mut inner);
+            let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             let id = PlugId::new("bar").unwrap();
             let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider { name: "bar".into() });
             let _ = ctx.plugs.llm_providers.register(id, plug);

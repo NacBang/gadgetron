@@ -36,6 +36,7 @@ use crate::bundle::errors::BundleError;
 use crate::bundle::id::PlugId;
 use crate::bundle::trait_def::{Bundle, BundleDescriptor};
 use crate::config::AppConfig;
+use crate::ingest::Extractor;
 use crate::provider::LlmProvider;
 
 /// Install-time status of one Plug registration inside a Bundle.
@@ -76,22 +77,29 @@ pub struct BundleRegistry {
     /// Installed Bundles — name → (descriptor, plug statuses).
     bundles: BTreeMap<Arc<str>, (BundleDescriptor, Vec<PlugStatus>)>,
     /// Consumed by the core router (LlmProvider Plug axis).
-    ///
-    /// Other Plug axis maps (Extractor, BlobStore, Scheduler,
-    /// EmbeddingProvider, EntityKind, HTTP routes) land in W3 when
-    /// their Rust traits ship.
     llm_providers: BTreeMap<PlugId, Arc<dyn LlmProvider>>,
+    /// Consumed by `gadgetron-knowledge::ingest::IngestPipeline` (Extractor
+    /// Plug axis). Added in W3-KL-2 per design 11 §4.3 so the
+    /// `plugin-document-formats` Bundle can register its markdown
+    /// extractor through the same plumbing as LlmProvider.
+    ///
+    /// Other Plug axis maps (BlobStore, Scheduler, EmbeddingProvider,
+    /// EntityKind, HTTP routes) land post-W3-KL-2 when their Rust traits
+    /// ship.
+    extractors: BTreeMap<PlugId, Arc<dyn Extractor>>,
 }
 
-// Manual `Debug` — `dyn LlmProvider` does not require `Debug`, so a
-// `derive(Debug)` would force every provider to implement it. Emitting
-// only the descriptor table + Plug count keeps `{:?}` useful for
-// debugging without leaking provider internals.
+// Manual `Debug` — `dyn LlmProvider` / `dyn Extractor` do not require
+// `Debug` being emitted, so a `derive(Debug)` would force every provider
+// / extractor to expose their internals. Emitting only the descriptor
+// table + per-axis Plug counts keeps `{:?}` useful for debugging without
+// leaking backend details.
 impl std::fmt::Debug for BundleRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BundleRegistry")
             .field("bundles", &self.bundles)
             .field("llm_provider_count", &self.llm_providers.len())
+            .field("extractor_count", &self.extractors.len())
             .finish()
     }
 }
@@ -144,13 +152,16 @@ impl BundleRegistry {
             }
 
             // Build predicates + scratch axis maps for this Bundle. The
-            // scratch maps are merged into `self.*_providers` only on
-            // success, so a panic leaves the registry consistent.
+            // scratch maps are merged into `self.*` only on success, so
+            // a panic or Err leaves the registry consistent — a
+            // half-registered Bundle never pollutes the core registry.
             let predicates = build_predicates(config, &descriptor);
             let mut llm_scratch: BTreeMap<PlugId, Arc<dyn LlmProvider>> = BTreeMap::new();
+            let mut extractor_scratch: BTreeMap<PlugId, Arc<dyn Extractor>> = BTreeMap::new();
 
             let install_result = {
-                let mut ctx = BundleContext::new(&predicates, &mut llm_scratch);
+                let mut ctx =
+                    BundleContext::new(&predicates, &mut llm_scratch, &mut extractor_scratch);
                 catch_unwind(AssertUnwindSafe(|| bundle.install(&mut ctx)))
             };
 
@@ -159,11 +170,14 @@ impl BundleRegistry {
                     // Merge scratch maps into self. `BTreeMap::extend`
                     // overwrites on key collision; cross-Bundle key
                     // collisions are rare in practice (Plug IDs are
-                    // kebab-case global names like `"openai-llm"`) —
-                    // but last-wins is deterministic and the sequential
-                    // install order is documented.
+                    // kebab-case global names like `"openai-llm"` /
+                    // `"markdown"`) — but last-wins is deterministic
+                    // and the sequential install order is documented.
                     for (id, provider) in llm_scratch {
                         self.llm_providers.insert(id, provider);
+                    }
+                    for (id, extractor) in extractor_scratch {
+                        self.extractors.insert(id, extractor);
                     }
 
                     // Collect Plug statuses from the predicate view —
@@ -174,9 +188,17 @@ impl BundleRegistry {
                     // whose `enabled_plugs[id] == false` reports
                     // `DisabledByConfig`. W3 adds `RegistrationFailed`
                     // sourcing from `requires_plugs` cascade.
+                    //
+                    // W3-KL-2 extends the "port" string to name whichever
+                    // axis actually received the registration — extractor
+                    // bundles get `"extractor"`, LLM bundles stay on
+                    // `"llm_provider"`. The CLI `gadgetron bundle info`
+                    // uses this to group the PLUGS table by axis.
                     let mut statuses: Vec<PlugStatus> = Vec::new();
                     for plug_id in &bundle.manifest().plugs {
-                        let registered_here = self.llm_providers.contains_key(plug_id);
+                        let in_llm = self.llm_providers.contains_key(plug_id);
+                        let in_extractors = self.extractors.contains_key(plug_id);
+                        let registered_here = in_llm || in_extractors;
                         let disabled_by_cfg = predicates
                             .enabled_plugs
                             .get(plug_id)
@@ -184,6 +206,16 @@ impl BundleRegistry {
                             .map(|en| !en)
                             .unwrap_or(false)
                             || !predicates.bundle_enabled;
+                        let port: &'static str = if in_extractors {
+                            "extractor"
+                        } else {
+                            // Default to llm_provider for back-compat
+                            // with existing ai-infra tests. Non-matching
+                            // plugs (manifest drift) also land here but
+                            // their status reports RegistrationFailed
+                            // so the label mislabel is cosmetic.
+                            "llm_provider"
+                        };
                         let status = if registered_here {
                             PlugStatusKind::Registered
                         } else if disabled_by_cfg {
@@ -203,7 +235,7 @@ impl BundleRegistry {
                         };
                         statuses.push(PlugStatus {
                             id: plug_id.clone(),
-                            port: "llm_provider", // W2: only axis that ships
+                            port,
                             status,
                         });
                     }
@@ -213,15 +245,17 @@ impl BundleRegistry {
                     results.push(Ok(descriptor));
                 }
                 Ok(Err(e)) => {
-                    // Bundle explicitly returned Err — scratch map is
+                    // Bundle explicitly returned Err — scratch maps are
                     // dropped here (unmerged), so the registry stays
-                    // clean.
+                    // clean on both axes.
                     drop(llm_scratch);
+                    drop(extractor_scratch);
                     results.push(Err(e));
                 }
                 Err(panic) => {
-                    // Scratch map dropped; daemon continues.
+                    // Scratch maps dropped; daemon continues.
                     drop(llm_scratch);
+                    drop(extractor_scratch);
                     let reason = extract_panic_msg(panic);
                     results.push(Err(BundleError::Install(format!("panic: {reason}"))));
                 }
@@ -251,6 +285,21 @@ impl BundleRegistry {
     /// router at request time.
     pub fn llm_provider(&self, id: &PlugId) -> Option<&Arc<dyn LlmProvider>> {
         self.llm_providers.get(id)
+    }
+
+    /// Look up a registered Extractor Plug by id. Used by
+    /// `gadgetron-knowledge::ingest::IngestPipeline` when selecting an
+    /// extractor for an incoming `wiki.import` call.
+    pub fn extractor(&self, id: &PlugId) -> Option<&Arc<dyn Extractor>> {
+        self.extractors.get(id)
+    }
+
+    /// Iterate every registered extractor in stable (`BTreeMap`) order.
+    /// Consumed by the pipeline when dispatching by `content_type` —
+    /// the pipeline asks each extractor `supported_content_types()` and
+    /// routes to the first match.
+    pub fn list_extractors(&self) -> impl Iterator<Item = (&PlugId, &Arc<dyn Extractor>)> {
+        self.extractors.iter()
     }
 }
 
@@ -406,5 +455,123 @@ mod tests {
         }
         // Only one row in the registry.
         assert_eq!(reg.list_bundles().len(), 1);
+    }
+
+    // ---- W3-KL-2 extractor axis — scratch atomicity + lookup ----
+
+    /// `Bundle` shape that registers one extractor under a caller-provided
+    /// `PlugId`. Sufficient for the contract test that proves the axis
+    /// round-trips through `install_all`.
+    struct ExtractorBundle {
+        desc: BundleDescriptor,
+        manifest: BundleManifest,
+        plug_id: PlugId,
+    }
+
+    impl Bundle for ExtractorBundle {
+        fn descriptor(&self) -> &BundleDescriptor {
+            &self.desc
+        }
+        fn manifest(&self) -> &BundleManifest {
+            &self.manifest
+        }
+        fn install(&self, ctx: &mut BundleContext<'_>) -> Result<(), BundleError> {
+            let outcome = ctx.plugs.extractors.register(
+                self.plug_id.clone(),
+                Arc::new(NoopExtractor {
+                    id: self.plug_id.clone(),
+                }),
+            );
+            // Surface the outcome to the test — a silent discard here
+            // would make the `Registered` assertion below unprovable.
+            assert!(
+                outcome.is_registered(),
+                "extractor plug must register under default config; got {outcome:?}"
+            );
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopExtractor {
+        id: PlugId,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ingest::Extractor for NoopExtractor {
+        fn name(&self) -> &str {
+            self.id.as_str()
+        }
+        fn supported_content_types(&self) -> &[&str] {
+            &["application/x-noop"]
+        }
+        async fn extract(
+            &self,
+            _bytes: &[u8],
+            _content_type: &str,
+            _hints: &crate::ingest::ExtractHints,
+        ) -> Result<crate::ingest::ExtractedDocument, crate::ingest::ExtractError> {
+            Ok(crate::ingest::ExtractedDocument {
+                plain_text: String::new(),
+                structure: Vec::new(),
+                source_metadata: serde_json::Value::Null,
+                warnings: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn extractor_plug_registration_flows_through_install_all() {
+        // Contract: a Bundle registering an extractor via
+        // `ctx.plugs.extractors.register(...)` must surface it through
+        // `BundleRegistry::extractor` after `install_all` returns.
+        // Regression guard against the scratch-map merge forgetting the
+        // extractor axis — W3-KL-2 introduced a second scratch BTreeMap
+        // that must be merged on success and dropped on panic/err.
+        let cfg = AppConfig::default();
+        let mut reg = BundleRegistry::new();
+
+        let plug_id = PlugId::new("markdown").unwrap();
+        let bundle = Box::new(ExtractorBundle {
+            desc: BundleDescriptor {
+                name: Arc::from("document-formats"),
+                version: Version::new(0, 1, 0),
+                manifest_version: 1,
+            },
+            manifest: BundleManifest {
+                name: "document-formats".into(),
+                version: Version::new(0, 1, 0),
+                manifest_version: 1,
+                license: None,
+                homepage: None,
+                plugs: vec![plug_id.clone()],
+                gadgets: Vec::new(),
+                requires_plugs: Default::default(),
+                runtime: None,
+            },
+            plug_id: plug_id.clone(),
+        }) as Box<dyn Bundle>;
+
+        let results = reg.install_all(&cfg, vec![bundle]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "install must succeed: {:?}", results[0]);
+
+        // `extractor(&plug_id)` returns the registered instance.
+        let looked_up = reg
+            .extractor(&plug_id)
+            .expect("extractor must be registered");
+        assert_eq!(looked_up.name(), "markdown");
+
+        // `list_extractors` yields one entry in BTreeMap order.
+        let listed: Vec<&PlugId> = reg.list_extractors().map(|(id, _)| id).collect();
+        assert_eq!(listed, vec![&plug_id]);
+
+        // Status row reports `Registered` on the `extractor` port.
+        let statuses = reg
+            .list_plugs("document-formats")
+            .expect("statuses for installed bundle");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].port, "extractor");
+        assert!(matches!(statuses[0].status, PlugStatusKind::Registered));
     }
 }

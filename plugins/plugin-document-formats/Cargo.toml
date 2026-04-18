@@ -1,0 +1,28 @@
+[package]
+name = "gadgetron-bundle-document-formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAW ingestion extractors — markdown (W3-KL-2); PDF/docx/pptx land in W3-KL-3"
+
+[features]
+default = ["markdown"]
+# Always-on in W3-KL-2. Kept feature-gated so W3-KL-3's pdf/docx/pptx
+# features can compose with markdown via `default-features = ["markdown"]`.
+markdown = []
+# Placeholder features — implementations land in W3-KL-3 alongside the
+# `pdf-extract` / pandoc subprocess extractors.
+# pdf = ["pdf-extract"]
+# docx = []
+# pptx = []
+
+[dependencies]
+async-trait = { workspace = true }
+gadgetron-core = { workspace = true }
+serde_json = { workspace = true }
+semver = "1"
+# pdf-extract = { version = "0.7", optional = true }
+
+[dev-dependencies]
+# `#[tokio::test]` for the async extract-fn tests.
+tokio = { workspace = true, features = ["macros", "rt"] }

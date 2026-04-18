@@ -1044,6 +1044,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gadgetron-bundle-document-formats"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "gadgetron-core",
+ "semver",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "gadgetron-cli"
 version = "0.2.0"
 dependencies = [
@@ -1121,6 +1132,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "futures",
  "gadgetron-core",
@@ -3867,6 +3879,7 @@ checksum = "5ac8b6f42ead25368cf5b098aeb3dc8a1a2c05a3eee8a9a1a68c640edbfc79d9"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
