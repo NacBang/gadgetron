@@ -1,7 +1,7 @@
 # Penny 런타임 (Phase 2A)
 
 > **상태**: trunk `0.2.0` 기준 구현됨.
-> **현재 CLI 계약**: `gadgetron penny ...` 계열 서브커맨드는 없습니다. Penny는 `gadgetron serve`가 `gadgetron.toml`의 `[knowledge]` 섹션을 읽어 등록하고, `gadgetron mcp serve`는 Claude Code가 호출하는 child-side stdio 서버입니다.
+> **현재 CLI 계약**: `gadgetron penny ...` 계열 서브커맨드는 없습니다. Penny는 `gadgetron serve`가 `gadgetron.toml`의 `[knowledge]` 섹션을 읽어 등록하고, `gadgetron gadget serve`는 Claude Code가 호출하는 child-side stdio 서버입니다 (`gadgetron mcp serve`는 deprecated alias — ADR-P2A-10).
 
 Penny는 Claude Code CLI를 Gadgetron의 `model = "penny"` 뒤에 붙인 런타임입니다. 사용자가 Penny로 채팅을 보내면 Gadgetron은 Claude Code를 서브프로세스로 띄우고, 로컬 markdown 위키와 선택적 SearXNG 검색을 MCP 도구로 제공합니다. 향후 P2C/P3에서는 같은 런타임이 infra/scheduler/cluster 도구까지 확장되는 방향을 전제합니다.
 
@@ -158,15 +158,17 @@ curl -sN http://127.0.0.1:8080/v1/chat/completions \
 
 ---
 
-## `gadgetron mcp serve`
+## `gadgetron gadget serve`
 
-`gadgetron mcp serve`는 일반 운영자가 직접 쓰는 주 명령은 아닙니다. Claude Code가 Penny 요청마다 child process로 호출하는 stdio JSON-RPC 서버입니다. 다만 수동 진단에는 유용합니다.
+`gadgetron gadget serve`는 일반 운영자가 직접 쓰는 주 명령은 아닙니다. Claude Code가 Penny 요청마다 child process로 호출하는 stdio JSON-RPC 서버입니다. 다만 수동 진단에는 유용합니다.
+
+> **참고**: `gadgetron mcp serve`는 deprecated alias입니다 (ADR-P2A-10). v0.3–v0.4에서는 동작하지만 v0.5에서 제거될 예정입니다. 스크립트·systemd unit·MCP config에서 이 명령을 사용하고 있다면 `gadgetron gadget serve`로 업데이트하십시오.
 
 ```sh
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | ./target/debug/gadgetron mcp serve --config gadgetron.toml
+  | ./target/debug/gadgetron gadget serve --config gadgetron.toml
 ```
 
 이 명령은 `gadgetron.toml`이 존재하고 `[knowledge]` 섹션이 유효해야만 동작합니다. 현재 CLI에는 `gadgetron penny init`이 없으므로, 설정 파일은 직접 준비해야 합니다.
@@ -250,7 +252,7 @@ stale_threshold_days = 90
 | 증상 | 원인 | 대응 |
 |---|---|---|
 | `/v1/models`에 `penny`가 없음 | `[knowledge]` 섹션이 없거나 검증에 실패함 | `gadgetron.toml`에 `[knowledge]`를 추가하고, `wiki_path` 부모 디렉터리가 존재하는지 확인한 뒤 서버 로그에서 `penny: registered`를 확인 |
-| `config file not found ... Create a gadgetron.toml with a [knowledge] section` | `gadgetron mcp serve`가 설정 파일을 찾지 못함 | `--config`로 올바른 경로를 넘기거나, 현재 디렉터리에 `gadgetron.toml`을 두십시오 |
+| `config file not found ... Create a gadgetron.toml with a [knowledge] section` | `gadgetron gadget serve`가 설정 파일을 찾지 못함 | `--config`로 올바른 경로를 넘기거나, 현재 디렉터리에 `gadgetron.toml`을 두십시오 |
 | ``[knowledge] section is missing`` | 설정 파일은 있지만 knowledge layer가 비활성 | `[knowledge]` 블록을 추가하십시오 |
 | `penny_not_installed` / spawn failure | `claude` 바이너리가 없거나 실행할 수 없음 | Claude Code를 설치하고 `claude login`을 완료한 뒤 `claude --version`을 확인 |
 | `penny_timeout` | `request_timeout_secs` 초과 | 프롬프트를 단순화하거나 timeout을 늘리십시오 |
