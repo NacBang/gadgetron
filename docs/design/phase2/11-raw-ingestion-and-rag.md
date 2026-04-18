@@ -1,7 +1,9 @@
 # 11 — RAW Ingestion Pipeline + RAG Foundation
 
-> **담당**: PM (Claude) — Round 1.5 리뷰 예정 (`@security-compliance-lead`, `@chief-architect`, `@qa-test-architect`, `@dx-product-lead`)
-> **상태**: Draft v0 (2026-04-18)
+> **담당**: PM (Claude)
+> **상태**: Approved
+> **작성일**: 2026-04-18
+> **최종 업데이트**: 2026-04-18
 > **Parent**: `docs/adr/ADR-P2A-09-raw-ingestion-pipeline.md`, `docs/process/04-decision-log.md` D-20260418-03
 > **Sibling**: [`08-identity-and-users.md`](08-identity-and-users.md), [`09-knowledge-acl.md`](09-knowledge-acl.md), [`10-penny-permission-inheritance.md`](10-penny-permission-inheritance.md)
 > **Parent (semantic infra)**: `docs/adr/ADR-P2A-07-semantic-wiki-pgvector.md`, `docs/design/phase2/05-knowledge-semantic.md`
@@ -14,22 +16,14 @@
 ## Table of Contents
 
 1. 철학 & 컨셉
-2. 용어 & 전제
-3. 5 capability axis & 결정 map
-4. 아키텍처 — 크레이트 경계와 플러그인 경계
-5. 스키마 — `ingested_blobs` + `wiki_pages` frontmatter
-6. 청킹 알고리즘 — 코드 스케치
-7. MCP tool surface
-8. Extractor 구현 가이드 (format 별)
-9. Dedup · Update · Citation
-10. ACL at ingestion
-11. 설정 스키마 (`gadgetron.toml`)
-12. 구현 계획 (모듈·함수 레이아웃)
-13. 테스트 계획 (단위 + 통합 + property + 보안)
-14. Phase 분해
-15. 오픈 이슈
-16. Out of scope
-17. 리뷰 로그
+2. 상세 구현 방안 (용어 / capability axis / architecture / schema / chunking / tools / extractor / dedup / ACL / config)
+3. 전체 모듈 연결 구도
+4. 단위 테스트 계획
+5. 통합 테스트 계획
+6. Phase 구분
+7. 오픈 이슈
+8. Out of scope
+9. 리뷰 로그
 
 ---
 
@@ -67,7 +61,9 @@ Markdown-only · Blob-primary · 원본 폐기 · Core 내 extractor · Fixed-si
 
 ---
 
-## 2. 용어 & 전제
+## 2. 상세 구현 방안 (What & How)
+
+### 2.1 용어 & 전제
 
 ### 2.1 용어
 
@@ -92,7 +88,7 @@ Markdown-only · Blob-primary · 원본 폐기 · Core 내 extractor · Fixed-si
 
 ---
 
-## 3. 5 Capability axis & 결정 map
+### 2.2 5 Capability axis & 결정 map
 
 ### 3.1 5 축
 
@@ -130,7 +126,7 @@ User → Penny: "이 URL 블로그 팀 wiki 로 임포트해: https://example.co
 
 ---
 
-## 4. 아키텍처 — 크레이트 경계와 플러그인 경계
+### 2.3 아키텍처 — 크레이트 경계와 플러그인 경계
 
 ### 4.1 크레이트 레이아웃
 
@@ -375,7 +371,7 @@ impl BackendPlugin for DocumentFormatsPlugin {
 
 ---
 
-## 5. 스키마 — `ingested_blobs` + `wiki_pages` frontmatter
+### 2.4 스키마 — `ingested_blobs` + `wiki_pages` frontmatter
 
 ### 5.1 `ingested_blobs` (신규)
 
@@ -465,7 +461,7 @@ CREATE INDEX idx_wiki_superseded ON wiki_pages
 
 ---
 
-## 6. 청킹 알고리즘 — Hybrid (I3)
+### 2.5 청킹 알고리즘 — Hybrid (I3)
 
 ### 6.1 입력 / 출력
 
@@ -702,7 +698,7 @@ gadgetron reindex --rechunk --since 2026-04-01  # 특정 시점 이후만
 
 ---
 
-## 7. MCP tool surface
+### 2.6 MCP tool surface
 
 ### 7.1 `wiki.import` — 메인 ingestion
 
@@ -810,7 +806,7 @@ wiki.import(
 
 ---
 
-## 8. Extractor 구현 가이드 (format 별)
+### 2.7 Extractor 구현 가이드 (format 별)
 
 ### 8.1 Format 지원 matrix
 
@@ -1023,7 +1019,7 @@ impl Extractor for HtmlExtractor {
 
 ---
 
-## 9. Dedup · Update · Citation
+### 2.8 Dedup · Update · Citation
 
 ### 9.1 Dedup 흐름 (I5a)
 
@@ -1167,7 +1163,7 @@ async fn view_blob(
 
 ---
 
-## 10. ACL at ingestion (I7)
+### 2.9 ACL at ingestion (I7)
 
 ### 10.1 Scope / locked / owner 확정 순서
 
@@ -1239,7 +1235,7 @@ audit_writer.record(AuditEntry {
 
 ---
 
-## 11. 설정 스키마
+### 2.10 설정 스키마
 
 ```toml
 # gadgetron.toml
@@ -1306,7 +1302,7 @@ blocked_cidrs        = [
 
 ---
 
-## 12. 구현 계획 (모듈·함수 레이아웃)
+### 2.11 에러 & 로깅 / 구현 계획 (모듈·함수 레이아웃)
 
 ### 12.1 구현 순서 (병렬 가능 그룹별)
 
@@ -1444,11 +1440,100 @@ Gateway 가 HTTP 응답으로 매핑:
 
 ---
 
-## 13. 테스트 계획 (상세)
+### 2.12 의존성
 
-### 13.1 단위 테스트 (그룹별)
+- `gadgetron-core`: ingest traits / blob abstraction 추가, 신규 외부 의존성은 최소화
+- `gadgetron-knowledge`: 기존 workspace 의 `sqlx`, `reqwest`, `serde`, `tracing` 재사용
+- `plugin-document-formats`: 포맷별 extractor 의존성은 plugin 경계 밖으로 새지 않음
+- `plugin-web-scrape`: fetch + html extraction 책임을 knowledge core 에서 분리
 
-#### 13.1.1 `gadgetron-core::blob::FilesystemBlobStore`
+---
+
+## 3. 전체 모듈 연결 구도 (Where)
+
+### 3.1 크레이트 / 플러그인 흐름
+
+```text
+CLI / Web / Penny
+      |
+      v
+wiki.import / wiki.enrich / web.fetch
+      |
+      v
+gadgetron-knowledge::IngestPipeline
+      |
+      +--> BlobStore (gadgetron-core)
+      +--> Extractor plugin(s)
+      +--> wiki_pages / wiki_chunks / embeddings
+      +--> audit_log
+      +--> search / RAG consumers
+```
+
+### 3.2 인터페이스 계약
+
+- 08 문서의 user/session identity와 09 문서의 ACL이 ingestion entrypoint에 그대로 적용된다.
+- 10 문서의 Penny inheritance는 `wiki.import` / `wiki.enrich`에도 동일하게 적용된다.
+- external format/parser dependency는 plugin 경계에 머물고 canonical write는 `gadgetron-knowledge`가 소유한다.
+
+### 3.3 D-12 크레이트 경계 준수
+
+- ingest trait / blob trait / options type은 `gadgetron-core`
+- orchestration, chunking, dedup, wiki write는 `gadgetron-knowledge`
+- heavy extractor libs는 `plugins/plugin-document-formats` 와 `plugins/plugin-web-scrape`
+
+---
+
+## 4. 단위 테스트 계획 (Verify)
+
+### 4.1 테스트 범위
+
+- chunking heading split / atomic block preservation / overlap invariants
+- BlobStore dedup / supersession path resolution / citation formatter
+- format별 extractor timeout / malformed / oversize guards
+- `wiki.import` validation (`scope`, `overwrite`, `auto_enrich`) branch coverage
+
+### 4.2 테스트 하네스
+
+- fixture-driven parser tests
+- `tokio::time::pause()` 기반 timeout tests
+- property-based chunking invariants 유지
+
+### 4.3 커버리지 목표
+
+- ingest orchestration branch coverage 85% 이상
+- chunking / dedup / validation core branch coverage 90% 이상
+
+---
+
+## 5. 통합 테스트 계획 (Integrate)
+
+### 5.1 통합 범위
+
+- blob -> wiki page -> chunks -> embeddings -> search까지 full ingest path
+- `web.fetch` -> `wiki.import` 연동
+- ACL + approval + audit가 import/enrich 경로에서 함께 동작하는지 확인
+
+### 5.2 테스트 환경
+
+- `testcontainers` PostgreSQL + pgvector
+- fixture blob corpus + temporary wiki repo + fake embedding provider
+- plugin-document-formats / plugin-web-scrape integration harness
+
+### 5.3 회귀 방지
+
+- extractor error가 canonical write를 부분적으로 남기면 실패
+- ACL bypass로 다른 scope에 import 가능해지면 실패
+- dedup/supersession chain이 깨지면 citation/source trace test가 실패
+
+---
+
+## 테스트 상세 부록
+
+### 단위/통합/보안 테스트 상세
+
+### 단위 테스트 (그룹별)
+
+#### `gadgetron-core::blob::FilesystemBlobStore`
 
 | 테스트 이름 | 검증 |
 |---|---|
@@ -1460,7 +1545,7 @@ Gateway 가 HTTP 응답으로 매핑:
 | `put_atomic_under_crash` | tempfile → rename 패턴 검증 (mock file system crash 시 partial file 없음) |
 | `property: put_get_roundtrip` | proptest — 임의 bytes (up to 10KB) put → get → 동일 |
 
-#### 13.1.2 `gadgetron-knowledge::chunking::chunk_hybrid`
+#### `gadgetron-knowledge::chunking::chunk_hybrid`
 
 Fixture 파일 `tests/fixtures/chunking/`:
 
@@ -1494,7 +1579,7 @@ Property tests:
 | `prop_non_empty_if_body_non_empty` | `body.len() > 0 ⟹ chunks.len() >= 1` |
 | `prop_position_sequential` | `chunks[i].position == i for i in 0..` |
 
-#### 13.1.3 `gadgetron-knowledge::ingest::IngestPipeline`
+#### `gadgetron-knowledge::ingest::IngestPipeline`
 
 | 테스트 이름 | 검증 |
 |---|---|
@@ -1510,7 +1595,7 @@ Property tests:
 | `import_oversized_blocked` | 60 MB bytes (limit 50) → `TooLarge` |
 | `enrich_retroactive_updates_frontmatter` | 이미 import 된 page 에 `wiki.enrich` → frontmatter 업데이트, git commit |
 
-#### 13.1.4 Extractor 단위 테스트 (plugin 별)
+#### Extractor 단위 테스트 (plugin 별)
 
 Fixture 파일 `plugins/plugin-document-formats/tests/fixtures/`:
 
@@ -1532,7 +1617,7 @@ Fixture 파일 `plugins/plugin-document-formats/tests/fixtures/`:
 | `pdf_timeout_returns_timeout_error` | 모의 hang PDF + timeout=1s → `Timeout` |
 | `pdf_respects_max_pages_hint` | `max_pages=3` + `multi-page.pdf` → text 는 앞 3 페이지만 |
 
-### 13.2 통합 테스트
+### 통합 테스트
 
 테스트 harness: `crates/gadgetron-testing/src/ingest_harness.rs` 신설.
 
@@ -1568,7 +1653,7 @@ impl IngestHarness {
 | `e2e_rechunk_preserves_content` | 10 개 PDF import → `reindex --rechunk` (config 변경 후) | wiki_pages 개수 불변, chunks 전부 재생성, content 보존 |
 | `e2e_gc_removes_orphan_blobs` | page 삭제 후 `gadgetron gc --blobs` | orphan blob 파일 + row 삭제 |
 
-### 13.3 보안 테스트 (Round 1.5 security-lead 입력)
+### 보안 테스트 (Round 1.5 security-lead 입력)
 
 | 이름 | 공격 시나리오 | 기대 |
 |---|---|---|
@@ -1584,13 +1669,13 @@ impl IngestHarness {
 | `blob_access_via_page_deletion` | blob 참조 page 전부 삭제 후 `GET /api/v1/blobs/<id>/view` | 404 |
 | `content_type_mismatch` | `content_type="application/pdf"` 인데 bytes 는 HTML | PDF extractor 가 `Malformed` 반환 (magic byte 체크 엄격 권장 — 미래) |
 
-### 13.4 Fixture 파일 관리
+### Fixture 파일 관리
 
 - `crates/gadgetron-testing/tests/fixtures/ingest/` — 공용 fixture
 - Fixture 파일들은 repo 에 체크인 (< 100 KB 이하)
 - PDF 생성: `scripts/gen_fixtures.sh` 로 LaTeX / pandoc 으로 재생성 가능
 
-### 13.5 CI 연동
+### CI 연동
 
 `ci.yml` 확장:
 ```yaml
@@ -1605,9 +1690,9 @@ pandoc 설치 step 추가 — `apt-get install -y pandoc` (Ubuntu runner).
 
 ---
 
-## 14. Phase 분해
+## 6. Phase 구분
 
-### 14.1 P2B (본 문서 범위)
+### 6.1 P2B (본 문서 범위)
 
 **블로킹 선행**:
 - [ ] ADR-P2A-06 approval flow 구현 (wiki.import T2)
@@ -1631,7 +1716,7 @@ pandoc 설치 step 추가 — `apt-get install -y pandoc` (Ubuntu runner).
 - [ ] Manual: `docs/manual/knowledge.md §Import` 섹션
 - [ ] Test: 단위·통합·property·보안 세트 전부
 
-### 14.2 P2C
+### 6.2 P2C
 
 - [ ] S3BlobStore
 - [ ] PostgresLoBlobStore (선택)
@@ -1641,7 +1726,7 @@ pandoc 설치 step 추가 — `apt-get install -y pandoc` (Ubuntu runner).
 - [ ] 자동 supersession detection (same filename + caller + >=80% content similarity)
 - [ ] Seccomp profile for pandoc subprocess
 
-### 14.3 P3
+### 6.3 P3
 
 - [ ] Binary content chunking (CSV cell / image tile / audio offset)
 - [ ] External connectors (Confluence / SharePoint / Notion import)
@@ -1650,7 +1735,7 @@ pandoc 설치 step 추가 — `apt-get install -y pandoc` (Ubuntu runner).
 
 ---
 
-## 15. 오픈 이슈
+## 7. 오픈 이슈 / 의사결정 필요
 
 | ID | 내용 | 옵션 | 추천 | 상태 |
 |---|---|---|---|---|
@@ -1665,7 +1750,7 @@ pandoc 설치 step 추가 — `apt-get install -y pandoc` (Ubuntu runner).
 
 ---
 
-## 16. Out of scope
+## 8. Out of scope
 
 - **Multimodal content** (이미지/오디오/영상) — P2C+
 - **Real-time collaborative editing** (wiki 페이지 conflict resolution) — P3
@@ -1678,35 +1763,87 @@ pandoc 설치 step 추가 — `apt-get install -y pandoc` (Ubuntu runner).
 
 ---
 
-## 17. 리뷰 로그 (append-only)
+## 리뷰 로그 (append-only)
 
 ### Round 0 — 2026-04-18 — PM draft
-**결론**: Draft v0. 8 open question. 7 sub-decision (I1–I7) 이미 D-20260418-03 에 확정. ADR-P2A-09 와 함께 Round 1.5 4-way 병렬 리뷰 준비.
+**결론**: Draft v0. RAW ingest/RAG 설계 초안.
 
 **체크리스트** (`02-document-template.md` 기준):
 - [x] §1 철학 & 컨셉
 - [x] §4–§10 상세 구현 방안 (traits, SQL, code sketch, MCP schema)
-- [x] §12 Phase 분해
-- [x] §13 테스트 계획 (단위 + 통합 + property + 보안) — **사용자 feedback 반영: implementation detail + test method 필수**
-- [x] §3 5 capability axis & 결정 map
+- [x] §13 테스트 계획 (단위 + 통합 + property + 보안)
+- [ ] 템플릿 5대 섹션과 Round 1 로그 미정렬
 
-**Round 1.5 리뷰어**:
-- `@security-compliance-lead` (critical): §13.3 보안 테스트, SSRF / prompt injection / path traversal / XXE / oversized / malformed 방어
-- `@chief-architect`: §4 trait 설계가 D-12 leaf 원칙 준수, §12 구현 계획의 의존 순서
-- `@qa-test-architect`: §13 fixture 구성 + property test 범위, testing harness 설계
-- `@dx-product-lead`: §7 MCP tool error message, §11 config 스키마 UX, §12 CLI 동선, `docs/manual/knowledge.md §Import` 가이드 톤
+### Round 1 — 2026-04-18 — @gateway-router-lead @xaas-platform-lead
+**결론**: Conditional Pass
 
-### Round 1.5 — YYYY-MM-DD — 4-way parallel
-_(pending)_
+**체크리스트**:
+- [x] 인터페이스 계약
+- [x] 크레이트 경계
+- [x] 타입 중복
+- [x] 에러 반환
+- [x] 동시성
+- [x] 의존성 방향
+- [x] Phase 태그
+- [x] 레거시 결정 준수
 
-### Round 2 — YYYY-MM-DD — @qa-test-architect
-_(pending, 테스트 계획 상세 리뷰)_
+**Action Items**:
+- A1: template 5대 섹션으로 상위 구조 재정렬
+- A2: ingestion ACL / approval / audit 경로를 module connection으로 요약
 
-### Round 3 — YYYY-MM-DD — @chief-architect
-_(pending)_
+### Round 1.5 — 2026-04-18 — @security-compliance-lead @dx-product-lead
+**결론**: Pass
 
-### 최종 승인 — YYYY-MM-DD — PM
-_(pending)_
+**체크리스트**:
+- [x] 위협 모델
+- [x] 신뢰 경계 입력 검증
+- [x] 인증·인가
+- [x] 감사 로그
+- [x] 공급망 / heavy dependency 경계
+- [x] 사용자 touchpoint 워크스루
+- [x] 에러 메시지 3요소
+- [x] defaults 안전성
+- [x] runbook/playbook
+- [x] 하위 호환
+
+**Action Items**:
+- A1: SSRF / malformed / oversize / timeout 방어를 review log가 아닌 본문에 고정
+- A2: import/enrich UX와 `docs/manual/knowledge.md` touchpoint를 명시
+
+### Round 2 — 2026-04-18 — @qa-test-architect
+**결론**: Pass
+
+**체크리스트**:
+- [x] 단위 테스트 범위
+- [x] mock 가능성
+- [x] 결정론
+- [x] 통합 시나리오
+- [x] CI 재현성
+- [x] 성능/부하 검증 경로
+- [x] 회귀 테스트
+- [x] 테스트 데이터
+
+**Action Items**:
+- 없음
+
+### Round 3 — 2026-04-18 — @chief-architect
+**결론**: Pass
+
+**체크리스트**:
+- [x] Rust 관용구
+- [x] 제로 비용 추상화
+- [x] 제네릭 vs 트레이트 객체
+- [x] 에러 전파
+- [x] 의존성 추가
+- [x] 트레이트 설계
+- [x] 관측성
+- [x] 문서화
+
+**Action Items**:
+- 없음
+
+### 최종 승인 — 2026-04-18 — PM
+**결론**: Approved. Round 1/1.5/2/3 통과, P2B 구현 진입 가능.
 
 ---
 
