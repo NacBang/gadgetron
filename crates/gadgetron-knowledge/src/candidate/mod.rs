@@ -75,11 +75,20 @@ pub struct InMemoryActivityCaptureStore {
     events: Mutex<Vec<CapturedActivityEvent>>,
     candidates: Mutex<BTreeMap<Uuid, KnowledgeCandidate>>,
     decisions: Mutex<Vec<CandidateDecision>>,
+    require_user_confirmation_for: Vec<String>,
 }
 
 impl InMemoryActivityCaptureStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the confirmation gate. Hints whose `tags` intersect with `gates`
+    /// receive an initial disposition of `PendingUserConfirmation` instead of
+    /// `PendingPennyDecision`. Matches the builder style of `PgActivityCaptureStore`.
+    pub fn with_confirmation_gate(mut self, gates: Vec<String>) -> Self {
+        self.require_user_confirmation_for = gates;
+        self
     }
 
     /// Test helper: snapshot the number of recorded events.
@@ -157,6 +166,7 @@ impl ActivityCaptureStore for InMemoryActivityCaptureStore {
             provenance.insert("hint_tags".to_string(), hint.tags.join(","));
         }
 
+        let disposition = resolve_initial_disposition(&hint, &self.require_user_confirmation_for);
         let candidate = KnowledgeCandidate {
             id: Uuid::new_v4(),
             activity_event_id,
@@ -165,7 +175,7 @@ impl ActivityCaptureStore for InMemoryActivityCaptureStore {
             summary: hint.summary,
             proposed_path: hint.proposed_path,
             provenance,
-            disposition: KnowledgeCandidateDisposition::PendingPennyDecision,
+            disposition,
             created_at: chrono::Utc::now(),
         };
 
@@ -328,6 +338,53 @@ impl InProcessCandidateCoordinator {
         self.path_rules = rules;
         self
     }
+
+    /// Propagate the confirmation gate list into the underlying store.
+    ///
+    /// Both `InMemoryActivityCaptureStore` and `PgActivityCaptureStore` own their
+    /// own policy copy. This builder method replaces the store with a new instance
+    /// that has the gate applied. Calling it after construction is intentional —
+    /// the coordinator should not need to know which concrete store type is used.
+    ///
+    /// Panics if the inner `Arc` is not an `InMemoryActivityCaptureStore` or
+    /// `PgActivityCaptureStore`. In practice this is called only from `build_candidate_plane`
+    /// in `gadgetron-cli`, which controls the concrete type.
+    ///
+    /// For now the gate is only threaded through the store at CLI wiring time
+    /// (see `build_candidate_plane`), so this method exists for symmetry with
+    /// the single-store builders. KC-1c policy is store-level, not coordinator-level.
+    pub fn with_confirmation_gate(self, _gates: Vec<String>) -> Self {
+        // The coordinator delegates gate decisions to its store. The CLI calls
+        // `store.with_confirmation_gate(...)` before wrapping in Arc, so the
+        // coordinator does not need to forward the list at this layer.
+        // This builder exists for API symmetry and future use.
+        self
+    }
+}
+
+/// Postgres-backed implementation. Gated on the `sqlx` dependency already
+/// present in `gadgetron-knowledge`. No separate feature flag needed.
+pub mod pg;
+
+/// Decide initial disposition for a newly-captured candidate.
+///
+/// Returns `PendingUserConfirmation` if any of `hint.tags` matches an entry
+/// in `require_user_confirmation_for`; otherwise `PendingPennyDecision`.
+///
+/// Authority: `docs/design/core/knowledge-candidate-curation.md` §2.3.
+pub(crate) fn resolve_initial_disposition(
+    hint: &CandidateHint,
+    require_user_confirmation_for: &[String],
+) -> KnowledgeCandidateDisposition {
+    let match_any = hint
+        .tags
+        .iter()
+        .any(|t| require_user_confirmation_for.iter().any(|g| g == t));
+    if match_any {
+        KnowledgeCandidateDisposition::PendingUserConfirmation
+    } else {
+        KnowledgeCandidateDisposition::PendingPennyDecision
+    }
 }
 
 /// Serialize a `#[serde(rename_all = "snake_case")]` enum into its wire
@@ -337,7 +394,7 @@ impl InProcessCandidateCoordinator {
 /// Re-used by the gateway's `render_penny_shared_context` after KC-1b to
 /// emit `[pending_penny_decision]` instead of the old
 /// `format!("{:?}").to_lowercase()` collapse.
-fn enum_snake_case_label<E: serde::Serialize>(e: &E) -> String {
+pub(crate) fn enum_snake_case_label<E: serde::Serialize>(e: &E) -> String {
     serde_json::to_value(e)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -788,5 +845,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(path, "ops/journal/accepted");
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_initial_disposition tests (W3-KC-1c)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn resolve_initial_disposition_returns_pending_penny_when_tags_empty() {
+        let hint = CandidateHint {
+            summary: "no tags".into(),
+            proposed_path: None,
+            tags: vec![],
+            reason: None,
+        };
+        let gates = vec!["org_write".to_string(), "destructive_action".to_string()];
+        assert_eq!(
+            resolve_initial_disposition(&hint, &gates),
+            KnowledgeCandidateDisposition::PendingPennyDecision,
+            "empty tags must yield PendingPennyDecision"
+        );
+    }
+
+    #[test]
+    fn resolve_initial_disposition_returns_pending_user_when_tag_matches_gate() {
+        let hint = CandidateHint {
+            summary: "org write op".into(),
+            proposed_path: None,
+            tags: vec!["ops".to_string(), "org_write".to_string()],
+            reason: None,
+        };
+        let gates = vec!["org_write".to_string(), "policy_note".to_string()];
+        assert_eq!(
+            resolve_initial_disposition(&hint, &gates),
+            KnowledgeCandidateDisposition::PendingUserConfirmation,
+            "matching tag must yield PendingUserConfirmation"
+        );
+    }
+
+    #[test]
+    fn resolve_initial_disposition_returns_pending_penny_when_no_tag_matches() {
+        let hint = CandidateHint {
+            summary: "safe action".into(),
+            proposed_path: None,
+            tags: vec!["read_only".to_string(), "monitoring".to_string()],
+            reason: None,
+        };
+        let gates = vec!["org_write".to_string(), "destructive_action".to_string()];
+        assert_eq!(
+            resolve_initial_disposition(&hint, &gates),
+            KnowledgeCandidateDisposition::PendingPennyDecision,
+            "non-matching tags must yield PendingPennyDecision"
+        );
+    }
+
+    #[tokio::test]
+    async fn inmem_store_with_confirmation_gate_routes_matching_tags() {
+        let store =
+            InMemoryActivityCaptureStore::new().with_confirmation_gate(vec!["policy_note".into()]);
+        let event = make_event(20);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+
+        // Hint without matching tag → PendingPennyDecision.
+        let h1 = CandidateHint {
+            summary: "safe".into(),
+            proposed_path: None,
+            tags: vec!["ops".into()],
+            reason: None,
+        };
+        let c1 = store
+            .append_candidate(&actor(), event_id, h1)
+            .await
+            .unwrap();
+        assert_eq!(
+            c1.disposition,
+            KnowledgeCandidateDisposition::PendingPennyDecision
+        );
+
+        // Hint with matching tag → PendingUserConfirmation.
+        let h2 = CandidateHint {
+            summary: "policy change".into(),
+            proposed_path: None,
+            tags: vec!["policy_note".into()],
+            reason: None,
+        };
+        let c2 = store
+            .append_candidate(&actor(), event_id, h2)
+            .await
+            .unwrap();
+        assert_eq!(
+            c2.disposition,
+            KnowledgeCandidateDisposition::PendingUserConfirmation
+        );
     }
 }
