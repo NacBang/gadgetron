@@ -530,11 +530,15 @@ The audit log emits `latency_ms` on every request. **Its meaning depends on whet
 
 ### Streaming requests (`stream: true`)
 
-`latency_ms` = middleware chain + dispatch overhead **only**. It will always read as `0 ms` on modern hardware (sub-millisecond dispatch). This is **not a bug** — the audit entry is emitted at dispatch time, before the first SSE byte leaves the server, so the value captures how long Gadgetron took to hand the request off to the provider, not how long the full stream took. This is Phase 1 behavior; Phase 2 will capture total stream duration via a `Drop` guard on the SSE stream, and the `latency_ms` value will change meaning accordingly — until then, use the alternatives below.
+Streaming requests produce **two audit entries**, both sharing the same `request_id` but with distinct `event_id` values:
 
-For real end-to-end streaming latency, use one of these alternatives:
+1. **Dispatch entry** — emitted before the first SSE byte. `latency_ms` = middleware + dispatch overhead only (typically `0 ms` on modern hardware). `output_tokens = 0`, `status = "ok"` (placeholder — the stream hasn't started yet).
+
+2. **Amendment entry** — emitted when the stream ends, regardless of how (normal completion, client disconnect, provider error, future cancellation). Carries a chunk-count proxy for `output_tokens` (incremented once per non-empty chunk — coarse, not exact token counts), `input_tokens = 0` (the SSE chunk format carries no usage field), and the real `status`: `"ok"` for a clean stream end, `"error"` for any terminal provider error.
+
+For end-to-end streaming latency (dispatch entry `latency_ms` is not useful for this), use:
 - **TUI dashboard** (`gadgetron serve --tui`) — the Requests panel shows wall-clock latency from the `metrics_middleware` layer, which measures the full chain including the stream body
 - **`/metrics` Prometheus histogram** — planned in Phase 2
 - **Client-side timing** — measure `time.perf_counter()` around the OpenAI SDK call
 
-This applies only to `status: "ok"` rows for streaming requests. Streaming failures (connection drops, provider 5xx) still record the wall-clock latency up to the failure point.
+To correlate both entries for a single stream: `WHERE request_id = '<id>' ORDER BY created_at`.

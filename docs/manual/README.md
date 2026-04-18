@@ -48,7 +48,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - Bearer token authentication backed by PostgreSQL
 - Per-tenant scope enforcement (`OpenAiCompat`, `Management`, `XaasAdmin`)
 - In-memory quota enforcement (daily ceiling check)
-- Structured audit log (written to tracing; PostgreSQL batch-insert is Sprint 2+)
+- Structured audit log (written to tracing; PostgreSQL batch-insert is Sprint 2+); streaming requests emit two correlated entries — dispatch-time + stream-end amendment with actual token counts and status
 - Automatic PostgreSQL schema migrations on startup
 - Gemini provider — request/response adaptation implemented
 - vLLM provider — tested end-to-end against a live vLLM instance
