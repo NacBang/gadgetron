@@ -278,7 +278,7 @@ impl Drop for StreamEndGuard {
                     request_id,
                     amendment_event_id,
                     model,
-                    0,                 // prompt_tokens: 0 for streaming (see StreamEndState docs)
+                    0, // prompt_tokens: 0 for streaming (see StreamEndState docs)
                     completion_tokens,
                     true,
                 )
@@ -379,10 +379,7 @@ mod tests {
     /// No coordinator is wired — the tests here verify the AuditEntry side
     /// of the amendment; the PSL-1d capture path is exercised via
     /// integration tests (see `tests/psl_1d_chat_capture.rs`).
-    async fn drive_and_drop<S>(
-        stream: S,
-        request_id: Uuid,
-    ) -> (Vec<AuditEntry>, StreamEndState)
+    async fn drive_and_drop<S>(stream: S, request_id: Uuid) -> (Vec<AuditEntry>, StreamEndState)
     where
         S: Stream<Item = Result<ChatChunk, GadgetronError>> + Unpin + Send + 'static,
     {
