@@ -25,7 +25,7 @@
 | C-2 | 경계 | `ADR-P2A-10` 의 Plug consumer wording / crate-path note 가 `router` 를 core-owned 로 오독하게 만들 수 있었음 | `docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md`, `README.md`, `docs/00-overview.md`, `docs/architecture/glossary.md` | P0 | Closed |
 | C-3 | 실행 경로 | `README` / manual 의 no-db, plain Postgres, `demo.sh`, pgvector 전제가 서로 다름 | `README.md`, `docs/manual/quickstart.md`, `docs/manual/web.md`, `docs/manual/installation.md` | P0 | Closed |
 | C-4 | legacy 설계 문서 | `06-backend-plugin-architecture.md`, `07-plugin-server.md` 가 legacy 용어를 강하게 드러내지 못함 | `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/design/phase2/07-plugin-server.md` | P1 | Closed |
-| C-5 | seed/frontmatter | `plugin`, `plugin_version`, `plugin_seed` 호환 필드와 canonical 용어 사이 설명 부족 | `docs/architecture/glossary.md`, `crates/gadgetron-knowledge/src/wiki/frontmatter.rs`, `crates/gadgetron-knowledge/seeds/*` | P1 | Open |
+| C-5 | seed/frontmatter | `plugin`, `plugin_version`, `plugin_seed` 호환 필드와 canonical 용어 사이 설명 부족 | `docs/architecture/glossary.md`, `crates/gadgetron-knowledge/src/wiki/frontmatter.rs`, `crates/gadgetron-knowledge/seeds/*` | P1 | Partial — `glossary.md` §Seed page 에 "Frontmatter field migration (P2B)" 표 추가. `frontmatter.rs` deprecated 주석 + serde alias 구현은 P2B 코드 작업으로 남음 |
 | C-6 | deep architecture docs | `platform-architecture.md`, older module docs, review docs 의 legacy naming 잔존 | `docs/architecture/platform-architecture.md`, `docs/modules/*`, `docs/reviews/*` | P2 | Open |
 | C-7 | authority entrypoint | `README.md` 가 hard-coded ADR count/range 를 유지해 최신 accepted ADR set 을 축소해서 보임 | `README.md`, `docs/adr/README.md` | P0 | Closed |
 
