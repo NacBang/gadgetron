@@ -2,12 +2,14 @@
 // extensively. See the matching cfg_attr in gadgetron-core/src/lib.rs.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
+pub mod activity_capture;
 pub mod error;
 pub mod handlers;
 pub mod middleware;
 pub mod penny;
 pub mod server;
 pub mod sse;
+pub mod stream_end_guard;
 pub mod web;
 
 #[cfg(feature = "web-ui")]
