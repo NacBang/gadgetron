@@ -126,6 +126,12 @@ pub struct AppState {
     pub no_db: bool,
     pub tui_tx: Option<broadcast::Sender<WsMessage>>,
     pub workbench: Option<Arc<GatewayWorkbenchService>>,
+    // P2B observability (PSL/KC cycles — D-20260418-14..22):
+    pub penny_shared_surface: Option<Arc<dyn PennySharedSurfaceService>>,
+    pub penny_assembler: Option<Arc<dyn PennyTurnContextAssembler>>,
+    pub agent_config: Arc<AgentConfig>,
+    pub activity_capture_store: Option<Arc<dyn ActivityCaptureStore>>,
+    pub candidate_coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
 }
 ```
 
@@ -135,7 +141,13 @@ pub struct AppState {
 - `router = None` 은 legacy unit fixture 나 일부 handler-isolated test 에서 허용된다. routing-dependent handler 는 fail-closed 해야 한다.
 - `pg_pool` 와 `no_db` 는 한 쌍이다. `no_db = true` 면 `/ready` 는 DB probe 없이 200 을 반환한다.
 - `tui_tx` 는 optional observability surface 이다. 없을 때 `metrics_middleware` 는 no-op 이다.
-- `workbench` 는 optional gateway leaf service 이다. current trunk 는 route subtree 를 항상 mount 하지만, service 미주입 시 route handler 가 OpenAI-shaped config error 로 fail-closed 한다.
+- `workbench` 는 optional gateway leaf service 이다. current trunk 는 route subtree 를 항상 mount 하지만, service 미주입 시 route handler 가 OpenAI-shaped config error 로 fail-closed 한다. `knowledge_service` 가 없어도 `build_workbench` 는 `Some(degraded_workbench)` 를 반환하므로 endpoint 들은 항상 mount 된다 — bootstrap 응답의 `degraded_reasons` 로 상태가 operator 에 노출된다.
+- `penny_shared_surface` / `penny_assembler` / `activity_capture_store` / `candidate_coordinator` 는 PSL-1 ~ KC-1c 에서 순차 landed 됐다. **boot-gating rule**:
+  - `[knowledge]` 섹션 없음 → 5 필드 모두 `None`, P1 legacy serve 경로 보존
+  - `[knowledge]` 있고 `[knowledge.curation].enabled = false` → `workbench` 만 Some, candidate plane 은 None
+  - `[knowledge]` 있고 `enabled = true` → 5 필드 모두 wired (Pg backing if `pg_pool.is_some()`, else InMemory + operator-visible `tracing::warn!`)
+- `agent_config` 는 required (non-optional) Arc 이다. `AgentConfig::default()` 가 안전한 기본값을 제공하며, chat handler 가 `[agent.shared_context]` 를 소비할 때 이 Arc 를 읽는다.
+- 전체 matrix 의 의미 / source / `None` 동작은 `docs/design/gateway/workbench-projection-and-actions.md §2.1.3` 에 표로 정리돼 있다. 본 문서는 route gating 관점 (auth / scope / boot-gating) 만 다룬다.
 
 #### 2.1.2 Router entrypoints and route groups [P1] [P2A] [P2B]
 
