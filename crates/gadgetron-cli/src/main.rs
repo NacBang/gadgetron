@@ -2128,6 +2128,8 @@ mod tests {
             models: vec![],
             web: gadgetron_core::config::WebConfig::default(),
             agent: gadgetron_core::agent::AgentConfig::default(),
+            bundles: std::collections::BTreeMap::new(),
+            features: gadgetron_core::config::FeaturesConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
         assert!(
@@ -2163,6 +2165,8 @@ mod tests {
             models: vec![],
             web: gadgetron_core::config::WebConfig::default(),
             agent: gadgetron_core::agent::AgentConfig::default(),
+            bundles: std::collections::BTreeMap::new(),
+            features: gadgetron_core::config::FeaturesConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
         assert!(
@@ -2198,6 +2202,8 @@ mod tests {
             models: vec![],
             web: gadgetron_core::config::WebConfig::default(),
             agent: gadgetron_core::agent::AgentConfig::default(),
+            bundles: std::collections::BTreeMap::new(),
+            features: gadgetron_core::config::FeaturesConfig::default(),
         };
         let map = build_providers(&cfg).expect("Gemini provider must now be implemented");
         assert!(

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::node::NodeConfig;
 use crate::routing::RoutingConfig;
@@ -19,6 +19,15 @@ pub struct AppConfig {
     pub web: WebConfig,
     #[serde(default)]
     pub agent: crate::agent::AgentConfig,
+    /// Per-Bundle configuration overrides (ADR-P2A-10-ADDENDUM-01 §1 / §2).
+    /// `BTreeMap` is used so that TOML round-trips preserve key ordering,
+    /// which matters for golden-file testing and operator diffs.
+    #[serde(default)]
+    pub bundles: BTreeMap<String, BundleOverride>,
+    /// Opt-in feature toggles. Currently only `tenant_plug_overrides_accepted_as_reserved`
+    /// per ADDENDUM-01 §2 — additional toggles land here as P2B evolves.
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 /// Gadgetron Web UI (`gadgetron-web` crate) configuration.
@@ -152,6 +161,161 @@ impl Default for ServerConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bundle / Plug / Gadget config overrides (ADR-P2A-10-ADDENDUM-01 §§1, 2, 5)
+// ---------------------------------------------------------------------------
+//
+// Per-Bundle TOML stanzas look like:
+//
+//     [bundles.ai-infra]
+//     enabled = true                    # §1 Bundle enablement
+//
+//     [bundles.ai-infra.plugs.anthropic-llm]
+//     enabled = false                   # §1 per-Plug enable/disable
+//
+//     [bundles.ai-infra.plugs.anthropic-llm.tenant_overrides]
+//     "tenant-a" = { enabled = false }  # §2 — reserved in P2B, enforced in P2C
+//
+//     [bundles.ai-infra.gadgets."gpu.list"]
+//     tier = "read"
+//     mode = "auto"
+//
+// The `tenant_overrides` stanza parses in P2B-alpha but is a no-op until
+// P2C. Operators must acknowledge this by setting
+// `[features] tenant_plug_overrides_accepted_as_reserved = true` or startup
+// fails with CFG-045 per ADDENDUM-01 §2 / D-20260418-08 P1.
+
+/// Per-Bundle configuration stanza.
+///
+/// All fields default to their "no override" values — a completely absent
+/// `[bundles.ai-infra]` section is equivalent to `enabled = true` with no
+/// per-Plug or per-Gadget modifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleOverride {
+    /// Bundle-level enablement (§1). `false` means no Plugs/Gadgets from
+    /// this Bundle register. Defaults to `true` for opt-out behaviour.
+    #[serde(default = "default_bundle_enabled")]
+    pub enabled: bool,
+
+    /// Per-Plug overrides (§1 — per-Plug enable/disable axis). Keyed by
+    /// `PlugId` string form; the actual `PlugId` validation happens at the
+    /// `Bundle::install` boundary in W2+.
+    #[serde(default)]
+    pub plugs: BTreeMap<String, PlugOverride>,
+
+    /// Per-Gadget overrides (tier / mode). The `tier` and `mode` strings
+    /// map to `GadgetTier` / `GadgetMode` enums at the dispatch boundary;
+    /// kept as `Option<String>` here so the config parser is decoupled
+    /// from the agent module's enum shape.
+    #[serde(default)]
+    pub gadgets: BTreeMap<String, GadgetOverride>,
+
+    /// Runtime ceiling / egress overrides (§5 floors 6 + 7). Operator can
+    /// tighten manifest-declared limits via `[bundles.<name>.runtime.limits]`
+    /// or `[bundles.<name>.runtime.egress]`. **Parsed only in W1** — the
+    /// W2+ `Bundle::install` hook enforces fail-closed-on-missing (no
+    /// ceiling) and merges this override on top of the manifest value.
+    #[serde(default)]
+    pub runtime: Option<BundleRuntimeOverride>,
+}
+
+/// Runtime ceiling / egress overrides (§5 floors 6 + 7). Mirrors the
+/// `[bundle.runtime]` shape in `bundle.toml` minus the `kind` / `entry` /
+/// `transport` fields (those are manifest-owned; the operator cannot
+/// change which runtime dispatches the Gadget, only its resource envelope).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BundleRuntimeOverride {
+    #[serde(default)]
+    pub limits: Option<crate::bundle::RuntimeLimits>,
+    #[serde(default)]
+    pub egress: Option<crate::bundle::RuntimeEgress>,
+}
+
+impl Default for BundleOverride {
+    fn default() -> Self {
+        Self {
+            enabled: default_bundle_enabled(),
+            plugs: BTreeMap::new(),
+            gadgets: BTreeMap::new(),
+            runtime: None,
+        }
+    }
+}
+
+/// Per-Plug configuration stanza (§1 / §2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlugOverride {
+    /// Deployment-wide Plug enablement (§1).
+    #[serde(default = "default_plug_enabled")]
+    pub enabled: bool,
+
+    /// Per-tenant override table (§2). Reserved in P2B — parsed but not
+    /// enforced. Any non-empty inner map requires
+    /// `[features] tenant_plug_overrides_accepted_as_reserved = true`
+    /// or startup fails with CFG-045.
+    #[serde(default)]
+    pub tenant_overrides: BTreeMap<String, TenantOverrideEntry>,
+}
+
+impl Default for PlugOverride {
+    fn default() -> Self {
+        Self {
+            enabled: default_plug_enabled(),
+            tenant_overrides: BTreeMap::new(),
+        }
+    }
+}
+
+/// Per-Gadget override stanza. String forms here keep the parser free of
+/// compile-time dependency on the agent module's `GadgetTier` / `GadgetMode`
+/// enums — validation happens at `GadgetRegistry::freeze()` time in W2+.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GadgetOverride {
+    /// `"read"` | `"write"` | `"destructive"`. Validated at registry-freeze.
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// `"auto"` | `"ask"` | `"never"`. Validated at registry-freeze.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// One tenant-level override entry inside `PlugOverride::tenant_overrides`.
+/// In P2B this is parsed but not enforced; in P2C the router will consult
+/// `AuthenticatedContext.tenant_id` and apply this flag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantOverrideEntry {
+    #[serde(default = "default_plug_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for TenantOverrideEntry {
+    fn default() -> Self {
+        Self {
+            enabled: default_plug_enabled(),
+        }
+    }
+}
+
+/// Opt-in feature toggles. Currently only the `tenant_plug_overrides_accepted_as_reserved`
+/// acknowledgement gate for ADDENDUM-01 §2; additional toggles land here
+/// as P2B evolves.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeaturesConfig {
+    /// ADDENDUM-01 §2 + D-20260418-08 P1 — operator acknowledgement that
+    /// `tenant_overrides` stanzas are parsed but not enforced in P2B.
+    /// Without this toggle, any non-empty `tenant_overrides` map refuses
+    /// startup with CFG-045.
+    #[serde(default)]
+    pub tenant_plug_overrides_accepted_as_reserved: bool,
+}
+
+fn default_bundle_enabled() -> bool {
+    true
+}
+fn default_plug_enabled() -> bool {
+    true
+}
+
 impl Default for AppConfig {
     /// Built-in defaults used when no gadgetron.toml is present.
     ///
@@ -166,6 +330,8 @@ impl Default for AppConfig {
             models: vec![],
             web: WebConfig::default(),
             agent: crate::agent::AgentConfig::default(),
+            bundles: BTreeMap::new(),
+            features: FeaturesConfig::default(),
         }
     }
 }
@@ -192,7 +358,47 @@ impl AppConfig {
         config.web.validate()?;
         config.agent.validate(&config.providers)?;
         config.agent.warn_unusable_modes_in_p2a();
+        config.validate_bundles()?;
         Ok(config)
+    }
+
+    /// Enforce ADR-P2A-10-ADDENDUM-01 §2 — `tenant_overrides` stanzas are
+    /// parsed but not enforced in P2B. Any non-empty map requires the
+    /// operator acknowledgement toggle
+    /// `[features] tenant_plug_overrides_accepted_as_reserved = true`.
+    ///
+    /// Per D-20260418-08 P1: without the toggle, startup fails with
+    /// `CFG-045`. With the toggle, parser emits `tracing::warn!` per
+    /// bundle/plug pairing naming the reserved stanza.
+    fn validate_bundles(&self) -> crate::error::Result<()> {
+        let ack = self
+            .features
+            .tenant_plug_overrides_accepted_as_reserved;
+        for (bundle_name, bundle) in &self.bundles {
+            for (plug_name, plug) in &bundle.plugs {
+                if plug.tenant_overrides.is_empty() {
+                    continue;
+                }
+                if !ack {
+                    return Err(crate::error::GadgetronError::Config(format!(
+                        "CFG-045: [bundles.{bundle_name}.plugs.{plug_name}.tenant_overrides] \
+                         stanza is P2B-reserved and requires [features] \
+                         tenant_plug_overrides_accepted_as_reserved = true to accept. \
+                         Remove the stanza or set the feature toggle per \
+                         ADR-P2A-10-ADDENDUM-01 §2."
+                    )));
+                }
+                // Toggle ack — warn per stanza per codex round-2 MINOR 5.
+                tracing::warn!(
+                    target: "gadgetron_config",
+                    bundle = bundle_name.as_str(),
+                    plug = plug_name.as_str(),
+                    entries = plug.tenant_overrides.len(),
+                    "tenant_overrides reserved — enforcement deferred to P2C per ADR-P2A-10-ADDENDUM-01 §2"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Replace ${ENV_VAR} patterns with environment variable values.
@@ -587,5 +793,318 @@ max_concurrent_subprocesses = 4
         );
         assert_eq!(v["agent"]["brain"]["mode"].as_str(), Some("external_proxy"));
         assert!(v.as_table().unwrap().get("penny").is_none());
+    }
+
+    // ---- [bundles.*] + [features] — ADR-P2A-10-ADDENDUM-01 §§1, 2, 5 ----
+
+    /// Minimal config with no `[bundles]` stanza — `AppConfig::load` must
+    /// produce an empty `BTreeMap` and `FeaturesConfig::default()`.
+    #[test]
+    fn app_config_accepts_bundles_section_empty_default() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+"#;
+        let cfg: AppConfig = toml::from_str(src).expect("minimal config parses");
+        assert!(cfg.bundles.is_empty());
+        assert!(!cfg.features.tenant_plug_overrides_accepted_as_reserved);
+    }
+
+    /// `[bundles.<name>.runtime.limits]` / `.egress` parses into the
+    /// `BundleRuntimeOverride` shape. No enforcement yet (W1 scope) — W2+
+    /// `Bundle::install` consumes this override.
+    #[test]
+    fn app_config_accepts_runtime_limits_in_bundle_override() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+
+[bundles.ai-infra]
+enabled = true
+
+[bundles.ai-infra.runtime.limits]
+memory_mb   = 4096
+open_files  = 512
+cpu_seconds = 600
+
+[bundles.ai-infra.runtime.egress]
+allow = ["api.anthropic.com:443"]
+"#;
+        let cfg: AppConfig = toml::from_str(src).expect("runtime override parses");
+        let bundle = cfg.bundles.get("ai-infra").expect("ai-infra present");
+        assert!(bundle.enabled);
+        let rt = bundle.runtime.as_ref().expect("runtime override present");
+        let limits = rt.limits.as_ref().expect("limits present");
+        assert_eq!(limits.memory_mb, 4096);
+        assert_eq!(limits.open_files, 512);
+        assert_eq!(limits.cpu_seconds, 600);
+        let egress = rt.egress.as_ref().expect("egress present");
+        assert_eq!(egress.allow, vec!["api.anthropic.com:443".to_string()]);
+    }
+
+    /// Per-Plug override parses and defaults to `enabled = true`.
+    #[test]
+    fn app_config_accepts_per_plug_override() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+
+[bundles.ai-infra]
+enabled = true
+
+[bundles.ai-infra.plugs.anthropic-llm]
+enabled = false
+
+[bundles.ai-infra.plugs.openai-llm]
+enabled = true
+"#;
+        let cfg: AppConfig = toml::from_str(src).expect("per-plug override parses");
+        let bundle = cfg.bundles.get("ai-infra").unwrap();
+        assert_eq!(bundle.plugs.len(), 2);
+        assert!(!bundle.plugs.get("anthropic-llm").unwrap().enabled);
+        assert!(bundle.plugs.get("openai-llm").unwrap().enabled);
+    }
+
+    /// CFG-045 — `tenant_overrides` stanza WITHOUT the acknowledgement
+    /// toggle refuses startup. Per ADDENDUM-01 §2 / D-20260418-08 P1.
+    #[test]
+    fn tenant_overrides_without_ack_toggle_refuses_startup_cfg_045() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+
+[bundles.ai-infra.plugs.anthropic-llm]
+enabled = true
+
+[bundles.ai-infra.plugs.anthropic-llm.tenant_overrides]
+"tenant-a" = { enabled = false }
+"#;
+        let mut cfg: AppConfig = toml::from_str(src).expect("parse ok (validation is post-parse)");
+        let err = cfg.validate_bundles().expect_err("CFG-045 must fire");
+        match &err {
+            crate::error::GadgetronError::Config(msg) => {
+                assert!(
+                    msg.starts_with("CFG-045"),
+                    "error code must prefix CFG-045, got: {msg}"
+                );
+                assert!(msg.contains("ai-infra"), "error must name bundle: {msg}");
+                assert!(msg.contains("anthropic-llm"), "error must name plug: {msg}");
+                assert!(
+                    msg.contains("tenant_plug_overrides_accepted_as_reserved"),
+                    "error must name the toggle: {msg}"
+                );
+                assert!(msg.contains("ADR-P2A-10-ADDENDUM-01 §2"));
+            }
+            other => panic!("expected GadgetronError::Config, got {other:?}"),
+        }
+
+        // And enabling the toggle turns it into Ok(()).
+        cfg.features.tenant_plug_overrides_accepted_as_reserved = true;
+        cfg.validate_bundles()
+            .expect("toggle ack flips CFG-045 to Ok");
+    }
+
+    // ---- Tracing capture infrastructure (shared by tracing-sensitive tests) ----
+    //
+    // `tracing`'s callsite `Interest` cache is process-global. Parallel
+    // tests that each try to install a thread-local subscriber via
+    // `set_default` race against each other — once a callsite's Interest
+    // is cached as `never()` (under the default no-op dispatcher), no
+    // per-thread subscriber sees subsequent events from that callsite.
+    //
+    // We sidestep the race by installing ONE process-wide subscriber at
+    // first use and routing every event into a `OnceLock`-ed shared
+    // `Vec<CapturedEvent>`. Tests serialize their access via
+    // `TRACING_CAPTURE_GUARD`; each test clears the buffer at entry.
+
+    #[derive(Debug, Clone, Default)]
+    struct CapturedEvent {
+        target: String,
+        message: String,
+        bundle: Option<String>,
+        plug: Option<String>,
+    }
+
+    static TRACING_CAPTURE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static CAPTURED: std::sync::OnceLock<std::sync::Mutex<Vec<CapturedEvent>>> =
+        std::sync::OnceLock::new();
+    static SUBSCRIBER_INIT: std::sync::Once = std::sync::Once::new();
+
+    fn install_tracing_capture() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata, Subscriber};
+
+        struct Visitor<'a>(&'a mut CapturedEvent);
+
+        impl<'a> Visit for Visitor<'a> {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    let d = format!("{value:?}");
+                    self.0.message = d
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .map(|s| s.to_string())
+                        .unwrap_or(d);
+                }
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                match field.name() {
+                    "bundle" => self.0.bundle = Some(value.to_string()),
+                    "plug" => self.0.plug = Some(value.to_string()),
+                    "message" => self.0.message = value.to_string(),
+                    _ => {}
+                }
+            }
+        }
+
+        struct CaptureSubscriber {
+            next_id: AtomicU64,
+        }
+
+        impl Subscriber for CaptureSubscriber {
+            fn register_callsite(
+                &self,
+                _m: &'static Metadata<'static>,
+            ) -> tracing::subscriber::Interest {
+                tracing::subscriber::Interest::always()
+            }
+            fn enabled(&self, _m: &Metadata<'_>) -> bool {
+                true
+            }
+            fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+                Some(tracing::metadata::LevelFilter::TRACE)
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(self.next_id.fetch_add(1, Ordering::Relaxed))
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut captured = CapturedEvent {
+                    target: event.metadata().target().to_string(),
+                    ..Default::default()
+                };
+                event.record(&mut Visitor(&mut captured));
+                if let Some(buf) = CAPTURED.get() {
+                    buf.lock().unwrap().push(captured);
+                }
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+
+        CAPTURED.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        SUBSCRIBER_INIT.call_once(|| {
+            let subscriber = CaptureSubscriber {
+                next_id: AtomicU64::new(1),
+            };
+            // `set_global_default` can only be called once per process —
+            // `SUBSCRIBER_INIT::call_once` protects the invariant. If some
+            // other crate in the workspace already installed a global
+            // subscriber (e.g. via an `#[ctor]`), the call fails here and
+            // the test fallback path just skips assertion on captured
+            // events (see `capture_clear_and_snapshot`).
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            tracing::callsite::rebuild_interest_cache();
+        });
+    }
+
+    /// Clear the shared capture buffer and return an exclusive snapshot
+    /// handle. The returned closure drains the buffer at call time.
+    fn capture_clear_and_snapshot() -> impl FnOnce() -> Vec<CapturedEvent> {
+        if let Some(buf) = CAPTURED.get() {
+            buf.lock().unwrap().clear();
+        }
+        || {
+            CAPTURED
+                .get()
+                .map(|m| m.lock().unwrap().clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// With the acknowledgement toggle set, `tenant_overrides` parses and
+    /// the validator emits `warn!` per stanza (enforcement is deferred to
+    /// P2C). Captures via the shared process-global subscriber installed
+    /// by `install_tracing_capture()` — avoids `tracing`'s thread-local
+    /// subscriber + process-global Interest cache race.
+    #[test]
+    fn tenant_overrides_with_ack_toggle_parses_and_warns() {
+        let _serial = TRACING_CAPTURE_GUARD.lock().expect("tracing mutex");
+        install_tracing_capture();
+        let snapshot = capture_clear_and_snapshot();
+
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+
+[features]
+tenant_plug_overrides_accepted_as_reserved = true
+
+[bundles.ai-infra.plugs.anthropic-llm]
+enabled = true
+
+[bundles.ai-infra.plugs.anthropic-llm.tenant_overrides]
+"tenant-a" = { enabled = false }
+"tenant-b" = { enabled = true  }
+"#;
+        let cfg: AppConfig = toml::from_str(src).expect("parse ok");
+        cfg.validate_bundles().expect("validator passes with ack");
+
+        let events = snapshot();
+        let found = events
+            .iter()
+            .find(|e| e.target == "gadgetron_config" && e.message.contains("tenant_overrides"));
+        let event = found.unwrap_or_else(|| {
+            panic!(
+                "warn event must be emitted with target=gadgetron_config; captured {} events: {:#?}",
+                events.len(),
+                events
+            );
+        });
+        assert_eq!(event.bundle.as_deref(), Some("ai-infra"));
+        assert_eq!(event.plug.as_deref(), Some("anthropic-llm"));
+        assert!(
+            event.message.contains("reserved") && event.message.contains("P2C"),
+            "message must name the reservation + P2C defer: {}",
+            event.message
+        );
+    }
+
+    /// `BundleOverride` default is `enabled = true` with empty submaps.
+    /// Regression guard — a future refactor that drops the Default impl
+    /// must not silently flip the default to `false`.
+    #[test]
+    fn bundle_override_default_is_enabled() {
+        let b = BundleOverride::default();
+        assert!(b.enabled);
+        assert!(b.plugs.is_empty());
+        assert!(b.gadgets.is_empty());
+        assert!(b.runtime.is_none());
+
+        let p = PlugOverride::default();
+        assert!(p.enabled);
+        assert!(p.tenant_overrides.is_empty());
+    }
+
+    /// A `BundleOverride` with no `tenant_overrides` passes validation
+    /// trivially. Ensures we do not over-fire CFG-045 on vanilla configs.
+    #[test]
+    fn bundles_without_tenant_overrides_pass_validation() {
+        let src = r#"
+[server]
+bind = "0.0.0.0:8080"
+
+[bundles.ai-infra]
+enabled = true
+
+[bundles.ai-infra.plugs.openai-llm]
+enabled = true
+"#;
+        let cfg: AppConfig = toml::from_str(src).expect("parse ok");
+        cfg.validate_bundles()
+            .expect("no tenant_overrides → validator passes with no ack toggle");
     }
 }

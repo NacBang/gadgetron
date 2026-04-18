@@ -249,6 +249,17 @@ pub enum GadgetronError {
         kind: WikiErrorKind,
         message: String,
     },
+
+    /// Bundle subsystem error (Phase 2B). Manifest parse failures, install
+    /// hook errors, bundles-home resolution failures. Added by
+    /// ADR-P2A-10-ADDENDUM-01 §4 / D-20260418-07 W1 foundation.
+    ///
+    /// The inner `BundleError` carries the structured kind (`Manifest`,
+    /// `Install`, `PlugId`, `Home`); this variant is the single `GadgetronError`
+    /// seam so the gateway renders bundle failures through the same code
+    /// path as every other subsystem.
+    #[error("Bundle error: {0}")]
+    Bundle(#[from] crate::bundle::errors::BundleError),
 }
 
 impl GadgetronError {
@@ -299,6 +310,12 @@ impl GadgetronError {
                 WikiErrorKind::GitCorruption { .. } => "wiki_git_corrupted",
                 WikiErrorKind::Conflict { .. } => "wiki_conflict",
                 WikiErrorKind::PageNotFound { .. } => "wiki_page_not_found",
+            },
+            Self::Bundle(e) => match e {
+                crate::bundle::errors::BundleError::Manifest(_) => "bundle_manifest_error",
+                crate::bundle::errors::BundleError::Install(_) => "bundle_install_failed",
+                crate::bundle::errors::BundleError::PlugId(_) => "bundle_plug_id_invalid",
+                crate::bundle::errors::BundleError::Home(_) => "bundle_home_unresolvable",
             },
         }
     }
@@ -374,6 +391,10 @@ impl GadgetronError {
                 WikiErrorKind::PageNotFound { path } =>
                     format!("Wiki page not found: {path}. Check the page name; use `wiki.list` or `wiki.search` to find existing pages."),
             },
+            // Bundle errors surface the inner `BundleError` text verbatim —
+            // these are operator-facing messages (startup / install time)
+            // and the inner text already carries the remediation hint.
+            Self::Bundle(e) => format!("A bundle subsystem error occurred: {e}"),
         }
     }
 
@@ -407,6 +428,15 @@ impl GadgetronError {
                 WikiErrorKind::CredentialBlocked { .. } => "invalid_request_error",
                 WikiErrorKind::PageNotFound { .. } => "invalid_request_error",
                 _ => "server_error",
+            },
+            // Bundle errors are config / install-time; `Manifest` + `PlugId`
+            // are operator-supplied data → `invalid_request_error`. `Install`
+            // + `Home` are daemon-side failures → `server_error`.
+            Self::Bundle(e) => match e {
+                crate::bundle::errors::BundleError::Manifest(_)
+                | crate::bundle::errors::BundleError::PlugId(_) => "invalid_request_error",
+                crate::bundle::errors::BundleError::Install(_)
+                | crate::bundle::errors::BundleError::Home(_) => "server_error",
             },
         }
     }
@@ -454,6 +484,16 @@ impl GadgetronError {
                 WikiErrorKind::GitCorruption { .. } => 503,
                 WikiErrorKind::Conflict { .. } => 409,
                 WikiErrorKind::PageNotFound { .. } => 404,
+            },
+            // Bundle errors are configuration / install-time failures. `Manifest`
+            // + `PlugId` classify as operator-fixable config mistakes (400);
+            // `Install` + `Home` are daemon-side misconfiguration blocking
+            // startup (500).
+            Self::Bundle(e) => match e {
+                crate::bundle::errors::BundleError::Manifest(_)
+                | crate::bundle::errors::BundleError::PlugId(_) => 400,
+                crate::bundle::errors::BundleError::Install(_)
+                | crate::bundle::errors::BundleError::Home(_) => 500,
             },
         }
     }

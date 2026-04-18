@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod bundle;
 pub mod config;
 pub mod context;
 pub mod error;
