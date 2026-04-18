@@ -565,6 +565,8 @@ impl KnowledgeGadgetProvider {
                     markdown: content,
                     create_only: false,
                     overwrite: false,
+                    // Penny-authored wiki.write has no candidate provenance.
+                    provenance: Default::default(),
                 },
             )
             .await

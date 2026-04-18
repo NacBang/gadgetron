@@ -508,17 +508,17 @@ impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
 
         // Happy path: canonical writeback through `KnowledgeService::write`.
         if let Some(svc) = self.knowledge_service.as_ref() {
-            // TODO KC-1c: surface `write.provenance` on
-            // `KnowledgePutRequest` so the candidate's `hint_reason` /
-            // `hint_tags` plumb through to wiki frontmatter. For KC-1b we
-            // accept the payload to keep the trait signature stable and
-            // drop provenance on the floor; Penny still has the candidate
-            // row with its provenance intact for audit replay.
+            // Drift-fix PR 3 (D-20260418-27): `write.provenance` now threads
+            // into `KnowledgePutRequest.provenance` — stores that persist
+            // frontmatter (e.g. `LlmWikiStore`) embed the map under the
+            // `provenance:` key. `BTreeMap` ordering is deterministic so the
+            // wire shape is byte-stable for audit replay.
             let request = KnowledgePutRequest {
                 path: write.path.to_string(),
                 markdown: write.content.clone(),
                 create_only: false,
                 overwrite: true,
+                provenance: write.provenance.clone(),
             };
             let receipt = svc.write(actor, request).await?;
             // `KnowledgeWriteReceipt.path` is still `String` (see D-12 boundary —

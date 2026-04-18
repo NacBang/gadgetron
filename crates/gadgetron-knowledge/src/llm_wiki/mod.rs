@@ -75,6 +75,25 @@ impl LlmWikiStore {
         Ok(Self { wiki, plug_id })
     }
 
+    /// Format a `KnowledgePutRequest.provenance` map as a YAML frontmatter
+    /// block and prepend it to the given markdown.
+    ///
+    /// Uses JSON-inline-in-YAML (JSON is a strict subset of YAML 1.2) so
+    /// the output is deterministic for byte-stable audit replay — the
+    /// `BTreeMap<String, String>` already iterates in key order.
+    ///
+    /// Drift-fix PR 3 (D-20260418-27). Callers gate this on non-empty
+    /// `provenance` so legacy writes are byte-identical.
+    fn embed_provenance_frontmatter(
+        provenance: &std::collections::BTreeMap<String, String>,
+        markdown: &str,
+    ) -> String {
+        // serde_json::to_string on a BTreeMap is deterministic — no sort
+        // needed after the fact.
+        let prov_json = serde_json::to_string(provenance).unwrap_or_else(|_| "{}".to_string());
+        format!("---\nprovenance: {prov_json}\n---\n\n{markdown}")
+    }
+
     /// Construct with an explicit plug id — test-only surface for
     /// multi-wiki scenarios (P3 preview). Production wiring MUST use
     /// [`Self::new`] so the `"llm-wiki"` string matches every example
@@ -195,9 +214,32 @@ impl KnowledgeStore for LlmWikiStore {
                 "create_only write collided with existing page",
             ));
         }
+        // Drift-fix PR 3 (D-20260418-27): when `request.provenance` is
+        // non-empty, prepend a deterministic YAML frontmatter block so
+        // the audit trail from the candidate plane (hint_reason /
+        // hint_tags / source-bundle identifiers) persists into the
+        // canonical page. Empty provenance → markdown unchanged,
+        // preserving legacy `wiki.write` / RAW-import byte shape.
+        //
+        // Single-block assumption: if `request.markdown` already starts
+        // with `---\n`, the caller is responsible for the merge — we do
+        // NOT attempt to merge two YAML frontmatter blocks here. A
+        // doubled block would render oddly but is still valid YAML 1.2;
+        // document authors rarely hand-roll frontmatter, and the
+        // only in-tree writer that embeds one today
+        // (`ingest::pipeline`) passes `provenance: Default::default()`
+        // so the branches never collide.
+        let markdown_with_provenance = if request.provenance.is_empty() {
+            std::borrow::Cow::Borrowed(request.markdown.as_str())
+        } else {
+            std::borrow::Cow::Owned(Self::embed_provenance_frontmatter(
+                &request.provenance,
+                &request.markdown,
+            ))
+        };
         let write_result = self
             .wiki
-            .write(&request.path, &request.markdown)
+            .write(&request.path, &markdown_with_provenance)
             .map_err(wiki_err_to_knowledge)?;
         Ok(KnowledgeWriteReceipt {
             path: write_result.name,
@@ -351,6 +393,7 @@ mod tests {
                     markdown: "# Home\n\nBody text.".into(),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -395,6 +438,7 @@ mod tests {
                     markdown: "# v1".into(),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -408,6 +452,7 @@ mod tests {
                     markdown: "# v2".into(),
                     create_only: true,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -444,6 +489,7 @@ mod tests {
                     markdown: "x".repeat(100),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -474,6 +520,7 @@ mod tests {
                             .into(),
                     create_only: false,
                     overwrite: false,
+                    provenance: Default::default(),
                 },
             )
             .await
@@ -485,6 +532,70 @@ mod tests {
             } => assert!(reason.contains("pem_private_key"), "reason: {reason}"),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    // Drift-fix PR 3 (D-20260418-27): provenance plumbing
+
+    #[tokio::test]
+    async fn put_with_empty_provenance_writes_markdown_unchanged() {
+        // Legacy invariant: empty provenance → no frontmatter change.
+        // Keeps RAW-import / wiki.write byte-stable.
+        let (_dir, store) = fresh_store();
+        let actor = AuthenticatedContext;
+        store
+            .put(
+                &actor,
+                KnowledgePutRequest {
+                    path: "plain".into(),
+                    markdown: "# Title\n\nBody text.".into(),
+                    create_only: false,
+                    overwrite: false,
+                    provenance: Default::default(),
+                },
+            )
+            .await
+            .expect("put");
+        // Read raw wiki bytes directly — parse_page in assemble_document
+        // would strip frontmatter, which defeats the byte-identity check.
+        let raw = store.wiki.read("plain").expect("read");
+        assert!(
+            !raw.starts_with("---\n"),
+            "legacy empty-provenance write must NOT add frontmatter; got raw bytes: {raw:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_with_provenance_embeds_yaml_frontmatter() {
+        let (_dir, store) = fresh_store();
+        let actor = AuthenticatedContext;
+        let mut provenance = std::collections::BTreeMap::new();
+        provenance.insert("hint_reason".to_string(), "routine check".to_string());
+        provenance.insert("hint_tags".to_string(), "monitoring".to_string());
+        store
+            .put(
+                &actor,
+                KnowledgePutRequest {
+                    path: "with-prov".into(),
+                    markdown: "# Observation\n\nBody.".into(),
+                    create_only: false,
+                    overwrite: false,
+                    provenance: provenance.clone(),
+                },
+            )
+            .await
+            .expect("put");
+        let raw = store.wiki.read("with-prov").expect("read");
+        // BTreeMap JSON is deterministic in key order — hint_reason before
+        // hint_tags alphabetically.
+        let expected_start = "---\nprovenance: {\"hint_reason\":\"routine check\",\"hint_tags\":\"monitoring\"}\n---\n\n";
+        assert!(
+            raw.starts_with(expected_start),
+            "provenance frontmatter must be deterministically emitted;\n  expected prefix: {expected_start:?}\n  got raw: {raw:?}"
+        );
+        assert!(
+            raw.contains("# Observation"),
+            "body markdown must survive; got raw: {raw:?}"
+        );
     }
 
     #[tokio::test]

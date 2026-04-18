@@ -3645,4 +3645,60 @@ KC-1 (D-20260418-17) 이 `KnowledgeCandidate.proposed_path: Option<String>` 로 
 
 ---
 
+## D-20260418-27: Drift-fix PR 3 — `KnowledgePutRequest.provenance` plumbing
+
+**날짜**: 2026-04-19
+**유형**: Follow-up fix (drift-fix PR 2 머지 직후, 5-min cron iteration 5)
+**상태**: 🟢 승인 (codex cycle-15 sequencing note — "PR 3 resumes the Material track")
+**관련 문서**: D-20260418-23 (drift-fix PR 1 — M2 flagged), `docs/design/core/knowledge-candidate-curation.md` §2.1
+**Follows**: D-20260418-26 (drift-fix PR 2)
+
+### 배경
+
+KC-1b (D-18) 의 `materialize_accepted_candidate` 은 `KnowledgeDocumentWrite.provenance: BTreeMap<String, String>` 를 받지만 `KnowledgePutRequest` 에 해당 필드가 없어서 drop 됐음. Cycle-14 drift audit Material M2 가 이를 flag: "candidate 가 hint_reason / hint_tags 를 가져도 wiki 프런트매터에 안 남음 → audit replay 단절".
+
+### 결정: `KnowledgePutRequest.provenance` 필드 추가 + `LlmWikiStore` frontmatter 임베드
+
+1. **`KnowledgePutRequest.provenance: BTreeMap<String, String>`**:
+   - `#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]`
+   - 기본값 빈 맵 — legacy 호출자 (RAW ingest, wiki.write gadget) 는 byte-stable 동작 유지
+2. **Materialize 플러밍**:
+   - `InProcessCandidateCoordinator::materialize_accepted_candidate` 가 `write.provenance` 를 `KnowledgePutRequest.provenance` 로 forward
+   - TODO-KC-1c 마커 제거
+3. **`LlmWikiStore::put`** frontmatter 임베드:
+   - `provenance` 비어있지 않으면 `---\nprovenance: <JSON>\n---\n\n` 블록을 markdown 앞에 prepend
+   - JSON-inline-in-YAML (BTreeMap 순서 결정적 → byte-stable audit replay)
+   - 기존 frontmatter 가 있는 경우 merge 하지 않음 (단일 writer 가정, 문서에 명시)
+4. **Test**: `put_with_empty_provenance_writes_markdown_unchanged` + `put_with_provenance_embeds_yaml_frontmatter` — 정확한 bytes assertion
+5. **다른 construction 사이트**: `gadget.rs` (wiki.write), `ingest/pipeline.rs` (RAW import), `llm_wiki/mod.rs` 5 test fixtures, `service.rs` 3 사이트 — 모두 `provenance: Default::default()` 추가
+
+### Codex hidden caveat
+
+- 기존에 frontmatter 가 있는 markdown 을 candidate 가 materialize 하는 경우 (e.g. operator 가 `# --- ...` 로 시작하는 문서 작성 후 accept) 두 개의 frontmatter 블록이 YAML 렌더러에 노출됨. YAML 1.2 multi-document stream 으로는 valid 하지만 wiki renderer 가 첫 블록만 파싱할 위험. 현재는 in-tree writer 가 이 시나리오를 유발하지 않음 (ingest/pipeline 은 `provenance: Default::default()` 로 빈 맵 전달). 후속 PR 에서 merge 로직 검토
+- `KnowledgeWriteReceipt.path: String` 은 여전히 그대로 — KnowledgeStore-API 경계 narrowing 은 별도 (PR 2 의 non-scope 기록 참조)
+
+### Non-scope
+
+- `KnowledgeWriteReceipt.path` KnowledgePath narrowing
+- Frontmatter merge 로직 (기존 frontmatter + 새 provenance)
+- provenance → wiki git commit message 로 전달 (현재는 frontmatter 에만)
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: `KnowledgePutRequest` 필드 1개 추가 (~10 LOC)
+- `gadgetron-knowledge`: `LlmWikiStore::embed_provenance_frontmatter` 헬퍼 + `put()` 임베드 + 2 tests + construction 사이트 8개 업데이트 (~100 LOC)
+- 문서: doc 71 §1.3 landed-state + code example 업데이트 (~20 LOC)
+
+**Total 예상**: ~130 LOC
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `fix/drift-pr3-provenance-plumbing` (생성됨)
+3. 직접 구현
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
