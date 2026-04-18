@@ -1222,6 +1222,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         pg_pool,
         no_db,
         tui_tx,
+        workbench: None,
     }
 }
 
