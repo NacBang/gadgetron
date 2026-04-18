@@ -2144,4 +2144,65 @@ ADR-P2A-10-ADDENDUM-01 rev3 팀 수렴 완료 후 P2B-alpha 실행 단계 진입
 
 ---
 
+## D-20260418-09: W2 kickoff 팀 수렴 + 실행 플랜
+
+**날짜**: 2026-04-18
+**유형**: Execution plan (W1 머지 직후, W2 착수 전 4-agent review)
+**상태**: 🟢 승인 (4 agents: chief-architect APPROVE, qa APPROVE, security CONDITIONAL OK, codex APPROVE WITH CONCERNS)
+**관련 문서**: `docs/adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md` rev4
+
+### 배경
+
+W1 (PR #62 `aa080de`) 머지 완료 후 W2 (`Bundle` trait + `BundleContext` + `PlugRegistry` + `#[must_use] RegistrationOutcome`) 착수 전 4-agent 리뷰. rev3 까지는 개념 수렴, rev4 는 구현 직전 shape 확정.
+
+### 수렴된 결정 (7건)
+
+1. **W2 단일 PR** — codex 권고 채택 (trait + context + registry + outcome 을 같이 freeze 해야 shape 검증). chief-architect 의 2-PR 분할안 기각.
+2. **`BundleRegistry` metadata-only** (codex MAJOR 1) — live `dyn Bundle` 은 `install` 후 drop, `Vec<Arc<dyn Bundle>>` 금지. metadata+inventory+status 만 저장.
+3. **`SkippedByAvailability { missing: Vec<PlugId> }`** (codex MAJOR 2) — 운영 debugging 위해 누락된 plug IDs 캐리.
+4. **Field-form style 통일** (codex MAJOR 3) — `ctx.plugs.*` + `ctx.gadgets.*` (method form `gadgets_mut()` 폐기). ADR §4 + glossary 동기화.
+5. **Security 6 deliverables 필수** (security-compliance-lead CONDITIONAL OK):
+   - (a) `catch_unwind` around `Bundle::install` in `BundleRegistry::install_all` (DoS 방어)
+   - (b) `BundleRegistry` duplicate-id rejection
+   - (c) `register()` log field whitelist — `bundle`, `plug`, `axis` 만. Arc<T> Debug 금지
+   - (d) `let _` audit completeness (discarded outcome 도 tracing 발행 guarantee)
+   - (e) `CoreAuditEvent::PlugSkippedByConfig` structured variant — Gate 1 MUST-LAND wire freeze preview
+   - (f) `Bundle` trait rustdoc trust 제약 3건 명시 (P2B in-tree only / audit target operator-only / in-core full-trust)
+6. **테스트 2건 rename** (qa):
+   - `is_plug_enabled_returns_correct_tristate` → `is_plug_enabled_reflects_bundle_and_plug_axes`
+   - `bundle_plug_toml_subsection_parses_with_defaults` → `plug_override_omitting_enabled_defaults_to_true`
+7. **`trybuild` W2 defer** — `clippy -D warnings` 가 `#[must_use]` 를 이미 error 로 승격하므로 W2 에서는 문서+inline test 만. trybuild 는 W3 compile-fail 배치에 포함.
+
+### 예상 범위
+
+| 항목 | LOC |
+|---|---|
+| `gadgetron-core::bundle::trait_def` (`Bundle` trait + `BundleDescriptor` + `DisableBehavior`) | ~120 |
+| `gadgetron-core::bundle::context` (`BundleContext` + `PlugPredicates` + `PlugHandles`) | ~180 |
+| `gadgetron-core::bundle::registry` (`PlugRegistry<T>` + `RegistrationOutcome`) | ~150 |
+| `gadgetron-core::bundle::bundle_registry` (metadata-only + `catch_unwind` + duplicate-id) | ~120 |
+| `gadgetron-core::audit::event` 확장 (`CoreAuditEvent::PlugSkippedByConfig`) | ~40 |
+| 테스트 8건 (4 contract + 4 security) | ~380 |
+| **총** | **~990 LOC** |
+
+### 시행 순서
+
+1. 본 D-entry + ADR rev4 + glossary 수정 커밋 (docs-only)
+2. chief-architect delegation: trait + registry 구현 + 8 tests
+3. `cargo check` + `clippy` + `test -p gadgetron-core`
+4. `cargo fmt`
+5. Feature branch `p2b-alpha/w2-bundle-trait` → push
+6. PR + CI
+7. Admin override merge (W1 precedent 과 동일)
+
+### 리뷰 권고
+
+4-agent synthesis 결과로 rev4 와 본 D-entry 수렴됐으므로 W2 구현 PR 은 재-리뷰 불필요. `codex-chief-advisor` 재검증은 W2 PR 머지 후 W3 착수 전에 실시.
+
+### 비용
+
+~4-5 agent-hours (chief-architect W2 구현 + qa fake inline + security 4 regression tests).
+
+---
+
 _(다음 엔트리는 아래에 append)_
