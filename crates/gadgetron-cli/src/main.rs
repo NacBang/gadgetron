@@ -154,6 +154,36 @@ enum Commands {
         config: Option<PathBuf>,
     },
 
+    /// Rebuild the semantic wiki index from the markdown source of truth.
+    Reindex {
+        /// Path to TOML configuration file.
+        /// Overrides GADGETRON_CONFIG environment variable.
+        #[arg(long, short = 'c')]
+        config: Option<PathBuf>,
+
+        /// Truncate wiki_pages/wiki_chunks and rebuild from scratch.
+        #[arg(long, conflicts_with = "incremental")]
+        full: bool,
+
+        /// Explicitly request incremental mode (the default).
+        #[arg(long)]
+        incremental: bool,
+
+        /// Scan and report actions without changing PostgreSQL.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print per-page actions in addition to the summary.
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Knowledge-layer maintenance commands.
+    Wiki {
+        #[command(subcommand)]
+        command: WikiCmd,
+    },
+
     /// Run the stdio Gadget server (MCP-wire-protocol payload of Gadgets).
     ///
     /// This subcommand is invoked by Claude Code as a child process via
@@ -253,6 +283,18 @@ enum BundleCmd {
 enum PlugCmd {
     /// List all Plugs registered to core ports (stub).
     List,
+}
+
+/// Subcommands for `gadgetron wiki`.
+#[derive(Subcommand)]
+enum WikiCmd {
+    /// Print a report of stale pages and pages without frontmatter.
+    Audit {
+        /// Path to TOML configuration file.
+        /// Overrides GADGETRON_CONFIG environment variable.
+        #[arg(long, short = 'c')]
+        config: Option<PathBuf>,
+    },
 }
 
 /// Subcommands for `gadgetron tenant`.
@@ -358,6 +400,16 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
+        Some(Commands::Reindex {
+            config,
+            full,
+            incremental,
+            dry_run,
+            verbose,
+        }) => cmd_reindex(config, full, incremental, dry_run, verbose).await,
+        Some(Commands::Wiki {
+            command: WikiCmd::Audit { config },
+        }) => cmd_wiki_audit(config),
 
         Some(Commands::Gadget {
             command: GadgetCmd::Serve { config },
@@ -445,16 +497,7 @@ fn cmd_gadget_list_stub() -> Result<()> {
 /// deprecation shim (ADR-P2A-10); the shim prints a `tracing::warn!`
 /// and forwards unchanged.
 async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
-    let config_path: PathBuf = config_path_override
-        .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
-
-    if !config_path.exists() {
-        anyhow::bail!(
-            "config file not found: {}. Create a gadgetron.toml with a `[knowledge]` section, or pass --config.",
-            config_path.display()
-        );
-    }
+    let config_path = resolve_existing_config_path(config_path_override)?;
 
     // Also load the `[agent]` section from the same TOML so the
     // registry can enforce L3 defense-in-depth (ADR-P2A-06 addendum
@@ -467,13 +510,15 @@ async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
         .map(|app| app.agent)
         .unwrap_or_default();
 
-    let registry = load_penny_registry_from_config(&config_path, &agent_cfg)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "`[knowledge]` section is missing in {}. `gadgetron gadget serve` \
+    let registry = load_penny_registry_from_config_for_gadget_serve(&config_path, &agent_cfg)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "`[knowledge]` section is missing in {}. `gadgetron gadget serve` \
                  requires the knowledge layer to be configured.",
-            config_path.display()
-        )
-    })?;
+                config_path.display()
+            )
+        })?;
 
     // Drive the stdio loop until EOF.
     gadgetron_penny::serve_stdio(registry)
@@ -483,32 +528,30 @@ async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn resolve_existing_config_path(config_path_override: Option<PathBuf>) -> Result<PathBuf> {
+    let config_path: PathBuf = config_path_override
+        .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("gadgetron.toml"));
+
+    if !config_path.exists() {
+        anyhow::bail!(
+            "config file not found: {}. Create a gadgetron.toml with a `[knowledge]` section, or pass --config.",
+            config_path.display()
+        );
+    }
+
+    Ok(config_path)
+}
+
 fn load_penny_registry_from_config(
     config_path: &std::path::Path,
     agent_cfg: &gadgetron_core::agent::AgentConfig,
 ) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
-    let raw = std::fs::read_to_string(config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-
-    let Some(mut knowledge_cfg) =
-        gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-    else {
+    let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? else {
         return Ok(None);
     };
 
-    // Resolve relative wiki paths against the operator config file so
-    // both the in-process provider and the MCP grandchild use the same
-    // wiki root regardless of their current working directories.
-    if let Some(config_dir) = config_path.parent() {
-        knowledge_cfg.resolve_relative_paths(config_dir);
-    }
-
-    knowledge_cfg
-        .validate()
-        .map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
-
-    let provider = gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg)
+    let provider = gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg, None)
         .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
 
     let mut builder = gadgetron_penny::GadgetRegistryBuilder::new();
@@ -521,6 +564,126 @@ fn load_penny_registry_from_config(
     // registry, regardless of whether it is used in-process or via the
     // child-side stdio server.
     Ok(Some(Arc::new(builder.freeze(agent_cfg))))
+}
+
+async fn load_penny_registry_from_config_for_gadget_serve(
+    config_path: &std::path::Path,
+    agent_cfg: &gadgetron_core::agent::AgentConfig,
+) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
+    let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? else {
+        return Ok(None);
+    };
+
+    let pg_pool = connect_optional_pg_for_knowledge().await;
+    let provider = gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg, pg_pool)
+        .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
+
+    let mut builder = gadgetron_penny::GadgetRegistryBuilder::new();
+    builder
+        .register(Arc::new(provider))
+        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
+    Ok(Some(Arc::new(builder.freeze(agent_cfg))))
+}
+
+fn load_knowledge_config_from_path(
+    config_path: &std::path::Path,
+) -> Result<Option<gadgetron_knowledge::config::KnowledgeConfig>> {
+    load_knowledge_config_from_path_with_validator(config_path, |cfg| cfg.validate())
+}
+
+fn load_knowledge_config_from_path_for_local_wiki_ops(
+    config_path: &std::path::Path,
+) -> Result<Option<gadgetron_knowledge::config::KnowledgeConfig>> {
+    load_knowledge_config_from_path_with_validator(config_path, |cfg| {
+        cfg.validate_without_embedding_env()
+    })
+}
+
+fn load_knowledge_config_from_path_with_validator<F>(
+    config_path: &std::path::Path,
+    validate: F,
+) -> Result<Option<gadgetron_knowledge::config::KnowledgeConfig>>
+where
+    F: Fn(&gadgetron_knowledge::config::KnowledgeConfig) -> Result<(), String>,
+{
+    let raw = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+
+    let Some(mut knowledge_cfg) =
+        gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&raw)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    else {
+        return Ok(None);
+    };
+
+    if let Some(config_dir) = config_path.parent() {
+        knowledge_cfg.resolve_relative_paths(config_dir);
+    }
+
+    validate(&knowledge_cfg).map_err(|e| anyhow::anyhow!("[knowledge] config invalid: {e}"))?;
+
+    Ok(Some(knowledge_cfg))
+}
+
+async fn connect_optional_pg_for_knowledge() -> Option<sqlx::PgPool> {
+    let Ok(url) = std::env::var("GADGETRON_DATABASE_URL") else {
+        return None;
+    };
+    if url.trim().is_empty() {
+        return None;
+    }
+
+    match sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+    {
+        Ok(pool) => {
+            if let Err(error) = sqlx::migrate!("../gadgetron-xaas/migrations")
+                .run(&pool)
+                .await
+            {
+                tracing::warn!(
+                    target: "knowledge_semantic",
+                    error = %error,
+                    "failed to run PostgreSQL migrations for semantic knowledge backend; falling back to keyword-only wiki tools"
+                );
+                return None;
+            }
+            Some(pool)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "knowledge_semantic",
+                error = %error,
+                "failed to connect to PostgreSQL for semantic knowledge backend; falling back to keyword-only wiki tools"
+            );
+            None
+        }
+    }
+}
+
+async fn connect_required_pg_for_knowledge() -> Result<sqlx::PgPool> {
+    let url = std::env::var("GADGETRON_DATABASE_URL")
+        .context("GADGETRON_DATABASE_URL is required for semantic reindex")?;
+    if url.trim().is_empty() {
+        anyhow::bail!("GADGETRON_DATABASE_URL is set but empty");
+    }
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .context("failed to connect to PostgreSQL for semantic reindex")?;
+
+    sqlx::migrate!("../gadgetron-xaas/migrations")
+        .run(&pool)
+        .await
+        .context("failed to run PostgreSQL migrations for semantic reindex")?;
+
+    Ok(pool)
 }
 
 struct PennyRouterRegistration {
@@ -1482,6 +1645,87 @@ fn cmd_init(output: &std::path::Path, yes: bool) -> Result<()> {
     );
     println!("    2. Run: gadgetron serve");
 
+    Ok(())
+}
+
+async fn cmd_reindex(
+    config_path_override: Option<PathBuf>,
+    full: bool,
+    incremental: bool,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<()> {
+    let config_path = resolve_existing_config_path(config_path_override)?;
+    let knowledge_cfg = load_knowledge_config_from_path(&config_path)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`[knowledge]` section is missing in {}. `gadgetron reindex` requires the knowledge layer to be configured.",
+            config_path.display()
+        )
+    })?;
+
+    let mode = match (full, incremental) {
+        (true, _) => gadgetron_knowledge::ReindexMode::Full,
+        (false, _) => gadgetron_knowledge::ReindexMode::Incremental,
+    };
+
+    let pool = connect_required_pg_for_knowledge().await?;
+    let report = gadgetron_knowledge::run_reindex(
+        &knowledge_cfg,
+        pool.clone(),
+        gadgetron_knowledge::ReindexOptions {
+            mode,
+            dry_run,
+            verbose,
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("semantic reindex failed: {e}"))?;
+
+    if verbose {
+        for action in &report.actions {
+            let verb = match action.kind {
+                gadgetron_knowledge::ReindexActionKind::Reembedded => "reembedded",
+                gadgetron_knowledge::ReindexActionKind::Deleted => "deleted",
+                gadgetron_knowledge::ReindexActionKind::Skipped => "skipped",
+            };
+            println!("{verb}: {}", action.page_name);
+        }
+        if !report.actions.is_empty() {
+            println!();
+        }
+    }
+
+    println!("Reindex complete");
+    println!(
+        "Mode: {}",
+        match report.mode {
+            gadgetron_knowledge::ReindexMode::Incremental => "incremental",
+            gadgetron_knowledge::ReindexMode::Full => "full",
+        }
+    );
+    println!("Dry run: {}", if report.dry_run { "yes" } else { "no" });
+    println!("Scanned: {}", report.scanned);
+    println!("Re-embedded: {}", report.reembedded);
+    println!("Deleted: {}", report.deleted);
+    println!("Skipped: {}", report.skipped);
+
+    pool.close().await;
+    Ok(())
+}
+
+fn cmd_wiki_audit(config_path_override: Option<PathBuf>) -> Result<()> {
+    let config_path = resolve_existing_config_path(config_path_override)?;
+    let knowledge_cfg = load_knowledge_config_from_path_for_local_wiki_ops(&config_path)?
+        .ok_or_else(|| {
+        anyhow::anyhow!(
+            "`[knowledge]` section is missing in {}. `gadgetron wiki audit` requires the knowledge layer to be configured.",
+            config_path.display()
+        )
+    })?;
+
+    let report = gadgetron_knowledge::audit_wiki(&knowledge_cfg, chrono::Utc::now())
+        .map_err(|e| anyhow::anyhow!("wiki audit failed: {e}"))?;
+    println!("{}", report.render());
     Ok(())
 }
 
@@ -2485,6 +2729,72 @@ mod tests {
                 assert!(!yes);
             }
             _ => panic!("expected Commands::Init"),
+        }
+    }
+
+    #[test]
+    fn clap_reindex_defaults_to_incremental() {
+        let cli = Cli::try_parse_from(["gadgetron", "reindex"])
+            .expect("parse must succeed for 'reindex'");
+        match cli.command {
+            Some(Commands::Reindex {
+                config,
+                full,
+                incremental,
+                dry_run,
+                verbose,
+            }) => {
+                assert!(config.is_none());
+                assert!(!full);
+                assert!(!incremental);
+                assert!(!dry_run);
+                assert!(!verbose);
+            }
+            _ => panic!("expected Commands::Reindex"),
+        }
+    }
+
+    #[test]
+    fn clap_reindex_full_dry_run_verbose() {
+        let cli = Cli::try_parse_from([
+            "gadgetron",
+            "reindex",
+            "--full",
+            "--dry-run",
+            "--verbose",
+            "--config",
+            "/tmp/gadgetron.toml",
+        ])
+        .expect("parse must succeed for reindex flags");
+        match cli.command {
+            Some(Commands::Reindex {
+                config,
+                full,
+                incremental,
+                dry_run,
+                verbose,
+            }) => {
+                assert_eq!(config, Some(PathBuf::from("/tmp/gadgetron.toml")));
+                assert!(full);
+                assert!(!incremental);
+                assert!(dry_run);
+                assert!(verbose);
+            }
+            _ => panic!("expected Commands::Reindex"),
+        }
+    }
+
+    #[test]
+    fn clap_wiki_audit() {
+        let cli = Cli::try_parse_from(["gadgetron", "wiki", "audit", "--config", "cfg.toml"])
+            .expect("parse must succeed for 'wiki audit'");
+        match cli.command {
+            Some(Commands::Wiki {
+                command: WikiCmd::Audit { config },
+            }) => {
+                assert_eq!(config, Some(PathBuf::from("cfg.toml")));
+            }
+            _ => panic!("expected Commands::Wiki {{ command: WikiCmd::Audit }}"),
         }
     }
 

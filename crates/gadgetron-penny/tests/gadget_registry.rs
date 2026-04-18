@@ -246,5 +246,5 @@ async fn dispatch_wiki_search_via_registry_returns_hits() {
         .expect("search");
     let hits = result.content["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0]["name"], "notes");
+    assert_eq!(hits[0]["page_name"], "notes");
 }

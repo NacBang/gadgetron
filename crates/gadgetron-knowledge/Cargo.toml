@@ -13,6 +13,8 @@ tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
 
 # Wiki subsystem — git backend + credential patterns
 git2 = { workspace = true }
@@ -21,12 +23,15 @@ once_cell = { workspace = true }
 libc = { workspace = true }
 include_dir = { workspace = true }
 chrono = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
 
 # Web search subsystem (SearXNG client)
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+gadgetron-testing = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
