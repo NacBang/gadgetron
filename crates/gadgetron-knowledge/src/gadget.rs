@@ -37,8 +37,14 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+use base64::Engine;
+use gadgetron_core::ingest::{
+    ExtractError, ExtractHints, ExtractedDocument, Extractor, StructureHint,
+};
+
 use crate::config::KnowledgeConfig;
 use crate::error::{SearchError, WikiError};
+use crate::ingest::{ImportRequest, IngestPipeline};
 use crate::keyword_index::WikiKeywordIndex;
 use crate::llm_wiki::LlmWikiStore;
 use crate::search::{SearxngClient, WebSearch};
@@ -66,6 +72,19 @@ pub struct KnowledgeGadgetProvider {
     /// should normalize frontmatter (created/updated/source defaults) per
     /// `docs/design/phase2/05-knowledge-semantic.md §6`.
     normalize_on_write: bool,
+    /// RAW ingestion pipeline. Always constructed; wires through the same
+    /// `KnowledgeService` as the other wiki.* gadgets so `wiki.import`
+    /// goes through the knowledge plane contract (`write()` delegation,
+    /// derived-plug fanout, etc.) — see design 11 §4.4 and
+    /// `docs/design/core/knowledge-plug-architecture.md` §3.3.
+    ingest_pipeline: Arc<IngestPipeline>,
+    /// Default markdown extractor — an internal near-noop used by
+    /// `wiki.import` when the operator hasn't registered a Bundle
+    /// extractor yet (W3-KL-2 is Bundle-less on the production path).
+    /// Design 11 §8.1: markdown needs no heavyweight parsing, so the
+    /// default guarantees `wiki.import(..., content_type: "text/markdown")`
+    /// works out of the box even on the simplest deployment.
+    default_markdown_extractor: Arc<dyn Extractor>,
 }
 
 impl KnowledgeGadgetProvider {
@@ -154,11 +173,16 @@ impl KnowledgeGadgetProvider {
         let normalize = service
             .index_plugs()
             .any(|p| p.as_str() == "semantic-pgvector");
+        let ingest_pipeline = Arc::new(IngestPipeline::new(service.clone()));
+        let default_markdown_extractor: Arc<dyn Extractor> =
+            Arc::new(InternalMarkdownExtractor::new());
         Self {
             service,
             web_search,
             max_search_results: max_search_results.max(1),
             normalize_on_write: normalize,
+            ingest_pipeline,
+            default_markdown_extractor,
         }
     }
 
@@ -189,11 +213,17 @@ impl KnowledgeGadgetProvider {
             .build()
             .map_err(|e| WikiError::Frontmatter(format!("knowledge service build: {e}")))?;
 
+        let ingest_pipeline = Arc::new(IngestPipeline::new(service.clone()));
+        let default_markdown_extractor: Arc<dyn Extractor> =
+            Arc::new(InternalMarkdownExtractor::new());
+
         Ok(Self {
             service,
             web_search,
             max_search_results: max_search_results.max(1),
             normalize_on_write: semantic.is_some(),
+            ingest_pipeline,
+            default_markdown_extractor,
         })
     }
 
@@ -218,6 +248,7 @@ impl GadgetProvider for KnowledgeGadgetProvider {
             schema_wiki_write(),
             schema_wiki_delete(),
             schema_wiki_rename(),
+            schema_wiki_import(),
         ];
         if self.web_search.is_some() {
             out.push(schema_web_search());
@@ -233,6 +264,7 @@ impl GadgetProvider for KnowledgeGadgetProvider {
             "wiki.write" => self.call_wiki_write(args).await,
             "wiki.delete" => self.call_wiki_delete(args).await,
             "wiki.rename" => self.call_wiki_rename(args).await,
+            "wiki.import" => self.call_wiki_import(args).await,
             "web.search" => self.call_web_search(args).await,
             other => Err(GadgetError::UnknownGadget(other.to_string())),
         }
@@ -363,6 +395,66 @@ fn schema_wiki_rename() -> GadgetSchema {
                 "to":   { "type": "string", "minLength": 1, "maxLength": 256 }
             },
             "required": ["from", "to"],
+            "additionalProperties": false
+        }),
+        idempotent: Some(false),
+    }
+}
+
+fn schema_wiki_import() -> GadgetSchema {
+    GadgetSchema {
+        name: "wiki.import".into(),
+        tier: GadgetTier::Write,
+        description: "Import a RAW document (markdown / plain text) into the \
+            wiki. Bytes are base64-encoded in `bytes`, `content_type` is the \
+            MIME type (e.g. `text/markdown`). The pipeline extracts a title \
+            (explicit `title_hint` > first heading > fallback), kebab-cases \
+            it into `imports/<title>.md`, prepends source-tracking \
+            frontmatter, and writes through the canonical store. \
+            PDF / docx / pptx extractors land in a later release."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "bytes": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Base64-encoded RAW bytes (standard alphabet)."
+                },
+                "content_type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "MIME type of `bytes`. Currently `text/markdown` and `text/plain` are supported."
+                },
+                "target_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Optional wiki path override; when omitted the pipeline derives `imports/<kebab-title>`."
+                },
+                "title_hint": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "description": "Optional caller-supplied title; overrides the first-heading fallback."
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "If true, allow overwriting an existing page at `target_path`."
+                },
+                "auto_enrich": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Caller may set `true` but W3-KL-2 treats this as a no-op; enrichment lands in a later release."
+                },
+                "source_uri": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Optional URL provenance; copied into the page's `source_uri` frontmatter."
+                }
+            },
+            "required": ["bytes", "content_type"],
             "additionalProperties": false
         }),
         idempotent: Some(false),
@@ -538,6 +630,84 @@ impl KnowledgeGadgetProvider {
         }
     }
 
+    async fn call_wiki_import(&self, args: Value) -> Result<GadgetResult, GadgetError> {
+        let bytes_b64 = required_string_arg(&args, "bytes")?;
+        let content_type = required_string_arg(&args, "content_type")?;
+        let target_path = optional_string_arg(&args, "target_path");
+        let title_hint = optional_string_arg(&args, "title_hint");
+        let source_uri = optional_string_arg(&args, "source_uri");
+        let overwrite = args
+            .get("overwrite")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let auto_enrich = args
+            .get("auto_enrich")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Decode base64 in the gadget layer so the pipeline API stays on
+        // raw `Vec<u8>`. Pass-through of decode errors as InvalidArgs —
+        // per design 11 §9, malformed input is a caller concern.
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(bytes_b64.as_bytes())
+            .map_err(|e| GadgetError::InvalidArgs(format!("bytes must be valid base64: {e}")))?;
+
+        // W3-KL-2: pick extractor by content_type prefix. Only the
+        // internal markdown extractor is available on this path — PDF
+        // and friends land when Bundle-driven extractors can register
+        // on the `extractors` axis.
+        let primary = content_type
+            .split(';')
+            .next()
+            .unwrap_or(&content_type)
+            .trim()
+            .to_ascii_lowercase();
+        let supported = self.default_markdown_extractor.supported_content_types();
+        if !supported.iter().any(|t| t.eq_ignore_ascii_case(&primary)) {
+            return Err(GadgetError::InvalidArgs(format!(
+                "content_type {primary:?} is not supported by the built-in markdown extractor; \
+                 supported: {supported:?}"
+            )));
+        }
+
+        let request = ImportRequest {
+            bytes: decoded,
+            content_type: content_type.clone(),
+            target_path,
+            title_hint,
+            auto_enrich,
+            overwrite,
+            source_uri,
+        };
+
+        match self
+            .ingest_pipeline
+            .import(
+                &self.actor(),
+                request,
+                self.default_markdown_extractor.clone(),
+            )
+            .await
+        {
+            Ok(receipt) => Ok(GadgetResult {
+                content: json!({
+                    "path": receipt.path,
+                    "canonical_plug": receipt.canonical_plug.as_str(),
+                    "revision": receipt.revision,
+                    "byte_size": receipt.byte_size,
+                    "content_hash": receipt.content_hash,
+                    "derived_failures": receipt
+                        .derived_failures
+                        .iter()
+                        .map(|p| p.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                }),
+                is_error: false,
+            }),
+            Err(e) => Err(map_knowledge_err_write(e)),
+        }
+    }
+
     async fn call_web_search(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let Some(client) = &self.web_search else {
             return Err(GadgetError::Denied {
@@ -611,6 +781,17 @@ fn required_string_arg(args: &Value, field: &str) -> Result<String, GadgetError>
             "missing required field '{field}'"
         ))),
     }
+}
+
+/// `wiki.import` permits several optional string fields (title_hint,
+/// target_path, source_uri). Returns `None` for missing-or-null-or-empty
+/// so the pipeline's `Option<&str>` consumers don't need to branch on
+/// empty strings.
+fn optional_string_arg(args: &Value, field: &str) -> Option<String> {
+    args.get(field).and_then(|v| match v {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    })
 }
 
 // ---- GadgetronError -> GadgetError translation ----
@@ -723,6 +904,113 @@ fn map_search_err(err: SearchError) -> GadgetError {
 }
 
 // ---------------------------------------------------------------------------
+// Internal markdown extractor — default ingest path for W3-KL-2.
+//
+// Mirrors `gadgetron-bundle-document-formats::MarkdownExtractor` shape but
+// lives inline in the knowledge crate so `wiki.import` works without a
+// Bundle installation. When W3-KL-3 wires `DocumentFormatsBundle` through
+// a real `BundleRegistry`, `KnowledgeGadgetProvider::from_service_with_extractor`
+// (future) will replace this default with the registered extractor.
+// ---------------------------------------------------------------------------
+
+/// In-crate markdown extractor. Kept minimal — only the hooks the pipeline
+/// needs: UTF-8 validation + `StructureHint::Heading` emission for ATX
+/// headings. A copy of `plugin-document-formats::markdown::MarkdownExtractor`
+/// would be cleaner but the plan (D-20260418-11) explicitly sets up
+/// `default-markdown-extractor` as in-crate so W3-KL-2 is independent of
+/// the bundle crate's install flow.
+#[derive(Debug, Default, Clone)]
+struct InternalMarkdownExtractor;
+
+impl InternalMarkdownExtractor {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Extractor for InternalMarkdownExtractor {
+    fn name(&self) -> &str {
+        "markdown-internal"
+    }
+
+    fn supported_content_types(&self) -> &[&str] {
+        &["text/markdown", "text/plain"]
+    }
+
+    async fn extract(
+        &self,
+        bytes: &[u8],
+        _content_type: &str,
+        _hints: &ExtractHints,
+    ) -> Result<ExtractedDocument, ExtractError> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| ExtractError::Malformed(format!("non-utf8 input: {e}")))?;
+        let structure = detect_internal_headings(text);
+        Ok(ExtractedDocument {
+            plain_text: text.to_string(),
+            structure,
+            source_metadata: serde_json::json!({
+                "extractor": "markdown-internal",
+            }),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+/// ATX heading detection, fence-aware. See
+/// `plugin-document-formats::markdown::detect_headings` for the full
+/// rationale — this is a trimmed-down copy to keep the gadget crate
+/// independent of the bundle crate at link time.
+fn detect_internal_headings(text: &str) -> Vec<StructureHint> {
+    let mut hints = Vec::new();
+    let mut offset = 0usize;
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            offset += line.len();
+            continue;
+        }
+        if in_fence {
+            offset += line.len();
+            continue;
+        }
+        let line_start = offset + (line.len() - trimmed.len());
+        let mut level = 0u8;
+        for b in trimmed.bytes() {
+            if b == b'#' {
+                level += 1;
+                if level > 6 {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if (1..=6).contains(&level) {
+            let after = &trimmed[level as usize..];
+            let is_heading = after.starts_with(' ') || after.trim().is_empty();
+            if is_heading {
+                let t = after
+                    .trim_start_matches(' ')
+                    .trim_end_matches(['\n', '\r', '#', ' '])
+                    .trim_end()
+                    .to_string();
+                hints.push(StructureHint::Heading {
+                    level,
+                    byte_offset: line_start,
+                    text: t,
+                });
+            }
+        }
+        offset += line.len();
+    }
+    hints
+}
+
+// ---------------------------------------------------------------------------
 // Tests — preserved from the legacy implementation plus new delegation
 // assertions.
 // ---------------------------------------------------------------------------
@@ -823,10 +1111,13 @@ mod tests {
     }
 
     #[test]
-    fn gadget_schemas_no_search_has_six_tools() {
+    fn gadget_schemas_no_search_has_seven_tools() {
+        // W3-KL-2 adds `wiki.import` to the surface; the six legacy
+        // wiki.* gadgets remain. `web.search` still only appears when
+        // the provider is built with a SearxngClient.
         let (_dir, p) = fresh_provider_no_search();
         let schemas = p.gadget_schemas();
-        assert_eq!(schemas.len(), 6);
+        assert_eq!(schemas.len(), 7);
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
         for expected in [
             "wiki.list",
@@ -835,6 +1126,7 @@ mod tests {
             "wiki.write",
             "wiki.delete",
             "wiki.rename",
+            "wiki.import",
         ] {
             assert!(
                 names.contains(&expected),

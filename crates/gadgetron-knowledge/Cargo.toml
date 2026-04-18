@@ -29,6 +29,9 @@ include_dir = { workspace = true }
 chrono = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
+# wiki.import arg shape carries bytes as base64 — RFC 4648 std alphabet.
+# Scope: gadget layer only (core trait takes raw &[u8]). D-12 leaf-safe.
+base64 = "0.22"
 
 # Web search subsystem (SearXNG client)
 async-trait = { workspace = true }

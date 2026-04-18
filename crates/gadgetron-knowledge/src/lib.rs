@@ -22,6 +22,7 @@ pub mod config;
 pub mod embedding;
 pub mod error;
 pub mod gadget;
+pub mod ingest;
 pub mod keyword_index;
 pub mod llm_wiki;
 pub mod maintenance;
@@ -35,6 +36,7 @@ pub use embedding::{EmbeddingError, EmbeddingProvider, OpenAiCompatEmbedding};
 pub use error::{SearchError, WikiError};
 pub use gadget::KnowledgeGadgetProvider;
 pub use gadgetron_core::error::{KnowledgeErrorKind, WikiErrorKind};
+pub use ingest::{ImportReceipt, ImportRequest, IngestPipeline};
 pub use keyword_index::WikiKeywordIndex;
 pub use llm_wiki::LlmWikiStore;
 pub use maintenance::{

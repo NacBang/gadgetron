@@ -35,6 +35,7 @@ use crate::bundle::id::PlugId;
 use crate::bundle::registry::PlugRegistry;
 use crate::bundle::trait_def::BundleDescriptor;
 use crate::config::AppConfig;
+use crate::ingest::Extractor;
 use crate::provider::LlmProvider;
 
 /// Cached predicate view over the operator's per-Bundle plug config.
@@ -67,15 +68,23 @@ pub(crate) struct PlugPredicates<'a> {
 /// Per-axis Plug registration surface. Bundle authors reach into this
 /// via `ctx.plugs.<axis>.register(id, plug)`.
 ///
-/// W2 ships only the `llm_providers` axis because `LlmProvider` is the
-/// single Plug trait that already lives in `gadgetron-core`. Extractor /
-/// BlobStore / Scheduler / EmbeddingProvider / EntityKind / HTTP routes
-/// land in W3 when their Rust traits ship — adding a new axis is an
-/// additive change to this struct (no trait break).
+/// W2 shipped only the `llm_providers` axis; W3-KL-2 adds `extractors` for
+/// the RAW ingestion pipeline (design 11 §4.3). BlobStore / Scheduler /
+/// EmbeddingProvider / EntityKind / HTTP route axes land when their Rust
+/// traits ship — adding a new axis is an additive change to this struct
+/// (no trait break; bundles that don't use a new axis don't compile against
+/// it).
 pub struct PlugHandles<'a> {
     /// LLM provider Plugs consumed by the router. Keyed by `PlugId`
     /// (e.g. `"openai-llm"`, `"anthropic-llm"`).
     pub llm_providers: PlugRegistry<'a, dyn LlmProvider>,
+    /// RAW-ingestion extractors consumed by
+    /// `gadgetron-knowledge::ingest::IngestPipeline`. Keyed by `PlugId`
+    /// (e.g. `"markdown"`, `"pdf"`, `"docx"`). The pipeline dispatches by
+    /// the extractor's `supported_content_types()`; the `PlugId` is how
+    /// operator config can disable a specific format without uninstalling
+    /// the whole document-formats Bundle.
+    pub extractors: PlugRegistry<'a, dyn Extractor>,
 }
 
 /// Per-category Gadget registration surface. Scaffold for W3 — the
@@ -114,9 +123,11 @@ impl<'a> BundleContext<'a> {
     pub(crate) fn new(
         predicates: &'a PlugPredicates<'a>,
         llm_providers_inner: &'a mut BTreeMap<PlugId, Arc<dyn LlmProvider>>,
+        extractors_inner: &'a mut BTreeMap<PlugId, Arc<dyn Extractor>>,
     ) -> Self {
         let plugs = PlugHandles {
             llm_providers: PlugRegistry::new(predicates, llm_providers_inner, "llm_provider"),
+            extractors: PlugRegistry::new(predicates, extractors_inner, "extractor"),
         };
         let gadgets = GadgetHandles {
             _phantom: std::marker::PhantomData,
