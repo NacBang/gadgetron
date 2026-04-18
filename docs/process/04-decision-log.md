@@ -3442,4 +3442,73 @@ _(다음 엔트리는 아래에 append)_
 
 ---
 
+## D-20260418-24: Drift-fix PR 5 — AuditEntry.event_id real field (N2)
+
+**날짜**: 2026-04-18
+**유형**: Follow-up fix (drift-fix PR 1 머지 직후, 5-min cron iteration 2)
+**상태**: 🟢 승인 (codex-chief-advisor fast vote — PR 2/4/5 중 PR 5 우선)
+**관련 문서**: D-20260418-21 (KC-1c 에서 `audit_event_id = Some(request_id)` 재사용 언급), `docs/design/gateway/workbench-projection-and-actions.md` §2.1.3
+**Follows**: D-20260418-23 (drift-fix PR 1)
+
+### 배경
+
+PSL-1d 가 `CapturedActivityEvent.audit_event_id = Some(ctx.request_id)` 로 세팅. `request_id` 를 audit row 의 correlation key 로 "재사용" 하는 것은 semantically 는 맞지만, 실제 `audit_log` row 의 PK (`id UUID DEFAULT gen_random_uuid()`) 와 구분 안되어서 shared surface ↔ audit JOIN 이 모호해짐. `stream_interrupted` 상태처럼 같은 request 가 여러 audit entry 를 만드는 경우 (PR 6 Streaming Drop-guard 이후 더 많아짐) JOIN 이 깨짐.
+
+Codex cycle 15 vote: PR 5 가 operator-visible utility (audit 상관관계 명확화) + PR 6 (Streaming Drop-guard) unblock → PR 2 (internal-only) / PR 4 (latent security) 보다 우선.
+
+### 결정: Drift-fix PR 5 (AuditEntry.event_id)
+
+1. **`AuditEntry` 에 `event_id: Uuid` 필드 추가**:
+   - Client (handler) 에서 `Uuid::new_v4()` 생성 → `AuditEntry.event_id` + `CapturedActivityEvent.audit_event_id` 둘 다 동일 값
+   - Pg 영속화 시 `audit_log.id` 컬럼에 매핑 (기존 migration 에 이미 `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` 존재 — 클라이언트 생성 UUID 를 `INSERT` 시 바인딩)
+   - 기존 `request_id` 필드는 그대로 유지 (trace continuity)
+2. **Handler 변경** (`crates/gadgetron-gateway/src/handlers.rs`):
+   - `chat_completions_handler` 가 `audit_event_id: Uuid` 한 번 생성
+   - `AuditEntry { event_id: audit_event_id, request_id, ... }` + `capture_chat_completion(audit_event_id, ...)` 양쪽에 주입
+   - 스트리밍 / 비스트리밍 / Ok / Err 경로 모두 동일 패턴
+3. **`capture_chat_completion` 시그니처 변경**:
+   - 현재: 내부에서 `audit_event_id = Some(request_id)` 로 세팅
+   - 변경: `audit_event_id: Uuid` 를 caller 가 전달, `CapturedActivityEvent.audit_event_id = Some(audit_event_id)` 로 내부 매핑
+4. **middleware 2 사이트 업데이트**:
+   - `middleware/auth.rs`, `middleware/scope.rs` 의 audit.send() 사이트에서 `event_id: Uuid::new_v4()` 추가
+5. **Tests**:
+   - Round-trip: send + recv 후 `event_id` 보존
+   - Uniqueness: 2개 entry 발행 시 `event_id` 서로 다름
+   - Negative: 같은 `request_id` 에 대해 Ok + Err 2 entry 발행 시 `event_id` 가 다름 (`event_id != request_id` invariant)
+   - `psl_1d_chat_capture.rs` 업데이트: capture event 의 `audit_event_id` 가 handler 의 AuditEntry.event_id 와 일치 (기존에는 request_id 와 동일 체크)
+6. **Doc update**:
+   - `docs/design/gateway/workbench-projection-and-actions.md` §2.1.3 매트릭스의 `audit_event_id` 설명 업데이트
+   - `CapturedActivityEvent.audit_event_id` 계약을 doc 71 §2.1.1 에 명시
+
+### Codex hidden caveat
+
+- Pg 영속화 코드는 아직 없음 (AuditWriter 의 consumer side 가 Pg INSERT 를 하는 코드가 trunk 에 없음). 본 PR 은 _필드_ 만 추가; Pg bind 는 후속 audit-writer Pg impl 랜딩 시 자동 map (`event_id` → `audit_log.id`)
+- ULID / UUIDv7 대신 UUIDv4 — 워크스페이스 컨벤션 유지
+- `stream_interrupted` 상태처럼 같은 request 가 여러 audit entry 를 만드는 경우에도 `event_id` 가 각 이벤트에 고유하므로 JOIN 에 안전
+
+### Non-scope
+
+- Pg audit-writer consumer 구현 (separate PR)
+- `event_id` 를 response header 로 내보내기 (P2C observability)
+- 기존 `request_id` 시맨틱 변경 (trace continuity 보존 위해 그대로)
+
+### 영향 받는 크레이트
+
+- `gadgetron-xaas`: `AuditEntry` 필드 1개 추가 (~5 LOC)
+- `gadgetron-gateway`: handler + middleware construction 사이트 업데이트 (~30 LOC)
+- `gadgetron-gateway` tests: PSL-1d 통합 테스트 assertion 업데이트 (~10 LOC)
+- 문서: doc 74 §2.1.3 한 줄 수정 + doc 71 §2.1.1 계약 명시 (~30 LOC)
+
+**Total 예상**: ~80-120 LOC
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `fix/drift-pr5-audit-event-id` (생성됨)
+3. 직접 구현
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
