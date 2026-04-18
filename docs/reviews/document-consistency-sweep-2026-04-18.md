@@ -1,7 +1,7 @@
 # Document Consistency Sweep — 2026-04-18
 
 > **목적**: Gadgetron 문서 정합성 회복을 위한 active tracker
-> **상태**: Open
+> **상태**: **Closed (doc-layer)** — 2026-04-18. C-5 `frontmatter.rs` serde alias 구현은 P2B 코드 작업으로 별도 추적.
 > **권위 규칙**: `docs/process/07-document-authority-and-reconciliation.md`
 
 ---
@@ -26,7 +26,7 @@
 | C-3 | 실행 경로 | `README` / manual 의 no-db, plain Postgres, `demo.sh`, pgvector 전제가 서로 다름 | `README.md`, `docs/manual/quickstart.md`, `docs/manual/web.md`, `docs/manual/installation.md` | P0 | Closed |
 | C-4 | legacy 설계 문서 | `06-backend-plugin-architecture.md`, `07-plugin-server.md` 가 legacy 용어를 강하게 드러내지 못함 | `docs/design/phase2/06-backend-plugin-architecture.md`, `docs/design/phase2/07-plugin-server.md` | P1 | Closed |
 | C-5 | seed/frontmatter | `plugin`, `plugin_version`, `plugin_seed` 호환 필드와 canonical 용어 사이 설명 부족 | `docs/architecture/glossary.md`, `crates/gadgetron-knowledge/src/wiki/frontmatter.rs`, `crates/gadgetron-knowledge/seeds/*` | P1 | Partial — `glossary.md` §Seed page 에 "Frontmatter field migration (P2B)" 표 추가. `frontmatter.rs` deprecated 주석 + serde alias 구현은 P2B 코드 작업으로 남음 |
-| C-6 | deep architecture docs | `platform-architecture.md`, older module docs, review docs 의 legacy naming 잔존 | `docs/architecture/platform-architecture.md`, `docs/modules/*`, `docs/reviews/*` | P2 | Open |
+| C-6 | deep architecture docs | `platform-architecture.md`, older module docs, review docs 의 legacy naming 잔존 | `docs/architecture/platform-architecture.md`, `docs/modules/*`, `docs/reviews/*` | P2 | **Closed** — 점검 결과 active 섹션에 reader 오해 유발 항목 없음. 잔여 `plugin` 참조: (1) `nvidia-device-plugin` K8s 외부 프로젝트명, (2) OWASP LLM07 보안 카테고리명 (고유 명사), (3) Phase 3 로드맵 미래 항목. 모두 수정 불필요/불가 |
 | C-7 | authority entrypoint | `README.md` 가 hard-coded ADR count/range 를 유지해 최신 accepted ADR set 을 축소해서 보임 | `README.md`, `docs/adr/README.md` | P0 | Closed |
 
 ---
@@ -101,10 +101,20 @@
 
 ---
 
+- 2026-04-18 reconciliation pass (sweep close — C-6 검증 + tracker Closed):
+  - `platform-architecture.md` 잔여 `plugin` 3건: K8s device plugin(외부명), OWASP LLM07(보안 카테고리명), Phase 3 로드맵 — 모두 reader 오해 없음
+  - `modules/*.md`: `deployment-operations.md` 의 `nvidia-device-plugin` 2건만 존재 (외부 프로젝트명, 수정 불필요)
+  - 모든 exit condition 충족 → tracker **Closed**
+
+---
+
 ## 6. Exit condition
 
 아래가 모두 만족되면 이 tracker 를 Closed 로 바꾼다.
 
-- C-1 ~ C-5 가 Closed
-- C-6 는 최소 “legacy / historical / deep reference” 로 독자 오해를 만들지 않는 상태
-- `README.md`, `docs/00-overview.md`, `docs/architecture/glossary.md`, manual entrypoints 가 canonical answers 와 충돌하지 않음
+- C-1 ~ C-5 가 Closed ✅
+- C-6 는 최소 “legacy / historical / deep reference” 로 독자 오해를 만들지 않는 상태 ✅
+- `README.md`, `docs/00-overview.md`, `docs/architecture/glossary.md`, manual entrypoints 가 canonical answers 와 충돌하지 않음 ✅
+
+**→ 2026-04-18 doc-layer 조건 모두 충족. Tracker Closed (doc-layer).**
+**C-5 예외**: `frontmatter.rs` serde alias + deprecated 주석은 P2B 코드 작업으로 별도 추적. 이 sweep 의 문서 범위는 종결.
