@@ -4,8 +4,9 @@
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13 (v3), 2026-04-16 (§4 semantic extension pointer)
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
-> **Scope**: `gadgetron-knowledge` crate (`KnowledgeToolProvider` implementation) + `gadgetron-core::error::GadgetronError::Wiki` variant + reference-level documentation for the MCP protocol surface the knowledge provider exposes. The stdio MCP server transport is **hosted in `gadgetron-penny::mcp_server`**, not in this crate — see `02-penny-agent.md §5` and `04-mcp-tool-registry.md §2.1` for the authoritative transport implementation. References below to `gadgetron penny init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-penny` LlmProvider + subprocess is `02-penny-agent.md`.
+> **Scope**: `gadgetron-knowledge` crate (`KnowledgeGadgetProvider` implementation) + `gadgetron-core::error::GadgetronError::Wiki` variant + reference-level documentation for the MCP protocol surface the knowledge provider exposes. The stdio MCP server transport is **hosted in `gadgetron-penny::gadget_server`**, not in this crate — see `02-penny-agent.md §5` and `04-mcp-tool-registry.md §2.1` for the authoritative transport implementation. References below to `gadgetron penny init` are retained as **future bootstrap UX debt**, not current trunk CLI contract. `gadgetron-penny` LlmProvider + subprocess is `02-penny-agent.md`.
 > **Implementation determinism**: every type signature, config field, error code, and test name is explicit. No TBD.
+> **Canonical terminology note**: current code names are `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. Historical references later in this doc to `McpToolProvider`, `McpToolRegistry`, or `KnowledgeToolProvider` are legacy design-era names and must be read through that mapping.
 
 ## Table of Contents
 
@@ -28,9 +29,9 @@
 ## 1. Scope & Non-Scope
 
 ### In scope
-- `gadgetron-knowledge` crate: wiki store, web search proxy, `KnowledgeToolProvider` (implements `gadgetron_core::agent::tools::McpToolProvider`)
+- `gadgetron-knowledge` crate: wiki store, web search proxy, `KnowledgeGadgetProvider` (implements `gadgetron_core::agent::tools::GadgetProvider`)
 - **`gadgetron-core::error::GadgetronError::Wiki { kind: WikiErrorKind, message: String }` variant** (moved here from 02 per dx A6 and chief-architect B1)
-- `gadgetron-cli` gains `gadgetron mcp serve` subcommand which delegates to `gadgetron_penny::serve_stdio`, serving a frozen `McpToolRegistry` assembled from `KnowledgeToolProvider` + future providers
+- `gadgetron-cli` gains `gadgetron mcp serve` subcommand which delegates to `gadgetron_penny::serve_stdio`, serving a frozen `GadgetRegistry` assembled from `KnowledgeGadgetProvider` + future providers
 - future bootstrap UX fills the gap currently covered by manual `gadgetron.toml` authoring
 - Configuration schema `[knowledge]` and `[knowledge.search]` sections in `gadgetron.toml`
 
@@ -881,7 +882,7 @@ struct SearxngResult {
 
 ## 6. MCP server
 
-> **Implementation note (2026-04-15)**: The stdio MCP server is hosted in `crates/gadgetron-penny/src/mcp_server.rs`, not in `gadgetron-knowledge`. `gadgetron-knowledge` provides only `KnowledgeToolProvider`, which is registered into `McpToolRegistry` at startup and served by the penny stdio runtime. This section describes the **logical protocol surface** the knowledge provider exposes — §6.1 and §6.2 are reference-level pseudocode for schema shape, dispatch, and JSON-RPC envelopes. The authoritative transport code and `gadgetron mcp serve` entry point live in `02-penny-agent.md §5` + `04-mcp-tool-registry.md §2.1`. Any discrepancy between the pseudocode here and the actual `gadgetron-penny::mcp_server` implementation is resolved in favor of the penny code.
+> **Implementation note (2026-04-15)**: The stdio MCP server is hosted in `crates/gadgetron-penny/src/gadget_server.rs`, not in `gadgetron-knowledge`. `gadgetron-knowledge` provides only `KnowledgeGadgetProvider`, which is registered into `GadgetRegistry` at startup and served by the penny stdio runtime. This section describes the **logical protocol surface** the knowledge provider exposes — §6.1 and §6.2 are reference-level pseudocode for schema shape, dispatch, and JSON-RPC envelopes. The authoritative transport code and `gadgetron mcp serve` entry point live in `02-penny-agent.md §5` + `04-mcp-tool-registry.md §2.1`. Any discrepancy between the pseudocode here and the actual `gadgetron-penny::gadget_server` implementation is resolved in favor of the penny code.
 
 ### 6.1 Manual MCP transport (reference — real code in `gadgetron-penny::mcp_server`)
 

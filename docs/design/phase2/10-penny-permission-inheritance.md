@@ -7,8 +7,10 @@
 > **Parent**: `docs/adr/ADR-P2A-08-multi-user-foundation.md`, `docs/process/04-decision-log.md` D-20260418-02, `docs/adr/ADR-P2A-05-agent-centric-control-plane.md`, `docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md`
 > **Sibling**: [`08-identity-and-users.md`](08-identity-and-users.md) (전제), [`09-knowledge-acl.md`](09-knowledge-acl.md) (소비 대상)
 > **Drives**: P2B — `AuthenticatedContext` 타입, `ADMIN_ONLY_TOOLS` const, Penny env 주입 프로토콜, approval gate 통합, T1–T5 회귀 테스트
-> **관련 크레이트**: `gadgetron-core` (타입), `gadgetron-penny` (env 주입), 모든 MCP tool provider
+> **관련 크레이트**: `gadgetron-core` (타입), `gadgetron-penny` (env 주입), 모든 Gadget provider
 > **Phase**: [P2B]
+>
+> **Canonical terminology note**: current code and canonical docs use `GadgetProvider` / `GadgetRegistry`. Historical references later in this doc to `McpToolProvider` or `McpToolRegistry` are legacy names.
 
 ---
 

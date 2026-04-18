@@ -10,6 +10,8 @@
 > **Drives**: P2B 구현 — wiki 페이지 visibility, read/write rule, 하이브리드 검색 ACL pre-filter
 > **관련 크레이트**: `gadgetron-knowledge` (wiki + 검색), `gadgetron-core` (scope 타입), `gadgetron-xaas` (TeamCache)
 > **Phase**: [P2B]
+>
+> **Canonical terminology note**: historical references in this doc to `plugin` mainly refer to seed/frontmatter compatibility fields and legacy bundle working identifiers. Product terminology remains Bundle / Plug / Gadget.
 
 ---
 

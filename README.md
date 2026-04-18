@@ -1,6 +1,6 @@
 # Gadgetron
 
-Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes), **Penny** drives it on the user's behalf, and capabilities are extended through **MCP plugins**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
+Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes), **Penny** drives it on the user's behalf, and capabilities expand through **Bundles** that expose core-facing **Plugs** and Penny-facing **Gadgets**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
 
 **Version**: `0.2.0` — Phase 2A (Path 1). Current focus: knowledge layer, Penny runtime, and embedded Web UI. Interactive approval flow is deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
 
@@ -43,13 +43,14 @@ Details: [`docs/00-overview.md`](docs/00-overview.md) §1 for the product narrat
 - **SearXNG web search** — `search::searxng`. Bounded HTTP timeout + redirect limit + fixed-text error sanitization per A4.
 - **RAW ingestion** — drop-folder pipeline (PDF / text / meeting notes → LLM Wiki pages) planned for P2B.
 
-### MCP plugins
+### Bundles, Plugs, Gadgets
 
-- **`McpToolProvider` trait** — stable plugin interface in `gadgetron-core::agent::tools`. Register a provider and Penny discovers its tools via the MCP tool registry — no changes to Penny or the product core.
-- **`McpToolRegistry` builder/freeze** — `gadgetron-penny::registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
-- **3-tier × 3-mode permission model** — `Tier::{Read, Write, Destructive}` × `ToolMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
-- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio MCP server (`gadgetron-penny::mcp_server`). Invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per [`01-knowledge-layer.md v3 §6.1`](docs/design/phase2/01-knowledge-layer.md).
-- **Plugin roadmap** — `Knowledge` ships in P2A (`wiki.list` / `wiki.get` / `wiki.search` / `wiki.write` / `web.search`). `Server operations` is in design (see [`docs/design/ops/operations-tool-providers.md`](docs/design/ops/operations-tool-providers.md)). Cluster management and task management follow.
+- **Canonical terminology** — Gadgetron no longer uses a generic product term like "plugin" for new architecture work. The canonical vocabulary is **Bundle / Plug / Gadget** per [ADR-P2A-10](docs/adr/ADR-P2A-10-bundle-plug-gadget-terminology.md).
+- **`GadgetProvider` trait** — stable Bundle-to-Penny seam in [`gadgetron-core::agent::tools`](crates/gadgetron-core/src/agent/tools.rs). A Bundle contributes Gadgets without modifying Penny itself.
+- **`GadgetRegistry` builder/freeze** — `gadgetron-penny::gadget_registry`. Immutable post-startup per [ADR-P2A-05 §14](docs/adr/ADR-P2A-05-agent-centric-control-plane.md).
+- **3-tier × 3-mode permission model** — `GadgetTier::{Read, Write, Destructive}` × `GadgetMode::{Auto, Ask, Never}`. P2A: Read always auto, Write auto/never per subcategory, Destructive forced off. Ask mode lands in P2B with the approval flow.
+- **`gadgetron mcp serve`** — manual JSON-RPC 2.0 stdio Gadget server invoked by Claude Code as a child process; handles `initialize`, `tools/list`, `tools/call`, `initialized`. Per [`01-knowledge-layer.md v3 §6.1`](docs/design/phase2/01-knowledge-layer.md).
+- **Roadmap** — `Knowledge` ships in P2A (`wiki.list` / `wiki.get` / `wiki.search` / `wiki.write` / `web.search`). `Server operations` is in design (see [`docs/design/ops/operations-tool-providers.md`](docs/design/ops/operations-tool-providers.md)). Cluster management and task management follow.
 
 ### OpenAI-compatible gateway (Phase 1 substrate)
 
@@ -65,77 +66,42 @@ Gadgetron's knowledge + agent layer sits on top of a self-hosted gateway that Ph
 ## Quick Start
 
 ```bash
-# Prerequisites: Rust 1.85+, git, PostgreSQL (optional for no-db mode),
-#                Claude Code CLI if you want Penny.
+# Recommended local path: pgvector-enabled PostgreSQL + demo.sh
+docker run -d \
+  --name gadgetron-pgvector \
+  -e POSTGRES_USER=gadgetron \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=gadgetron_demo \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
 
-# 1. Build
-cargo build --release
-
-# 2. Create a local workspace for the wiki
-mkdir -p .gadgetron
-
-# 3. Minimal `gadgetron.toml` for the assistant profile
-cat > gadgetron.toml <<'TOML'
-[server]
-bind = "127.0.0.1:8080"
-
-[agent]
-binary = "claude"
-claude_code_min_version = "2.1.104"
-request_timeout_secs = 300
-max_concurrent_subprocesses = 4
-
-[agent.brain]
-mode = "claude_max"   # uses ~/.claude/ OAuth
-
-[knowledge]
-wiki_path = "./.gadgetron/wiki"
-wiki_autocommit = true
-wiki_max_page_bytes = 1048576
-
-# [knowledge.search]   # optional — uncomment to enable web.search tool
-# searxng_url = "http://127.0.0.1:8888"
-# timeout_secs = 10
-# max_results = 10
-TOML
-
-# 4. Create a local API key for no-db mode
-./target/release/gadgetron key create
-
-# 5. Run the server (no-db mode)
-./target/release/gadgetron serve --no-db
-
-# 6. Chat with Penny
-curl -sN http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer gad_live_<your_key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "penny",
-    "stream": true,
-    "messages": [
-      {"role":"user","content":"wiki에 오늘 회의 내용을 저장해줘"}
-    ]
-  }'
+export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadgetron_demo"
+./demo.sh start
+./demo.sh status
 ```
 
-The full platform quickstart (PostgreSQL, multi-tenant, provider configs) lives in [`docs/manual/quickstart.md`](docs/manual/quickstart.md). The Penny user manual section is [`docs/manual/penny.md`](docs/manual/penny.md).
+Important: the current knowledge-backed runtime requires PostgreSQL with the `vector` extension available. A plain PostgreSQL image is not sufficient for the default local demo path.
+
+The full operator quickstart lives in [`docs/manual/quickstart.md`](docs/manual/quickstart.md). Web UI operation is in [`docs/manual/web.md`](docs/manual/web.md), installation details are in [`docs/manual/installation.md`](docs/manual/installation.md), and Penny runtime notes are in [`docs/manual/penny.md`](docs/manual/penny.md).
 
 ## Architecture
+
+Canonical ownership note: `gateway` is core. `router`, `provider`, `scheduler`, and the engine-facing parts of `node` are **Bundle-side ownership** in the P2B target architecture, even though the current workspace still contains top-level crates with those names. The tree below shows today's crate layout, not the final Bundle ownership split.
 
 ```
 gadgetron (single binary)
 ├── gadgetron-core        — shared types, traits, errors, agent config + trait
-├── gadgetron-provider    — 6 LLM provider adapters (HTTP)
-├── gadgetron-router      — 6 routing strategies + MetricsStore
+├── gadgetron-provider    — current top-level crate; target ownership = ai-infra Bundle provider Plugs
+├── gadgetron-router      — current top-level crate; target ownership = ai-infra Bundle routing service
 ├── gadgetron-gateway     — axum HTTP server + Tower middleware + SSE
-├── gadgetron-scheduler   — VRAM bin-packing + LRU eviction
-├── gadgetron-node        — NodeAgent + GPU ResourceMonitor
+├── gadgetron-scheduler   — current top-level crate; target ownership = ai-infra Bundle scheduling service
+├── gadgetron-node        — current top-level crate; target ownership splits across server/gpu/ai-infra Bundles
 ├── gadgetron-xaas        — auth, tenant, quota, audit (PostgreSQL)
 ├── gadgetron-testing     — mocks, fakes, test harnesses
 ├── gadgetron-tui         — Ratatui terminal dashboard
 ├── gadgetron-web         — embedded assistant-ui Web UI (include_dir!)
-├── gadgetron-knowledge   — wiki (fs/git/secrets/link/index) + searxng + KnowledgeToolProvider
-├── gadgetron-penny      — McpToolRegistry, ClaudeCodeSession, PennyProvider, mcp_server
+├── gadgetron-knowledge   — wiki (fs/git/secrets/link/index) + searxng + KnowledgeGadgetProvider
+├── gadgetron-penny       — GadgetRegistry, ClaudeCodeSession, PennyProvider, gadget server wiring
 └── gadgetron-cli         — CLI entry point (gadgetron serve / mcp serve / init / doctor)
 ```
 
@@ -165,10 +131,10 @@ gadgetron-gateway  ──►  LlmRouter  ──►  PennyProvider::chat_stream
                            JSON-RPC 2.0 stdio
                                     │
                                     ▼
-                    McpToolRegistry::dispatch
+                    GadgetRegistry::dispatch
                                     │
                                     ▼
-                   KnowledgeToolProvider::call
+                KnowledgeGadgetProvider::call
                                     │
                                     ▼
                       Wiki / SearxngClient (M5 enforcement)
@@ -245,7 +211,7 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 | [01 — Knowledge Layer](docs/design/phase2/01-knowledge-layer.md) | v3 approved |
 | [02 — Penny Agent](docs/design/phase2/02-penny-agent.md) | v4 (Path 1 aligned) |
 | [03 — gadgetron-web](docs/design/phase2/03-gadgetron-web.md) | v2.1 approved |
-| [04 — MCP Tool Registry](docs/design/phase2/04-mcp-tool-registry.md) | **v2 (Path 1 scope cut)** |
+| [04 — Gadget Registry](docs/design/phase2/04-mcp-tool-registry.md) | **v2 (legacy filename: MCP Tool Registry; Path 1 scope cut)** |
 
 `docs/manual/*` tracks the operator-facing surface on trunk: the stable Phase 1 gateway plus the currently shipped Phase 2A Penny/Web runtime. `docs/design/*` continues to track approved and in-progress implementation work.
 
@@ -261,7 +227,7 @@ Tracked in [`docs/design/phase2/00-overview.md §15`](docs/design/phase2/00-over
 |-------|-------|--------|
 | **1 Knowledge foundation** | 1-5 | ✅ wiki::{fs, git, secrets, link, index} + search::searxng |
 | **2 Agent control plane** | 6-9 | ✅ AppConfig `[penny]` → `[agent.brain]` migration, AgentConfig fields, PennyErrorKind tool variants, EnvResolver, ask-mode warn |
-| **3 MCP registry + provider** | 10-14 | ✅ McpToolRegistry, Wiki aggregate + KnowledgeToolProvider, cross-crate integration (12 absorbed, 13 deferred to P2B) |
+| **3 Gadget registry + provider** | 10-14 | ✅ `GadgetRegistry`, wiki aggregate + `KnowledgeGadgetProvider`, cross-crate integration (12 absorbed, 13 deferred to P2B) |
 | **4 Penny subprocess** | 15-21 | ✅ mcp_config (M1), spawn, redact (M2), session, stream, provider, inline tests |
 | **5 CLI wiring** | 22-26 | ✅ register_penny_if_configured, `gadgetron mcp serve` subcommand; 24 (`init` `[agent]` emit) / 25 (feature gates) / 26 (gateway no-op) remain |
 | **6 Integration + E2E** | 27-29 | 🔲 fake_claude + real Claude E2E + gadgetron-web smoke |

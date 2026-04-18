@@ -143,7 +143,7 @@ mkdir -p .gadgetron
 
 **Fix — 로그 확인:**
 
-정상 경로에서는 startup log에 `penny: registered`가 남습니다. 실패 경로에서는 `penny: [knowledge] validation failed; skipping` 또는 `penny: KnowledgeToolProvider::new failed; skipping` 같은 로그가 남습니다.
+정상 경로에서는 startup log에 `penny: registered`가 남습니다. 실패 경로에서는 `penny: [knowledge] validation failed; skipping` 또는 `failed to register KnowledgeGadgetProvider` 같은 로그가 남습니다.
 
 ---
 

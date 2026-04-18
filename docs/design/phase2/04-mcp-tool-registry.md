@@ -1,18 +1,20 @@
-# 04 — MCP Tool Registry + Permission Model + Brain Model Selection
+# 04 — Gadget Registry (legacy filename: MCP Tool Registry) + Permission Model + Brain Model Selection
 
 > **Status**: Draft v2 — Path 1 scope cut (approval flow deferred to P2B per ADR-P2A-06)
 > **Author**: PM (Claude)
 > **Date (v1)**: 2026-04-14 — pending Round 1.5/2/3 reviews
-> **Date (v2)**: 2026-04-14 — 4 parallel reviews (dx/security/qa/chief-architect) all returned **BLOCK** with 24 combined blockers. Rather than iterate the doc to v3/v4, the PM cut the interactive approval flow from P2A scope (ADR-P2A-06). The remaining spec — `McpToolProvider` trait, `AgentConfig`, `McpToolRegistry`, `KnowledgeToolProvider`, brain-mode env plumbing — ships as P2A. The approval flow (ApprovalRegistry, SSE events, `POST /v1/approvals/{id}`, `<ApprovalCard>`, "Allow always" localStorage, rate limiting) reopens in Phase 2B with a fresh design round once the cross-process bridge architecture is settled.
+> **Date (v2)**: 2026-04-14 — 4 parallel reviews (dx/security/qa/chief-architect) all returned **BLOCK** with 24 combined blockers. Rather than iterate the doc to v3/v4, the PM cut the interactive approval flow from P2A scope (ADR-P2A-06). The remaining spec — `GadgetProvider` trait, `AgentConfig`, `GadgetRegistry`, `KnowledgeGadgetProvider`, brain-mode env plumbing — ships as P2A. The approval flow (ApprovalRegistry, SSE events, `POST /v1/approvals/{id}`, `<ApprovalCard>`, "Allow always" localStorage, rate limiting) reopens in Phase 2B with a fresh design round once the cross-process bridge architecture is settled.
 > **Drives**: D-20260414-04, ADR-P2A-05 (+ scope amendment ADR-P2A-06)
 > **Siblings**: `00-overview.md` v3, `01-knowledge-layer.md` v3, `02-penny-agent.md` v4, `03-gadgetron-web.md` v2.1
 > **Pre-merge gate (v2)**: ADR-P2A-05 ACCEPTED, ADR-P2A-06 ACCEPTED. Round 1.5/2/3 reviews of v1 are filed as historical record; v2 re-review is **not** blocking implementation because the deleted sections are what caused most blockers. Remaining findings from v1 reviews that still apply to v2 scope are addressed inline and listed in §17 "Review findings carried from v1".
+>
+> **Canonical terminology note**: current code and canonical docs use `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. This document retains the v2 draft title and many `McpTool*` names because it predates the rename. Implementers must read the old names through that mapping.
 
 ## Table of Contents
 
 1. Scope & Non-Scope (v2 — Path 1)
-2. `McpToolProvider` trait — the plugin interface
-2.1 `McpToolRegistry` — the dispatch table
+2. `GadgetProvider` trait — the gadget interface
+2.1 `GadgetRegistry` — the dispatch table
 3. Tier + Mode matrix (v2 simplification)
 4. `[agent]` schema
 5. Config validation rules
@@ -38,10 +40,10 @@
 
 ### In scope — P2A (v2)
 
-- `McpToolProvider` trait in `gadgetron-core::agent::tools` (landed in commit `b6b314d`)
+- `GadgetProvider` trait in `gadgetron-core::agent::tools` (landed in commit `b6b314d`)
 - `AgentConfig` + `BrainConfig` + `ToolsConfig` in `gadgetron-core::agent::config` (landed in commit `b6b314d`) — validation rules V1..V14 enforced at `AppConfig::load` time
-- `McpToolRegistry` — new struct in `gadgetron-penny::registry` — builder/freeze pattern, `HashMap<String, Arc<dyn McpToolProvider>>` dispatch (CA-MCP-B2)
-- `KnowledgeToolProvider` — first trait implementation in `gadgetron-knowledge::mcp` (P2A)
+- `GadgetRegistry` — new struct in `gadgetron-penny::registry` — builder/freeze pattern, `HashMap<String, Arc<dyn GadgetProvider>>` dispatch (CA-MCP-B2)
+- `KnowledgeGadgetProvider` — first trait implementation in `gadgetron-knowledge::gadget` (P2A)
 - Tier classification + `Tier::{Read, Write, Destructive}` — declared by tool author, checked at registration (see §13)
 - `[agent.brain]` config surface for modes `claude_max` / `external_anthropic` / `external_proxy` (all three functional in P2A via subprocess env plumbing) + `gadgetron_local` (config schema only — shim is P2C)
 - `agent.*` reserved namespace enforcement via `ensure_tool_name_allowed` — landed in code (§13)
@@ -83,7 +85,7 @@ The following are deferred per ADR-P2A-06. Design docs for these items will be d
 
 ---
 
-## 2. `McpToolProvider` trait — the plugin interface
+## 2. `GadgetProvider` trait — the gadget interface
 
 The trait is already landed in `crates/gadgetron-core/src/agent/tools.rs` (237 lines). This section documents its contract; the code is the source of truth.
 
@@ -166,7 +168,7 @@ Per D-12 crate boundary: core holds types and traits; leaf crates hold runtime s
 
 ---
 
-## 2.1 `McpToolRegistry` — the dispatch table (CA-MCP-B2 fix)
+## 2.1 `GadgetRegistry` — the dispatch table (CA-MCP-B2 fix)
 
 The registry is a **new** struct in `gadgetron-penny::registry`. It is NOT in `gadgetron-core` because it holds runtime state (a `HashMap` populated at startup from operator-supplied providers).
 

@@ -11,6 +11,8 @@
 
 ---
 
+**Canonical terminology note**: this ADR predates the Bundle/Plug/Gadget rename. Current code and canonical docs use `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. Historical references below to `McpToolProvider`, `McpToolRegistry`, and `KnowledgeToolProvider` are legacy names.
+
 ## Context
 
 On 2026-04-14, PR #17 landed the agent-centric control plane (ADR-P2A-05) with `04-mcp-tool-registry.md` Draft v1. The doc specified:
