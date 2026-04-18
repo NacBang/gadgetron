@@ -2837,4 +2837,84 @@ KC-1 이 stub→real 전환 + operator-visible fixture diff → cycle exit gate.
 
 ---
 
+## D-20260418-18: W3-KC-1b 착수 — Materialize → KnowledgeService::write + renderer polish
+
+**날짜**: 2026-04-18
+**유형**: Execution ordering (W3-KC-1 머지 직후, cron 10번째 사이클)
+**상태**: 🟢 승인 (codex-chief-advisor single-agent fast vote)
+**관련 문서**: `docs/design/core/knowledge-candidate-curation.md` §2.1 (materialize_accepted_candidate), §2.3 (path_rules), `docs/design/phase2/13-penny-shared-surface-loop.md`, `docs/design/phase2/15-penny-chat-bootstrap-injection.md`
+**Follows**: D-20260418-17 (W3-KC-1)
+
+### 배경
+
+W3-KC-1 landed: 캡처 플레인 + 2 traits + `InMemoryActivityCaptureStore` + `InProcessCandidateCoordinator` + fixture-diff golden. 하지만 두 gap:
+1. `materialize_accepted_candidate` 는 아직 `KnowledgeService::write` 호출 안 함 → canonical wiki 에 승급되지 않음 → "지식레이어는 fixture illusion 상태" (codex cycle 10)
+2. Renderer 가 `[pendingpennydecision]` (Debug lowercase) 출력 → wire-stable snake_case `[pending_penny_decision]` 로 교체해야 downstream parser 안정
+
+### 결정: W3-KC-1b
+
+**근거** (codex cycle 10):
+- WEB-2b 는 상태를 "렌더링" 하지만, KC-1b 는 상태를 "창조" — canonical write 없으면 operator 가 실제 재사용 가능한 지식이 생기지 않음
+- User directive ("빨리 지식레이어를 만들어서 테스트") 의 "테스트 가능한 지식레이어" 는 `wiki.search` 가 accepted candidate 를 찾을 수 있어야 성립
+- WEB-2b 는 cycle 11 (KC-1b 가 `pending_writebacks` 를 실제 produce 하게 된 뒤)
+
+### W3-KC-1b tight scope (본 PR)
+
+1. **`ActivityCaptureStore` trait 확장**:
+   - `async fn get_candidate(actor, id) -> CaptureResult<Option<KnowledgeCandidate>>` 추가
+   - `InMemoryActivityCaptureStore::get_candidate` 구현
+   - 기존 `list_candidates(usize::MAX, false)` 스캔 제거, `get_candidate` 로 대체
+2. **`InProcessCandidateCoordinator` 확장**:
+   - 생성자 `new(store, max_candidates_per_request)` → `new_with_knowledge(store, knowledge_service: Option<Arc<KnowledgeService>>, max_candidates_per_request)`
+   - `materialize_accepted_candidate`:
+     - `get_candidate` 로 lookup
+     - `disposition == Accepted` 검증 (기존 로직 유지)
+     - `knowledge_service.is_some()` 이면:
+       - `KnowledgeDocumentWrite` → `KnowledgePutRequest { path, markdown: content, create_only: false, overwrite: true }` 변환
+       - `knowledge_service.write(actor, request)` 호출 → `KnowledgeWriteReceipt.path` 반환
+     - `None` 이면 기존 synthetic path 폴백 (dev/test 편의)
+3. **Renderer snake_case polish** (`gadgetron-gateway::penny::shared_context::render_penny_shared_context`):
+   - Debug-lowercase 대신 `serde_json::to_value(&disposition)` → `as_str()` 로 snake_case enum 문자열 획득
+   - ActivityKind / ActivityOrigin 도 같은 패턴으로 일관되게
+   - `[pending_penny_decision]` 형태로 fixture-diff 갱신
+4. **path_rules template expansion** (`gadgetron-knowledge::candidate`):
+   - `{date}` → activity event created_at 의 `YYYY-MM-DD`
+   - `{topic}` → `activity_kind.to_string()` (snake_case)
+   - `{author}` → `actor_user_id` UUID
+   - `CandidateHint.proposed_path == None` 이고 `KnowledgeCurationConfig.path_rules` 에 매칭 rule 있으면 expand 적용
+   - 매칭 없으면 `ops/journal/{date}/{candidate_id}` fallback
+5. **E2E integration test** (`crates/gadgetron-knowledge/tests/kc1b_canonical_write_e2e.rs` 신규):
+   - Wiki + KnowledgeService + InMemory capture store + Coordinator 전체 연결
+   - capture activity → 2 hints → list_candidates → decide(Accept) → materialize → `wiki.search("summary")` 가 해당 페이지 반환
+6. **Fixture-diff 업데이트** (`kc1_fixture_diff.rs`):
+   - `[pending_penny_decision]` 으로 snapshot 갱신
+
+### Codex hidden caveat
+
+Codex 권고는 Pg store + testcontainers + migration 도 본 PR 에 포함. 하지만 단일 cycle 1500-2000 LOC 상한 넘을 위험 → Pg store 는 KC-1c 로 분리. 본 PR 은 InMemory + canonical write 만 완성. path_rules 도 3 변수 (`{date}`, `{topic}`, `{author}`) 로 제한, DSL 없음.
+
+### Non-scope (KC-1c / P2C)
+
+- **KC-1c**: `PgActivityCaptureStore` + testcontainers migration + schema
+- **KC-1c**: `audit_event_id` 실제 plumbing (gateway audit writer 와 coordinator 연결)
+- **KC-1c**: `require_user_confirmation_for` 분기 로직
+- **P2C**: Penny auto-prompt on pending candidate
+
+### 영향 받는 크레이트
+
+- `gadgetron-core`: `ActivityCaptureStore::get_candidate` 추가 (additive trait method with default impl None? 아니면 breaking — breaking 이면 InMemory impl 만 구현)
+- `gadgetron-knowledge`: `InMemoryActivityCaptureStore` get_candidate 구현, `InProcessCandidateCoordinator` 생성자 확장, path_rules expansion
+- `gadgetron-gateway`: renderer snake_case + fixture-diff 갱신. `AppState.candidate_coordinator` 생성 시 `KnowledgeService` 주입 path 추가 (현재는 `None`)
+- `gadgetron-cli`: startup wiring 에서 coordinator 에 KnowledgeService 주입 옵션 (최소 플럼빙; prod 활성화는 별도)
+
+### 시행 순서
+
+1. 본 커밋: D-entry land
+2. Feature branch `w3-kc-1b/canonical-write` (생성됨)
+3. chief-architect delegation
+4. cargo fmt/clippy/test full workspace
+5. PR + CI + admin merge
+
+---
+
 _(다음 엔트리는 아래에 append)_
