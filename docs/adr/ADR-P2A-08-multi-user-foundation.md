@@ -24,7 +24,7 @@ Phase 2A 는 **단일 운영자** 가정으로 설계되었다. Phase 2A 후기 
 3. **Penny 권한 모델 미정**. Penny subprocess 가 작동 중 어떤 user 의 권한으로 tool 을 쓰는지 정의되지 않음. prompt injection 시 권한 상승 방어 불가
 4. **ACL 필터링 없는 검색**. pgvector 하이브리드 검색은 ADR-P2A-07 에 설계되었으나 user-scope 필터 레이어 없음 — 모든 페이지가 모든 호출에 후보로 노출
 
-Phase 2A 에는 이게 수용 가능했지만 (사용자 1인 = 모든 권한), 실제 사용 시나리오 (SRE 팀, 개발팀) 로 확장하려면 foundation 먼저 확정 필요. 이 결정은 **모든 plugin, wiki, MCP tool 에 걸쳐** 유효하므로 개별 plugin 설계 (07-plugin-server.md 등) 보다 **한 층 아래** 에 놓임.
+Phase 2A 에는 이게 수용 가능했지만 (사용자 1인 = 모든 권한), 실제 사용 시나리오 (SRE 팀, 개발팀) 로 확장하려면 foundation 먼저 확정 필요. 이 결정은 **모든 plugin, wiki, MCP tool 에 걸쳐** 유효하므로 개별 bundle 설계 (`07-bundle-server.md` 등) 보다 **한 층 아래** 에 놓임.
 
 ## Decision
 
