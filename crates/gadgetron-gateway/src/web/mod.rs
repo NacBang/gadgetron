@@ -4,6 +4,7 @@
 //! W3-WEB-2b:  descriptor catalog, view data, and action invoke endpoints.
 
 pub mod action_service;
+pub mod approval_store;
 pub mod catalog;
 pub mod projection;
 pub mod replay_cache;
