@@ -294,9 +294,13 @@ curl -sS -b /tmp/gad-cookies.txt \
 
 - React + Tailwind login form in `gadgetron-web` that consumes the three `/auth/*` endpoints.
 
-**Deferred to ISSUE 19**:
+**Shipped in ISSUE 19 (v0.5.11 / PR #262) + ISSUE 20 (v0.5.12 / PR #263)**:
 
-- Thread `ValidatedKey.user_id` into `AuditWriter` + `ActionAuditEventWriter` + `run_gadget_audit_writer` so `audit_log.actor_user_id` (schema already in place via ISSUE 14 TASK 14.1 migration) actually gets populated. Same treatment for `billing_events` rows. Harness gate extension to pin `actor_user_id` non-NULL for cookie-auth + backfilled-user-id paths.
+- `AuditEntry` struct gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>` (ISSUE 19, structural), then `TenantContext` populates them from `ValidatedKey` (ISSUE 20) so the chat handler's audit rows carry user + api-key attribution. Cookie sessions use `actor_api_key_id = None` (distinguishes from Bearer callers via the nil-sentinel on `ValidatedKey.api_key_id`).
+
+**Deferred to ISSUE 21**:
+
+- pg consumer: background task drains the `AuditWriter` mpsc into `audit_log` rows using the new `actor_*` columns (migration already landed in ISSUE 14 TASK 14.1). Until this ships, audit entries stay in the tracing channel only. Same treatment planned for `billing_events` rows. Harness gate extension pins `actor_user_id` non-NULL for cookie-auth + backfilled-user-id paths.
 
 **Post-ISSUE-18 roadmap** (tracked separately on `project_multiuser_login_google`):
 
