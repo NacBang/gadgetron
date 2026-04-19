@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.3.0** (EPIC 1 closed — tag `v0.3.0`)
+**Current version: 0.4.0** (EPIC 2 closed — tag `v0.4.0`)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -60,14 +60,22 @@ scenarios stand in as functional proof.
 
 **Release:** `v0.3.0` — first complete workbench MVP.
 
-## EPIC 2 — Agent autonomy (1-3 months)
+## EPIC 2 — Agent autonomy (CLOSED — `v0.4.0`)
 
 Goal: Claude Code agent talks to Penny over MCP, Penny calls real gadgets
 against real infrastructure, results stream back as tool outputs AND land
 in the audit + activity trail. Turns Gadgetron into a platform an
 autonomous workflow can drive.
 
+**Closed 2026-04-19.** End-to-end validated by the dual-path audit
+contract: Penny tool calls populate `tool_audit_events` with
+`owner_id = NULL` (P2A single-tenant); external MCP callers
+populate the same table with `owner_id = Some(api_key_id)`. Operators
+can run one query (`WHERE owner_id IS NOT NULL`) to separate the two
+populations without any client-side ceremony.
+
 ### Completed ISSUEs
+
 - **ISSUE 5 — Penny tool-call audit surface** (0.2.7 → 0.2.8, PR #199)
   Real `GadgetAuditEventWriter` + `run_gadget_audit_writer` consumer
   persisting `tool_audit_events` rows (was Noop until this ISSUE);
@@ -84,28 +92,21 @@ autonomous workflow can drive.
   sinks attach the coord at startup. Unit tests in
   `audit::tool_event` cover the fan-out; full E2E requires the
   `--penny-vllm` opt-in path which defers to ISSUE 7's MCP server.
-
-### Completed ISSUE 7
 - **ISSUE 7 — first-class MCP server** (0.2.9 → 0.2.12, 3 PRs)
   - TASK 7.1 ✅ — `GET /v1/tools` discovery (0.2.10, PR #204).
     `GadgetCatalog` trait erases gateway→penny dep. Gate 7i.2.
   - TASK 7.2 ✅ — `POST /v1/tools/{name}/invoke` invocation (0.2.11,
     PR #205). `GadgetDispatcher` reuse; full `mcp_*` error taxonomy;
     503 `mcp_not_available` when unwired. Gate 7i.3.
-  - TASK 7.3 ✅ — cross-session audit (0.2.12). Every
+  - TASK 7.3 ✅ — cross-session audit (0.2.12, PR #207). Every
     `/v1/tools/invoke` call lands a `GadgetCallCompleted` row in
     `tool_audit_events` with `owner_id = Some(api_key_id)` and
     `tenant_id = Some(tenant_id)` — Penny P2A rows keep both NULL,
     so `WHERE owner_id IS NOT NULL` picks out external MCP callers.
-    AppState gains `tool_audit_sink: Arc<dyn GadgetAuditEventSink>`;
-    init_serve_runtime spawns a second `GadgetAuditEventWriter` with
-    `with_activity_bus` + `with_coordinator` so dashboards + the
-    `/workbench/activity` capture plane see external calls in real
-    time. Gate 7i.4 queries `/workbench/audit/tool-events` and
-    asserts at least one row with non-null `owner_id` after an
-    invoke.
+    Gate 7i.4 asserts the invariant post-invoke.
 
-Close → tag `v0.4.0`.
+**Release:** `v0.4.0` — first Gadgetron release with a working
+external-agent MCP surface end-to-end.
 
 ## EPIC 3 — Plugin platform (1-2 months)
 
