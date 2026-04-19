@@ -1189,6 +1189,38 @@ else
   fail "/web/ did not 30x-redirect to /web" "$REDIRECT_STATUS"
 fi
 
+# -----------------------------------------------------------------------
+# Gate 11b — security headers on /web (CSP + nosniff + referrer + perms)
+# -----------------------------------------------------------------------
+#
+# `apply_web_headers` (crates/gadgetron-gateway/src/web_csp.rs) layers
+# four security headers onto the /web subtree. A regression that
+# removes any of them is a silent XSS / MIME-sniff / referrer-leak
+# vuln — worth hardening before the UI ships. Harness asserts each
+# header is present + matches the documented value shape.
+
+WEB_HEADERS="$(curl -fsSL -D - -o /dev/null "$GAD_BASE/web" 2>&1 || true)"
+# `curl -D -` dumps ALL response headers (for each hop of the
+# redirect chain); lower-case the whole dump so header-name case
+# doesn't bite us.
+WEB_HEADERS_LC="$(echo "$WEB_HEADERS" | tr '[:upper:]' '[:lower:]')"
+SEC_FAILS=""
+check_web_header() {
+  local name_lc="$1"
+  local pattern="$2"
+  if echo "$WEB_HEADERS_LC" | grep -qE "^$name_lc:.*$pattern"; then
+    pass "/web sets $name_lc (${pattern})"
+  else
+    SEC_FAILS="$SEC_FAILS\n    - missing/wrong $name_lc"
+    fail "/web missing security header: $name_lc" \
+      "expected pattern '$pattern' — got:\n$(echo "$WEB_HEADERS_LC" | grep -i "^$name_lc:" | head -1)"
+  fi
+}
+check_web_header 'content-security-policy' "default-src 'self'"
+check_web_header 'x-content-type-options' 'nosniff'
+check_web_header 'referrer-policy' 'no-referrer'
+check_web_header 'permissions-policy' 'camera=\(\)'
+
 # Screenshot strategy (preference order):
 #   1. If --no-screenshot: skip.
 #   2. If $B is exported (gstack /browse skill warmed up): use that.
