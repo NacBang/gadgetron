@@ -173,8 +173,8 @@ async fn handle_non_streaming(
                 event_id: audit_event_id,
                 tenant_id: ctx.tenant_id,
                 api_key_id: ctx.api_key_id,
-                actor_user_id: None,
-                actor_api_key_id: None,
+                actor_user_id: ctx.actor_user_id,
+                actor_api_key_id: ctx.actor_api_key_id,
                 request_id: ctx.request_id,
                 model: Some(req.model.clone()),
                 provider: None,
@@ -240,8 +240,8 @@ async fn handle_non_streaming(
                 event_id: audit_event_id,
                 tenant_id: ctx.tenant_id,
                 api_key_id: ctx.api_key_id,
-                actor_user_id: None,
-                actor_api_key_id: None,
+                actor_user_id: ctx.actor_user_id,
+                actor_api_key_id: ctx.actor_api_key_id,
                 request_id: ctx.request_id,
                 model: Some(req.model.clone()),
                 provider: None,
@@ -335,6 +335,8 @@ async fn handle_streaming(
     let quota_enforcer = state.quota_enforcer.clone();
     let tenant_id = ctx.tenant_id;
     let api_key_id = ctx.api_key_id;
+    let actor_user_id = ctx.actor_user_id;
+    let actor_api_key_id = ctx.actor_api_key_id;
     let request_id = ctx.request_id;
     let model = req.model.clone();
 
@@ -344,8 +346,8 @@ async fn handle_streaming(
             event_id: audit_event_id,
             tenant_id,
             api_key_id,
-            actor_user_id: None,
-            actor_api_key_id: None,
+            actor_user_id,
+            actor_api_key_id,
             request_id,
             model: Some(model),
             provider: None,

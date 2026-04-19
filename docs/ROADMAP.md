@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.11** (post-ISSUE 19 close — AuditEntry.actor_user_id + actor_api_key_id fields added)
+**Current version: 0.5.12** (post-ISSUE 20 close — TenantContext + AuditEntry actor fields populated from ValidatedKey)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -345,6 +345,8 @@ Google OAuth social login tracked separately post-ISSUE-18 on
   - Google OAuth social login tracked separately post-ISSUE-18 on `project_multiuser_login_google` — will stack on top of the same `user_sessions` table + cookie shape so the ISSUE 16 middleware + ISSUE 17 `user_id` plumbing continue to apply unchanged.
 - **ISSUE 19 ✅ AuditEntry actor fields structural** (v0.5.11, closed 2026-04-19)
   - TASK 19.1 ✅ — `AuditEntry` gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>`. All 7 call sites across the workspace (tests, bench fixtures, chat handler, stream_end_guard, auth-fail audit, scope-denial audit) default to `None` for now. Re-scoped: the original "thread user_id through audit sinks + billing_events" plan splits into **ISSUE 20** (plumbing via TenantContext) + **ISSUE 21** (pg consumer writing audit_log). This PR lands only the struct shape so those follow-ups can do their one job each.
+- **ISSUE 20 ✅ TenantContext → AuditEntry plumbing** (v0.5.12, closed 2026-04-19)
+  - TASK 20.1 ✅ — `TenantContext` gains `actor_user_id` + `actor_api_key_id` (both `Option<Uuid>`), populated by `tenant_context_middleware` from `ValidatedKey.user_id` and the non-nil-sentinel `ValidatedKey.api_key_id` respectively. Chat handler's 3 `AuditEntry` literals (non-stream Ok, stream Ok+dispatch, stream Ok+spawn) all read ctx fields. Existing 5 `TenantContext` literals (middleware fixture, test helpers) default to `None`. No new harness gate — chat audit ledger is tracing-only (no DB consumer until ISSUE 21); behavior preserved by existing 129 gates.
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).

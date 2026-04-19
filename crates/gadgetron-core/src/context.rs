@@ -48,6 +48,16 @@ pub struct TenantContext {
     pub quota_snapshot: Arc<QuotaSnapshot>,
     pub request_id: Uuid,
     pub started_at: std::time::Instant,
+    /// Owning user (ISSUE 20). Populated from `ValidatedKey.user_id`
+    /// by the tenant_context middleware. `None` for legacy keys
+    /// predating ISSUE 14 TASK 14.1 backfill. Downstream audit
+    /// populates `AuditEntry.actor_user_id` from this.
+    pub actor_user_id: Option<Uuid>,
+    /// Distinguish "real API-key caller" (`Some(key_id)`) from
+    /// "cookie-session caller" (`None`; `api_key_id == Uuid::nil()`
+    /// is the sentinel). Downstream audit populates
+    /// `AuditEntry.actor_api_key_id` from this.
+    pub actor_api_key_id: Option<Uuid>,
 }
 
 impl TenantContext {
@@ -73,6 +83,8 @@ mod tests {
             }),
             request_id: Uuid::new_v4(),
             started_at: std::time::Instant::now(),
+            actor_user_id: None,
+            actor_api_key_id: None,
         }
     }
 

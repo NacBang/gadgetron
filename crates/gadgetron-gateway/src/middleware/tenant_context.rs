@@ -43,6 +43,15 @@ pub async fn tenant_context_middleware(mut req: Request, next: Next) -> Response
         .copied()
         .unwrap_or_else(Uuid::new_v4);
 
+    // ISSUE 20 — thread user_id + api_key_id from ValidatedKey.
+    // `api_key_id` kept as-is for backward-compat with existing
+    // reads; `actor_api_key_id` is None for cookie sessions where
+    // `api_key_id == Uuid::nil()` is the sentinel (ISSUE 16).
+    let actor_api_key_id = if validated_key.api_key_id == Uuid::nil() {
+        None
+    } else {
+        Some(validated_key.api_key_id)
+    };
     let ctx = TenantContext {
         tenant_id: validated_key.tenant_id,
         api_key_id: validated_key.api_key_id,
@@ -55,6 +64,8 @@ pub async fn tenant_context_middleware(mut req: Request, next: Next) -> Response
         }),
         request_id,
         started_at: Instant::now(),
+        actor_user_id: validated_key.user_id,
+        actor_api_key_id,
     };
 
     req.extensions_mut().insert(ctx);
