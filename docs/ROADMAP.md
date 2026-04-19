@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.12** (post-ISSUE 10 TASK 10.4 — signed manifests, ISSUE 10 closed)
+**Current version: 0.5.0** (EPIC 3 closed — tag `v0.5.0`)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -108,11 +108,20 @@ populations without any client-side ceremony.
 **Release:** `v0.4.0` — first Gadgetron release with a working
 external-agent MCP surface end-to-end.
 
-## EPIC 3 — Plugin platform (ACTIVE)
+## EPIC 3 — Plugin platform (CLOSED — `v0.5.0`)
 
 Goal: third-party bundles ship their own actions, providers, and UI
 panels without patching Gadgetron source. Hot-reload lets operators
 install/remove capabilities without restart. Substrate for the ecosystem.
+
+**Closed 2026-04-20.** End-to-end validated by the harness 7q gates
+and the bundle flow unit tests: operator can `POST /admin/bundles`
+with a signed Ed25519 manifest → install writes to disk → signature
+verified before parse → `GET /admin/bundles` enumerates → reload
+(HTTP or SIGHUP) → `CatalogSnapshot` atomically swaps catalog +
+validators → future requests see the new bundle. Bundles declare
+`required_scope` to gate access; aggregator rejects duplicate
+action ids across bundles.
 
 ### Functionally complete (pending EPIC 3 close)
 - **ISSUE 8 — DescriptorCatalog hot-reload** — all 5 TASKs shipped across 0.4.1 / 0.4.2 / 0.4.3 / 0.4.4 / 0.4.5 (PRs #211 / #213 / #214 / #216 / #217). Operator reload surface: HTTP `POST /admin/reload-catalog` OR POSIX `SIGHUP`, both sharing `perform_catalog_reload()`. File-based source via `[web] catalog_path` TOML. Parse-failure guarantee (running snapshot never replaced by bad edit). Validators bundled into `CatalogSnapshot` so reload never lands mismatched catalog+validators.
