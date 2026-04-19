@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.5.1",
+  "gateway_version": "0.5.2",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.1"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.2"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.5.1"
+    "version": "0.5.2"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.5.1"},
+    {"id": "gadgetron-core", "version": "0.5.2"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1391,7 +1391,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
   "count": 2,
   "bundles": [
     {
-      "bundle": {"id": "gadgetron-core", "version": "0.5.1"},
+      "bundle": {"id": "gadgetron-core", "version": "0.5.2"},
       "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
       "action_count": 5,
       "view_count": 3
