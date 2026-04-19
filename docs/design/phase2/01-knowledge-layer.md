@@ -1,6 +1,6 @@
 # 01 — Knowledge Layer Detailed Implementation Spec (`gadgetron-knowledge`)
 
-> **Status**: Draft v3 (addressed chief-architect + dx + security + qa Round 1 feedback; Round 2 review addressed (4 reviewers cross-check)) — **§4 search subsystem extended by `05-knowledge-semantic.md` (ADR-P2A-07) as of 2026-04-16** — **P2B architecture extension: `docs/design/core/knowledge-plug-architecture.md` (Plug/Bundle boundary for knowledge), 2026-04-18**
+> **Status**: Draft v3 → **IMPLEMENTED on trunk**. `gadgetron-knowledge` crate shipped with `KnowledgeGadgetProvider` (wiki.list / wiki.read / wiki.search / wiki.write / web.search Gadgets), git2-backed wiki with autocommit + secret scanner (PEM / AWS / GCP patterns), Obsidian-style `[[link]]` parsing, `gadgetron wiki audit` CLI — all landed ISSUE 1 / v0.2.0. §4 search subsystem superseded by pgvector hybrid search via `05-knowledge-semantic.md` (ADR-P2A-07) — shipped per 05's status. Round 1+2 review (chief-architect + dx + security + qa, 4 reviewers cross-check). — **§4 search subsystem extended by `05-knowledge-semantic.md` (ADR-P2A-07) as of 2026-04-16** — **P2B architecture extension: `docs/design/core/knowledge-plug-architecture.md` (Plug/Bundle boundary for knowledge), 2026-04-18**
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13 (v3), 2026-04-16 (§4 semantic extension pointer)
 > **Parent**: `docs/design/phase2/00-overview.md` v2 (APPROVED)
