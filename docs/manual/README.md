@@ -4,7 +4,7 @@ Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional P
 
 ## Source-of-truth scope
 
-This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.5.11` — three complete EPICs + ISSUE 11 + **ISSUE 12 closed at telemetry scope** + **ISSUE 14 (tenant self-service, PR #246 / 0.5.7)** + **ISSUE 15 TASK 15.1 (cookie-session login API, PR #248 / 0.5.8)** + **ISSUE 16 TASK 16.1 (unified Bearer-or-cookie auth middleware, PR #259 / 0.5.9)** + **ISSUE 17 TASK 17.1 (`ValidatedKey.user_id` plumbing, PR #260 / 0.5.10)** + **ISSUE 19 TASK 19.1 (`AuditEntry` actor fields structural, PR #262 / 0.5.11)** — see [auth.md §Cookie-session auth](auth.md).
+This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.5.12` — three complete EPICs + ISSUE 11 + **ISSUE 12 closed at telemetry scope** + **ISSUE 14 (tenant self-service, PR #246 / 0.5.7)** + **ISSUE 15 TASK 15.1 (cookie-session login API, PR #248 / 0.5.8)** + **ISSUE 16 TASK 16.1 (unified Bearer-or-cookie auth middleware, PR #259 / 0.5.9)** + **ISSUE 17 TASK 17.1 (`ValidatedKey.user_id` plumbing, PR #260 / 0.5.10)** + **ISSUE 19 TASK 19.1 (`AuditEntry` actor fields structural, PR #262 / 0.5.11)** + **ISSUE 20 TASK 20.1 (`TenantContext` → `AuditEntry` plumbing, PR #263 / 0.5.12)** — see [auth.md §Cookie-session auth](auth.md).
 **Historical context** — EPICs 1–3 (Phase 2 foundation) are all closed; EPIC 4 (Multi-tenant XaaS) is active, toward `v1.0.0`:
 
 - **EPIC 1** Workbench MVP — CLOSED `v0.3.0` (PR #208).
@@ -28,11 +28,11 @@ This manual is the **single source of truth for what trunk actually ships today*
 - **ISSUE 16** unified Bearer-or-cookie auth middleware ✅ (PR #259 / 0.5.9) — `auth_middleware` falls back to the `gadgetron_session` cookie when no Bearer header is present, synthesizing a `ValidatedKey` with role-derived scopes (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`) so browser clients reach every protected route without a separate middleware per surface.
 - **ISSUE 17** `ValidatedKey.user_id` plumbing ✅ (PR #260 / 0.5.10) — `ValidatedKey` gains `user_id: Option<Uuid>` populated by both auth paths (`PgKeyValidator::validate` SELECTs `api_keys.user_id`; cookie middleware populates from `session.user_id`). Downstream audit/billing/telemetry can attribute activity to users without an extra DB round-trip.
 - **ISSUE 19** `AuditEntry` actor fields structural ✅ (PR #262 / 0.5.11) — `AuditEntry` gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>`. The 7 call sites (chat handler, stream_end_guard, auth-fail audit, scope-denial audit, test fixtures) default to `None`; populate-from-TenantContext is ISSUE 20, pg `audit_log` writer is ISSUE 21.
+- **ISSUE 20** TenantContext → AuditEntry plumbing ✅ (PR #263 / 0.5.12) — `TenantContext` gains `actor_user_id` + `actor_api_key_id` (both `Option<Uuid>`) populated by `tenant_context_middleware` from `ValidatedKey.user_id` and the non-nil `ValidatedKey.api_key_id` (cookie sessions → `None` via the `Uuid::nil()` sentinel from ISSUE 16; real API-key callers get `Some(key_id)`). Chat handler's 3 `AuditEntry` literals now read ctx fields. Remaining pg audit-log write plumbing is ISSUE 21.
 
 **Remaining EPIC 4 work before `v1.0.0`**:
 
 - **ISSUE 18** ⏳ web UI login form (React/Tailwind in `gadgetron-web`).
-- **ISSUE 20** ⏳ TenantContext user_id plumbing + populate `AuditEntry.actor_*` at 7 sites.
 - **ISSUE 21** ⏳ pg `audit_log` consumer + `GET /admin/audit/log` query endpoint.
 - **Google OAuth** social login tracked separately post-ISSUE-18 on `project_multiuser_login_google`.
 
