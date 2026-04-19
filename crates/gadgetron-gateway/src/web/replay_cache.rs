@@ -2,26 +2,43 @@
 //!
 //! Authority: `docs/design/gateway/workbench-projection-and-actions.md` §2.1.1
 //!
-//! Entries expire after a configurable TTL (default 5 minutes). Expired entries
-//! are evicted opportunistically on each `put` call — no background task is
-//! spawned in this PR (P2B scope).
+//! Drift-fix PR 8 (Nominal N5): replaces the v1 `HashMap<ReplayKey, (Instant,
+//! response)>` behind a `tokio::sync::Mutex` with
+//! [`moka::future::Cache`]. Moka brings:
 //!
-//! Clock is sourced from `tokio::time::Instant` so tests can use
-//! `tokio::time::pause()` for deterministic TTL expiry.
+//! - **Concurrent sharded TTL LRU** — lock-free reads, sharded writes; no
+//!   single mutex point of contention under workbench-action load.
+//! - **Automatic expiry** — TTL eviction runs on a housekeeper task; no
+//!   opportunistic "evict on every put" scan needed.
+//! - **Bounded memory** — `max_capacity` caps the working set so a
+//!   misbehaving client cannot blow the heap with fresh
+//!   `client_invocation_id`s.
+//!
+//! Public API (`InMemoryReplayCache::{new,get,put}`) is unchanged — the
+//! cutover is a pure implementation swap for call sites.
 
-use std::{collections::HashMap, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use gadgetron_core::workbench::InvokeWorkbenchActionResponse;
-use tokio::time::Instant;
+use moka::future::Cache;
 use uuid::Uuid;
 
 /// Default TTL for replay-cache entries: 5 minutes.
 pub const DEFAULT_REPLAY_TTL: Duration = Duration::from_secs(300);
 
+/// Soft upper bound on cached entries. Workbench action invocations arrive at
+/// O(N_tenants × N_actions × recent_client_invocations); 10k leaves generous
+/// headroom for the P2B fleet while preventing unbounded growth from a
+/// replay-key storm.
+const DEFAULT_REPLAY_MAX_ENTRIES: u64 = 10_000;
+
 /// Composite key for a replay-cache entry.
 ///
 /// Keyed on `(tenant_id, action_id, client_invocation_id)` so replay
 /// protection is scoped per-tenant and cannot cross tenant boundaries.
+///
+/// The key wraps an `Arc` under the hood in moka, so `ReplayKey` stays
+/// cheap to clone across cache operations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReplayKey {
     pub tenant_id: Uuid,
@@ -31,46 +48,54 @@ pub struct ReplayKey {
 
 /// Thread-safe in-memory TTL cache for action invocation responses.
 ///
-/// Uses `tokio::sync::Mutex` over a `HashMap<ReplayKey, (Instant, response)>`.
-/// The lock is held only for the duration of a hash lookup or insert, not
-/// across any I/O, so contention should be negligible.
-#[derive(Debug)]
+/// Backed by [`moka::future::Cache`]. Reads are lock-free; writes use moka's
+/// sharded locking. Expired entries are reaped automatically by moka's
+/// housekeeper — callers do not need to poke the cache to force eviction.
+#[derive(Debug, Clone)]
 pub struct InMemoryReplayCache {
-    inner: tokio::sync::Mutex<HashMap<ReplayKey, (Instant, InvokeWorkbenchActionResponse)>>,
-    ttl: Duration,
+    inner: Cache<Arc<ReplayKey>, InvokeWorkbenchActionResponse>,
 }
 
 impl InMemoryReplayCache {
     /// Create a new cache with the given TTL.
+    ///
+    /// The max-capacity bound ([`DEFAULT_REPLAY_MAX_ENTRIES`]) is applied
+    /// implicitly — a misbehaving tenant cannot cause unbounded growth.
     pub fn new(ttl: Duration) -> Self {
+        Self::with_capacity(ttl, DEFAULT_REPLAY_MAX_ENTRIES)
+    }
+
+    /// Variant that lets callers (tests, tuning probes) pick an explicit
+    /// entry cap. Production code should use [`InMemoryReplayCache::new`].
+    pub fn with_capacity(ttl: Duration, max_entries: u64) -> Self {
         Self {
-            inner: tokio::sync::Mutex::new(HashMap::new()),
-            ttl,
+            inner: Cache::builder()
+                .time_to_live(ttl)
+                .max_capacity(max_entries)
+                .build(),
         }
     }
 
-    /// Look up an entry. Returns `Some` if the key exists **and** has not
-    /// exceeded the TTL; returns `None` otherwise (expired entries are treated
-    /// as absent).
+    /// Look up an entry. Returns `Some` if the key exists and has not
+    /// exceeded the TTL; returns `None` otherwise.
     pub async fn get(&self, key: &ReplayKey) -> Option<InvokeWorkbenchActionResponse> {
-        let guard = self.inner.lock().await;
-        guard.get(key).and_then(|(stored_at, resp)| {
-            if stored_at.elapsed() < self.ttl {
-                Some(resp.clone())
-            } else {
-                None
-            }
-        })
+        // moka's key type is `Arc<ReplayKey>`; we Arc-wrap transparently so
+        // the public API continues to take `&ReplayKey` as before.
+        let arc_key = Arc::new(key.clone());
+        self.inner.get(&arc_key).await
     }
 
-    /// Insert a fresh entry. Opportunistically evicts all expired entries on
-    /// each call (no background task required for P2B).
+    /// Insert a fresh entry.
     pub async fn put(&self, key: ReplayKey, response: InvokeWorkbenchActionResponse) {
-        let mut guard = self.inner.lock().await;
-        // Opportunistic eviction: remove expired entries before inserting.
-        let ttl = self.ttl;
-        guard.retain(|_, (stored_at, _)| stored_at.elapsed() < ttl);
-        guard.insert(key, (Instant::now(), response));
+        self.inner.insert(Arc::new(key), response).await;
+    }
+
+    /// Run any outstanding housekeeping (primarily a test hook). Under normal
+    /// workloads, moka's background reaper handles this; the explicit call
+    /// is useful for deterministic-eviction tests.
+    #[cfg(test)]
+    pub async fn run_pending_tasks(&self) {
+        self.inner.run_pending_tasks().await;
     }
 }
 
@@ -135,46 +160,24 @@ mod tests {
     // Expired
     // -----------------------------------------------------------------------
 
-    #[tokio::test(start_paused = true)]
+    // moka uses a real wall clock (Quanta) — `tokio::time::pause` does not
+    // affect it. Use a short real TTL + real sleep + `run_pending_tasks`
+    // to flush the expiry queue deterministically.
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_miss_after_ttl_elapsed() {
-        // Use a very short TTL (1 ms) so we can advance time past it.
-        let cache = InMemoryReplayCache::new(Duration::from_millis(1));
+        let cache = InMemoryReplayCache::new(Duration::from_millis(20));
         let key = make_key();
         cache.put(key.clone(), make_response("ok")).await;
+        assert!(cache.get(&key).await.is_some(), "pre-expiry hit");
 
-        // Advance time past the TTL.
-        tokio::time::advance(Duration::from_millis(10)).await;
+        // Sleep past the TTL, then flush moka's eviction queue.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        cache.run_pending_tasks().await;
 
         assert!(
             cache.get(&key).await.is_none(),
             "entry must be treated as absent after TTL elapsed"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // Opportunistic eviction
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(start_paused = true)]
-    async fn put_evicts_expired_entries() {
-        let ttl = Duration::from_millis(5);
-        let cache = InMemoryReplayCache::new(ttl);
-
-        let key_a = make_key();
-        let key_b = make_key();
-
-        cache.put(key_a.clone(), make_response("a")).await;
-
-        // Advance time so key_a is expired.
-        tokio::time::advance(Duration::from_millis(10)).await;
-
-        // Insert key_b — this triggers opportunistic eviction of key_a.
-        cache.put(key_b.clone(), make_response("b")).await;
-
-        // key_a must be gone.
-        assert!(cache.get(&key_a).await.is_none(), "key_a must be evicted");
-        // key_b must still be there.
-        assert!(cache.get(&key_b).await.is_some(), "key_b must survive");
     }
 
     // -----------------------------------------------------------------------
@@ -191,5 +194,29 @@ mod tests {
 
         assert_eq!(cache.get(&key1).await.unwrap().result.status, "first");
         assert_eq!(cache.get(&key2).await.unwrap().result.status, "second");
+    }
+
+    // -----------------------------------------------------------------------
+    // Max-capacity eviction (moka LRU bound)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn max_capacity_bounds_working_set() {
+        // Cap at 5 entries, insert 12 — the working set must stay bounded.
+        let cache = InMemoryReplayCache::with_capacity(DEFAULT_REPLAY_TTL, 5);
+        for _ in 0..12u32 {
+            cache.put(make_key(), make_response("x")).await;
+        }
+        cache.run_pending_tasks().await;
+
+        // moka's policy guarantees `entry_count` does not exceed
+        // `max_capacity` once housekeeping has run. Exact surviving set
+        // depends on moka's TinyLFU admission rules; the bound is the
+        // invariant we care about.
+        assert!(
+            cache.inner.entry_count() <= 5,
+            "cap=5 must not be exceeded after run_pending_tasks, got {}",
+            cache.inner.entry_count()
+        );
     }
 }
