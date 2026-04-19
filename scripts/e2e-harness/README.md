@@ -17,9 +17,9 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; ten PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
+refresh; eleven PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
 #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
-7h.8, #194 7k.3 + 11f — 64 → 73 PASS). Run
+7h.8, #194 7k.3 + 11f, #199 7k.4 — 64 → 75 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -53,6 +53,7 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7k | Management `/api/v1/usage` | RBAC positive path (200/501/503); FAILS on 401/403 |
 | 7k.2 | Management `/api/v1/costs` | PR #169: sibling of 7k — same scope, same pass set; catches scope-handler divergence |
 | 7k.3 | `/workbench/usage/summary` shape (OpenAiCompat scope) | PR #194: all three sub-objects (`chat`, `actions`, `tools`) present with fixed fields even in a zero-state window; `window_hours` echoed from the query param (default 24, clamp `[1,168]`) |
+| 7k.4 | `/workbench/audit/tool-events` shape + limit clamp | PR #199: `{events:[], returned=N}` with `returned == events|length` (tenant-pinned read); `?limit=9999` silently clamps server-side (contract is `[1,500]`) |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
