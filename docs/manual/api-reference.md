@@ -1408,7 +1408,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
 
 - `bundles_dir` — echoed absolute path of the configured directory, so admin tooling can confirm it's reading the same disk location it thinks it is.
 - `count` — length of the `bundles` array (convenience so clients don't re-count).
-- `bundles[].bundle` — `Option<BundleMetadata>` (same shape as the reload response `bundle` field; id + version). `null` for manifests that don't declare a top-level `[bundle]` table; admin UIs should nudge operators to add metadata to those, since TASK 10.2's install/uninstall will need the id as the identifier.
+- `bundles[].bundle` — `Option<BundleMetadata>` (same shape as the reload response `bundle` field; id + version). `null` for manifests that don't declare a top-level `[bundle]` table; admin UIs should nudge operators to add metadata to those because `POST /admin/bundles` install + `DELETE /admin/bundles/{bundle_id}` uninstall (TASK 10.2 / PR #224, shipped) require the id as the path parameter — a legacy anonymous bundle cannot be uninstalled via the HTTP surface, only by direct filesystem removal + reload.
 - `bundles[].source_path` — absolute path of the specific `bundle.toml` file (not just the subdirectory).
 - `bundles[].action_count` / `bundles[].view_count` — descriptor counts from that bundle alone (pre-merge). The merged catalog's counts come from the `POST /admin/reload-catalog` response instead.
 - **Ordering** — `bundles` is sorted by subdirectory path so the sequence matches exactly what `DescriptorCatalog::from_bundle_dir()` produces for a reload. Tooling can rely on deterministic output across process restarts.
