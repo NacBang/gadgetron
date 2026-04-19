@@ -154,13 +154,9 @@ All fields are optional at the file level (the server boots without a config fil
 # Override with GADGETRON_BIND environment variable.
 # Default: "0.0.0.0:8080"
 bind = "0.0.0.0:8080"
-
-# Maximum time to wait for a response from a provider, in milliseconds.
-# Default: 30000 (30 seconds)
-request_timeout_ms = 30000
 ```
 
-`server.api_key` is still parsed by the config loader but is not currently used by the gateway runtime. Leave it absent.
+Two `ServerConfig` fields are parsed by the config loader but not currently consumed by the gateway runtime: `request_timeout_ms` (default 30000) and `api_key`. Leaving them absent is recommended; if present, they are ignored without error. Both are tracked for future wiring and should not be relied on as working knobs.
 
 ---
 

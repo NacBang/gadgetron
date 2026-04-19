@@ -95,19 +95,38 @@ The recommended way to create tenants and keys is the CLI. The CLI handles key g
 
 ```sh
 ./target/release/gadgetron tenant create --name "my-team"
-# Output: tenant created id=<uuid>
+```
+
+Output (stdout):
+
+```
+Tenant Created
+
+  ID:    9f1c5a2e-8d4b-4f0d-b3a2-7c0e1f5b6d4e
+  Name:  my-team
+
+  Next: gadgetron key create --tenant-id 9f1c5a2e-8d4b-4f0d-b3a2-7c0e1f5b6d4e
 ```
 
 **Step 2 — create a key for that tenant:**
 
 ```sh
-./target/release/gadgetron key create --tenant-id <uuid>
-# Output:
-#   key created name=default id=<key-uuid>
-#   key: gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+./target/release/gadgetron key create --tenant-id 9f1c5a2e-8d4b-4f0d-b3a2-7c0e1f5b6d4e
 ```
 
-The raw key (the `key:` line) is printed exactly once. Copy it now — it cannot be recovered from the database, because Gadgetron stores only the SHA-256 hash.
+Output (**stderr**, not stdout — SEC-M7 prevents accidental capture in pipelines):
+
+```
+  API Key Created
+
+  Key:     gad_live_a3f8e1d2c4b5a6e7f8d9c0b1a2e3d4f5
+  Tenant:  9f1c5a2e-8d4b-4f0d-b3a2-7c0e1f5b6d4e
+  Scopes:  OpenAiCompat
+
+  Save this key — it will not be shown again.
+```
+
+The raw key (the `Key:` line) is printed exactly once to **stderr**. Copy it now — it cannot be recovered from the database, because Gadgetron stores only the SHA-256 hash. Scripts that pipe or capture `key create` output must redirect stderr (`2>&1` or `2>out`); redirecting only stdout will lose the key entirely.
 
 Current `key create` flags:
 
