@@ -78,6 +78,116 @@ pub async fn run_gadget_audit_writer(mut rx: mpsc::Receiver<GadgetAuditEvent>, p
     tracing::info!(target: "penny_audit", "gadget audit writer exiting — channel closed");
 }
 
+/// Query response row for `GET /api/v1/web/workbench/audit/tool-events`.
+/// Mirrors the `tool_audit_events` table schema and parallels the
+/// `ActionAuditRow` shape from the action-audit query endpoint so
+/// the two HTTP surfaces look symmetric to the dashboard client.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct ToolAuditRow {
+    pub id: i64,
+    pub tool_name: String,
+    pub tier: String,
+    pub category: String,
+    pub outcome: String,
+    pub error_code: Option<String>,
+    pub elapsed_ms: i64,
+    pub conversation_id: Option<String>,
+    pub claude_session_uuid: Option<String>,
+    pub owner_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Filter shape for the tool-audit query endpoint. `tenant_id` is
+/// always set by the handler (from the authenticated actor) so a
+/// tenant cannot read another tenant's tool-call trail.
+#[derive(Debug, Clone, Default)]
+pub struct ToolAuditQueryFilter {
+    pub tenant_id: String,
+    pub tool_name: Option<String>,
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: i64,
+}
+
+/// Query `tool_audit_events` filtered by tenant + optional tool_name
+/// + optional `since` timestamp, ordered newest-first. `limit` is
+/// clamped to `[1, 500]` by the caller.
+///
+/// Four prepared SQL variants (same pattern as
+/// `query_action_audit_events`) — no dynamic SQL string building.
+pub async fn query_tool_audit_events(
+    pool: &PgPool,
+    filter: &ToolAuditQueryFilter,
+) -> Result<Vec<ToolAuditRow>, sqlx::Error> {
+    let limit = filter.limit;
+    match (filter.tool_name.as_deref(), filter.since) {
+        (None, None) => {
+            sqlx::query_as::<_, ToolAuditRow>(
+                r#"SELECT id, tool_name, tier, category, outcome, error_code,
+                          elapsed_ms, conversation_id, claude_session_uuid,
+                          owner_id, tenant_id, created_at
+                   FROM tool_audit_events
+                   WHERE tenant_id = $1
+                   ORDER BY created_at DESC
+                   LIMIT $2"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(tool_name), None) => {
+            sqlx::query_as::<_, ToolAuditRow>(
+                r#"SELECT id, tool_name, tier, category, outcome, error_code,
+                          elapsed_ms, conversation_id, claude_session_uuid,
+                          owner_id, tenant_id, created_at
+                   FROM tool_audit_events
+                   WHERE tenant_id = $1 AND tool_name = $2
+                   ORDER BY created_at DESC
+                   LIMIT $3"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(tool_name)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (None, Some(since)) => {
+            sqlx::query_as::<_, ToolAuditRow>(
+                r#"SELECT id, tool_name, tier, category, outcome, error_code,
+                          elapsed_ms, conversation_id, claude_session_uuid,
+                          owner_id, tenant_id, created_at
+                   FROM tool_audit_events
+                   WHERE tenant_id = $1 AND created_at >= $2
+                   ORDER BY created_at DESC
+                   LIMIT $3"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(since)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(tool_name), Some(since)) => {
+            sqlx::query_as::<_, ToolAuditRow>(
+                r#"SELECT id, tool_name, tier, category, outcome, error_code,
+                          elapsed_ms, conversation_id, claude_session_uuid,
+                          owner_id, tenant_id, created_at
+                   FROM tool_audit_events
+                   WHERE tenant_id = $1 AND tool_name = $2 AND created_at >= $3
+                   ORDER BY created_at DESC
+                   LIMIT $4"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(tool_name)
+            .bind(since)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+    }
+}
+
 async fn insert_gadget_event(pool: &PgPool, event: &GadgetAuditEvent) -> Result<(), sqlx::Error> {
     match event {
         GadgetAuditEvent::GadgetCallCompleted {
