@@ -14,17 +14,7 @@ The demo path assumes a PostgreSQL server with the `vector` extension available.
 
 ## Step 1 — Start a pgvector-enabled PostgreSQL
 
-```sh
-docker run -d \
-  --name gadgetron-pgvector \
-  -e POSTGRES_USER=gadgetron \
-  -e POSTGRES_PASSWORD=secret \
-  -e POSTGRES_DB=gadgetron_demo \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
-```
-
-Wait until PostgreSQL is ready:
+Follow [installation.md §Step 4 PostgreSQL setup](installation.md#step-4-postgresql-setup) (Ubuntu) or [installation.md §Step 5 PostgreSQL setup](installation.md#step-5-postgresql-setup) (macOS) to start the `pgvector/pgvector:pg16` container. Then wait until PostgreSQL is ready:
 
 ```sh
 docker exec gadgetron-pgvector pg_isready -U gadgetron -d gadgetron_demo
