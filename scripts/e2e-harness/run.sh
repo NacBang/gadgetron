@@ -472,11 +472,18 @@ log "=== Gate 5: render gadgetron-test.toml ==="
 
 WIKI_DIR="$(mktemp -d)/wiki"
 RENDERED="$ART_DIR/gadgetron-test.toml"
+# ISSUE 9 TASK 9.3 — point bundles_dir at the in-tree bundles/ so the
+# harness boots against the first-party `gadgetron-core` manifest
+# instead of the hardcoded `seed_p2b()` fallback. Path is absolute so
+# gadgetron's CWD doesn't matter.
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BUNDLES_ABS="$REPO_ROOT/bundles"
 sed \
   -e "s|@WIKI_DIR@|$WIKI_DIR|g" \
   -e "s|@MOCK_URL@|http://127.0.0.1:$MOCK_PORT|g" \
   -e "s|@MOCK_ERROR_URL@|http://127.0.0.1:$MOCK_ERROR_PORT|g" \
   -e "s|@GAD_PORT@|$GAD_PORT|g" \
+  -e "s|@BUNDLES_DIR@|$BUNDLES_ABS|g" \
   "$FIX_DIR/gadgetron-test.toml.tmpl" > "$RENDERED"
 
 # --penny-vllm overlay: point Penny's claude-code subprocess at a real
@@ -1280,19 +1287,32 @@ RELOAD_RESP="$(curl -fsS -X POST \
   -H "Authorization: Bearer $MGMT_API_KEY" \
   -H "Content-Type: application/json" \
   "$GAD_BASE/api/v1/web/workbench/admin/reload-catalog" 2>&1 || true)"
-if echo "$RELOAD_RESP" | jq -e '.reloaded == true and .source == "seed_p2b" and (.action_count | type == "number") and (.view_count | type == "number")' >/dev/null 2>&1; then
+# ISSUE 9 TASK 9.3: source is now `bundles_dir` because the test
+# config points at `bundles/`. Previously `seed_p2b`.
+if echo "$RELOAD_RESP" | jq -e '.reloaded == true and .source == "bundles_dir" and (.action_count | type == "number") and (.view_count | type == "number")' >/dev/null 2>&1; then
   RELOAD_ACTIONS="$(echo "$RELOAD_RESP" | jq '.action_count')"
   # Cross-check: /workbench/actions count matches post-reload count.
   ACTIONS_LIVE="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
     "$GAD_BASE/api/v1/web/workbench/actions" 2>&1 \
     | jq '.actions | length' 2>/dev/null || echo -1)"
   if [ "$RELOAD_ACTIONS" = "$ACTIONS_LIVE" ]; then
-    pass "admin/reload-catalog swaps atomically (actions=$RELOAD_ACTIONS)"
+    pass "admin/reload-catalog swaps atomically (actions=$RELOAD_ACTIONS, source=bundles_dir)"
   else
     fail "post-reload action count drift: reload=$RELOAD_ACTIONS, /actions=$ACTIONS_LIVE" ""
   fi
 else
   fail "admin/reload-catalog shape regressed" "$(echo "$RELOAD_RESP" | head -c 400)"
+fi
+
+# Gate 7q.3 — contributing_bundles surfaces every loaded manifest.
+# Today we ship one bundle (`gadgetron-core`); future bundles would
+# extend the array. Assertion pins the id so a manifest rename in
+# the bundle file breaks the gate immediately.
+BUNDLES_ID="$(echo "$RELOAD_RESP" | jq -r '.bundles[0].id // "missing"')"
+if [ "$BUNDLES_ID" = "gadgetron-core" ]; then
+  pass "admin/reload-catalog surfaces contributing bundles (id=gadgetron-core)"
+else
+  fail "bundles array missing gadgetron-core" "$(echo "$RELOAD_RESP" | jq -c '.bundles' 2>/dev/null | head -c 200)"
 fi
 
 # Gate 7q.2 — OpenAiCompat-scoped caller MUST get 403 (admin surface).

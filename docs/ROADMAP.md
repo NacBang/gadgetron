@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.7** (post-ISSUE 9 TASK 9.2 multi-bundle aggregation)
+**Current version: 0.4.8** (post-ISSUE 9 TASK 9.3 — bundle-driven default)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -169,8 +169,14 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     gains `bundles: [BundleMetadata, ...]` so admin tooling shows
     every contributing bundle. Precedence: `bundles_dir` >
     `catalog_path` > `seed_p2b` fallback.
-  - TASK 9.3 — `seed_p2b()` retired in favor of shipping
-    `bundles/gadgetron-core/` as the default source.
+  - TASK 9.3 ✅ — bundle-driven harness default (0.4.7 → 0.4.8).
+    E2E harness config points `bundles_dir` at the in-tree
+    `bundles/` so harness boots exercise the real
+    `DescriptorCatalog::from_bundle_dir` path instead of the
+    hardcoded fallback. Gate 7q.1 pins `source=bundles_dir`;
+    Gate 7q.3 pins the contributing-bundle id. `seed_p2b()`
+    stays as a unit-test fixture + drift-guard reference (the
+    bundle file must keep matching its action id set).
 
 ### Planned ISSUEs
 - **ISSUE 10 — bundle marketplace**: discovery + install/uninstall API,
