@@ -589,6 +589,18 @@ Key log fields to look for:
 | `bind` | The address the server is actually listening on |
 | `name` | Provider name when a provider is registered |
 
+### Benign WARN patterns (safe to ignore)
+
+Not every WARN line in `gadgetron.log` indicates a regression. The P2A runtime deliberately emits three advisory WARNs that are expected on a healthy boot. The E2E harness (Gate 12 in `scripts/e2e-harness/run.sh:1443-1480`) whitelists exactly these three patterns and treats any other WARN as a regression candidate — operators can use the same triage posture.
+
+| WARN message (grep pattern) | Target | Emitted from | Why it fires | How to silence (optional) |
+|---|---|---|---|---|
+| `ask mode has no effect in Phase 2A` | `agent_config` | `crates/gadgetron-core/src/agent/config.rs:408-412` | Any `agent.gadgets.write.<field> = "ask"` in `gadgetron.toml`. Phase 2A does not wire the approval card UX — ADR-P2A-06 defers that to P2B. The gateway treats `ask` as `auto` in the meantime. | Set the affected fields to `"auto"` or `"never"` explicitly, or accept the warning until P2B lands. |
+| `git config user.name / user.email not set` | `knowledge_config` | `crates/gadgetron-knowledge/src/config.rs:752-755` | The host's system gitconfig has no `user.name` / `user.email`. Each wiki page commit would have no author, so the gateway falls back to `Penny <penny@gadgetron.local>`. | `git config --global user.name "Your Name" && git config --global user.email "you@example.com"`, or set `[knowledge].wiki_git_author = "Name <email>"` in `gadgetron.toml`. |
+| `scope denied` on a `path=/api/v1/...` | `gadgetron_gateway::middleware::scope` | `crates/gadgetron-gateway/src/middleware/scope.rs:62-67` | A request with `OpenAiCompat`-only scope hit a `/api/v1/` admin route that requires `Management`. The request was rejected with **HTTP 403** and audited to the 403 channel (SEC-M4). In a normal mixed deployment this line will appear **every time** a non-admin caller pokes an admin route — it is a security success, not a failure. | If you want to suppress the noise, either provision the caller a `Management`-scoped key, or narrow your client to only call `/v1/` routes. |
+
+Any other WARN line is worth investigating. In particular, WARNs from `knowledge_*`, `penny_shared_context`, `wiki_seed`, `quota`, or the audit writer all signal runtime conditions the operator should look into — the harness fails loudly on them by design.
+
 ---
 
 ## Audit log `latency_ms` interpretation
