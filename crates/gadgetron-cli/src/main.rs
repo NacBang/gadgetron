@@ -61,6 +61,7 @@ struct AppStateParts {
         Option<Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>>,
     activity_bus: gadgetron_core::activity_bus::ActivityBus,
     penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
+    tool_audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,6 +1483,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         candidate_coordinator,
         activity_bus,
         penny_registry,
+        tool_audit_sink,
     } = parts;
 
     AppState {
@@ -1505,6 +1507,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
             .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>),
         gadget_dispatcher: penny_registry
             .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>),
+        tool_audit_sink,
     }
 }
 
@@ -1598,6 +1601,35 @@ async fn init_serve_runtime(
             _ => (None, None),
         };
 
+    // ISSUE 7 TASK 7.3 — a second `GadgetAuditEventWriter` for the
+    // `/v1/tools/{name}/invoke` path so every external-MCP invocation
+    // lands in `tool_audit_events` with `owner_id` + `tenant_id`
+    // populated from the authenticated `TenantContext`. Wiring
+    // `with_activity_bus` + `with_coordinator` keeps the dashboard
+    // live feed (ISSUE 4 TASK 4.3) and the /workbench/activity capture
+    // plane (ISSUE 6 TASK 6.2) in sync for external callers as well.
+    // When `pg_pool` is `None` (no-db mode) we fall back to Noop so
+    // unit/test flows keep working.
+    let tool_audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink> =
+        if let Some(pool) = pg_pool.clone() {
+            use gadgetron_xaas::audit::{run_gadget_audit_writer, GadgetAuditEventWriter};
+            let (writer, rx) = GadgetAuditEventWriter::new(4_096);
+            let writer = writer.with_activity_bus(activity_bus.clone());
+            let writer = match candidate_coordinator.clone() {
+                Some(coord) => writer.with_coordinator(coord),
+                None => writer,
+            };
+            tokio::spawn(run_gadget_audit_writer(rx, pool));
+            tracing::info!(
+                target: "mcp_audit",
+                "GadgetAuditEventWriter wired for /v1/tools/invoke — external-caller \
+                 tool invocations will persist to tool_audit_events with owner_id+tenant_id"
+            );
+            Arc::new(writer)
+        } else {
+            Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink)
+        };
+
     let state = build_app_state(AppStateParts {
         key_validator,
         quota_enforcer,
@@ -1615,6 +1647,7 @@ async fn init_serve_runtime(
         candidate_coordinator,
         activity_bus,
         penny_registry: penny_registry.clone(),
+        tool_audit_sink,
     });
     let tui_thread = spawn_tui_thread(tui_tx.as_ref());
     let app = build_http_app(state, &config.web);
@@ -3657,6 +3690,7 @@ wiki_max_page_bytes = 1048576
             candidate_coordinator: Some(candidate_coordinator),
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             penny_registry: None,
+            tool_audit_sink: Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         });
 
         // PSL-1c field-presence assertions (spec §5).

@@ -767,6 +767,28 @@ E2E Gate 7i.3 pins the happy path (`wiki.list` → 200 with populated
 `content`), the unknown-gadget 404 + `mcp_unknown_tool` code, and the
 401-on-no-auth contract.
 
+### Cross-session audit
+
+Every successful or failed call to `POST /v1/tools/{name}/invoke` lands
+a row in the `tool_audit_events` table (same table Penny uses for its
+own tool-call trail). The row sets:
+
+- `owner_id = <api_key_id>` — the authenticated principal
+- `tenant_id = <tenant_id>` — the authenticated tenant
+- `conversation_id = NULL` — external MCP calls have no Penny session
+- `claude_session_uuid = NULL`
+
+Penny-internal calls in P2A populate both `owner_id` and `tenant_id`
+as NULL. Operators can therefore filter `WHERE owner_id IS NOT NULL`
+(or the equivalent `GET
+/api/v1/web/workbench/audit/tool-events?tool_name=...` response
+filtered client-side) to pick out cross-session (external-agent)
+callers.
+
+Shipped in ISSUE 7 TASK 7.3 (v0.2.12). E2E Gate 7i.4 pins the
+invariant: after an `/v1/tools/wiki.list/invoke` call, at least one
+`tool_audit_events` row for `wiki.list` has a non-null `owner_id`.
+
 ---
 
 ## Health endpoints

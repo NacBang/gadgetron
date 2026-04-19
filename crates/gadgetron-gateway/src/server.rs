@@ -167,6 +167,16 @@ pub struct AppState {
     /// was configured and Penny was registered at startup; `None`
     /// otherwise, in which case `/v1/tools/{name}/invoke` returns 503.
     pub gadget_dispatcher: Option<Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>>,
+    /// Tool-event audit sink — every external-caller invocation of
+    /// `POST /v1/tools/{name}/invoke` emits a `GadgetCallCompleted`
+    /// event here with `owner_id` + `tenant_id` populated from the
+    /// authenticated `TenantContext`. This is how ISSUE 7 TASK 7.3
+    /// correlates external-agent tool calls with Penny's `tool_audit_events`
+    /// table: Penny calls land with `owner_id = None` (P2A), external
+    /// MCP calls land with `owner_id = Some(api_key_id)`, so operators
+    /// can query `WHERE owner_id IS NOT NULL` to pick out cross-session
+    /// callers. `NoopGadgetAuditEventSink` when Postgres is not wired.
+    pub tool_audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -461,6 +471,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         }
     }
 
@@ -484,6 +495,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         }
     }
 
@@ -824,6 +836,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -904,6 +917,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         };
 
         let app = build_router(state);

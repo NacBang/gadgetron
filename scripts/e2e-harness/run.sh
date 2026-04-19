@@ -1225,6 +1225,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7i.4 — /v1/tools invoke → tool_audit_events row (ISSUE 7 TASK 7.3)
+# ---------------------------------------------------------------------------
+#
+# Cross-session audit: every external-MCP invocation must land a
+# `tool_audit_events` row with `owner_id` populated from the
+# authenticated `TenantContext`. Penny-internal calls populate both
+# owner_id + tenant_id as NULL in P2A, so the presence of `owner_id`
+# is the signal that separates external callers from Penny.
+#
+# We drive a fresh invoke, then query `/api/v1/web/workbench/audit/tool-events`
+# (the existing tenant-scoped read API from ISSUE 5) and confirm the
+# most recent event for `wiki.list` has non-null owner_id. Giving the
+# audit consumer a short grace window because the writer is async
+# (bounded mpsc → pg INSERT).
+
+log "=== Gate 7i.4: /v1/tools invoke → tool_audit_events (cross-session audit) ==="
+# Fresh invoke to generate an auditable row.
+curl -fsS -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "$GAD_BASE/v1/tools/wiki.list/invoke" > /dev/null 2>&1 || true
+
+# Drain window — the audit writer is async.
+sleep 1
+
+TOOL_AUDIT_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/audit/tool-events?tool_name=wiki.list&limit=5" 2>&1 || true)"
+OWNER_ID_PRESENT="$(echo "$TOOL_AUDIT_RESP" \
+  | jq -r '[.events[] | select(.tool_name == "wiki.list") | .owner_id] | map(select(. != null)) | length' \
+  2>/dev/null || echo 0)"
+if [ "${OWNER_ID_PRESENT:-0}" -ge 1 ]; then
+  pass "tool_audit_events row for wiki.list has owner_id set (external-MCP attribution)"
+else
+  fail "no tool_audit_events row for wiki.list with owner_id after /v1/tools invoke" \
+    "$(echo "$TOOL_AUDIT_RESP" | head -c 500)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7j — /favicon.ico served (public route, no auth)
 # ---------------------------------------------------------------------------
 #
