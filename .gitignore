@@ -24,3 +24,12 @@
 # without adding reviewable signal.
 graphify-out/cache/
 graphify-out/.graphify_*
+
+# Ephemeral QA review artifacts. gstack `/design-review`, `/qa`, and
+# related flows drop PNG screenshots at the repo root with names like
+# `ui-<surface>-review.png`, and Playwright MCP caches console logs
+# under `.playwright-mcp/`. Both are per-session scratch and should
+# never end up in a commit — contributors can rerun the tool to
+# regenerate.
+ui-*-review.png
+.playwright-mcp/
