@@ -813,6 +813,34 @@ else
     "first:  $(echo "$ACTION_RESP" | head -c 200) | second: $(echo "$ACTION_RESP2" | head -c 200)"
 fi
 
+log "=== Gate 7h.0: workbench routes require Bearer (401 on no-auth POST) ==="
+# Gate 7g asserts 401 on chat endpoint. Workbench routes go through
+# the SAME auth middleware chain and MUST deliver the same contract.
+# A regression that made the workbench routes public would be
+# catastrophic — any tenant's action flow would be invokable by any
+# caller. Separate gate here because the workbench routes are nested
+# under `/api/v1/web/workbench/*` and a middleware chain
+# refactor could miss this subtree.
+NOAUTH_WB_POST_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/knowledge-search" \
+  -H "Content-Type: application/json" \
+  -d '{"args":{"query":"x"},"client_invocation_id":null}' 2>&1 || true)"
+if [ "$NOAUTH_WB_POST_CODE" = "401" ]; then
+  pass "workbench action POST without Bearer → 401"
+else
+  fail "workbench action without auth: expected 401, got $NOAUTH_WB_POST_CODE" \
+    "(200 = workbench route is PUBLIC; 403 = middleware ordering flip)"
+fi
+
+NOAUTH_WB_GET_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  "$GAD_BASE/api/v1/web/workbench/bootstrap" 2>&1 || true)"
+if [ "$NOAUTH_WB_GET_CODE" = "401" ]; then
+  pass "workbench GET without Bearer → 401"
+else
+  fail "workbench GET without auth: expected 401, got $NOAUTH_WB_GET_CODE" \
+    "(must enforce auth on projection reads as well)"
+fi
+
 log "=== Gate 7h.3: JSON-schema validation on action args ==="
 # knowledge-search's input_schema declares `query` as `{type: string,
 # minLength: 1, maxLength: 500}`. POSTing `query: 42` (integer) must
