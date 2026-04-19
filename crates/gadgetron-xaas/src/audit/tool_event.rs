@@ -14,6 +14,10 @@ use std::sync::Arc;
 
 use gadgetron_core::activity_bus::{ActivityBus, ActivityEvent};
 use gadgetron_core::audit::{GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome};
+use gadgetron_core::knowledge::candidate::{
+    ActivityKind, ActivityOrigin, CapturedActivityEvent, KnowledgeCandidateCoordinator,
+};
+use gadgetron_core::knowledge::AuthenticatedContext;
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -32,6 +36,7 @@ pub struct GadgetAuditEventWriter {
     tx: mpsc::Sender<GadgetAuditEvent>,
     dropped: Arc<AtomicU64>,
     activity_bus: Option<ActivityBus>,
+    coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
 }
 
 impl GadgetAuditEventWriter {
@@ -42,6 +47,7 @@ impl GadgetAuditEventWriter {
                 tx,
                 dropped: Arc::new(AtomicU64::new(0)),
                 activity_bus: None,
+                coordinator: None,
             },
             rx,
         )
@@ -51,6 +57,16 @@ impl GadgetAuditEventWriter {
     /// writer — the original consumer channel receiver is unchanged.
     pub fn with_activity_bus(mut self, bus: ActivityBus) -> Self {
         self.activity_bus = Some(bus);
+        self
+    }
+
+    /// Attach a `KnowledgeCandidateCoordinator` so every Penny tool
+    /// call ALSO captures a `CapturedActivityEvent` with
+    /// `ActivityOrigin::Penny` — surfaces Penny-originated tool calls
+    /// in `/workbench/activity` alongside direct workbench actions
+    /// (ISSUE 6 TASK 6.1).
+    pub fn with_coordinator(mut self, coord: Arc<dyn KnowledgeCandidateCoordinator>) -> Self {
+        self.coordinator = Some(coord);
         self
     }
 
@@ -70,6 +86,25 @@ impl GadgetAuditEventSink for GadgetAuditEventWriter {
                 bus.publish(activity);
             }
         }
+        // ISSUE 6 TASK 6.1: fan out to the capture coordinator so the
+        // /workbench/activity feed shows Penny tool calls with the
+        // correct `ActivityOrigin::Penny` attribution.
+        if let Some(coord) = self.coordinator.clone() {
+            if let Some(captured) = gadget_audit_to_captured(&event) {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let actor = captured_actor(&captured);
+                    handle.spawn(async move {
+                        if let Err(e) = coord.capture_action(&actor, captured, vec![]).await {
+                            tracing::warn!(
+                                target: "penny_audit",
+                                error = %e,
+                                "capture_action failed for Penny tool call (non-fatal)"
+                            );
+                        }
+                    });
+                }
+            }
+        }
         if self.tx.try_send(event).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
@@ -77,6 +112,75 @@ impl GadgetAuditEventSink for GadgetAuditEventWriter {
                 "tool audit event dropped — channel full"
             );
         }
+    }
+}
+
+/// Convert a `GadgetAuditEvent` into a `CapturedActivityEvent` for
+/// the capture coordinator. Returns `None` for variants without a
+/// user-visible activity shape.
+fn gadget_audit_to_captured(event: &GadgetAuditEvent) -> Option<CapturedActivityEvent> {
+    match event {
+        GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name,
+            tier,
+            category,
+            outcome,
+            elapsed_ms,
+            conversation_id,
+            tenant_id,
+            owner_id,
+            ..
+        } => {
+            let (outcome_text, error_code) = match outcome {
+                GadgetCallOutcome::Success => ("success", None),
+                GadgetCallOutcome::Error { error_code } => ("error", Some(*error_code)),
+            };
+            let tenant_uuid = tenant_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(Uuid::nil);
+            let actor_uuid = owner_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(Uuid::nil);
+            Some(CapturedActivityEvent {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_uuid,
+                actor_user_id: actor_uuid,
+                request_id: None,
+                origin: ActivityOrigin::Penny,
+                kind: ActivityKind::GadgetToolCall,
+                title: format!("penny tool call: {gadget_name}"),
+                summary: format!(
+                    "outcome={outcome_text}, elapsed_ms={elapsed_ms}{}",
+                    error_code
+                        .map(|c| format!(", error_code={c}"))
+                        .unwrap_or_default()
+                ),
+                source_bundle: None,
+                source_capability: Some(gadget_name.clone()),
+                audit_event_id: None,
+                facts: serde_json::json!({
+                    "gadget_name": gadget_name,
+                    "tier": tier.as_str(),
+                    "category": category,
+                    "outcome": outcome_text,
+                    "error_code": error_code,
+                    "elapsed_ms": elapsed_ms,
+                    "conversation_id": conversation_id,
+                }),
+                created_at: chrono::Utc::now(),
+            })
+        }
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
+fn captured_actor(ev: &CapturedActivityEvent) -> AuthenticatedContext {
+    AuthenticatedContext {
+        user_id: ev.actor_user_id,
+        tenant_id: ev.tenant_id,
     }
 }
 
@@ -364,5 +468,96 @@ mod tests {
             #[allow(unreachable_patterns)]
             _ => panic!("unexpected GadgetAuditEvent variant"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ISSUE 6 TASK 6.1 — coordinator fan-out
+    // -----------------------------------------------------------------------
+
+    /// Capturing coordinator that records every `capture_action` call
+    /// so tests can assert fan-out happens on `send`.
+    #[derive(Debug, Default)]
+    struct CapturingCoordinator {
+        captured: std::sync::Mutex<Vec<CapturedActivityEvent>>,
+    }
+
+    #[async_trait::async_trait]
+    impl KnowledgeCandidateCoordinator for CapturingCoordinator {
+        async fn capture_action(
+            &self,
+            _actor: &AuthenticatedContext,
+            event: CapturedActivityEvent,
+            _hints: Vec<gadgetron_core::knowledge::candidate::CandidateHint>,
+        ) -> gadgetron_core::knowledge::candidate::CaptureResult<
+            Vec<gadgetron_core::knowledge::candidate::KnowledgeCandidate>,
+        > {
+            self.captured
+                .lock()
+                .expect("capturing coord mutex poisoned")
+                .push(event);
+            Ok(vec![])
+        }
+
+        async fn materialize_accepted_candidate(
+            &self,
+            _actor: &AuthenticatedContext,
+            _candidate_id: Uuid,
+            _write: gadgetron_core::knowledge::candidate::KnowledgeDocumentWrite,
+        ) -> gadgetron_core::knowledge::candidate::CaptureResult<
+            gadgetron_core::knowledge::KnowledgePath,
+        > {
+            unreachable!("test-only coordinator — materialize is never called")
+        }
+    }
+
+    fn event_with_owner_tenant(tenant: Uuid, owner: Uuid) -> GadgetAuditEvent {
+        GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name: "wiki.search".into(),
+            tier: GadgetTier::Read,
+            category: "knowledge".into(),
+            outcome: GadgetCallOutcome::Success,
+            elapsed_ms: 17,
+            conversation_id: Some("conv-42".into()),
+            claude_session_uuid: None,
+            owner_id: Some(owner.to_string()),
+            tenant_id: Some(tenant.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_fan_out_captures_penny_origin_event() {
+        let coord = Arc::new(CapturingCoordinator::default());
+        let (writer, _rx) = GadgetAuditEventWriter::new(16);
+        let writer =
+            writer.with_coordinator(coord.clone() as Arc<dyn KnowledgeCandidateCoordinator>);
+        let tenant = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        writer.send(event_with_owner_tenant(tenant, owner));
+
+        // Give the spawned capture task a tick.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let events = coord
+            .captured
+            .lock()
+            .expect("capturing coord mutex poisoned")
+            .clone();
+        assert_eq!(events.len(), 1);
+        let captured = &events[0];
+        assert_eq!(captured.origin, ActivityOrigin::Penny);
+        assert_eq!(captured.kind, ActivityKind::GadgetToolCall);
+        assert_eq!(captured.tenant_id, tenant);
+        assert_eq!(captured.actor_user_id, owner);
+        assert_eq!(captured.source_capability.as_deref(), Some("wiki.search"));
+    }
+
+    #[tokio::test]
+    async fn no_coordinator_means_no_capture() {
+        // Regression guard — the default writer has no coordinator and
+        // must not panic / allocate on send.
+        let (writer, _rx) = GadgetAuditEventWriter::new(16);
+        writer.send(make_event());
+        // If this returns, fan-out on an unwired coordinator is a no-op.
     }
 }

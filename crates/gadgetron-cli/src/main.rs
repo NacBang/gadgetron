@@ -732,6 +732,9 @@ fn prepare_penny_router_registration(
     app_config: &AppConfig,
     pg_pool: Option<sqlx::PgPool>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
+    candidate_coordinator: Option<
+        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
+    >,
 ) -> Result<Option<PennyRouterRegistration>> {
     if !config_path.exists() {
         return Ok(None);
@@ -752,6 +755,11 @@ fn prepare_penny_router_registration(
     // ISSUE 5 TASK 5.3: when an `ActivityBus` handle is also wired,
     // every event mirrors onto the /events/ws live feed as
     // `ToolCallCompleted` — dashboards see tool calls in real time.
+    //
+    // ISSUE 6 TASK 6.2: when a `KnowledgeCandidateCoordinator` is
+    // wired, the writer ALSO fans out to `capture_action` so every
+    // Penny tool call lands in /workbench/activity with
+    // `ActivityOrigin::Penny` attribution.
     let audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink> = if let Some(pool) =
         pg_pool
     {
@@ -759,6 +767,10 @@ fn prepare_penny_router_registration(
         let (writer, rx) = GadgetAuditEventWriter::new(4_096);
         let writer = match activity_bus {
             Some(bus) => writer.with_activity_bus(bus),
+            None => writer,
+        };
+        let writer = match candidate_coordinator {
+            Some(coord) => writer.with_coordinator(coord),
             None => writer,
         };
         tokio::spawn(run_gadget_audit_writer(rx, pool));
@@ -1214,6 +1226,9 @@ fn build_provider_maps(
     config_path: &std::path::Path,
     pg_pool: Option<sqlx::PgPool>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
+    candidate_coordinator: Option<
+        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
+    >,
 ) -> Result<(
     SharedProviderMap,
     RouterProviderMap,
@@ -1239,6 +1254,7 @@ fn build_provider_maps(
         &mut providers_for_router,
         pg_pool,
         activity_bus,
+        candidate_coordinator,
     );
     Ok((providers_ss, providers_for_router, penny_registry))
 }
@@ -1515,48 +1531,18 @@ async fn init_serve_runtime(
     // AppState.activity_bus use the same channel. Without this, the
     // Penny sink would publish to an orphan bus no one subscribes to.
     let activity_bus = gadgetron_core::activity_bus::ActivityBus::new();
-    let (providers_ss, providers_for_router, penny_registry) = build_provider_maps(
-        config,
-        config_path,
-        pg_pool.clone(),
-        Some(activity_bus.clone()),
-    )?;
-    let llm_router = build_llm_router(providers_for_router, config);
 
-    // PSL-1c: Wire the P2B observability stack (knowledge service,
-    // workbench projection, Penny shared surface, assembler, capture store,
-    // candidate coordinator) into production AppState.
+    // ISSUE 6 TASK 6.2: knowledge service + candidate coordinator must
+    // be built BEFORE Penny registration so the audit sink can be
+    // wired with `.with_coordinator(coord)` and fan out tool calls
+    // to `/workbench/activity`. Previously this ran AFTER
+    // build_provider_maps so the coord wasn't available yet.
     let knowledge_cfg = load_knowledge_config_from_path(config_path)?;
-
-    // Precondition: curation.enabled=true requires a [knowledge] section.
-    // We can only check this if there is no knowledge section but curation
-    // would default to enabled=true. Since KnowledgeCurationConfig defaults
-    // enabled=true we check via the TOML directly. The simpler guard:
-    // if [knowledge] is absent we leave all observability fields as None
-    // (graceful-degrade). The curation guard only fires when the operator
-    // explicitly wrote [knowledge.curation] enabled=true without [knowledge].
-    // In practice if knowledge_cfg is None there is no way for the operator
-    // to have set enabled=true because the whole section is absent — so the
-    // precondition reduces to: nothing to check when knowledge_cfg is None.
-
     let pg_pool_for_knowledge = connect_optional_pg_for_knowledge().await;
-
     let knowledge_service = build_knowledge_service(knowledge_cfg.as_ref(), pg_pool_for_knowledge)?;
-
     let (activity_capture_store, candidate_coordinator) =
         match (knowledge_service.as_ref(), knowledge_cfg.as_ref()) {
             (Some(svc), Some(kcfg)) if kcfg.curation.enabled => {
-                // Pass pg_pool so production wiring uses PgActivityCaptureStore.
-                // The pool is cloned here; the outer pool remains available for
-                // other subsystems (audit writer, key validator, etc.).
-                //
-                // W3-drift-fix U-B (D-20260418-23): when curation is enabled
-                // but no Postgres pool is available, `build_candidate_plane`
-                // silently falls back to the in-memory store. Restart then
-                // loses every captured activity event. Warn operators loudly
-                // so they stop being surprised by the silent ephemerality;
-                // hard-fail is deferred until we know whether operators want
-                // an explicit `allow_inmemory_store` opt-in flag instead.
                 if pg_pool.is_none() {
                     tracing::warn!(
                         "[knowledge.curation].enabled = true but no Postgres \
@@ -1572,6 +1558,15 @@ async fn init_serve_runtime(
             }
             _ => (None, None),
         };
+
+    let (providers_ss, providers_for_router, penny_registry) = build_provider_maps(
+        config,
+        config_path,
+        pg_pool.clone(),
+        Some(activity_bus.clone()),
+        candidate_coordinator.clone(),
+    )?;
+    let llm_router = build_llm_router(providers_for_router, config);
 
     let workbench = build_workbench(
         knowledge_service.clone(),
@@ -1851,28 +1846,36 @@ fn register_penny_if_configured(
     providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
     pg_pool: Option<sqlx::PgPool>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
+    candidate_coordinator: Option<
+        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
+    >,
 ) -> Option<Arc<gadgetron_penny::GadgetRegistry>> {
     // We re-read the toml file to extract the `[knowledge]` section.
     // The main AppConfig load path doesn't include a `knowledge`
     // field — adding one would require cross-crate type sharing
     // (gadgetron-core ↔ gadgetron-knowledge) that's more churn than
     // a ~5 ms second file read.
-    let registration =
-        match prepare_penny_router_registration(config_path, app_config, pg_pool, activity_bus) {
-            Ok(Some(registration)) => registration,
-            Ok(None) => {
-                // No [knowledge] section → penny not available.
-                return None;
-            }
-            Err(e) => {
-                tracing::error!(
-                    path = %config_path.display(),
-                    error = ?e,
-                    "penny: failed to prepare knowledge registry; skipping"
-                );
-                return None;
-            }
-        };
+    let registration = match prepare_penny_router_registration(
+        config_path,
+        app_config,
+        pg_pool,
+        activity_bus,
+        candidate_coordinator,
+    ) {
+        Ok(Some(registration)) => registration,
+        Ok(None) => {
+            // No [knowledge] section → penny not available.
+            return None;
+        }
+        Err(e) => {
+            tracing::error!(
+                path = %config_path.display(),
+                error = ?e,
+                "penny: failed to prepare knowledge registry; skipping"
+            );
+            return None;
+        }
+    };
     // Capture the registry Arc BEFORE consuming `registration` so the
     // workbench direct-action dispatcher can reuse the same L3-gated
     // dispatch surface Penny uses.
