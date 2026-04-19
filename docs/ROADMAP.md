@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.5** (post-ISSUE 8 TASK 8.5 SIGHUP reloader)
+**Current version: 0.4.6** (post-ISSUE 9 TASK 9.1 bundle metadata)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -152,9 +152,21 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     follow-up TASK 8.6 if operator feedback shows demand — SIGHUP
     covers the 90% case with no extra deps or background thread.
 
+### In-flight ISSUE (9)
+- **ISSUE 9 — real bundle manifests** (in-flight; 0.4.6 ships TASK 9.1)
+  - TASK 9.1 ✅ — `BundleMetadata { id, version }` attaches to
+    `DescriptorCatalog` via an optional `[bundle]` table in the TOML
+    source (0.4.5 → 0.4.6). Reload response gains a `bundle` field
+    so admin tooling can show which bundle + version is live.
+    First-party bundle shipped at `bundles/gadgetron-core/bundle.toml`
+    mirroring `seed_p2b()` exactly (guarded by a drift test that
+    asserts both catalogs produce the same action id set).
+  - TASK 9.2 — multi-bundle aggregation (load a bundle directory,
+    merge all manifests into one catalog; collision handling).
+  - TASK 9.3 — `seed_p2b()` retired in favor of shipping
+    `bundles/gadgetron-core/` as the default source.
+
 ### Planned ISSUEs
-- **ISSUE 9 — real bundle manifests**: `[[actions]]` schema, `seed_p2b`
-  moves into first-party bundle.
 - **ISSUE 10 — bundle marketplace**: discovery + install/uninstall API,
   per-bundle scope isolation, signed manifests.
 
