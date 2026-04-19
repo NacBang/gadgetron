@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.11"
+version = "0.4.12"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
@@ -83,6 +83,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 arc-swap = "1.7"
+ed25519-dalek = { version = "2", default-features = false }
+hex = "0.4"
 
 # Cache
 moka = { version = "0.12", features = ["future"] }

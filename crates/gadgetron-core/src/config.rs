@@ -73,6 +73,34 @@ pub struct WebConfig {
     /// bundle's actions.
     #[serde(default)]
     pub bundles_dir: Option<String>,
+    /// Bundle install-time signature verification (ISSUE 10 TASK 10.4).
+    /// Operators who trust a publisher's Ed25519 public key add it
+    /// here; then `POST /admin/bundles` requires a matching detached
+    /// signature over `bundle_toml` before writing the manifest to
+    /// disk. When `require_signature = true` and the installer sends
+    /// an unsigned manifest, the request is rejected before any IO.
+    #[serde(default)]
+    pub bundle_signing: BundleSigningConfig,
+}
+
+/// Ed25519 trust-anchor configuration for bundle installation
+/// (ISSUE 10 TASK 10.4). Default = unsigned installs allowed, no
+/// keys configured — matches the pre-TASK-10.4 behavior so
+/// existing deployments don't need a config bump.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BundleSigningConfig {
+    /// Hex-encoded Ed25519 public keys (32 bytes each → 64 hex
+    /// chars). Any caller-supplied signature must verify against at
+    /// least one of these keys. Empty list + `require_signature =
+    /// true` would reject every install — the handler treats that
+    /// as a 500-class config error rather than silently accepting.
+    #[serde(default)]
+    pub public_keys_hex: Vec<String>,
+    /// When `true`, unsigned manifest installs are rejected. Default
+    /// `false` preserves the TASK 10.2 behavior for deployments that
+    /// haven't rotated to signed bundles yet.
+    #[serde(default)]
+    pub require_signature: bool,
 }
 
 fn default_web_enabled() -> bool {
@@ -89,6 +117,7 @@ impl Default for WebConfig {
             api_base_path: default_api_base_path(),
             catalog_path: None,
             bundles_dir: None,
+            bundle_signing: BundleSigningConfig::default(),
         }
     }
 }

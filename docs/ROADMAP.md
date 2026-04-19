@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.11** (post-ISSUE 10 TASK 10.3 — bundle scope isolation)
+**Current version: 0.4.12** (post-ISSUE 10 TASK 10.4 — signed manifests, ISSUE 10 closed)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -205,8 +205,22 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     scope see NONE of the bundle's descriptors. Zero-overhead for
     bundles that don't declare a scope. Unit test pins the
     inheritance semantics.
-  - TASK 10.4 — signed manifests (Ed25519 signature check on
-    install).
+  - TASK 10.4 ✅ — signed manifests via Ed25519 (0.4.11 → 0.4.12).
+    New `[web.bundle_signing]` config with `public_keys_hex` (list
+    of trusted Ed25519 pubkeys) and `require_signature` (hard-fail
+    unsigned installs). Install body widens with
+    `signature_hex: Option<String>` — detached signature over the
+    exact `bundle_toml` bytes. Handler verifies before TOML parse
+    (equal error-path time for signed-malformed and
+    unsigned-malformed). 6 unit tests pin each branch of the
+    policy matrix: unsigned-allowed, unsigned-required,
+    valid-signature, tampered-body, unknown-key, signature-without-
+    trust-anchors.
+
+**ISSUE 10 complete.** Bundle marketplace surface is operational:
+discovery (10.1) → install/uninstall (10.2) → scope isolation
+(10.3) → signed manifests (10.4). EPIC 3 is now ready for close +
+`v0.5.0` tag on the next cycle.
 
 Close → tag `v0.5.0`.
 
