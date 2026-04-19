@@ -4181,6 +4181,8 @@ Cross-ref: Axis C §2.C.4.5 for `terminationGracePeriodSeconds: 70` Helm value.
 #### §2.E.1 Phase 1 → 2 → 3 로드맵 개요
 
 > **결정 기반**: D-20260411-01 옵션 B (12주 중간 범위), D-20260411-04 (GPU 기능 범위)
+>
+> **ROADMAP v2 supersession (PR #186, 2026-04-18)**: 이하 Phase 표는 프로젝트 초기 Phase 1→2→3 스펙의 **역사적 기록** 입니다. 현재 canonical 계획은 [`docs/ROADMAP.md`](../ROADMAP.md) 의 EPIC/ISSUE/TASK 트리로, Phase 2 는 **EPIC 1 (Workbench MVP, `v0.3.0` closed, PR #208) + EPIC 2 (Agent autonomy, `v0.4.0` closed, PR #209)** 로 쪼개졌습니다. Phase 2 오리지널 목표 중 shipped (Web UI ✅ 0.2.0+, `/audit/events`+`/audit/tool-events` 기반 observability ✅ 0.2.6/0.2.8) vs still-deferred (K8s operator, `/v1/embeddings`, distributed Redis rate-limit, pgbackrest WAL, MIG dynamic, semantic routing) 는 개별 ISSUE 로 재배치 예정 — EPIC 3 (Plugin platform), EPIC 4 (Multi-tenant XaaS), EPIC 5 (Cluster platform) 가 해당 미실장 항목들을 분산 흡수합니다. 아래 표의 "완료 기준" 은 오리지널 Phase-1 spec 에 정의된 것이며, 실제 릴리스는 EPIC close tag (v0.3.0 / v0.4.0) 기준입니다.
 
 | Phase | 기간 | 핵심 목표 | 게이트된 기능 (포함 안 됨) | 완료 기준 |
 |-------|------|----------|--------------------------|----------|
