@@ -761,6 +761,53 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7m — /workbench/requests/{uuid}/evidence 404 on unknown request
+# ---------------------------------------------------------------------------
+#
+# Today the projection returns RequestNotFound for every request_id
+# (live evidence wiring lands later). Gate asserts the "projection
+# rejects unknown id with 404" wire contract — a regression that
+# flips this to 200 / 500 would silently break UI error handling.
+
+log "=== Gate 7m: request_evidence 404 on unknown uuid ==="
+# python3 is already a harness preflight requirement — use its
+# `uuid.uuid4()` to guarantee a well-formed v4 UUID string so axum's
+# `Path<Uuid>` extractor accepts it and we reach the projection's
+# `RequestNotFound` branch (404) rather than the extractor's 400.
+RAND_UUID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+EV_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/requests/$RAND_UUID/evidence" 2>&1 || true)"
+if [ "$EV_CODE" = "404" ]; then
+  pass "GET /workbench/requests/$RAND_UUID/evidence → 404"
+else
+  fail "request_evidence: expected 404 for unknown id, got $EV_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7n — invalid chat body → 4xx (serde + axum Json extractor contract)
+# ---------------------------------------------------------------------------
+#
+# `/v1/chat/completions` body must have `model` AND `messages`.
+# An empty JSON object should surface as 422 (axum Json extractor
+# failure) or 400 — anything in the 4xx family is the correct
+# answer; 500 / 200 is a wire regression.
+
+log "=== Gate 7n: malformed chat body → 4xx ==="
+BAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/v1/chat/completions" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}' 2>&1 || true)"
+case "$BAD_CODE" in
+  4*)
+    pass "malformed chat body → $BAD_CODE (4xx family, as expected)" ;;
+  *)
+    fail "malformed chat body: expected 4xx, got $BAD_CODE" \
+      "(200 = handler accepted empty body; 500 = unhandled extraction error)" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Gate 8 — non-streaming chat completion
 # ---------------------------------------------------------------------------
 
