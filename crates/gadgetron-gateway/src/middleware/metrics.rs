@@ -150,6 +150,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         }
     }
 
@@ -223,6 +224,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         };
         let app = build_router(state);
 

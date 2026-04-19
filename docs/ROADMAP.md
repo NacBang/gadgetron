@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.10** (post-ISSUE 7 TASK 7.1 `/v1/tools` discovery)
+**Current version: 0.2.11** (post-ISSUE 7 TASK 7.2 `/v1/tools/{name}/invoke`)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -85,16 +85,19 @@ autonomous workflow can drive.
   `--penny-vllm` opt-in path which defers to ISSUE 7's MCP server.
 
 ### In-flight ISSUE
-- **ISSUE 7 — first-class MCP server** (in-flight; 0.2.10 ships TASK 7.1)
-  - TASK 7.1 ✅ — `GET /v1/tools` discovery endpoint (0.2.9 → 0.2.10).
-    `gadgetron_core::agent::tools::GadgetCatalog` trait erases the
-    gateway→penny dependency; `GadgetRegistry` implements it; AppState
-    holds `Option<Arc<dyn GadgetCatalog>>` so external MCP clients can
-    enumerate `{name, tier, description, input_schema, idempotent}`
-    without dispatching. Harness gate 7i.2 pins shape + 401-on-no-auth.
-  - TASK 7.2 — full MCP protocol: `/v1/tools/{name}/invoke` or
-    JSON-RPC transport so external agents can actually call tools
-    (not just list them).
+- **ISSUE 7 — first-class MCP server** (in-flight; 0.2.11 ships TASK 7.2)
+  - TASK 7.1 ✅ — `GET /v1/tools` discovery endpoint (0.2.9 → 0.2.10,
+    PR #204). `GadgetCatalog` trait in core; `GadgetRegistry` implements
+    it; AppState holds `Option<Arc<dyn GadgetCatalog>>`. Harness gate
+    7i.2 pins shape + 401-on-no-auth.
+  - TASK 7.2 ✅ — `POST /v1/tools/{name}/invoke` tool invocation
+    endpoint (0.2.10 → 0.2.11). AppState holds
+    `Option<Arc<dyn GadgetDispatcher>>`; handler dispatches via the
+    existing seam, translates every `GadgetError` variant to an HTTP
+    status + `mcp_*` code, and returns `{content, is_error}` on
+    success. Dispatcher-unwired deployments get 503 `mcp_not_available`
+    so clients don't retry. Harness gate 7i.3 pins happy path, unknown
+    gadget 404 + `mcp_unknown_tool`, and 401-on-no-auth.
   - TASK 7.3 — cross-session audit: correlate external-agent tool
     invocations to `tool_audit_events` with an `external_caller_id`
     attribution.

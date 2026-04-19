@@ -7,7 +7,7 @@
 
 use axum::{
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -479,6 +479,92 @@ pub async fn list_tools_handler(State(state): State<AppState>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/tools/{name}/invoke
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/tools/{name}/invoke` — MCP tool invocation (ISSUE 7 TASK 7.2).
+///
+/// External MCP clients (claude-code, custom agents) call this endpoint
+/// to actually execute a gadget they discovered via `GET /v1/tools`.
+/// Dispatch flows through `Arc<dyn GadgetDispatcher>`, which the gateway
+/// holds in `AppState.gadget_dispatcher` — normally the same frozen
+/// `GadgetRegistry` Penny uses, so the operator-config L3 allowed-names
+/// gate runs here too (a tool the operator disabled in Penny is ALSO
+/// unreachable via this path).
+///
+/// Wire shape:
+///
+/// - Request body: the gadget's `args` object (JSON) — schema lives at
+///   `GET /v1/tools` under `tools[].input_schema`.
+/// - Path param: full namespaced name, e.g. `wiki.list`. The axum route
+///   uses `{name}` with no regex; dot-separated names work without
+///   percent-encoding because axum normalizes `/` only.
+/// - Success (gadget ran, possibly with `is_error: true`): HTTP 200
+///   `{"content": <value>, "is_error": <bool>}` — matches MCP
+///   `tool_result` block shape.
+/// - Unknown gadget: HTTP 404 `{"error": {"code": "mcp_unknown_tool",
+///   "message": "..."}}`.
+/// - Denied by policy: HTTP 403 `{"error": {"code":
+///   "mcp_denied_by_policy", ...}}`.
+/// - Rate limited: HTTP 429.
+/// - Invalid args (JSON Schema violation inside the gadget): HTTP 400.
+/// - Execution failure: HTTP 500.
+/// - Approval timeout (P2B+): HTTP 408.
+/// - Dispatcher unwired (`AppState.gadget_dispatcher == None`): HTTP 503
+///   `{"error": {"code": "mcp_not_available", ...}}` — keeps clients
+///   from retrying a deployment that can never dispatch.
+pub async fn invoke_tool_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    args: Option<Json<serde_json::Value>>,
+) -> Response {
+    use gadgetron_core::agent::tools::GadgetError;
+
+    let Some(dispatcher) = state.gadget_dispatcher.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "mcp_not_available",
+                    "message": "gadget dispatcher is not wired on this deployment — \
+                                `[knowledge]` section and Penny registration required",
+                }
+            })),
+        )
+            .into_response();
+    };
+
+    let args_value = args.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
+
+    match dispatcher.dispatch_gadget(&name, args_value).await {
+        Ok(result) => Json(serde_json::json!({
+            "content": result.content,
+            "is_error": result.is_error,
+        }))
+        .into_response(),
+        Err(err) => {
+            let code = err.error_code();
+            let status = match err {
+                GadgetError::UnknownGadget(_) => StatusCode::NOT_FOUND,
+                GadgetError::Denied { .. } => StatusCode::FORBIDDEN,
+                GadgetError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+                GadgetError::ApprovalTimeout { .. } => StatusCode::REQUEST_TIMEOUT,
+                GadgetError::InvalidArgs(_) => StatusCode::BAD_REQUEST,
+                GadgetError::Execution(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let message = err.to_string();
+            (
+                status,
+                Json(serde_json::json!({
+                    "error": { "code": code, "message": message }
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // inject_shared_context_block — PSL-1b helper
 // ---------------------------------------------------------------------------
 
@@ -790,6 +876,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         }
     }
 
@@ -1202,6 +1289,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         }
     }
 

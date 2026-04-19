@@ -698,6 +698,77 @@ E2E Gate 7i.2 pins both the shape and the 401-on-missing-auth contract.
 
 ---
 
+### POST /v1/tools/{name}/invoke
+
+Requires scope: `OpenAiCompat`
+
+MCP-style tool invocation. Executes a gadget the caller discovered via
+`GET /v1/tools`. Dispatch flows through the same `GadgetDispatcher`
+Penny uses, so the operator-config L3 allowed-names gate runs here too
+— a tool the operator disabled for Penny is ALSO unreachable on this
+path.
+
+Shipped in ISSUE 7 TASK 7.2 (v0.2.11). Deployments that did not wire
+`[knowledge]` at startup return **503** `{"error": {"code":
+"mcp_not_available", ...}}` so clients don't retry a dispatcher that
+can never run.
+
+**Path param:** `name` — the full namespaced gadget name (e.g.
+`wiki.list`, `knowledge.search`). Dots are not reserved in axum path
+segments, so no percent-encoding is required.
+
+**Request body:** the gadget's `args` object. The JSON Schema for each
+gadget is exposed at `GET /v1/tools` under `tools[].input_schema`.
+Sending `{}` for a zero-arg gadget is valid.
+
+**Success response:**
+
+HTTP 200
+
+```json
+{
+  "content": { "pages": ["README", "setup", "rfc-0001"], "total": 3 },
+  "is_error": false
+}
+```
+
+Fields:
+
+- `content` — opaque JSON value defined per-gadget. Rendered back to the external agent as the MCP `tool_result.content` block.
+- `is_error` — if `true`, the gadget ran to completion but the tool author considers the outcome an error (e.g. `wiki.read` for a missing page). MCP clients typically display this in a different color but do NOT retry.
+
+**Protocol errors:**
+
+| HTTP | `error.code`             | When                                                                     |
+|------|--------------------------|--------------------------------------------------------------------------|
+| 400  | `mcp_invalid_args`       | `args` failed the gadget's own input validation.                         |
+| 403  | `mcp_denied_by_policy`   | L3 allowed-names gate rejected: operator disabled the tool.              |
+| 404  | `mcp_unknown_tool`       | No gadget registered with that name.                                     |
+| 408  | `mcp_approval_timeout`   | Destructive tool's approval prompt timed out (P2B+).                     |
+| 429  | `mcp_rate_limited`       | Per-tool hourly cap exceeded.                                            |
+| 500  | `mcp_execution_failed`   | The gadget itself errored — usually infrastructure (wiki disk full, etc.). |
+| 503  | `mcp_not_available`      | Dispatcher unwired on this deployment (no `[knowledge]` section).        |
+
+Error body shape is `{"error": {"code": "...", "message": "..."}}` —
+same shape as other gateway errors so SDK error handlers work
+uniformly.
+
+**Example:**
+
+```sh
+curl -s -X POST http://localhost:8080/v1/tools/wiki.list/invoke \
+  -H "Authorization: Bearer gad_live_your32chartoken00000000000000" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  | jq .
+```
+
+E2E Gate 7i.3 pins the happy path (`wiki.list` → 200 with populated
+`content`), the unknown-gadget 404 + `mcp_unknown_tool` code, and the
+401-on-no-auth contract.
+
+---
+
 ## Health endpoints
 
 These endpoints require no authentication and no scope. They are intended for load balancers, Kubernetes liveness/readiness probes, and monitoring systems.

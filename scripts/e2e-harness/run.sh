@@ -1172,6 +1172,59 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7i.3 — /v1/tools/{name}/invoke MCP tool invocation (ISSUE 7 TASK 7.2)
+# ---------------------------------------------------------------------------
+#
+# External MCP clients (claude-code, custom agents) discover tools via
+# `GET /v1/tools` and then invoke them via this endpoint. We exercise a
+# read-tier gadget (`wiki.list`) because:
+#   1. Read tier is always operator-allowed under default config (no
+#      `never`/`ask` mode gates), so the L3 allowed-names check passes.
+#   2. `wiki.list` needs no args, so we don't have to build a
+#      schema-matching payload here.
+#   3. The seed wiki in Gate 7b provides real pages, so `is_error` MUST
+#      be false and `content` MUST be a populated JSON value.
+
+log "=== Gate 7i.3: /v1/tools/{name}/invoke ==="
+INVOKE_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "$GAD_BASE/v1/tools/wiki.list/invoke" 2>&1 || true)"
+if echo "$INVOKE_RESP" | jq -e '.is_error == false and (.content != null)' \
+  >/dev/null 2>&1; then
+  pass "/v1/tools/wiki.list/invoke → {content, is_error:false} (read-tier happy path)"
+else
+  fail "/v1/tools/wiki.list/invoke shape regressed" "$(echo "$INVOKE_RESP" | head -c 400)"
+fi
+
+# Unknown gadget MUST be 404 with `mcp_unknown_tool` code — tightly
+# pinning this keeps the MCP error taxonomy stable for client SDKs.
+INVOKE_404_STATUS="$(curl -s -o /tmp/invoke_404.json -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "$GAD_BASE/v1/tools/does.not.exist/invoke" 2>&1 || true)"
+INVOKE_404_CODE="$(jq -r '.error.code // "missing"' /tmp/invoke_404.json 2>/dev/null || echo missing)"
+if [ "$INVOKE_404_STATUS" = "404" ] && [ "$INVOKE_404_CODE" = "mcp_unknown_tool" ]; then
+  pass "/v1/tools/does.not.exist/invoke → 404 with code=mcp_unknown_tool"
+else
+  fail "unknown-gadget invoke: expected 404+mcp_unknown_tool, got status=$INVOKE_404_STATUS code=$INVOKE_404_CODE" \
+    "$(cat /tmp/invoke_404.json 2>/dev/null | head -c 400)"
+fi
+rm -f /tmp/invoke_404.json
+
+# Unauthenticated invoke MUST be 401.
+INVOKE_401_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Content-Type: application/json" -d '{}' \
+  "$GAD_BASE/v1/tools/wiki.list/invoke" 2>&1 || true)"
+if [ "$INVOKE_401_CODE" = "401" ]; then
+  pass "/v1/tools/wiki.list/invoke without auth → 401"
+else
+  fail "/v1/tools invoke without auth: expected 401, got $INVOKE_401_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7j — /favicon.ico served (public route, no auth)
 # ---------------------------------------------------------------------------
 #
