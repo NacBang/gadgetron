@@ -507,6 +507,93 @@ If you are uploading a large document, chunk it into pieces that each fit under 
 
 ---
 
+### HTTP 404 — `workbench_action_not_found` on `POST /actions/{id}`
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "action \"<id>\" not found",
+    "type": "invalid_request_error",
+    "code": "workbench_action_not_found"
+  }
+}
+```
+
+**Why:** Either (a) the `action_id` you posted is not in the catalog, or (b) the catalog has a descriptor with that id but its `required_scope` is not in your key's scope set — in which case the handler returns 404 instead of 403 to avoid leaking existence of scope-gated actions (matches `GET /views/{id}/data`).
+
+**Fix:** Query `GET /api/v1/web/workbench/actions` first; the response lists every descriptor your scope set can invoke. If your target action is missing and you believe you should see it, rotate to a key whose scope set covers the descriptor's `required_scope`. E2E gate 7f locks the public list at five seed ids (`knowledge-search`, `wiki-list`, `wiki-read`, `wiki-write`, `wiki-delete`).
+
+---
+
+### HTTP 409 — `workbench_approval_already_resolved`
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "approval already resolved (state=approved)",
+    "type": "invalid_request_error",
+    "code": "workbench_approval_already_resolved"
+  }
+}
+```
+
+on `POST /api/v1/web/workbench/approvals/{approval_id}/approve` or `.../deny`.
+
+**Why:** Approvals are terminal. Once a record moves to `approved` or `denied`, subsequent approve/deny calls are rejected — the store will not re-flip a resolved record. This typically surfaces when:
+- A user clicks the approve button twice (common on laggy UIs).
+- Two operators race to resolve the same card.
+- An automation retried after a network hiccup that actually succeeded.
+
+**Fix:** Read `state` from the error message (or `GET /audit/events?action_id=<id>`) to confirm the final outcome. If the first resolution was correct, nothing to do — the dispatch either already ran (on `approved`) or was refused (on `denied`). If the first resolution was wrong, there is no undo — record a new corrective action and document in the audit trail. E2E Gate 7h.7 exercises this path by asserting the second approve of the same id returns 409.
+
+---
+
+### HTTP 403 — cross-tenant approval forbidden
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "approval belongs to a different tenant",
+    "type": "invalid_request_error",
+    "code": "workbench_approval_forbidden"
+  }
+}
+```
+
+**Why:** The authenticated actor's tenant does not match the approval's tenant. This is a hard scope boundary — one tenant cannot approve or deny another tenant's pending actions even if scope would otherwise allow it. The original approval record stays `pending`; nothing about it changes.
+
+**Fix:** Either switch to a key in the owning tenant, or ask that tenant's operator to resolve the approval. If you think this is a mis-configuration (wrong tenant attached to a key), inspect `TenantContext` via the server logs: every request tagged with `target: "scope"` prints `tenant_id = <uuid>` on entry.
+
+---
+
+### HTTP 400 — `approval store is not wired in this build`
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "approval store is not wired in this build",
+    "type": "invalid_request_error",
+    "code": "config_error"
+  }
+}
+```
+
+on the approve / deny / cancel endpoints, or similar 400 `audit event query requires Postgres` on `GET /audit/events`.
+
+**Why:** ISSUE 3 / v0.2.6 stores approvals in an in-memory `InMemoryApprovalStore` by default, and writes `action_audit_events` rows to Postgres. When `gadgetron serve` is started without a Postgres pool (no `DATABASE_URL` + the `--no-db` evaluation path), the approval store still wires, but the PG-backed audit writer does not — `GET /audit/events` fails with `config_error`. Approve/deny continue to work against the in-memory store, but the resulting audit rows never reach Postgres, so the query endpoint has nothing to return.
+
+**Fix:** Run with `DATABASE_URL` pointing at a pgvector-enabled Postgres (see `docs/manual/quickstart.md §Postgres setup`). For demo / no-db flows, expect `GET /audit/events` to 400 — use `tracing` logs (`target: "action_audit"`) to see the events that were emitted without being persisted.
+
+---
+
 ## Log interpretation
 
 **Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.
