@@ -793,7 +793,65 @@ Possible outputs and what each means:
 
 **How to check (SIGHUP path — no HTTP response):** `kill -HUP $(pidof gadgetron)` emits a `workbench.admin: descriptor catalog reloaded action_count=N view_count=N source="..."` line to stderr / `gadgetron.log` but does NOT include the `bundle` field in the log line (the trace is structured around `ReloadCatalogResponse` but the signal path discards the response body). To verify bundle identity after a SIGHUP reload, follow up with the HTTP call above — it's idempotent and will show the live `bundle` from the current snapshot.
 
-**Why the drift-test matters.** Until ISSUE 8 TASK 9.3 retires `seed_p2b()`, both sources ship: `bundles/gadgetron-core/bundle.toml` + the hardcoded seed. A drift test in the test suite asserts they produce the same action id set, so "load the bundle file" vs "fall back to seed_p2b" cannot silently diverge in what actions are exposed. If you're debugging a "missing action" issue in production with `catalog_path` pointing at the first-party bundle, the drift test is your sanity check — if `cargo test -p gadgetron-gateway` is green, the bundle file and seed_p2b have the same action ids.
+**Why the drift-test matters.** Both sources still ship on trunk: `bundles/gadgetron-core/bundle.toml` (the first-party bundle, now the harness + shipped default per TASK 9.3) + the hardcoded `seed_p2b()` (retained as a unit-test fixture + drift-guard). A drift test in the test suite asserts they produce the same action id set, so "load the bundle file" vs "fall back to seed_p2b" cannot silently diverge in what actions are exposed. If you're debugging a "missing action" issue in production with `catalog_path` or `bundles_dir` pointing at the first-party bundle, the drift test is your sanity check — if `cargo test -p gadgetron-gateway` is green, the bundle file and seed_p2b have the same action ids.
+
+---
+
+### HTTP 4xx — install rejected for invalid `bundle_id`
+
+**What you observe:** `POST /api/v1/web/workbench/admin/bundles` with a body that includes a `[bundle] id = "..."` declaration returns HTTP 4xx with a `config_error` body mentioning the id regex — even though the TOML parses as valid.
+
+**Why:** ISSUE 10 TASK 10.2 (PR #224 / v0.4.10) centralized bundle-id validation in `validate_bundle_id()` at `crates/gadgetron-gateway/src/web/workbench.rs`. The regex is `^[a-zA-Z0-9_-]{1,64}$`. Anything else — `..`, `/`, `.` prefix, empty string, length > 64 — is rejected **BEFORE** any filesystem path is built. Gate 7q.7 pins the classic `id = "../etc/passwd"` case: the rejection must happen before `std::path::PathBuf::push` runs, otherwise an attacker could make the path escape `bundles_dir` real before the error surfaces.
+
+**Fix:** Rewrite the id to satisfy the regex. Typical operator mistakes:
+- `my.bundle` → no dots allowed. Use `my-bundle` or `my_bundle`.
+- `My Bundle` → no spaces, no uppercase-rejection isn't the issue but spaces are. Use `my-bundle`.
+- `bundle/v2` → no slashes. Put the version in `[bundle].version` (which has no regex), not the id. Keep id stable across versions.
+- Empty string / missing `id` field → the `[bundle]` table must declare both `id` AND `version` (both strings).
+- 65+ chars → pick a shorter id. 64 chars is a lot; if you hit the limit, your ids probably encode state that should live elsewhere.
+
+**`DELETE /admin/bundles/{bundle_id}` gets the same treatment.** The path parameter goes through the same `validate_bundle_id()` guard. A request to `DELETE /admin/bundles/..%2Fetc%2Fpasswd` (URL-encoded path traversal) is rejected before touching disk. Gate 7q.7 + the symmetric uninstall-side regex test (covered by Gate 7q.8's happy path AND the per-path-segment regex in the router) both guard this.
+
+---
+
+### HTTP 4xx — install over an existing bundle id
+
+**What you observe:** `POST /admin/bundles` with an id that already has a `{bundles_dir}/{id}/` directory on disk returns HTTP 4xx with a `config_error` mentioning "bundle already exists" (or similar text naming the conflict). The manifest is NOT written.
+
+**Why:** ISSUE 10 TASK 10.2 explicitly rejects silent overwrites — the semantics match `DescriptorCatalog::from_bundle_dir()` where duplicate ids across bundles are a hard `Config` error. If install silently overwrote an existing id, a fresh reload could pick up the new bundle mid-request and surprise live callers with a different catalog — the marketplace would be a foot-gun. This is a **feature**, not a bug.
+
+**Fix:** Uninstall first, then reinstall.
+```bash
+# 1. Confirm what's installed
+curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/bundles | jq '.bundles[] | .bundle.id'
+
+# 2. Remove the conflicting id (DELETE is idempotent — a 404 just means "already gone")
+curl -fsS -X DELETE -H "Authorization: Bearer $MGMT_KEY" \
+  "http://localhost:8080/api/v1/web/workbench/admin/bundles/my-bundle"
+
+# 3. Reinstall with the new TOML
+curl -fsS -X POST -H "Authorization: Bearer $MGMT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"bundle_toml": "..."}' \
+  http://localhost:8080/api/v1/web/workbench/admin/bundles
+
+# 4. Activate when ready
+curl -fsS -X POST -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/reload-catalog
+```
+
+If you want install + uninstall to be a single atomic replace (no intermediate "missing" state visible to the `GET /admin/bundles` discovery endpoint), DON'T: the design deliberately separates them so the operator sees the transition explicitly. An accidental install never changes production behaviour until the operator calls reload.
+
+---
+
+### HTTP 503 — `config_error` on `/admin/bundles` when `bundles_dir` is not configured
+
+**What you observe:** `GET /admin/bundles` (or `POST` / `DELETE`) returns HTTP 503 with a `config_error` body mentioning that `bundles_dir` is not configured, even with a Management-scoped key.
+
+**Why:** ISSUE 10 TASK 10.1 + 10.2 (PR #223 + #224) both require `[web] bundles_dir` to be set in `gadgetron.toml`. Without it the handler has no directory to scan (discovery), no target path to write (install), and no directory to remove (uninstall). Deployments using `[web] catalog_path` (flat-file source, TASK 8.4) or the hardcoded `seed_p2b()` fallback don't have a bundles directory.
+
+**Fix:** Add `bundles_dir = "/etc/gadgetron/bundles"` (or any absolute path) to the `[web]` section of your `gadgetron.toml` and restart the server. See [`configuration.md §[web]`](configuration.md#web) for the full key documentation including the precedence order (`bundles_dir` > `catalog_path` > `seed_p2b`). The shipped `bundles/gadgetron-core/bundle.toml` is a valid minimal starting point.
 
 ---
 

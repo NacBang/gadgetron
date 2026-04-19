@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.9",
+  "gateway_version": "0.5.0",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.9"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.0"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.4.9"
+    "version": "0.5.0"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.4.9"},
+    {"id": "gadgetron-core", "version": "0.5.0"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1345,8 +1345,10 @@ The `bundles` field lists **every contributing bundle** in the merged catalog. W
 - `action_count` / `view_count` — counts in the catalog **after** the swap, computed with all three scopes (`OpenAiCompat`, `Management`, `XaasAdmin`) in the visibility filter so the totals reflect every descriptor the fresh catalog carries.
 - `source` — wire-stable enum. Three values on trunk: `"seed_p2b"` when neither `bundles_dir` nor `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback); `"config_file"` when `catalog_path` is configured and the single TOML file parsed successfully (flat-file loader, TASK 8.4); `"bundles_dir"` when `bundles_dir` is configured and its subdirectories merged successfully (multi-bundle loader, TASK 9.2). The E2E harness boots against `source == "bundles_dir"` as of PR #222 (TASK 9.3 / v0.4.8) — the shipped `bundles/gadgetron-core/` subtree is the canonical default. Gate 7q.1 pins this end-to-end.
 - `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"` (TASK 8.4); the absolute path of the bundles directory when `source == "bundles_dir"` (TASK 9.2 / TASK 9.3). Admin tooling uses this to confirm which on-disk artifact produced the live catalog.
-- `bundle` — optional `{id, version}` struct (ISSUE 9 TASK 9.1 / v0.4.6 / PR #219). Populated when the loaded TOML carries a top-level `[bundle]` table with `id` and `version` fields (single-bundle / flat-file path only). Operators use this to identify **which catalog they loaded** without out-of-band tracking. `seed_p2b()`, anonymous flat TOMLs, and multi-bundle aggregation paths all produce `None` here — the multi-bundle case populates `bundles` (below) instead. The first-party bundle file at `bundles/gadgetron-core/bundle.toml` carries `{id: "gadgetron-core", version: <workspace version>}` — a drift test asserts this bundle file and `seed_p2b()` produce the same action id set so the two sources stay in lockstep until TASK 9.3 retires `seed_p2b()`.
-- `bundles` — `Vec<BundleMetadata>` (ISSUE 9 TASK 9.2 / v0.4.7 / PR #220). Populated with **every contributing bundle** when the loaded catalog came from a bundle directory (`[web] bundles_dir`). The handler scans every immediate subdirectory of `bundles_dir` for a `bundle.toml`, merges matching manifests in alphabetical path order so reloads are idempotent, and records each contributor's metadata here. Subdirectories without `bundle.toml` are silently skipped (operator workspace dirs, hidden dirs). Empty in every other case (seed_p2b / flat-file path / anonymous TOML). Single-bundle callers should read `bundle`; multi-bundle admin tooling should read `bundles` and distinguish "1 bundle" from "N bundles" without a special flag.
+- `bundle` — optional `{id, version, required_scope?}` struct (ISSUE 9 TASK 9.1 / v0.4.6 / PR #219 + ISSUE 10 TASK 10.3 / v0.4.11 / PR #226 added the optional `required_scope`). Populated when the loaded TOML carries a top-level `[bundle]` table with `id` and `version` fields (single-bundle / flat-file path only). Operators use this to identify **which catalog they loaded** without out-of-band tracking. `seed_p2b()`, anonymous flat TOMLs, and multi-bundle aggregation paths all produce `None` here — the multi-bundle case populates `bundles` (below) instead. The first-party bundle file at `bundles/gadgetron-core/bundle.toml` carries `{id: "gadgetron-core", version: <workspace version>}` — a drift test asserts this bundle file and `seed_p2b()` produce the same action id set so the two sources stay in lockstep.
+- `bundles` — `Vec<BundleMetadata>` (ISSUE 9 TASK 9.2 / v0.4.7 / PR #220). Populated with **every contributing bundle** when the loaded catalog came from a bundle directory (`[web] bundles_dir`). The handler scans every immediate subdirectory of `bundles_dir` for a `bundle.toml`, merges matching manifests in alphabetical path order so reloads are idempotent, and records each contributor's metadata here (including `required_scope` when the bundle declares one, post-PR #226). Subdirectories without `bundle.toml` are silently skipped (operator workspace dirs, hidden dirs). Empty in every other case (seed_p2b / flat-file path / anonymous TOML). Single-bundle callers should read `bundle`; multi-bundle admin tooling should read `bundles` and distinguish "1 bundle" from "N bundles" without a special flag.
+
+**Bundle-level scope inheritance (ISSUE 10 TASK 10.3 / v0.4.11 / PR #226).** A bundle manifest can declare `required_scope = "Management"` at the `[bundle]` level. On parse (both `from_toml_file` and `from_bundle_dir`), a post-parse pass walks every view + action and **inherits** the bundle's `required_scope` onto descriptors that don't have their own. Descriptors with explicit `required_scope` keep theirs (narrower wins). Zero-overhead for bundles that don't declare a scope (default `None`, no inheritance pass). Design motivation: a bundle with N operator-only actions used to need `required_scope = "Management"` on every descriptor; one declaration at the bundle level now covers the whole set AND travels with the manifest file so `POST /admin/bundles` installs inherit the scope floor automatically. Actors without the floored scope see NONE of the bundle's descriptors (the effective scope also lands on the descriptor itself so downstream audit/log can introspect without re-reading the bundle).
 
 **Plumbing.** The handler reads the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate, rev-bumped to `CatalogSnapshot` in TASK 8.3 / PR #214). To build the fresh catalog the handler picks a source in precedence order: (1) **`WebConfig.bundles_dir`** is `Some(dir)` (TASK 9.2 / PR #220) → calls `DescriptorCatalog::from_bundle_dir(dir)` which scans every `<dir>/<name>/bundle.toml` and merges into one catalog; deterministic alphabetical order; duplicate action OR view ids across bundles surface as a hard `Config` error naming the id + both contributing bundle ids so operators must rename or remove one before the next reload succeeds; `allow_direct_actions` is OR-folded across bundles (if ANY manifest opts in, the merged catalog opts in); (2) **`WebConfig.catalog_path`** is `Some(path)` (TASK 8.4 / PR #216) → calls `DescriptorCatalog::from_toml_file(path)` via the `CatalogFile` shape; (3) fallback → `DescriptorCatalog::seed_p2b()`. The resulting `DescriptorCatalog` is then turned into a snapshot via `into_snapshot()` (compiles JSON-schema validators for every action), and `ArcSwap::store()` atomically publishes the `(catalog, validators)` pair. In-flight requests holding an `Arc<CatalogSnapshot>` snapshot finish reading BOTH catalog and validators from the old pointer; any request that reads the handle after the store sees the new pointer for both sides. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`, `crates/gadgetron-gateway/src/web/catalog.rs::CatalogSnapshot`, `DescriptorCatalog::from_toml_file`, and `DescriptorCatalog::from_bundle_dir` in the same catalog module.
 
@@ -1389,7 +1391,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
   "count": 2,
   "bundles": [
     {
-      "bundle": {"id": "gadgetron-core", "version": "0.4.9"},
+      "bundle": {"id": "gadgetron-core", "version": "0.5.0"},
       "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
       "action_count": 5,
       "view_count": 3
@@ -1423,6 +1425,113 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
 | `config_error` | 500 | One of the `<subdir>/bundle.toml` files failed to read or parse. Same error envelope as the reload endpoint's TOML parse failure — error message embeds the file path and the serde / IO error. The endpoint is read-only, so nothing has been swapped; fix the bad TOML and retry. |
 
 E2E Gate 7q.4 pins the response shape and asserts the first-party `gadgetron-core` bundle is enumerated with `action_count == 5`. Gate 7q.5 pins the RBAC contract.
+
+---
+
+### POST /api/v1/web/workbench/admin/bundles
+
+Install a new bundle manifest into the configured `[web] bundles_dir`. Landed in ISSUE 10 TASK 10.2 / v0.4.10 (PR #224). **Does NOT swap the live catalog** — the handler writes the TOML to disk but leaves `Arc<ArcSwap<CatalogSnapshot>>` untouched. Operators activate the new bundle by triggering `POST /admin/reload-catalog` or `SIGHUP` when ready; the `reload_hint` field in the response points at the reload endpoint explicitly.
+
+**Scope:** `Management` (admin sub-tree). An OpenAiCompat key returns 403 `scope_required`.
+
+**Request body:**
+```json
+{
+  "bundle_toml": "[bundle]\nid = \"acme-ops\"\nversion = \"1.2.0\"\n\n[[actions]]\n...",
+  "signature_hex": "9a3f…ed25519 signature over the bundle_toml string, hex-encoded"
+}
+```
+
+- `bundle_toml` — a complete manifest as a single string (not a filesystem reference). The handler parses it to verify schema + extract the id, then writes the string verbatim to disk.
+- `signature_hex` (optional, ISSUE 10 TASK 10.4 / v0.4.12 / PR #227) — hex-encoded Ed25519 signature over the raw `bundle_toml` string. Verified against `[web.bundle_signing].public_keys_hex` trust anchors BEFORE the TOML is parsed, so a signed-malformed manifest takes the same error path as an unsigned-malformed one (no "which signer did you claim?" leak via error text). Required when `[web.bundle_signing].require_signature = true`; otherwise unsigned installs still work for backwards compatibility with TASK 10.2 deployments that haven't rotated to signed bundles yet.
+
+**Signature policy matrix (TASK 10.4).** `verify_bundle_signature` runs before TOML parse and enforces all six branches:
+
+| Config | Request | Outcome |
+|--------|---------|---------|
+| `require_signature = false`, no trust anchors | no `signature_hex` | accept (backwards-compat with TASK 10.2) |
+| `require_signature = true`, any config | no `signature_hex` | reject 4xx `Config` — "signature required" |
+| trust anchors present | valid sig matching one of the anchors | accept |
+| trust anchors present | sig value tampered (verification fails against every anchor) | reject 4xx `Config` — "signature invalid" |
+| trust anchors present | sig formatted correctly but from a pubkey not in anchors | reject 4xx `Config` — "signature from unknown signer" |
+| no trust anchors, `signature_hex` present | (trust set is empty so nothing to verify against) | reject 4xx `Config` — "signature provided but no trust anchors configured" |
+
+The last branch is loud-fail by design — silently accepting a signed request when trust anchors are missing would let a misconfigured deployment trust any signer. Operators who want unsigned installs should leave `signature_hex` empty AND keep `require_signature = false`; operators who want signed installs MUST configure trust anchors.
+
+**Response (HTTP 200):**
+```json
+{
+  "installed": true,
+  "bundle_id": "acme-ops",
+  "manifest_path": "/etc/gadgetron/bundles/acme-ops/bundle.toml",
+  "reload_hint": "POST /api/v1/web/workbench/admin/reload-catalog to activate"
+}
+```
+
+- `installed` — always `true` on 200. Clients key observability on this flag (same pattern as `reloaded` on reload-catalog).
+- `bundle_id` — echoed id extracted from the `[bundle]` table. Admin UIs use this to confirm the manifest they sent was the one the server parsed.
+- `manifest_path` — absolute path of the file the handler wrote. Typically `{bundles_dir}/{id}/bundle.toml`. Operators can `cat` this to verify contents match what they sent.
+- `reload_hint` — human-readable reminder that installing does NOT activate; caller must call the reload endpoint (or send SIGHUP) next.
+
+**Security invariant — path-traversal safe.** The `[bundle]` id must match `^[a-zA-Z0-9_-]{1,64}$`. `validate_bundle_id()` centralizes this check and every filesystem-touching path (install + uninstall) goes through it. Ids containing `..`, `/`, leading dot, or any other character outside the regex are rejected with 4xx `Config` BEFORE any disk write. Gate 7q.7 pins this: a request with `id = "../etc/passwd"` must return 4xx.
+
+**Collision policy — no silent overwrites.** Installing over an existing id is a hard `Config` error (4xx). The handler checks `{bundles_dir}/{id}/` first and bails if it exists. Operators must `DELETE /admin/bundles/{bundle_id}` before reinstalling. This matches the `from_bundle_dir` duplicate-id hard-error semantics — the marketplace never silently prefers one version over another.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management`. |
+| `config_error` | 503 | `bundles_dir` is not configured in `[web]`. |
+| `config_error` | 4xx | Request body missing `bundle_toml` / not JSON / TOML parse failure / missing `[bundle]` table / missing `id` / missing `version` / id fails the `[a-zA-Z0-9_-]{1,64}` regex / bundle id already exists under `bundles_dir`. Error message distinguishes the cause so admin UIs can present actionable feedback. |
+| `config_error` | 500 | Filesystem write failure (disk full, permission denied, parent-dir IO error). The handler does not leave partial state — if the `bundle.toml` write fails, `mkdir` is rolled back where possible. |
+
+E2E Gate 7q.6 installs a dummy bundle and verifies it appears in the next `GET /admin/bundles` call. Gate 7q.7 pins the path-traversal rejection.
+
+---
+
+### DELETE /api/v1/web/workbench/admin/bundles/{bundle_id}
+
+Remove an installed bundle. Landed in ISSUE 10 TASK 10.2 / v0.4.10 (PR #224). **Does NOT swap the live catalog** — same contract as install. Operator triggers reload to drop the removed bundle from the merged catalog.
+
+**Scope:** `Management`.
+
+**Path parameter:** `bundle_id` — must match `^[a-zA-Z0-9_-]{1,64}$` (same regex as install; rejected BEFORE any filesystem access).
+
+**Request body:** none.
+
+**Example:**
+```bash
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/bundles/acme-ops
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "uninstalled": true,
+  "bundle_id": "acme-ops",
+  "manifest_path": "/etc/gadgetron/bundles/acme-ops/bundle.toml",
+  "reload_hint": "POST /api/v1/web/workbench/admin/reload-catalog to drop from live catalog"
+}
+```
+
+`manifest_path` is the path that no longer exists (the directory was removed via `std::fs::remove_dir_all`).
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management`. |
+| `config_error` | 503 | `bundles_dir` is not configured. |
+| `config_error` | 4xx | `bundle_id` path parameter fails the id regex (path-traversal attempt / empty / too long / contains `/` or `..`). Rejected BEFORE touching disk. |
+| `config_error` | 404 | No `{bundles_dir}/{bundle_id}/` directory exists. Idempotent-friendly: a second DELETE of the same id surfaces this 404 so scripts can treat it as "already gone". |
+| `config_error` | 500 | `remove_dir_all` failure (permission denied, disk I/O error). Partial-removal state is possible on filesystem failure; a retry after fixing the underlying issue is safe because install prevents re-creating over an existing id. |
+
+E2E Gate 7q.8 uninstalls a previously-installed bundle and verifies it no longer appears in `GET /admin/bundles`.
+
+**Compose with reload.** Install + uninstall both leave the live `CatalogSnapshot` untouched. The typical operator workflow is: (1) `POST /admin/bundles` to stage, (2) `DELETE /admin/bundles/{old}` if replacing, (3) `POST /admin/reload-catalog` (or `kill -HUP <pid>`) to activate. This keeps the "snapshot swap" moment explicit — an accidental install never changes behaviour until the operator decides to reload.
 
 ---
 

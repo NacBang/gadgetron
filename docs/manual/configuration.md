@@ -311,7 +311,11 @@ Minimal `bundles/gadgetron-core/bundle.toml` shape:
 ```toml
 [bundle]
 id = "gadgetron-core"
-version = "0.4.7"
+version = "0.4.11"
+# Optional — bundle-level scope floor (ISSUE 10 TASK 10.3 / v0.4.11 / PR #226).
+# When set, every [[views]] / [[actions]] without its own required_scope
+# inherits this one. Explicit descriptor scopes keep theirs (narrower wins).
+# required_scope = "Management"
 
 # [[views]] and [[actions]] entries follow, one table array per descriptor.
 # Schema mirrors WorkbenchViewDescriptor / WorkbenchActionDescriptor exactly
@@ -328,6 +332,43 @@ version = "0.4.7"
 │   └── bundle.toml    # operator-authored bundle for their workflows
 └── README.md          # ignored (no bundle.toml inside)
 ```
+
+---
+
+### `[web.bundle_signing]`
+
+Controls Ed25519 signature verification on bundle install (`POST /api/v1/web/workbench/admin/bundles`). Landed in ISSUE 10 TASK 10.4 / v0.4.12 / PR #227. Defaults preserve the unsigned-install behavior TASK 10.2 shipped, so deployments that haven't rotated to signed bundles keep working.
+
+```toml
+[web.bundle_signing]
+# List of trusted publisher public keys (hex-encoded Ed25519).
+# Empty by default — matches TASK 10.2 unsigned-install behavior.
+public_keys_hex = [
+  "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+]
+# When true, POST /admin/bundles REJECTS unsigned requests with 4xx Config.
+# Default false for backwards compatibility.
+require_signature = false
+```
+
+**Policy matrix** (enforced before TOML parse in `verify_bundle_signature`):
+
+- `require_signature = false`, no trust anchors, request has no `signature_hex` → accept (TASK 10.2 backwards compat).
+- `require_signature = true`, request has no `signature_hex` → reject 4xx `Config` ("signature required").
+- Trust anchors present, valid sig matching one of the anchors → accept.
+- Trust anchors present, sig value tampered → reject 4xx `Config` ("signature invalid").
+- Trust anchors present, sig from a pubkey not in anchors → reject 4xx `Config` ("unknown signer").
+- **No trust anchors, but `signature_hex` provided** → reject 4xx `Config` loudly ("signature provided but no trust anchors configured"). Silent acceptance would let a misconfigured deployment trust any signer — fail loud by design.
+
+**Signing the manifest (operator workflow).**
+1. Generate a keypair once per publisher: `cargo run -p <your-signing-crate> -- keygen` (any Ed25519 tool works — the wire format is raw hex of the public key and the signature, no framing).
+2. Add the hex-encoded public key to `public_keys_hex` on every gadgetron deployment that should trust this publisher.
+3. For each bundle install: sign the **raw `bundle_toml` string** (byte-for-byte what you'll send in the request body) with the matching private key.
+4. POST with both `bundle_toml` and `signature_hex` fields.
+
+**Error message determinism.** `verify_bundle_signature` runs BEFORE `toml::from_str`, so a signed request with a malformed TOML surfaces the same `config_error` envelope as an unsigned malformed TOML — the signer is never named in an error response, which would otherwise leak trust-anchor attempts. Operators debugging a rejected install should check the tracing log (`workbench.admin: bundle install rejected reason="signature_invalid" publisher=<hex>`) rather than the HTTP body.
+
+**Key rotation.** `public_keys_hex` is a list, so you can add the new key, deploy, sign with the new key going forward, then remove the old key after deployed bundles are all re-signed. No restart needed on the rotation path itself — `[web.bundle_signing]` is read at request time from the live `WebConfig`. However, changing `require_signature` DOES require a restart (Phase 1 `AppConfig` hot-reload limitation — see `docs/architecture/platform-architecture.md §2.B.5.3`).
 
 ---
 

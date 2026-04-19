@@ -17,31 +17,48 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; twenty-two PRs have landed since (#169 7k.2, #172 7n.2,
+refresh; twenty-six PRs have landed since (#169 7k.2, #172 7n.2,
 #173 9c, #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188
 7h.7 + 7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207
-7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220
-no-new-gates — ISSUE 8 TASKs 8.3 / 8.4 / 8.5 + ISSUE 9 TASKs 9.1 /
-9.2 all reuse the existing Gate 7q.1 cross-check (response
+7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220 / #226 /
+#227 / #228 no-new-gates — ISSUE 8 TASKs 8.3 / 8.4 / 8.5 + ISSUE 9
+TASKs 9.1 / 9.2 + ISSUE 10 TASK 10.3 + ISSUE 10 TASK 10.4 + EPIC 3
+close all reuse the existing Gate 7q.1 cross-check (response
 `action_count` vs live `/workbench/actions` count) which implicitly
 proves both catalog and validators swapped in lockstep (TASK 8.3),
 the file-based source produced a valid snapshot (TASK 8.4
 `catalog_path` fallback path), the HTTP-triggered reload landed
 (TASK 8.5 shares `perform_catalog_reload()` with SIGHUP path), the
 optional `bundle` response field is additive-only (TASK 9.1
-`skip_serializing_if`), and the multi-bundle merge produced a
-coherent snapshot (TASK 9.2 `from_bundle_dir` + alphabetical order +
-duplicate-id hard error); **#222 7q.3 + retarget of 7q.1** —
-ISSUE 9 TASK 9.3 flipped the harness config from implicit `seed_p2b`
-fallback to explicit `[web] bundles_dir = <repo>/bundles`, Gate 7q.1
-now pins `source == "bundles_dir"` end-to-end, and new Gate 7q.3
-asserts `.bundles[0].id == "gadgetron-core"` so a rename of the
-first-party bundle trips the gate; **#223 7q.4 + 7q.5** — ISSUE 10
-TASK 10.1 shipped the read-only `GET /admin/bundles` enumeration
-endpoint with Management scope, so the harness now also pins the
+`skip_serializing_if`), the multi-bundle merge produced a coherent
+snapshot (TASK 9.2 `from_bundle_dir` + alphabetical order +
+duplicate-id hard error), the bundle-level `required_scope`
+inheritance doesn't break any existing scope-independent invariant
+(TASK 10.3 — scope inheritance is a per-descriptor filter at
+action-visibility time, not a reload invariant, so the reload +
+discovery gates stay green by construction), the Ed25519 signature
+verification runs before TOML parse without affecting the unsigned
+happy path (TASK 10.4 — signature config defaults preserve TASK
+10.2 unsigned behavior, so existing harness install gates 7q.6 /
+7q.8 continue to hold against the seeded no-signing-config
+deployment), and EPIC 3 close itself is a version-bump + docs PR
+(TASK 8 / 9 / 10 milestones were validated by the 7q gate family
+individually); **#222 7q.3 + retarget of 7q.1** — ISSUE 9 TASK 9.3
+flipped the harness config from implicit `seed_p2b` fallback to
+explicit `[web] bundles_dir = <repo>/bundles`, Gate 7q.1 now pins
+`source == "bundles_dir"` end-to-end, and new Gate 7q.3 asserts
+`.bundles[0].id == "gadgetron-core"` so a rename of the first-party
+bundle trips the gate; **#223 7q.4 + 7q.5** — ISSUE 10 TASK 10.1
+shipped `GET /admin/bundles` (Management), so the harness pins the
 response shape + `gadgetron-core` enumeration with `action_count=5`
-(7q.4) and the OpenAiCompat → 403 RBAC contract (7q.5) — 64 →
-86 PASS). Run
+(7q.4) and the OpenAiCompat → 403 RBAC contract (7q.5); **#224
+7q.6 + 7q.7 + 7q.8** — ISSUE 10 TASK 10.2 shipped install
+(`POST /admin/bundles`) + uninstall (`DELETE /admin/bundles/{id}`)
+with the `validate_bundle_id()` path-traversal regex, so the
+harness pins: 7q.6 install a dummy bundle → discovery lists it;
+7q.7 install with `id = "../etc/passwd"` → 4xx rejection BEFORE any
+filesystem write; 7q.8 uninstall → discovery no longer lists it —
+64 → 91 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -83,7 +100,10 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7q.2 | `/workbench/admin/reload-catalog` RBAC enforcement | PR #213: same endpoint called with an OpenAiCompat key → 403 (admin sub-tree scope rule precedes the broader workbench rule in `scope_guard_middleware`) |
 | 7q.3 | `/workbench/admin/reload-catalog` contributing-bundles list | PR #222 / TASK 9.3: `.bundles[0].id == "gadgetron-core"` on the reload response when the harness boots against `bundles_dir = <repo>/bundles`. Catches (a) a rename of the first-party bundle (`bundles/gadgetron-core/bundle.toml` → some other id), (b) a silent drop of the `bundles` field from the response (e.g. serde attribute regression removing `skip_serializing_if` or changing `pub bundles: Vec<...>` back to `Option<...>` semantics), (c) the `from_bundle_dir` merge path silently falling through to a different source. |
 | 7q.4 | `GET /workbench/admin/bundles` bundle-discovery shape + enumeration | PR #223 / TASK 10.1: Management-scoped `GET /api/v1/web/workbench/admin/bundles` returns `{bundles_dir, count, bundles: [...]}` with the first-party `gadgetron-core` bundle enumerated at `.bundles[0]` and `.bundles[0].action_count == 5` (matches the seed action set that drift-test guards). Catches: shape regressions (missing top-level fields, `bundles[]` no longer containing `bundle.id` / `source_path` / `action_count` / `view_count`), enumeration drift (first-party bundle renamed or dropped from the repo `bundles/` tree), action-count drift (seed action set changes without drift-test or bundle file updating in lockstep). |
-| 7q.5 | `GET /workbench/admin/bundles` RBAC enforcement | PR #223 / TASK 10.1: same endpoint called with an OpenAiCompat key → 403. Inherits the admin sub-tree scope rule in `scope_guard_middleware` (same path prefix the 7q.2 RBAC gate pins on the reload endpoint). Catches regressions where a future TASK 10.2/10.3/10.4 admin endpoint accidentally exposes the scope rule to a broader path prefix. |
+| 7q.5 | `GET /workbench/admin/bundles` RBAC enforcement | PR #223 / TASK 10.1: same endpoint called with an OpenAiCompat key → 403. Inherits the admin sub-tree scope rule in `scope_guard_middleware` (same path prefix the 7q.2 RBAC gate pins on the reload endpoint). Catches regressions where a future TASK 10.4 admin endpoint accidentally exposes the scope rule to a broader path prefix. |
+| 7q.6 | `POST /workbench/admin/bundles` install + discovery round-trip | PR #224 / TASK 10.2: POST a dummy bundle manifest via `{bundle_toml: "<text>"}`, expect `{installed:true, bundle_id, manifest_path, reload_hint}` response. Follow-up `GET /admin/bundles` must enumerate the newly-installed bundle (live discovery sees disk write immediately, even though the live catalog snapshot is untouched). Catches regressions where (a) the install handler succeeds without writing disk, (b) the write lands at a wrong path not picked up by discovery, or (c) the discovery scan has a stale cache that doesn't see fresh subdirectories. |
+| 7q.7 | `POST /workbench/admin/bundles` path-traversal rejection | PR #224 / TASK 10.2: POST a bundle with `[bundle] id = "../etc/passwd"` → 4xx rejection BEFORE any filesystem write. Pins the `validate_bundle_id()` `^[a-zA-Z0-9_-]{1,64}$` regex. Catches regressions where (a) the regex is loosened, (b) id validation is bypassed on an error path that still calls `std::fs::write`, or (c) the check moves to a code path that runs AFTER `std::path::PathBuf::push` (making the path escape real before rejection). |
+| 7q.8 | `DELETE /workbench/admin/bundles/{bundle_id}` uninstall + discovery round-trip | PR #224 / TASK 10.2: DELETE the bundle installed by 7q.6, expect 200 response. Follow-up `GET /admin/bundles` must NOT enumerate that bundle anymore. Catches regressions where (a) the delete handler succeeds without removing the directory (partial `remove_dir_all` failure swallowed), (b) a stale discovery cache reports the bundle still present, or (c) the id regex guard is bypassed on the DELETE path (asymmetric validation vs install). |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
