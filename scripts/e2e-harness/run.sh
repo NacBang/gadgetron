@@ -977,6 +977,25 @@ else
   fail "non-streaming chat round-trip" "$CHAT_RESP"
 fi
 
+# Tighter OpenAI wire-compat assertions on the same response.
+# These lock in contracts that downstream SDKs (Python OpenAI,
+# LangChain, etc.) rely on — a regression that drops `.id` or
+# flips `.object` would not break Gate 8's content/token check
+# but WOULD break every client in the ecosystem.
+if echo "$CHAT_RESP" | jq -e '
+     (.id | type == "string" and startswith("chatcmpl-"))
+     and .object == "chat.completion"
+     and (.model | type == "string" and length > 0)
+     and (.choices | length >= 1)
+     and (.choices[0].finish_reason | type == "string")
+     and (.usage.total_tokens | type == "number")
+   ' >/dev/null 2>&1; then
+  pass "non-streaming chat: OpenAI wire contract (id, object, model, finish_reason, total_tokens)"
+else
+  fail "non-streaming chat OpenAI wire contract regressed" \
+    "$(echo "$CHAT_RESP" | jq -c '{id, object, model, finish_reason: .choices[0].finish_reason, total_tokens: .usage.total_tokens}')"
+fi
+
 # ---------------------------------------------------------------------------
 # Gate 8b — audit trail for non-streaming happy path
 # ---------------------------------------------------------------------------
