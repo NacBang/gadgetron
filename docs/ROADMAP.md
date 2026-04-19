@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.8** (post-ISSUE 5 Penny tool-call audit surface)
+**Current version: 0.2.9** (post-ISSUE 6 Penny-attributed activity feed)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -74,10 +74,17 @@ autonomous workflow can drive.
   tenant pinning; `ActivityEvent::ToolCallCompleted` variant + bus
   fan-out from the writer so dashboards see Penny tool calls in
   real time. Harness gate 7k.4 (tool-events shape + clamp).
+- **ISSUE 6 — Penny-attributed activity feed** (0.2.8 → 0.2.9)
+  `GadgetAuditEventWriter::with_coordinator(coord)` fan-out; every
+  Penny tool call also captures a `CapturedActivityEvent` with
+  `ActivityOrigin::Penny` + `ActivityKind::GadgetToolCall`.
+  `init_serve_runtime` reordered so `candidate_coordinator` is
+  built before `build_provider_maps`, letting production Penny
+  sinks attach the coord at startup. Unit tests in
+  `audit::tool_event` cover the fan-out; full E2E requires the
+  `--penny-vllm` opt-in path which defers to ISSUE 7's MCP server.
 
 ### Planned ISSUEs
-- **ISSUE 6 — activity feed from Penny**: Penny-originated writes show
-  in `/workbench/activity` with correct attribution.
 - **ISSUE 7 — first-class MCP server**: `/v1/tools` listing; tool schemas
   exposed to external agents; cross-session audit.
 
