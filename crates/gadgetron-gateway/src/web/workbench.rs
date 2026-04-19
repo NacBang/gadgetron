@@ -190,6 +190,12 @@ pub struct GatewayWorkbenchService {
     /// catalog — winning over `catalog_path` if both are
     /// configured. Cloned from `WebConfig.bundles_dir` at startup.
     pub bundles_dir: Option<String>,
+    /// Bundle signing trust anchors (ISSUE 10 TASK 10.4). Cloned from
+    /// `WebConfig.bundle_signing` at startup. Empty list +
+    /// `require_signature = false` preserves the TASK 10.2 unsigned
+    /// install behavior for deployments that haven't rotated to
+    /// signed bundles yet.
+    pub bundle_signing: gadgetron_core::config::BundleSigningConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +987,14 @@ pub struct InstallBundleRequest {
     /// Complete `bundle.toml` text. Must include a `[bundle]` table
     /// with a valid `id` (id drives the install directory name).
     pub bundle_toml: String,
+    /// Optional Ed25519 detached signature over `bundle_toml`
+    /// (ISSUE 10 TASK 10.4). Hex-encoded 64-byte signature. When
+    /// `web.bundle_signing.require_signature = true`, a missing
+    /// signature is rejected before any filesystem IO. When present,
+    /// the handler verifies it against every key in
+    /// `web.bundle_signing.public_keys_hex`; any match accepts.
+    #[serde(default)]
+    pub signature_hex: Option<String>,
 }
 
 /// Response for `POST /admin/bundles`.
@@ -1007,6 +1021,95 @@ pub struct UninstallBundleResponse {
     pub uninstalled: bool,
     pub bundle_id: String,
     pub reload_hint: &'static str,
+}
+
+/// Verify an optional Ed25519 signature against the configured trust
+/// anchors (ISSUE 10 TASK 10.4).
+///
+/// Policy:
+/// - `require_signature = true` + no signature → reject.
+/// - Signature present → verify against every configured public
+///   key; any match accepts. No match → reject.
+/// - `require_signature = false` + no signature → accept (TASK 10.2
+///   unsigned behavior preserved for back-compat).
+/// - Signature supplied but `public_keys_hex` empty → reject (no
+///   trust anchors means we can't validate; better to fail loud
+///   than silently accept unverified input).
+fn verify_bundle_signature(
+    cfg: &gadgetron_core::config::BundleSigningConfig,
+    req: &InstallBundleRequest,
+) -> Result<(), WorkbenchHttpError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let Some(sig_hex) = req.signature_hex.as_deref() else {
+        if cfg.require_signature {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle install: signature required but none supplied \
+                 (web.bundle_signing.require_signature = true)"
+                    .into(),
+            )));
+        }
+        return Ok(());
+    };
+
+    let sig_bytes = hex::decode(sig_hex).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: signature is not valid hex: {e}",
+        )))
+    })?;
+    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: signature must be 64 bytes (got {})",
+            sig_bytes.len()
+        )))
+    })?;
+    let signature = Signature::from_bytes(&sig_arr);
+
+    if cfg.public_keys_hex.is_empty() {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle install: signature supplied but no trust anchors \
+             configured (web.bundle_signing.public_keys_hex is empty)"
+                .into(),
+        )));
+    }
+
+    let message = req.bundle_toml.as_bytes();
+    for (idx, pk_hex) in cfg.public_keys_hex.iter().enumerate() {
+        let Ok(pk_bytes) = hex::decode(pk_hex) else {
+            tracing::warn!(
+                target: "workbench.admin",
+                key_index = idx,
+                "bundle signing: configured public key is not valid hex; skipping"
+            );
+            continue;
+        };
+        let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else {
+            tracing::warn!(
+                target: "workbench.admin",
+                key_index = idx,
+                expected_bytes = 32,
+                got_bytes = pk_bytes.len(),
+                "bundle signing: configured public key has wrong length; skipping"
+            );
+            continue;
+        };
+        if let Ok(vk) = VerifyingKey::from_bytes(&pk_arr) {
+            if vk.verify(message, &signature).is_ok() {
+                tracing::info!(
+                    target: "workbench.admin",
+                    key_index = idx,
+                    "bundle install: signature verified"
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    Err(WorkbenchHttpError::Core(GadgetronError::Config(
+        "bundle install: signature did not verify against any configured \
+         trust anchor (web.bundle_signing.public_keys_hex)"
+            .into(),
+    )))
 }
 
 /// Validate a bundle id against the reserved character set.
@@ -1056,6 +1159,12 @@ pub async fn install_bundle_handler(
             "bundle install requires `[web] bundles_dir` to be configured".into(),
         ))
     })?;
+
+    // ISSUE 10 TASK 10.4 — signature verification runs BEFORE TOML
+    // parse so a signed-but-malformed file and an unsigned-but-
+    // malformed file aren't distinguishable via the error text
+    // (don't leak signer information to unauthenticated probing).
+    verify_bundle_signature(&svc.bundle_signing, &req)?;
 
     // Parse + validate the manifest before touching the filesystem.
     let file: crate::web::catalog::CatalogFile = toml::from_str(&req.bundle_toml).map_err(|e| {
@@ -1568,6 +1677,97 @@ fn require_workbench(state: &AppState) -> Result<Arc<GatewayWorkbenchService>, W
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod tests_bundle_signing {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn make_req(body: &str, sig: Option<&[u8; 64]>) -> InstallBundleRequest {
+        InstallBundleRequest {
+            bundle_toml: body.to_string(),
+            signature_hex: sig.map(hex::encode),
+        }
+    }
+
+    #[test]
+    fn verify_accepts_unsigned_when_not_required() {
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![],
+            require_signature: false,
+        };
+        verify_bundle_signature(&cfg, &make_req("[bundle]\nid=\"x\"\nversion=\"1\"", None))
+            .expect("unsigned install is allowed when not required");
+    }
+
+    #[test]
+    fn verify_rejects_unsigned_when_required() {
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![],
+            require_signature: true,
+        };
+        let err = verify_bundle_signature(&cfg, &make_req("x", None))
+            .expect_err("require_signature=true must reject unsigned");
+        assert!(format!("{:?}", err).contains("signature required"));
+    }
+
+    #[test]
+    fn verify_accepts_valid_signature() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = sk.verifying_key();
+        let body = "[bundle]\nid=\"x\"\nversion=\"1\"";
+        let sig = sk.sign(body.as_bytes());
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![hex::encode(vk.to_bytes())],
+            require_signature: true,
+        };
+        verify_bundle_signature(&cfg, &make_req(body, Some(&sig.to_bytes())))
+            .expect("valid signature must pass");
+    }
+
+    #[test]
+    fn verify_rejects_tampered_body() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = sk.verifying_key();
+        let sig = sk.sign(b"original");
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![hex::encode(vk.to_bytes())],
+            require_signature: true,
+        };
+        let err = verify_bundle_signature(&cfg, &make_req("tampered", Some(&sig.to_bytes())))
+            .expect_err("tampered body must reject");
+        assert!(format!("{:?}", err).contains("did not verify"));
+    }
+
+    #[test]
+    fn verify_rejects_unknown_key() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let untrusted_sk = SigningKey::from_bytes(&[42u8; 32]);
+        let body = "[bundle]\nid=\"x\"\nversion=\"1\"";
+        let sig = untrusted_sk.sign(body.as_bytes());
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![hex::encode(sk.verifying_key().to_bytes())],
+            require_signature: true,
+        };
+        let err = verify_bundle_signature(&cfg, &make_req(body, Some(&sig.to_bytes())))
+            .expect_err("unknown key must reject");
+        assert!(format!("{:?}", err).contains("did not verify"));
+    }
+
+    #[test]
+    fn verify_rejects_signature_without_trust_anchors() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let body = "x";
+        let sig = sk.sign(body.as_bytes());
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![],
+            require_signature: false,
+        };
+        let err = verify_bundle_signature(&cfg, &make_req(body, Some(&sig.to_bytes())))
+            .expect_err("signature with no trust anchors must reject");
+        assert!(format!("{:?}", err).contains("no trust anchors"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::middleware::scope::scope_guard_middleware;
@@ -1634,6 +1834,7 @@ mod tests {
                 descriptor_catalog: None,
                 catalog_path: None,
                 bundles_dir: None,
+                bundle_signing: Default::default(),
             })),
             penny_shared_surface: None,
             penny_assembler: None,

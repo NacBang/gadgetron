@@ -92,6 +92,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
             descriptor_catalog: None,
             catalog_path: None,
             bundles_dir: None,
+            bundle_signing: Default::default(),
         })),
         penny_shared_surface: None,
         penny_assembler: None,

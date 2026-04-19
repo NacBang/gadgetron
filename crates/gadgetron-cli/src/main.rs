@@ -1316,6 +1316,7 @@ fn build_workbench(
     pg_pool: Option<sqlx::PgPool>,
     catalog_path: Option<String>,
     bundles_dir: Option<String>,
+    bundle_signing: gadgetron_core::config::BundleSigningConfig,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
     use gadgetron_core::agent::tools::GadgetDispatcher;
     use gadgetron_core::audit::{ActionAuditSink, NoopActionAuditSink};
@@ -1394,6 +1395,7 @@ fn build_workbench(
         descriptor_catalog: Some(catalog),
         catalog_path,
         bundles_dir,
+        bundle_signing,
     }))
 }
 
@@ -1598,6 +1600,7 @@ async fn init_serve_runtime(
         pg_pool.clone(),
         config.web.catalog_path.clone(),
         config.web.bundles_dir.clone(),
+        config.web.bundle_signing.clone(),
     );
 
     let agent_config = Arc::new(config.agent.clone());
@@ -3665,6 +3668,7 @@ wiki_max_page_bytes = 1048576
             None,
             None,
             None,
+            Default::default(),
         );
         assert!(
             workbench.is_some(),
@@ -3763,9 +3767,9 @@ wiki_max_page_bytes = 1048576
             "knowledge_service must be None"
         );
 
-        // build_workbench(None, None, None, None, None, None) → Some (degraded-mode projection —
+        // build_workbench(None, None, None, None, None, None, Default::default()) → Some (degraded-mode projection —
         // always wired so the endpoint returns a degraded bootstrap rather than 404).
-        let workbench = build_workbench(None, None, None, None, None, None);
+        let workbench = build_workbench(None, None, None, None, None, None, Default::default());
         assert!(
             workbench.is_some(),
             "workbench is always Some (degraded mode) even without knowledge service"

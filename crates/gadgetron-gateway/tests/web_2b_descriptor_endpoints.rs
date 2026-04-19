@@ -120,6 +120,7 @@ fn make_state_with_coordinator(
             descriptor_catalog: Some(catalog),
             catalog_path: None,
             bundles_dir: None,
+            bundle_signing: Default::default(),
         })),
         penny_shared_surface: None,
         penny_assembler: None,
