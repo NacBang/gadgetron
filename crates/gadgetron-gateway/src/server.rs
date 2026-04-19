@@ -20,7 +20,9 @@ use serde_json::json;
 use tokio::sync::broadcast;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use crate::handlers::{chat_completions_handler, list_models_handler, list_tools_handler};
+use crate::handlers::{
+    chat_completions_handler, invoke_tool_handler, list_models_handler, list_tools_handler,
+};
 use crate::middleware::{
     auth::auth_middleware, metrics::metrics_middleware, request_id::request_id_middleware,
     scope::scope_guard_middleware, tenant_context::tenant_context_middleware,
@@ -157,6 +159,14 @@ pub struct AppState {
     /// shipped in ISSUE 7 so external MCP clients can enumerate
     /// available tools.
     pub tool_catalog: Option<Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>>,
+    /// Gadget dispatch seam — typically the same frozen `GadgetRegistry`
+    /// Penny uses, erased behind `GadgetDispatcher` to keep the gateway
+    /// independent of `gadgetron-penny`. Drives `POST /v1/tools/{name}/invoke`
+    /// (ISSUE 7 TASK 7.2) so external MCP clients can actually call the
+    /// tools they discover via `/v1/tools`. Present when `[knowledge]`
+    /// was configured and Penny was registered at startup; `None`
+    /// otherwise, in which case `/v1/tools/{name}/invoke` returns 503.
+    pub gadget_dispatcher: Option<Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -259,6 +269,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(list_models_handler))
         // ISSUE 7 TASK 7.1 — MCP-style tool discovery endpoint.
         .route("/v1/tools", get(list_tools_handler))
+        // ISSUE 7 TASK 7.2 — MCP tool invocation endpoint.
+        .route("/v1/tools/{name}/invoke", post(invoke_tool_handler))
         .nest("/api/v1/web/workbench", workbench_routes())
         .route("/api/v1/nodes", get(list_nodes_handler))
         .route("/api/v1/models/deploy", post(deploy_model_handler))
@@ -448,6 +460,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         }
     }
 
@@ -470,6 +483,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         }
     }
 
@@ -809,6 +823,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -888,6 +903,7 @@ mod tests {
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
+            gadget_dispatcher: None,
         };
 
         let app = build_router(state);

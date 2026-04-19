@@ -1501,7 +1501,10 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         candidate_coordinator,
         activity_bus,
         tool_catalog: penny_registry
+            .clone()
             .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>),
+        gadget_dispatcher: penny_registry
+            .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>),
     }
 }
 

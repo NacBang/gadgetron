@@ -1,12 +1,12 @@
 # Graph Report - /Users/junghopark/dev/gadgetron-plan  (2026-04-19)
 
 ## Corpus Check
-- 224 files · ~1,006,762 words
+- 224 files · ~1,010,026 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 3570 nodes · 8508 edges · 155 communities detected
-- Extraction: 68% EXTRACTED · 32% INFERRED · 0% AMBIGUOUS · INFERRED: 2745 edges (avg confidence: 0.8)
+- 3572 nodes · 8516 edges · 150 communities detected
+- Extraction: 68% EXTRACTED · 32% INFERRED · 0% AMBIGUOUS · INFERRED: 2750 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -160,11 +160,6 @@
 - [[_COMMUNITY_Community 147|Community 147]]
 - [[_COMMUNITY_Community 148|Community 148]]
 - [[_COMMUNITY_Community 149|Community 149]]
-- [[_COMMUNITY_Community 150|Community 150]]
-- [[_COMMUNITY_Community 151|Community 151]]
-- [[_COMMUNITY_Community 152|Community 152]]
-- [[_COMMUNITY_Community 153|Community 153]]
-- [[_COMMUNITY_Community 154|Community 154]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `is_empty()` - 79 edges
@@ -183,12 +178,12 @@
   /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/semantic.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/wiki/index.rs
 - `search_hit_payload()` --calls--> `is_empty()`  [INFERRED]
   /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/gadget.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/wiki/frontmatter.rs
-- `generate_api_key()` --calls--> `key_create()`  [INFERRED]
-  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/auth/key_gen.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-cli/src/main.rs
-- `generate_api_key()` --calls--> `key_create_no_db()`  [INFERRED]
-  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/auth/key_gen.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-cli/src/main.rs
 - `run_action_audit_writer()` --calls--> `build_workbench()`  [INFERRED]
   /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/action_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-cli/src/main.rs
+- `query_action_audit_events()` --calls--> `list_audit_events()`  [INFERRED]
+  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/action_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-gateway/src/web/workbench.rs
+- `query_tool_audit_events()` --calls--> `list_tool_audit_events()`  [INFERRED]
+  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/tool_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-gateway/src/web/workbench.rs
 
 ## Hyperedges (group relationships)
 - **Knowledge Plane Trait Triad (KnowledgeStore, KnowledgeIndex, KnowledgeRelationEngine)** — knowledge_plug_arch_knowledgestore, knowledge_plug_arch_knowledgeindex, knowledge_plug_arch_knowledgerelationengine, knowledge_plug_arch_knowledgeservice [EXTRACTED 1.00]
@@ -231,236 +226,236 @@
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.02
-Nodes (106): AnthropicProvider, from_anthropic_response(), message_content_to_anthropic(), to_anthropic_request(), snake_case_label(), citation_round_trip(), CitationRef, extract_citation_refs() (+98 more)
+Cohesion: 0.01
+Nodes (121): serve_stdio(), write_response(), FakeLlmProvider, FakeProjectionEmpty, generate_api_key(), generate_key_has_correct_prefix(), generate_key_hash_is_64_hex(), generate_key_suffix_is_32_hex() (+113 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.02
-Nodes (161): Chunk, chunk_h1_is_ignored_as_section_boundary(), chunk_index_is_zero_based_sequential(), chunk_multiple_h2_sections_splits_correctly(), chunk_no_headings_single_chunk(), chunk_oversize_section_splits_by_paragraph(), chunk_page(), chunk_preserves_section_metadata() (+153 more)
+Nodes (131): bundle_install_rejects_duplicate_id(), BundleRegistry, extract_panic_msg(), extractor_plug_registration_flows_through_install_all(), ExtractorBundle, fake(), FakeBehaviour, FakeBundle (+123 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.02
-Nodes (98): knowledge_config_extracts_embedding_and_reindex_sections(), FakePgKeyValidator, embedding_api_key_env_name(), serve_stdio(), write_response(), FakeLlmProvider, EnvGuard, FakeProjectionEmpty (+90 more)
+Cohesion: 0.03
+Nodes (139): to_anthropic_request(), dir_total_bytes(), web_dist_total_bytes_under_budget(), Chunk, chunk_h1_is_ignored_as_section_boundary(), chunk_index_is_zero_based_sequential(), chunk_multiple_h2_sections_splits_correctly(), chunk_no_headings_single_chunk() (+131 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.01
-Nodes (152): activity_kind_round_trips(), activity_origin_round_trips(), ActivityCaptureStore, ActivityKind, ActivityOrigin, candidate_decision_kind_round_trips_snake_case(), CandidateDecision, CandidateDecisionKind (+144 more)
+Cohesion: 0.02
+Nodes (126): activity_kind_round_trips(), activity_origin_round_trips(), ActivityCaptureStore, ActivityKind, ActivityOrigin, candidate_decision_kind_round_trips_snake_case(), CandidateDecision, CandidateDecisionKind (+118 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.03
 Nodes (105): BaseHTTPRequestHandler, SearchError, WikiError, accepts_explicit_md_suffix(), accepts_nested_name(), accepts_simple_name(), canonicalize_with_missing_tail(), percent_encoded_dotdot_is_not_decoded_by_fs_but_stays_inside_root() (+97 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.03
-Nodes (95): ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, new_arc_constructs_dyn_sink(), noop_sink_accepts_every_variant(), NoopActionAuditSink, ActivityBus, ActivityEvent (+87 more)
+Cohesion: 0.04
+Nodes (74): from_anthropic_response(), citation_round_trip(), CitationRef, extract_citation_refs(), extract_citation_refs_ignores_code_fences(), extract_citation_refs_named_labels(), extract_citation_refs_preserves_order(), extract_citation_refs_single_definition() (+66 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.03
-Nodes (84): AlwaysAcceptValidator, build_test_app(), chat_request_body(), FakeErrorProvider, inject_degrades_gracefully_when_assembler_errs(), inject_does_nothing_when_flag_disabled(), inject_does_nothing_when_service_none(), inject_inserts_new_system_when_first_message_is_parts_content() (+76 more)
+Cohesion: 0.02
+Nodes (97): ActionAuditEventWriter, ActionAuditQueryFilter, ActionAuditRow, drops_when_channel_full(), insert_event(), make_event(), outcome_variants_round_trip_through_channel(), query_action_audit_events() (+89 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.04
-Nodes (92): query_action_audit_events(), actor(), actor_scopes_default(), CapturingAuditSink, drained_events(), FakeDispatcher, InProcessWorkbenchActionService, invoke_additional_properties_rejected() (+84 more)
+Cohesion: 0.03
+Nodes (80): auth_middleware(), emit_auth_failure_audit(), token_from_query(), token_from_query_extracts_bare_token(), token_from_query_handles_multiple_params(), token_from_query_returns_none_when_missing(), token_from_query_url_decodes(), autodetect_git_author_or_fallback() (+72 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.03
-Nodes (78): auth_middleware(), emit_auth_failure_audit(), token_from_query(), token_from_query_extracts_bare_token(), token_from_query_handles_multiple_params(), token_from_query_returns_none_when_missing(), token_from_query_url_decodes(), autodetect_git_author_or_fallback() (+70 more)
+Nodes (80): ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, new_arc_constructs_dyn_sink(), noop_sink_accepts_every_variant(), NoopActionAuditSink, ApprovalError, ApprovalRequest (+72 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.04
-Nodes (71): dir_total_bytes(), web_dist_total_bytes_under_budget(), add_page_twice_same_name_does_not_duplicate(), deterministic_tie_break_on_name_asc(), empty_index_search_returns_empty(), empty_query_returns_empty(), InvertedIndex, korean_query_matches_korean_content() (+63 more)
+Cohesion: 0.03
+Nodes (76): deserialize_optional_datetime(), frontmatter_absent_returns_default(), frontmatter_confidence_unknown_value_warns_not_errors(), frontmatter_crlf_line_endings_supported(), frontmatter_missing_closing_fence_errors(), frontmatter_parses_full_fields(), frontmatter_source_unknown_value_warns_not_errors(), frontmatter_unknown_fields_preserved_in_extra() (+68 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.06
-Nodes (52): actor(), create_then_get_roundtrips(), cross_tenant_resolve_is_rejected(), duplicate_create_returns_backend_error(), fresh_request(), get_unknown_returns_not_found(), InMemoryApprovalStore, mark_approved_flips_state_and_records_approver() (+44 more)
+Cohesion: 0.03
+Nodes (28): NodeAgent, AnthropicProvider, message_content_to_anthropic(), E2EFixture, e2e_auth_missing_401(), e2e_body_too_large_413(), e2e_chat_completion_non_streaming(), e2e_chat_completion_streaming() (+20 more)
 
 ### Community 11 - "Community 11"
+Cohesion: 0.04
+Nodes (69): gemini_models_returns_configured(), gemini_name_is_gemini(), gemini_parse_response(), gemini_request_body_format(), GeminiCandidate, GeminiContent, GeminiPart, GeminiProvider (+61 more)
+
+### Community 12 - "Community 12"
+Cohesion: 0.06
+Nodes (48): bundles_home_no_home_when_all_tiers_empty(), bundles_home_public_entry_emits_info_and_succeeds(), bundles_home_resolver_fail_closed_on_root_home(), bundles_home_tier1_config_override_wins(), bundles_home_tier2_env_var_when_config_absent(), bundles_home_tier3_data_dir_fallback(), bundles_home_tier4_home_dir_fallback(), EnvGuard (+40 more)
+
+### Community 13 - "Community 13"
 Cohesion: 0.03
 Nodes (101): Development collaboration layer (distinct from product runtime Penny), Agents directory role index and usage conventions, gadgetron-cli crate (binary entrypoint, bootstrap), gadgetron-core crate (shared types, traits, errors, config), GadgetronError enum (single canonical error type), LlmProvider trait (core public trait), Rationale: gadgetron-core is leaf crate (no sqlx/axum/nvml deps) for clean boundaries, chief-architect agent role (+93 more)
 
-### Community 12 - "Community 12"
+### Community 14 - "Community 14"
 Cohesion: 0.02
 Nodes (100): BackendPlugin trait, Penny brain / ai-infra provider seam, Bundle Architecture (06 - backend plugin architecture), DisableBehavior (plugin lifecycle), EntityRef / EntityTree forest model, Knowledge vs Function separation principle, plugin-ai-infra (LLM inference + router + scheduler), PluginContext (+92 more)
 
-### Community 13 - "Community 13"
-Cohesion: 0.04
-Nodes (62): deserialize_optional_datetime(), frontmatter_absent_returns_default(), frontmatter_confidence_unknown_value_warns_not_errors(), frontmatter_crlf_line_endings_supported(), frontmatter_missing_closing_fence_errors(), frontmatter_parses_full_fields(), frontmatter_source_unknown_value_warns_not_errors(), frontmatter_unknown_fields_preserved_in_extra() (+54 more)
-
-### Community 14 - "Community 14"
-Cohesion: 0.05
-Nodes (66): agent_config_default_validates_ok(), AgentConfig, BrainConfig, BrainMode, BrainShimConfig, default_agent_binary(), default_approval_timeout_secs(), default_claude_code_min_version() (+58 more)
-
 ### Community 15 - "Community 15"
-Cohesion: 0.03
-Nodes (88): Bundle, Gadget, Gadgetron Platform, gadgetron-core crate, GadgetronError, gadgetron-gateway crate, gadgetron-knowledge crate, gadgetron-penny crate (+80 more)
+Cohesion: 0.05
+Nodes (56): make_state_with_tui(), metrics_middleware(), metrics_middleware_emits_request_log(), metrics_middleware_noop_when_tui_disabled(), metrics_middleware_records_error_status(), MockKeyValidator, AllowAllValidator, bench_middleware_chain() (+48 more)
 
 ### Community 16 - "Community 16"
 Cohesion: 0.05
-Nodes (50): bench_auth_cache_hit(), PreWarmedCacheValidator, actor(), kc1_fixture_diff_shared_context_reflects_decide_candidate(), make_event(), normalize(), toml_escape(), different_keys_do_not_collide() (+42 more)
+Nodes (61): add_page_twice_same_name_does_not_duplicate(), deterministic_tie_break_on_name_asc(), empty_index_search_returns_empty(), empty_query_returns_empty(), InvertedIndex, korean_query_matches_korean_content(), max_results_limits_output(), max_results_zero_returns_empty() (+53 more)
 
 ### Community 17 - "Community 17"
 Cohesion: 0.03
-Nodes (76): ADR-P2A-01, ADR-P2A-02, ADR-P2A-03, Chief Architect Agent, Codex Chief Advisor Agent, DevOps SRE Lead Agent, Agent Roster Document, DX Product Lead Agent (+68 more)
+Nodes (88): Bundle, Gadget, Gadgetron Platform, gadgetron-core crate, GadgetronError, gadgetron-gateway crate, gadgetron-knowledge crate, gadgetron-penny crate (+80 more)
 
 ### Community 18 - "Community 18"
 Cohesion: 0.05
-Nodes (43): ApprovalError, ApprovalRequest, ApprovalState, ApprovalStore, new_pending_populates_fields(), BlobError, BlobId, BlobMetadata (+35 more)
+Nodes (49): bench_auth_cache_hit(), PreWarmedCacheValidator, actor(), kc1_fixture_diff_shared_context_reflects_decide_candidate(), make_event(), normalize(), compose_frontmatter(), toml_escape() (+41 more)
 
 ### Community 19 - "Community 19"
-Cohesion: 0.05
-Nodes (32): MetricsStore, ResourceMonitor, failing_provider_health_returns_err(), failing_provider_immediate_fail(), failing_provider_immediate_fail_stream(), failing_provider_models_returns_list(), failing_provider_name_is_failing(), failing_provider_stream_interrupted() (+24 more)
+Cohesion: 0.06
+Nodes (54): capture_chat_completion(), capture_chat_completion_error(), error_class(), ApiError, ExhaustedQuotaEnforcer, AlwaysAcceptValidator, build_test_app(), chat_completions_handler() (+46 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.08
-Nodes (45): ask_mode_tools_are_excluded_from_allowed_list(), build_allowed_tools_output_is_deterministic(), build_allowed_tools_output_is_sorted_and_deduped(), build_allowed_tools_t1_always_present(), build_allowed_tools_t3_disabled_omits_all_destructive(), build_allowed_tools_t3_enabled_includes_destructive(), build_allowed_tools_wiki_write_auto_included(), build_allowed_tools_wiki_write_never_omitted() (+37 more)
+Cohesion: 0.06
+Nodes (45): apply_delete_removes_page_from_hits(), apply_rename_updates_hit_path(), apply_upsert_then_search_returns_hit(), delete_missing_page_translates_to_document_not_found(), doc(), empty_query_returns_no_hits(), extract_title(), fresh_store() (+37 more)
 
 ### Community 21 - "Community 21"
-Cohesion: 0.07
-Nodes (39): apply_delete_removes_page_from_hits(), apply_rename_updates_hit_path(), apply_upsert_then_search_returns_hit(), delete_missing_page_translates_to_document_not_found(), doc(), empty_query_returns_no_hits(), extract_title(), fresh_store() (+31 more)
+Cohesion: 0.03
+Nodes (76): ADR-P2A-01, ADR-P2A-02, ADR-P2A-03, Chief Architect Agent, Codex Chief Advisor Agent, DevOps SRE Lead Agent, Agent Roster Document, DX Product Lead Agent (+68 more)
 
 ### Community 22 - "Community 22"
 Cohesion: 0.08
-Nodes (44): audit_context_populated_for_native_session(), build_stdin_payload(), CaptureSink, ClaudeCodeSession, collect_stderr(), drive(), DriverContext, emit_tool_audit_falls_back_to_unknown_metadata_for_unregistered_tools() (+36 more)
+Nodes (45): ask_mode_tools_are_excluded_from_allowed_list(), build_allowed_tools_output_is_deterministic(), build_allowed_tools_output_is_sorted_and_deduped(), build_allowed_tools_t1_always_present(), build_allowed_tools_t3_disabled_omits_all_destructive(), build_allowed_tools_t3_enabled_includes_destructive(), build_allowed_tools_wiki_write_auto_included(), build_allowed_tools_wiki_write_never_omitted() (+37 more)
 
 ### Community 23 - "Community 23"
+Cohesion: 0.06
+Nodes (31): MetricsStore, failing_provider_health_returns_err(), failing_provider_immediate_fail(), failing_provider_immediate_fail_stream(), failing_provider_models_returns_list(), failing_provider_name_is_failing(), failing_provider_stream_interrupted(), FailingProvider (+23 more)
+
+### Community 24 - "Community 24"
+Cohesion: 0.1
+Nodes (28): snake_case_label(), actor(), kc1c_pg_store_append_candidate_unknown_event_errors(), kc1c_pg_store_audit_event_id_propagated(), kc1c_pg_store_round_trip_append_list_decide(), make_event(), pg_available(), actor() (+20 more)
+
+### Community 25 - "Community 25"
+Cohesion: 0.13
+Nodes (39): actor(), actor_scopes_default(), CapturingAuditSink, drained_events(), FakeDispatcher, InProcessWorkbenchActionService, invoke_additional_properties_rejected(), invoke_destructive_action_returns_pending_approval() (+31 more)
+
+### Community 26 - "Community 26"
 Cohesion: 0.04
 Nodes (16): all_12_variants_have_valid_status(), DatabaseErrorKind, error_body_never_leaks_internal(), error_message_is_human_readable_not_same_as_code(), from_gadget_rate_limited_includes_name_and_counts(), from_gadget_unknown_maps_to_tool_unknown_kind(), GadgetronError, KnowledgeErrorKind (+8 more)
 
-### Community 24 - "Community 24"
-Cohesion: 0.12
-Nodes (29): actor(), build_service(), build_wiki(), kc1b_capture_accept_materialize_then_wiki_search_finds_it(), should_skip(), actor(), kc1c_pg_store_append_candidate_unknown_event_errors(), kc1c_pg_store_audit_event_id_propagated() (+21 more)
-
-### Community 25 - "Community 25"
+### Community 27 - "Community 27"
 Cohesion: 0.05
 Nodes (48): SearXNG Opt-out via searxng_url unset, [P2C-SECURITY-REOPEN] Multi-user SearXNG data segregation, Pre-merge gate: penny.md must contain disclosure text, Rationale: GDPR requires user disclosure of query routing to 3rd-party engines, SearxngClient, ADR-P2A-03: SearXNG Query Privacy Disclosure, web_search MCP Tool, ADR-P2A-05: Agent-Centric Control Plane + MCP Tool Registry (+40 more)
 
-### Community 26 - "Community 26"
+### Community 28 - "Community 28"
 Cohesion: 0.05
 Nodes (46): API Error Codes (invalid_api_key, quota_exceeded, etc.), API Reference (OpenAI-compat endpoints), API Key Format (gad_live_/gad_test_), API Key Revocation (10-min cache TTL), Auth Middleware Stack (Tower layer 4), PgKeyValidator (moka cache + PostgreSQL lookup), Rationale: Store Only SHA-256 Hash of API Key, Scope System (OpenAiCompat, Management, XaasAdmin) (+38 more)
 
-### Community 27 - "Community 27"
-Cohesion: 0.09
-Nodes (32): App, app_new_has_demo_data(), drain_updates_closed_channel_stops_app(), drain_updates_empty_channel_is_noop(), drain_updates_health_update_replaces_health(), drain_updates_model_update_replaces_model_statuses(), drain_updates_node_update_replaces_gpu_metrics(), drain_updates_request_log_overflow_keeps_100() (+24 more)
-
-### Community 28 - "Community 28"
-Cohesion: 0.08
-Nodes (29): assistant_message_to_chunks(), AssistantMessage, build_chunk(), chunk_ids_are_unique(), ContentBlock, ContentBlockDeltaPayload, event_to_chat_chunks(), format_thinking_block() (+21 more)
-
 ### Community 29 - "Community 29"
-Cohesion: 0.09
-Nodes (19): bundle_install_rejects_duplicate_id(), BundleRegistry, extract_panic_msg(), extractor_plug_registration_flows_through_install_all(), ExtractorBundle, fake(), FakeBehaviour, FakeBundle (+11 more)
+Cohesion: 0.08
+Nodes (32): assistant_message_to_chunks(), AssistantMessage, build_chunk(), chunk_ids_are_unique(), ContentBlock, ContentBlockDeltaPayload, event_to_chat_chunks(), event_to_chat_chunks_ex() (+24 more)
 
 ### Community 30 - "Community 30"
 Cohesion: 0.08
-Nodes (28): Real-time Metrics (WebSocket backend), TUI 3-Column Layout (Nodes | Models | Requests), TUI Dashboard (Ratatui), Dashboard Web UI (React 19 + Recharts), Docker Compose (Gadgetron + Ollama + vLLM + SGLang), Docker Image (multi-stage, distroless), GitHub Actions CI Pipeline, Kubernetes Helm Chart (CRDs: GadgetronModel, GadgetronNode, GadgetronRouting) (+20 more)
+Nodes (25): emit_rerun_triggers(), BuildEnv, BuildOutcome, copy_dir_all(), ensure_fallback_dist(), run(), scrubbed_npm(), which_npm() (+17 more)
 
 ### Community 31 - "Community 31"
+Cohesion: 0.08
+Nodes (28): Real-time Metrics (WebSocket backend), TUI 3-Column Layout (Nodes | Models | Requests), TUI Dashboard (Ratatui), Dashboard Web UI (React 19 + Recharts), Docker Compose (Gadgetron + Ollama + vLLM + SGLang), Docker Image (multi-stage, distroless), GitHub Actions CI Pipeline, Kubernetes Helm Chart (CRDs: GadgetronModel, GadgetronNode, GadgetronRouting) (+20 more)
+
+### Community 32 - "Community 32"
 Cohesion: 0.12
 Nodes (15): gadget_name_and_plug_id_are_distinct_types(), GadgetName, plug_id_accepts_valid_kebab(), plug_id_clone_is_cheap(), plug_id_rejects_double_hyphen(), plug_id_rejects_leading_hyphen(), plug_id_rejects_over_128_chars(), plug_id_rejects_trailing_hyphen() (+7 more)
 
-### Community 32 - "Community 32"
-Cohesion: 0.16
-Nodes (16): captured_actor(), CapturingCoordinator, coordinator_fan_out_captures_penny_origin_event(), drops_when_channel_full(), event_with_owner_tenant(), gadget_audit_to_activity(), gadget_audit_to_captured(), GadgetAuditEventWriter (+8 more)
-
 ### Community 33 - "Community 33"
+Cohesion: 0.17
+Nodes (16): App, app_new_has_demo_data(), drain_updates_closed_channel_stops_app(), drain_updates_empty_channel_is_noop(), drain_updates_health_update_replaces_health(), drain_updates_model_update_replaces_model_statuses(), drain_updates_node_update_replaces_gpu_metrics(), drain_updates_request_log_overflow_keeps_100() (+8 more)
+
+### Community 34 - "Community 34"
 Cohesion: 0.08
 Nodes (23): CitationSummary, InvokeWorkbenchActionRequest, InvokeWorkbenchActionResponse, PlugHealth, ToolTraceSummary, WorkbenchActionDescriptor, WorkbenchActionKind, WorkbenchActionPlacement (+15 more)
 
-### Community 34 - "Community 34"
-Cohesion: 0.13
-Nodes (12): gemini_models_returns_configured(), gemini_name_is_gemini(), gemini_parse_response(), gemini_request_body_format(), GeminiCandidate, GeminiContent, GeminiPart, GeminiProvider (+4 more)
-
 ### Community 35 - "Community 35"
-Cohesion: 0.19
-Nodes (5): NodeAgent, port_pool_allocate_returns_port(), port_pool_exhaustion_returns_none(), port_pool_release_makes_port_available(), PortPool
-
-### Community 36 - "Community 36"
-Cohesion: 0.19
-Nodes (11): adversarial_long_input_completes_quickly(), is_idempotent(), redact_stderr(), redacts_anthropic_key(), redacts_aws_access_key(), redacts_bearer_token_case_insensitive(), redacts_gadgetron_live_key(), redacts_gadgetron_test_key() (+3 more)
-
-### Community 37 - "Community 37"
-Cohesion: 0.19
-Nodes (12): client_constructs_from_valid_config(), good_config(), parse_error_text_does_not_include_response_body(), parse_error_text_is_stable_across_inputs(), parse_searxng_response(), parse_searxng_response_empty_results(), parse_searxng_response_happy_path(), parse_searxng_response_missing_fields_uses_defaults() (+4 more)
-
-### Community 38 - "Community 38"
 Cohesion: 0.13
 Nodes (15): Cross-Review Rounds (R1, R1.5, R2, R3), Development Process (9-step sprint cycle), Design Document Template (5 required sections), 5 Required Document Sections (Philosophy/Implementation/Connections/UnitTest/IntegrationTest), Hotfix Exception (Round 1 only, post-doc required), Rule: No Implementation Without Approved Design Doc, Cross-Review Rubric (Round 1/1.5/2/3 checklists), Round 1.5 Security Review Checklist (STRIDE) (+7 more)
 
-### Community 39 - "Community 39"
+### Community 36 - "Community 36"
 Cohesion: 0.16
 Nodes (11): fixed_time(), fixed_uuid(), penny_turn_bootstrap_serializes_with_expected_field_names(), PennyActivityDigest, PennyApprovalDigest, PennyCandidateDecisionReceipt, PennyCandidateDecisionRequest, PennyCandidateDigest (+3 more)
 
-### Community 40 - "Community 40"
-Cohesion: 0.28
-Nodes (9): ActionAuditEventWriter, ActionAuditQueryFilter, ActionAuditRow, drops_when_channel_full(), insert_event(), make_event(), outcome_variants_round_trip_through_channel(), run_action_audit_writer() (+1 more)
-
-### Community 41 - "Community 41"
+### Community 37 - "Community 37"
 Cohesion: 0.17
 Nodes (12): ADR-P2A-10: Bundle/Plug/Gadget Terminology, Bundle/Plug/Gadget Canonical Vocabulary, D-20260418-02: Terminology bundle.enable, C-1: plugin vs Bundle/Plug/Gadget Terminology Conflict, C-2: Router Ownership Ambiguity, C-3: Execution Path Inconsistency, C-4: Legacy Design Docs Not Labeled, C-5: Seed/Frontmatter Field Migration Gap (+4 more)
 
-### Community 42 - "Community 42"
-Cohesion: 0.22
-Nodes (4): getApiBase(), invokeAction(), useApiKey(), wsUrlFromHttp()
-
-### Community 43 - "Community 43"
+### Community 38 - "Community 38"
 Cohesion: 0.2
 Nodes (11): require_tty_for_tui() pure-function TTY check, Hotfix: --tui TTY pre-check and fail-fast, Sprint 5: E2E, Criterion Benchmarks, TUI Wiring, FakeLlmProvider + FailingProvider test doubles, GatewayHarness + PgHarness test infrastructure, AppState extension: pg_pool + tui_tx fields, Graceful shutdown audit drain (5s timeout), Criterion benchmarks: middleware_chain / auth_cache / router (+3 more)
 
-### Community 44 - "Community 44"
+### Community 39 - "Community 39"
 Cohesion: 0.18
 Nodes (11): D-20260411-08: StreamInterrupted Variant, D-20260411-09: Audit Drop Policy, D-20260411-10: Scope Enum, Review Verdict: CONDITIONAL PASS, Round 1 Week 1 Cross-Review Results, Track 1: Core Types Consolidation, Track 2: Testing Harness, Track 3: XaaS Phase 1 (+3 more)
 
-### Community 45 - "Community 45"
+### Community 40 - "Community 40"
 Cohesion: 0.33
 Nodes (0): 
 
-### Community 46 - "Community 46"
+### Community 41 - "Community 41"
 Cohesion: 0.33
 Nodes (0): 
 
-### Community 47 - "Community 47"
+### Community 42 - "Community 42"
 Cohesion: 0.33
 Nodes (6): Sprint 4: vLLM + SGLang Provider Activation, SGLang reasoning_content field (ChunkDelta optional field), Sprint 8: CLI Completion, Benchmarks, TUI Scroll, Gemini Adapter, CLI: tenant list / key list / key revoke commands, Gemini provider adapter (query param auth, SSE ?alt=sse), TUI scroll + Tab focus (ListState, StatefulWidget)
 
-### Community 48 - "Community 48"
+### Community 43 - "Community 43"
 Cohesion: 0.33
 Nodes (6): ADR-P2A-04 (Chat UI Selection: assistant-ui over OpenWebUI), Web UI Stack (assistant-ui + Next.js 14 + Tailwind), Content Security Policy Headers (DOMPurify, trusted-types), Gadgetron Web UI (gadgetron-web), Origin Isolation Requirement (localStorage security), Rationale: Origin Isolation for API Key Security
 
-### Community 49 - "Community 49"
+### Community 44 - "Community 44"
 Cohesion: 0.4
 Nodes (0): 
 
-### Community 50 - "Community 50"
+### Community 45 - "Community 45"
 Cohesion: 0.4
 Nodes (0): 
 
-### Community 51 - "Community 51"
+### Community 46 - "Community 46"
 Cohesion: 0.67
 Nodes (2): MarkdownText(), useTypewriterText()
 
-### Community 52 - "Community 52"
+### Community 47 - "Community 47"
 Cohesion: 0.5
 Nodes (2): Badge(), cn()
 
-### Community 53 - "Community 53"
+### Community 48 - "Community 48"
 Cohesion: 0.5
 Nodes (0): 
 
-### Community 54 - "Community 54"
+### Community 49 - "Community 49"
 Cohesion: 0.5
 Nodes (0): 
 
-### Community 55 - "Community 55"
+### Community 50 - "Community 50"
 Cohesion: 0.5
 Nodes (4): ADR-P2A-01: --allowed-tools Enforcement Verification, Claude Code -p stdin contract (JSON messages vs raw text), ADR-P2A-02: --dangerously-skip-permissions Risk Acceptance, Prompt injection risks (R1-R4 via wiki / SearXNG)
 
-### Community 56 - "Community 56"
+### Community 51 - "Community 51"
 Cohesion: 0.5
 Nodes (4): assistant-ui (MIT React component library), ADR-P2A-04: assistant-ui replaces OpenWebUI, gadgetron-web crate (embedded static assets), OpenWebUI rejection (branding clause + architectural friction)
 
-### Community 57 - "Community 57"
+### Community 52 - "Community 52"
 Cohesion: 0.5
 Nodes (4): ManagedProcess struct (pid, port, model_id, child handle), PortPool: deterministic port allocation for inference engines, Sprint 9: NodeAgent Process Lifecycle + Scheduler-Node Connection, VRAM eviction loop execution (find_eviction_candidate → deploy)
+
+### Community 53 - "Community 53"
+Cohesion: 0.67
+Nodes (0): 
+
+### Community 54 - "Community 54"
+Cohesion: 0.67
+Nodes (0): 
+
+### Community 55 - "Community 55"
+Cohesion: 0.67
+Nodes (0): 
+
+### Community 56 - "Community 56"
+Cohesion: 0.67
+Nodes (0): 
+
+### Community 57 - "Community 57"
+Cohesion: 0.67
+Nodes (0): 
 
 ### Community 58 - "Community 58"
 Cohesion: 0.67
@@ -468,67 +463,67 @@ Nodes (0):
 
 ### Community 59 - "Community 59"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (2): EmbeddingError, EmbeddingProvider
 
 ### Community 60 - "Community 60"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (2): SearchResult, WebSearch
 
 ### Community 61 - "Community 61"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (2): EnrichOpts, ImportOpts
 
 ### Community 62 - "Community 62"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (2): BundleError, HomeError
 
 ### Community 63 - "Community 63"
 Cohesion: 0.67
-Nodes (0): 
+Nodes (3): Fix: 413 body plain text → OpenAI-shaped JSON, Hotfix: Error Shape Findings (tenant_not_found / 413 JSON), Fix: error_code tenant_not_found → invalid_api_key
 
 ### Community 64 - "Community 64"
 Cohesion: 0.67
-Nodes (2): EmbeddingError, EmbeddingProvider
+Nodes (3): Fix: doctor provider check shows 'reachable' not HTTP status code, Fix: no-db WARNING prefix deduplication, Hotfix: UX Issues (doctor output / no-db warning duplicate)
 
 ### Community 65 - "Community 65"
 Cohesion: 0.67
-Nodes (2): SearchResult, WebSearch
+Nodes (3): demo.sh Operator Loop (build|start|status|logs|stop), macOS Installation Guide, Ubuntu 22.04 Installation Guide
 
 ### Community 66 - "Community 66"
 Cohesion: 0.67
-Nodes (2): EnrichOpts, ImportOpts
+Nodes (3): POST /v1/chat/completions, reasoning_content Field (SGLang GLM reasoning models), SSE Streaming Response Format
 
 ### Community 67 - "Community 67"
 Cohesion: 0.67
-Nodes (2): BundleError, HomeError
+Nodes (3): XaaS AgentaaS [P2] (lifecycle FSM + memory + tools), XaaS Billing Engine [P2] (i64 cents LedgerEntry), Rationale: i64 cents for billing (D-8, no float)
 
 ### Community 68 - "Community 68"
 Cohesion: 0.67
-Nodes (3): Fix: 413 body plain text → OpenAI-shaped JSON, Hotfix: Error Shape Findings (tenant_not_found / 413 JSON), Fix: error_code tenant_not_found → invalid_api_key
+Nodes (3): Lockstep Versioning (all workspace crates share version), Rationale: Lockstep Versioning (crate boundaries tightly coupled), Versioning Policy (0.N.X lockstep, no SemVer pre-1.0)
 
 ### Community 69 - "Community 69"
 Cohesion: 0.67
-Nodes (3): Fix: doctor provider check shows 'reachable' not HTTP status code, Fix: no-db WARNING prefix deduplication, Hotfix: UX Issues (doctor output / no-db warning duplicate)
+Nodes (3): D-20260411-01: Phase 1 MVP Scope, D-20260411-05: gadgetron-testing Crate, Round 2 Platform Review 2026-04-11
 
 ### Community 70 - "Community 70"
-Cohesion: 0.67
-Nodes (3): demo.sh Operator Loop (build|start|status|logs|stop), macOS Installation Guide, Ubuntu 22.04 Installation Guide
+Cohesion: 1.0
+Nodes (0): 
 
 ### Community 71 - "Community 71"
-Cohesion: 0.67
-Nodes (3): POST /v1/chat/completions, reasoning_content Field (SGLang GLM reasoning models), SSE Streaming Response Format
+Cohesion: 1.0
+Nodes (0): 
 
 ### Community 72 - "Community 72"
-Cohesion: 0.67
-Nodes (3): XaaS AgentaaS [P2] (lifecycle FSM + memory + tools), XaaS Billing Engine [P2] (i64 cents LedgerEntry), Rationale: i64 cents for billing (D-8, no float)
+Cohesion: 1.0
+Nodes (0): 
 
 ### Community 73 - "Community 73"
-Cohesion: 0.67
-Nodes (3): Lockstep Versioning (all workspace crates share version), Rationale: Lockstep Versioning (crate boundaries tightly coupled), Versioning Policy (0.N.X lockstep, no SemVer pre-1.0)
+Cohesion: 1.0
+Nodes (0): 
 
 ### Community 74 - "Community 74"
-Cohesion: 0.67
-Nodes (3): D-20260411-01: Phase 1 MVP Scope, D-20260411-05: gadgetron-testing Crate, Round 2 Platform Review 2026-04-11
+Cohesion: 1.0
+Nodes (0): 
 
 ### Community 75 - "Community 75"
 Cohesion: 1.0
@@ -568,19 +563,19 @@ Nodes (0):
 
 ### Community 84 - "Community 84"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (2): Headless Build (no Web UI, cargo headless feature), Headless Build (no Web UI, --features headless)
 
 ### Community 85 - "Community 85"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (2): pgvector Docker Setup (pgvector/pgvector:pg16), Installation Requirements (Rust 1.80+, PostgreSQL 16, pgvector)
 
 ### Community 86 - "Community 86"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (2): D-12: Crate Boundary Table, PM Decisions Document (Legacy D-1 to D-13)
 
 ### Community 87 - "Community 87"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (2): C-1 Critical: EvictionPolicy, Round 1 PM Review
 
 ### Community 88 - "Community 88"
 Cohesion: 1.0
@@ -588,19 +583,19 @@ Nodes (0):
 
 ### Community 89 - "Community 89"
 Cohesion: 1.0
-Nodes (2): Headless Build (no Web UI, cargo headless feature), Headless Build (no Web UI, --features headless)
+Nodes (0): 
 
 ### Community 90 - "Community 90"
 Cohesion: 1.0
-Nodes (2): pgvector Docker Setup (pgvector/pgvector:pg16), Installation Requirements (Rust 1.80+, PostgreSQL 16, pgvector)
+Nodes (0): 
 
 ### Community 91 - "Community 91"
 Cohesion: 1.0
-Nodes (2): D-12: Crate Boundary Table, PM Decisions Document (Legacy D-1 to D-13)
+Nodes (0): 
 
 ### Community 92 - "Community 92"
 Cohesion: 1.0
-Nodes (2): C-1 Critical: EvictionPolicy, Round 1 PM Review
+Nodes (0): 
 
 ### Community 93 - "Community 93"
 Cohesion: 1.0
@@ -760,190 +755,180 @@ Nodes (0):
 
 ### Community 132 - "Community 132"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): pass / fail / unexpected_pass / expected_fail.
 
 ### Community 133 - "Community 133"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): gadgetron-router crate
 
 ### Community 134 - "Community 134"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): KnowledgeChangeEvent
 
 ### Community 135 - "Community 135"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): ADR-P2A-01: --allowed-tools enforcement verification
 
 ### Community 136 - "Community 136"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): ADR-P2A-02: --dangerously-skip-permissions risk acceptance
 
 ### Community 137 - "Community 137"
 Cohesion: 1.0
-Nodes (1): pass / fail / unexpected_pass / expected_fail.
+Nodes (1): ADR-P2A-04: Web Chat UI assistant-ui selection
 
 ### Community 138 - "Community 138"
 Cohesion: 1.0
-Nodes (1): gadgetron-router crate
+Nodes (1): ADR-P2A-08: Multi-user + Knowledge ACL Foundation
 
 ### Community 139 - "Community 139"
 Cohesion: 1.0
-Nodes (1): KnowledgeChangeEvent
+Nodes (1): ADR-P2A-09: RAW Ingestion Pipeline + RAG Foundation
 
 ### Community 140 - "Community 140"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-01: --allowed-tools enforcement verification
+Nodes (1): ADR-P2A-10: Bundle/Plug/Gadget terminology
 
 ### Community 141 - "Community 141"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-02: --dangerously-skip-permissions risk acceptance
+Nodes (1): ADR-P2A-10-ADDENDUM-01: Bundle/Plug/Gadget RBAC
 
 ### Community 142 - "Community 142"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-04: Web Chat UI assistant-ui selection
+Nodes (1): Sprint 7: CLI Init No-DB Mode
 
 ### Community 143 - "Community 143"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-08: Multi-user + Knowledge ACL Foundation
+Nodes (1): Core — always-present product substrate (gadgetron-core through gadgetron-tui)
 
 ### Community 144 - "Community 144"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-09: RAW Ingestion Pipeline + RAG Foundation
+Nodes (1): Provider Types (openai, anthropic, ollama, vllm, sglang)
 
 ### Community 145 - "Community 145"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-10: Bundle/Plug/Gadget terminology
+Nodes (1): GET /v1/models
 
 ### Community 146 - "Community 146"
 Cohesion: 1.0
-Nodes (1): ADR-P2A-10-ADDENDUM-01: Bundle/Plug/Gadget RBAC
+Nodes (1): Health Endpoints (/health, /ready)
 
 ### Community 147 - "Community 147"
 Cohesion: 1.0
-Nodes (1): Sprint 7: CLI Init No-DB Mode
+Nodes (1): Admin Endpoints (/api/v1/) - HTTP 501 Not Implemented
 
 ### Community 148 - "Community 148"
 Cohesion: 1.0
-Nodes (1): Core — always-present product substrate (gadgetron-core through gadgetron-tui)
-
-### Community 149 - "Community 149"
-Cohesion: 1.0
-Nodes (1): Provider Types (openai, anthropic, ollama, vllm, sglang)
-
-### Community 150 - "Community 150"
-Cohesion: 1.0
-Nodes (1): GET /v1/models
-
-### Community 151 - "Community 151"
-Cohesion: 1.0
-Nodes (1): Health Endpoints (/health, /ready)
-
-### Community 152 - "Community 152"
-Cohesion: 1.0
-Nodes (1): Admin Endpoints (/api/v1/) - HTTP 501 Not Implemented
-
-### Community 153 - "Community 153"
-Cohesion: 1.0
 Nodes (1): Hot Reload Config (diff-based, no restart for providers/routing)
 
-### Community 154 - "Community 154"
+### Community 149 - "Community 149"
 Cohesion: 1.0
 Nodes (1): Phase2 Overview Design Doc
 
 ## Knowledge Gaps
-- **640 isolated node(s):** `ValidatedKey`, `KeyValidator`, `KeyRow`, `ActionAuditRow`, `ActionAuditQueryFilter` (+635 more)
+- **641 isolated node(s):** `ValidatedKey`, `KeyValidator`, `KeyRow`, `ActionAuditRow`, `ActionAuditQueryFilter` (+636 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 75`** (2 nodes): `sqlx_to_gadgetron()`, `error.rs`
+- **Thin community `Community 70`** (2 nodes): `sqlx_to_gadgetron()`, `error.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 76`** (2 nodes): `RootLayout()`, `layout.tsx`
+- **Thin community `Community 71`** (2 nodes): `RootLayout()`, `layout.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 77`** (2 nodes): `SlashAutocomplete()`, `slash-autocomplete.tsx`
+- **Thin community `Community 72`** (2 nodes): `SlashAutocomplete()`, `slash-autocomplete.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 78`** (2 nodes): `handleChange()`, `reasoning-part.tsx`
+- **Thin community `Community 73`** (2 nodes): `handleChange()`, `reasoning-part.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 79`** (2 nodes): `TooltipContent()`, `tooltip.tsx`
+- **Thin community `Community 74`** (2 nodes): `TooltipContent()`, `tooltip.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 80`** (2 nodes): `cn()`, `separator.tsx`
+- **Thin community `Community 75`** (2 nodes): `cn()`, `separator.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 81`** (2 nodes): `cn()`, `button.tsx`
+- **Thin community `Community 76`** (2 nodes): `cn()`, `button.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 82`** (2 nodes): `Collapsible()`, `collapsible.tsx`
+- **Thin community `Community 77`** (2 nodes): `Collapsible()`, `collapsible.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 83`** (2 nodes): `cn()`, `textarea.tsx`
+- **Thin community `Community 78`** (2 nodes): `cn()`, `textarea.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 84`** (2 nodes): `Input()`, `input.tsx`
+- **Thin community `Community 79`** (2 nodes): `Input()`, `input.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 85`** (2 nodes): `cn()`, `left-rail.tsx`
+- **Thin community `Community 80`** (2 nodes): `cn()`, `left-rail.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 86`** (2 nodes): `WorkbenchShell.test.tsx`, `mockFetch()`
+- **Thin community `Community 81`** (2 nodes): `WorkbenchShell.test.tsx`, `mockFetch()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 87`** (2 nodes): `mockFetch()`, `StatusStrip.test.tsx`
+- **Thin community `Community 82`** (2 nodes): `mockFetch()`, `StatusStrip.test.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 88`** (2 nodes): `web_headless.rs`, `headless_build_compiles_without_gadgetron_web()`
+- **Thin community `Community 83`** (2 nodes): `web_headless.rs`, `headless_build_compiles_without_gadgetron_web()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 89`** (2 nodes): `Headless Build (no Web UI, cargo headless feature)`, `Headless Build (no Web UI, --features headless)`
+- **Thin community `Community 84`** (2 nodes): `Headless Build (no Web UI, cargo headless feature)`, `Headless Build (no Web UI, --features headless)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 90`** (2 nodes): `pgvector Docker Setup (pgvector/pgvector:pg16)`, `Installation Requirements (Rust 1.80+, PostgreSQL 16, pgvector)`
+- **Thin community `Community 85`** (2 nodes): `pgvector Docker Setup (pgvector/pgvector:pg16)`, `Installation Requirements (Rust 1.80+, PostgreSQL 16, pgvector)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 91`** (2 nodes): `D-12: Crate Boundary Table`, `PM Decisions Document (Legacy D-1 to D-13)`
+- **Thin community `Community 86`** (2 nodes): `D-12: Crate Boundary Table`, `PM Decisions Document (Legacy D-1 to D-13)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 92`** (2 nodes): `C-1 Critical: EvictionPolicy`, `Round 1 PM Review`
+- **Thin community `Community 87`** (2 nodes): `C-1 Critical: EvictionPolicy`, `Round 1 PM Review`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 88`** (1 nodes): `lib.rs`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 89`** (1 nodes): `auth.rs`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 90`** (1 nodes): `mod.rs`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 91`** (1 nodes): `mod.rs`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 92`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 93`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 94`** (1 nodes): `auth.rs`
+- **Thin community `Community 94`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 95`** (1 nodes): `mod.rs`
+- **Thin community `Community 95`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 96`** (1 nodes): `mod.rs`
+- **Thin community `Community 96`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 97`** (1 nodes): `lib.rs`
+- **Thin community `Community 97`** (1 nodes): `postcss.config.mjs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 98`** (1 nodes): `lib.rs`
+- **Thin community `Community 98`** (1 nodes): `next-env.d.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 99`** (1 nodes): `lib.rs`
+- **Thin community `Community 99`** (1 nodes): `playwright.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 100`** (1 nodes): `lib.rs`
+- **Thin community `Community 100`** (1 nodes): `vitest.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 101`** (1 nodes): `lib.rs`
+- **Thin community `Community 101`** (1 nodes): `vitest.setup.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 102`** (1 nodes): `postcss.config.mjs`
+- **Thin community `Community 102`** (1 nodes): `next.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 103`** (1 nodes): `next-env.d.ts`
+- **Thin community `Community 103`** (1 nodes): `slash-help-dialog.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 104`** (1 nodes): `playwright.config.ts`
+- **Thin community `Community 104`** (1 nodes): `index.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 105`** (1 nodes): `vitest.config.ts`
+- **Thin community `Community 105`** (1 nodes): `evidence-pane.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 106`** (1 nodes): `vitest.setup.ts`
+- **Thin community `Community 106`** (1 nodes): `FailurePanel.test.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 107`** (1 nodes): `next.config.ts`
+- **Thin community `Community 107`** (1 nodes): `EvidencePane.test.tsx`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 108`** (1 nodes): `slash-help-dialog.tsx`
+- **Thin community `Community 108`** (1 nodes): `use-workbench-prefs.test.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 109`** (1 nodes): `index.ts`
+- **Thin community `Community 109`** (1 nodes): `workbench.spec.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 110`** (1 nodes): `evidence-pane.tsx`
+- **Thin community `Community 110`** (1 nodes): `failure.spec.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 111`** (1 nodes): `FailurePanel.test.tsx`
+- **Thin community `Community 111`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 112`** (1 nodes): `EvidencePane.test.tsx`
+- **Thin community `Community 112`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 113`** (1 nodes): `use-workbench-prefs.test.ts`
+- **Thin community `Community 113`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 114`** (1 nodes): `workbench.spec.ts`
+- **Thin community `Community 114`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 115`** (1 nodes): `failure.spec.ts`
+- **Thin community `Community 115`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 116`** (1 nodes): `lib.rs`
+- **Thin community `Community 116`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 117`** (1 nodes): `lib.rs`
+- **Thin community `Community 117`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 118`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 119`** (1 nodes): `mod.rs`
+- **Thin community `Community 119`** (1 nodes): `lib.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 120`** (1 nodes): `lib.rs`
+- **Thin community `Community 120`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 121`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -961,68 +946,58 @@ Nodes (1): Phase2 Overview Design Doc
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 128`** (1 nodes): `mod.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 129`** (1 nodes): `lib.rs`
+- **Thin community `Community 129`** (1 nodes): `wiki-e2e.mjs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 130`** (1 nodes): `mod.rs`
+- **Thin community `Community 130`** (1 nodes): `sdk-client.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 131`** (1 nodes): `mod.rs`
+- **Thin community `Community 131`** (1 nodes): `screenshot.mjs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 132`** (1 nodes): `mod.rs`
+- **Thin community `Community 132`** (1 nodes): `pass / fail / unexpected_pass / expected_fail.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 133`** (1 nodes): `mod.rs`
+- **Thin community `Community 133`** (1 nodes): `gadgetron-router crate`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 134`** (1 nodes): `wiki-e2e.mjs`
+- **Thin community `Community 134`** (1 nodes): `KnowledgeChangeEvent`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 135`** (1 nodes): `sdk-client.py`
+- **Thin community `Community 135`** (1 nodes): `ADR-P2A-01: --allowed-tools enforcement verification`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 136`** (1 nodes): `screenshot.mjs`
+- **Thin community `Community 136`** (1 nodes): `ADR-P2A-02: --dangerously-skip-permissions risk acceptance`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 137`** (1 nodes): `pass / fail / unexpected_pass / expected_fail.`
+- **Thin community `Community 137`** (1 nodes): `ADR-P2A-04: Web Chat UI assistant-ui selection`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 138`** (1 nodes): `gadgetron-router crate`
+- **Thin community `Community 138`** (1 nodes): `ADR-P2A-08: Multi-user + Knowledge ACL Foundation`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 139`** (1 nodes): `KnowledgeChangeEvent`
+- **Thin community `Community 139`** (1 nodes): `ADR-P2A-09: RAW Ingestion Pipeline + RAG Foundation`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 140`** (1 nodes): `ADR-P2A-01: --allowed-tools enforcement verification`
+- **Thin community `Community 140`** (1 nodes): `ADR-P2A-10: Bundle/Plug/Gadget terminology`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 141`** (1 nodes): `ADR-P2A-02: --dangerously-skip-permissions risk acceptance`
+- **Thin community `Community 141`** (1 nodes): `ADR-P2A-10-ADDENDUM-01: Bundle/Plug/Gadget RBAC`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 142`** (1 nodes): `ADR-P2A-04: Web Chat UI assistant-ui selection`
+- **Thin community `Community 142`** (1 nodes): `Sprint 7: CLI Init No-DB Mode`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 143`** (1 nodes): `ADR-P2A-08: Multi-user + Knowledge ACL Foundation`
+- **Thin community `Community 143`** (1 nodes): `Core — always-present product substrate (gadgetron-core through gadgetron-tui)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 144`** (1 nodes): `ADR-P2A-09: RAW Ingestion Pipeline + RAG Foundation`
+- **Thin community `Community 144`** (1 nodes): `Provider Types (openai, anthropic, ollama, vllm, sglang)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 145`** (1 nodes): `ADR-P2A-10: Bundle/Plug/Gadget terminology`
+- **Thin community `Community 145`** (1 nodes): `GET /v1/models`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 146`** (1 nodes): `ADR-P2A-10-ADDENDUM-01: Bundle/Plug/Gadget RBAC`
+- **Thin community `Community 146`** (1 nodes): `Health Endpoints (/health, /ready)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 147`** (1 nodes): `Sprint 7: CLI Init No-DB Mode`
+- **Thin community `Community 147`** (1 nodes): `Admin Endpoints (/api/v1/) - HTTP 501 Not Implemented`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 148`** (1 nodes): `Core — always-present product substrate (gadgetron-core through gadgetron-tui)`
+- **Thin community `Community 148`** (1 nodes): `Hot Reload Config (diff-based, no restart for providers/routing)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 149`** (1 nodes): `Provider Types (openai, anthropic, ollama, vllm, sglang)`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 150`** (1 nodes): `GET /v1/models`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 151`** (1 nodes): `Health Endpoints (/health, /ready)`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 152`** (1 nodes): `Admin Endpoints (/api/v1/) - HTTP 501 Not Implemented`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 153`** (1 nodes): `Hot Reload Config (diff-based, no restart for providers/routing)`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 154`** (1 nodes): `Phase2 Overview Design Doc`
+- **Thin community `Community 149`** (1 nodes): `Phase2 Overview Design Doc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `is_empty()` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 8`, `Community 9`, `Community 10`, `Community 13`, `Community 14`, `Community 16`, `Community 19`, `Community 20`, `Community 21`, `Community 24`, `Community 28`, `Community 31`?**
-  _High betweenness centrality (0.023) - this node is a cross-community bridge._
-- **Why does `GadgetronError` connect `Community 23` to `Community 1`?**
-  _High betweenness centrality (0.015) - this node is a cross-community bridge._
-- **Why does `migrate_legacy_penny()` connect `Community 3` to `Community 0`, `Community 1`, `Community 2`, `Community 7`, `Community 8`?**
-  _High betweenness centrality (0.014) - this node is a cross-community bridge._
+- **Why does `is_empty()` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 12`, `Community 16`, `Community 18`, `Community 19`, `Community 20`, `Community 22`, `Community 23`, `Community 24`, `Community 29`, `Community 32`?**
+  _High betweenness centrality (0.022) - this node is a cross-community bridge._
+- **Why does `migrate_legacy_penny()` connect `Community 6` to `Community 0`, `Community 1`, `Community 2`, `Community 5`, `Community 7`?**
+  _High betweenness centrality (0.016) - this node is a cross-community bridge._
+- **Why does `GadgetronError` connect `Community 26` to `Community 2`?**
+  _High betweenness centrality (0.013) - this node is a cross-community bridge._
 - **Are the 77 inferred relationships involving `is_empty()` (e.g. with `to_anthropic_request()` and `from_anthropic_response()`) actually correct?**
   _`is_empty()` has 77 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 19 inferred relationships involving `build_router()` (e.g. with `build_http_app()` and `psl_1d_successful_non_streaming_chat_completions_captures_one_event()`) actually correct?**
