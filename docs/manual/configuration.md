@@ -549,6 +549,22 @@ knowledge_writeback = "ops/knowledge/{date}/{topic}"
 
 ---
 
+### `[features]`
+
+Opt-in feature toggles. Currently one field, all P2B-alpha reserved surface.
+
+```toml
+[features]
+tenant_plug_overrides_accepted_as_reserved = false   # 기본 false
+```
+
+- `tenant_plug_overrides_accepted_as_reserved`: Acknowledges that `[bundles.<bundle>.plugs.<plug>.tenant_overrides]` stanzas are **reserved / parsed-but-not-enforced** in P2B. The toggle exists to prevent operators from silently shipping broken policy expectations. The rule:
+  - If no `[bundles.*].plugs.*.tenant_overrides` stanzas are present in the config, the toggle has no effect.
+  - If any `tenant_overrides` stanza is non-empty, startup **refuses** with error code **CFG-045** unless this toggle is `true`. The refusal path is enforced by `AppConfig::load()` validation in `crates/gadgetron-core/src/config.rs` (per ADDENDUM-01 §2 / D-20260418-08 P1).
+  - Setting this toggle to `true` means: "I've read the addendum, I know my `tenant_overrides` stanzas do nothing in P2B, and I'm OK leaving them in the config file as forward-compat placeholders." It does NOT activate tenant-override enforcement — that lands in P2C.
+
+---
+
 ### Minimal working `gadgetron.toml`
 
 The following file is the minimum configuration to serve requests through a single OpenAI provider. It is a **field-minimal example**, not the full canonical local demo path. For the full local path with PostgreSQL, Web UI, and optional Penny, follow [quickstart.md](quickstart.md) and [penny.md](penny.md).

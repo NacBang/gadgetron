@@ -226,8 +226,8 @@ Penny 런타임이 읽는 설정 블록은 아래와 같습니다. 각 필드의
 | `docs/adr/ADR-P2A-02-dangerously-skip-permissions-risk-acceptance.md` | `--dangerously-skip-permissions` risk acceptance + non-root 전제 |
 | `docs/adr/ADR-P2A-03-searxng-privacy-disclosure.md` | SearXNG 프라이버시 고지 ADR |
 | `docs/manual/auth.md` | API 키 / 테넌트 / scope 시스템 |
-| `docs/manual/quickstart.md` | Phase 1 5분 빠른 시작 |
-| `docs/manual/troubleshooting.md` | Phase 1 공통 에러 해결 |
+| `docs/manual/quickstart.md` | 5분 로컬 빠른 시작 (pgvector + demo.sh 경로) |
+| `docs/manual/troubleshooting.md` | 공통 에러 해결 · 로그 경로 · `gadgetron doctor` |
 | `docs/manual/web.md` | Gadgetron Web UI (`/web`) 설정, Origin 격리, 키 회전, 헤드리스 빌드 — D-20260414-02 이후 신규 |
 | `docs/design/phase2/03-gadgetron-web.md` | `gadgetron-web` crate 설계 (assistant-ui + Next.js embed) |
 | `docs/adr/ADR-P2A-04-chat-ui-selection.md` | OpenWebUI → assistant-ui 전환 근거 |
