@@ -1052,6 +1052,24 @@ else
     "last data line: '$LAST_DATA_LINE'"
 fi
 
+# Chunk-shape assertion on the FIRST non-[DONE] data frame. Every
+# SDK parser assumes `object == "chat.completion.chunk"` + a
+# non-empty `.id`; a regression that flips these to
+# `chat.completion` (non-streaming shape) would pass the current
+# [DONE] check but break every streaming client.
+FIRST_CHUNK_JSON="$(echo "$STREAM_RESP" | grep '^data: ' | grep -v '^data: \[DONE\]' | head -1 | sed 's/^data: //')"
+if [ -n "$FIRST_CHUNK_JSON" ] \
+   && echo "$FIRST_CHUNK_JSON" | jq -e '
+        .object == "chat.completion.chunk"
+        and (.id | type == "string" and length > 0)
+        and (.choices | length >= 1)
+      ' >/dev/null 2>&1; then
+  pass "streaming chunk shape: object=chat.completion.chunk with id + choices"
+else
+  fail "streaming chunk shape regressed" \
+    "first-chunk-json: $(echo "$FIRST_CHUNK_JSON" | head -c 400)"
+fi
+
 # ---------------------------------------------------------------------------
 # Gate 9b — streaming chat ERROR path (Drop-guard Err arm, PR 6 coverage)
 # ---------------------------------------------------------------------------
