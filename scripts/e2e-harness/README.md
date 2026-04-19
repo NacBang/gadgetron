@@ -17,26 +17,33 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; twenty-four PRs have landed since (#169 7k.2, #172 7n.2,
+refresh; twenty-six PRs have landed since (#169 7k.2, #172 7n.2,
 #173 9c, #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188
 7h.7 + 7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207
-7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220 / #226
-no-new-gates — ISSUE 8 TASKs 8.3 / 8.4 / 8.5 + ISSUE 9 TASKs 9.1 /
-9.2 + ISSUE 10 TASK 10.3 all reuse the existing Gate 7q.1
-cross-check (response `action_count` vs live `/workbench/actions`
-count) which implicitly proves both catalog and validators swapped
-in lockstep (TASK 8.3), the file-based source produced a valid
-snapshot (TASK 8.4 `catalog_path` fallback path), the
-HTTP-triggered reload landed (TASK 8.5 shares
-`perform_catalog_reload()` with SIGHUP path), the optional `bundle`
-response field is additive-only (TASK 9.1 `skip_serializing_if`),
-the multi-bundle merge produced a coherent snapshot (TASK 9.2
-`from_bundle_dir` + alphabetical order + duplicate-id hard error),
-and the bundle-level `required_scope` inheritance doesn't break any
-existing scope-independent invariant (TASK 10.3 — scope inheritance
-is a per-descriptor filter at action-visibility time, not a reload
-invariant, so the reload + discovery gates stay green by
-construction); **#222 7q.3 + retarget of 7q.1** — ISSUE 9 TASK 9.3
+7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220 / #226 /
+#227 / #228 no-new-gates — ISSUE 8 TASKs 8.3 / 8.4 / 8.5 + ISSUE 9
+TASKs 9.1 / 9.2 + ISSUE 10 TASK 10.3 + ISSUE 10 TASK 10.4 + EPIC 3
+close all reuse the existing Gate 7q.1 cross-check (response
+`action_count` vs live `/workbench/actions` count) which implicitly
+proves both catalog and validators swapped in lockstep (TASK 8.3),
+the file-based source produced a valid snapshot (TASK 8.4
+`catalog_path` fallback path), the HTTP-triggered reload landed
+(TASK 8.5 shares `perform_catalog_reload()` with SIGHUP path), the
+optional `bundle` response field is additive-only (TASK 9.1
+`skip_serializing_if`), the multi-bundle merge produced a coherent
+snapshot (TASK 9.2 `from_bundle_dir` + alphabetical order +
+duplicate-id hard error), the bundle-level `required_scope`
+inheritance doesn't break any existing scope-independent invariant
+(TASK 10.3 — scope inheritance is a per-descriptor filter at
+action-visibility time, not a reload invariant, so the reload +
+discovery gates stay green by construction), the Ed25519 signature
+verification runs before TOML parse without affecting the unsigned
+happy path (TASK 10.4 — signature config defaults preserve TASK
+10.2 unsigned behavior, so existing harness install gates 7q.6 /
+7q.8 continue to hold against the seeded no-signing-config
+deployment), and EPIC 3 close itself is a version-bump + docs PR
+(TASK 8 / 9 / 10 milestones were validated by the 7q gate family
+individually); **#222 7q.3 + retarget of 7q.1** — ISSUE 9 TASK 9.3
 flipped the harness config from implicit `seed_p2b` fallback to
 explicit `[web] bundles_dir = <repo>/bundles`, Gate 7q.1 now pins
 `source == "bundles_dir"` end-to-end, and new Gate 7q.3 asserts
