@@ -594,6 +594,28 @@ on the approve / deny / cancel endpoints, or similar 400 `audit event query requ
 
 ---
 
+### HTTP 400 — `tool audit query requires Postgres` (`/audit/tool-events`)
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "tool audit query requires Postgres (no pool configured)",
+    "type": "invalid_request_error",
+    "code": "config_error"
+  }
+}
+```
+
+on `GET /api/v1/web/workbench/audit/tool-events`.
+
+**Why:** ISSUE 5 / v0.2.8 (PR #199) replaced the P2A-era `NoopGadgetAuditEventSink` with `run_gadget_audit_writer` backed by Postgres. Under `--no-db` the sink falls back to Noop — events still flow through `target: "penny_audit"` tracing logs, but never reach the `tool_audit_events` table. The query handler 400s rather than silently returning zero rows.
+
+**Fix:** Run with `DATABASE_URL` pointing at a pgvector-enabled Postgres — same fix as for `/audit/events`. For demo / no-db flows, use `tracing` logs (`target: "penny_audit"`) to observe the event stream without persistence. The `/events/ws` WebSocket feed still publishes `ActivityEvent::ToolCallCompleted` from the writer task only when a pool is present, so Dashboard tiles showing "tools" totals will stay at zero under `--no-db`.
+
+---
+
 ### HTTP 400 — `usage summary requires Postgres`
 
 **What you observe:**
