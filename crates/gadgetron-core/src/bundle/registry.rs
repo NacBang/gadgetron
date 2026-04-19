@@ -457,11 +457,31 @@ mod tests {
         (buf, sub)
     }
 
+    /// Serialize tests that use `capture_subscriber` + `with_default`.
+    ///
+    /// `tracing::subscriber::with_default` sets a THREAD-LOCAL default
+    /// dispatcher, but cargo's test harness runs tests in parallel
+    /// across a thread pool. Under concurrency, two tests can race on
+    /// the global static-max-level cache — one test's `with_default`
+    /// installs a `Level::DEBUG` subscriber, a concurrent test's
+    /// default dispatcher stays at `NEVER`, and the tracing macros'
+    /// `enabled!` short-circuit may filter out events before they
+    /// reach this thread's dispatcher. Result: `buf` stays empty and
+    /// the assertion fires. Hit CI main twice on 2026-04-19 post-PRs
+    /// #250/#255 merge.
+    ///
+    /// Wrapping every capture-using test in `CAPTURE_LOCK` serializes
+    /// the `capture_subscriber` + `with_default` scope so the global
+    /// cache settles between tests. Zero runtime cost outside these
+    /// two tests.
+    static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn register_log_contains_only_bundle_plug_axis_outcome() {
         // rev4 security deliverable #3 — no Debug of the Plug Arc<T>;
         // only the whitelisted fields `bundle`, `plug`, `axis`,
         // `outcome` must appear in the `gadgetron_audit` emission.
+        let _serial = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = config_with("foo", |over| over.enabled = true);
         let desc = descriptor("foo");
         let preds = build_predicates(&cfg, &desc);
@@ -522,6 +542,7 @@ mod tests {
 
     #[test]
     fn let_underscore_register_still_emits_audit_event() {
+        let _serial = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // rev4 security deliverable #4 — discarding the RegistrationOutcome
         // with `let _ = …` MUST NOT silence the audit emit. The `tracing`
         // call fires before `register` returns, so the outcome drop is
