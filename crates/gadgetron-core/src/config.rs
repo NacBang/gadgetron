@@ -46,6 +46,19 @@ pub struct WebConfig {
     /// in the embedded `index.html` at startup using this value (SEC-W-B5).
     #[serde(default = "default_api_base_path")]
     pub api_base_path: String,
+    /// Optional path to a TOML file that overrides `seed_p2b()` as the
+    /// source for `/api/v1/web/workbench/admin/reload-catalog` (ISSUE
+    /// 8 TASK 8.4). When set, the reload handler reads and parses this
+    /// file on every call — operator edits the file, POSTs reload,
+    /// and the new catalog lands atomically. When unset, reload falls
+    /// back to the hand-coded seed.
+    ///
+    /// Absolute paths recommended; relative paths resolve against the
+    /// process CWD. Parse failures surface as 500 with the parse error
+    /// message — the running snapshot is NOT swapped on failure so a
+    /// malformed file can't take the workbench down.
+    #[serde(default)]
+    pub catalog_path: Option<String>,
 }
 
 fn default_web_enabled() -> bool {
@@ -60,6 +73,7 @@ impl Default for WebConfig {
         Self {
             enabled: default_web_enabled(),
             api_base_path: default_api_base_path(),
+            catalog_path: None,
         }
     }
 }

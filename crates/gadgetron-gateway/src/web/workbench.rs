@@ -178,6 +178,12 @@ pub struct GatewayWorkbenchService {
     /// together, ISSUE 8 TASK 8.3). `None` in legacy test fixtures
     /// that don't wire a workbench; production always sets it.
     pub descriptor_catalog: Option<Arc<arc_swap::ArcSwap<crate::web::catalog::CatalogSnapshot>>>,
+    /// Optional file path the reload handler reads on every call
+    /// (ISSUE 8 TASK 8.4). When set, reload parses this TOML file
+    /// and swaps in the resulting catalog; when unset, reload falls
+    /// back to `DescriptorCatalog::seed_p2b()`. Cloned from
+    /// `WebConfig.catalog_path` at startup.
+    pub catalog_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -965,10 +971,16 @@ pub struct ReloadCatalogResponse {
     pub action_count: usize,
     /// Number of views in the catalog AFTER the swap.
     pub view_count: usize,
-    /// Catalog source identifier. Today always `"seed_p2b"` — TASK 8.3
-    /// will widen this to `"config_file"` / `"bundle_manifest"` as
-    /// reload sources grow. Wire-stable enum.
+    /// Catalog source identifier — one of `"seed_p2b"` (hand-coded
+    /// fallback) or `"config_file"` (TOML at `web.catalog_path`).
+    /// Future sources can widen this without breaking clients —
+    /// wire-stable enum; unknown values should be tolerated.
     pub source: &'static str,
+    /// When `source == "config_file"`, the absolute path that was
+    /// read. Absent for `seed_p2b` so a curious operator can tell
+    /// at a glance where the catalog came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
 }
 
 /// Atomically swap the in-memory `DescriptorCatalog` for a fresh one.
@@ -1004,10 +1016,30 @@ pub async fn reload_catalog_handler(
         ))
     })?;
 
-    // Today the only source is the hand-coded seed — TASK 8.4+ will
-    // add file-based sources. `into_snapshot()` compiles the JSON-Schema
-    // validators so the swap is atomic across catalog + validators.
-    let fresh = crate::web::catalog::DescriptorCatalog::seed_p2b().into_snapshot();
+    // TASK 8.4: prefer the configured file source when present.
+    // Parse failures surface as 500 with the error message so the
+    // operator knows the file was malformed — the old snapshot stays
+    // live on disk, so a bad edit can't take the workbench down.
+    // `into_snapshot()` compiles the JSON-Schema validators so the
+    // swap is atomic across catalog + validators.
+    let catalog_path_cfg = svc.catalog_path.as_deref();
+    let (fresh_catalog, source_label, source_path) = match catalog_path_cfg {
+        Some(p) => {
+            let path = std::path::Path::new(p);
+            match crate::web::catalog::DescriptorCatalog::from_toml_file(path) {
+                Ok(c) => (c, "config_file", Some(p.to_string())),
+                Err(e) => {
+                    return Err(WorkbenchHttpError::Core(e));
+                }
+            }
+        }
+        None => (
+            crate::web::catalog::DescriptorCatalog::seed_p2b(),
+            "seed_p2b",
+            None,
+        ),
+    };
+    let fresh = fresh_catalog.into_snapshot();
 
     // Pre-compute the response counts from the same snapshot we're
     // about to publish, so the response is consistent with the swap
@@ -1023,7 +1055,8 @@ pub async fn reload_catalog_handler(
         target: "workbench.admin",
         action_count = action_count,
         view_count = view_count,
-        source = "seed_p2b",
+        source = source_label,
+        source_path = source_path.as_deref().unwrap_or(""),
         "descriptor catalog reloaded (CatalogSnapshot = catalog + validators)"
     );
 
@@ -1031,7 +1064,8 @@ pub async fn reload_catalog_handler(
         reloaded: true,
         action_count,
         view_count,
-        source: "seed_p2b",
+        source: source_label,
+        source_path,
     }))
 }
 
@@ -1191,6 +1225,7 @@ mod tests {
                 actions: None,
                 approval_store: None,
                 descriptor_catalog: None,
+                catalog_path: None,
             })),
             penny_shared_surface: None,
             penny_assembler: None,

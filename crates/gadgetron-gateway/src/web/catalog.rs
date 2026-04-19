@@ -35,6 +35,38 @@ pub struct CatalogSnapshot {
     pub validators: std::collections::HashMap<String, std::sync::Arc<jsonschema::Validator>>,
 }
 
+/// On-disk catalog file shape consumed by
+/// [`DescriptorCatalog::from_toml_file`] (ISSUE 8 TASK 8.4).
+///
+/// ```toml
+/// allow_direct_actions = true  # optional, default true
+///
+/// [[views]]
+/// id = "my-view"
+/// title = "My view"
+/// # ... full WorkbenchViewDescriptor fields
+///
+/// [[actions]]
+/// id = "my-action"
+/// title = "My action"
+/// # ... full WorkbenchActionDescriptor fields
+/// input_schema = { type = "object", properties = {} }
+/// ```
+///
+/// Field names match the serde-derived shape of
+/// `WorkbenchViewDescriptor` / `WorkbenchActionDescriptor` in
+/// `gadgetron-core::workbench` — consult those struct docs for the
+/// authoritative field list.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CatalogFile {
+    #[serde(default)]
+    pub allow_direct_actions: Option<bool>,
+    #[serde(default)]
+    pub views: Vec<WorkbenchViewDescriptor>,
+    #[serde(default)]
+    pub actions: Vec<WorkbenchActionDescriptor>,
+}
+
 /// Snapshot of registered workbench descriptors with actor-aware filtering.
 ///
 /// Clone is O(n) over descriptors but the catalog is expected to be small
@@ -284,6 +316,40 @@ impl DescriptorCatalog {
     }
 
     // -----------------------------------------------------------------------
+    // File-based source (ISSUE 8 TASK 8.4)
+    // -----------------------------------------------------------------------
+
+    /// Load a catalog from a TOML file on disk.
+    ///
+    /// Expected format matches the shape of [`CatalogFile`]: an
+    /// optional `allow_direct_actions` bool plus `[[views]]` and
+    /// `[[actions]]` arrays whose field names match
+    /// `WorkbenchViewDescriptor` / `WorkbenchActionDescriptor`
+    /// (serde-derived, stable across the `gadgetron-core` crate).
+    ///
+    /// On any read/parse failure the function returns the error
+    /// verbatim — the admin reload handler surfaces this as 500 with
+    /// the message so the operator knows the file was malformed and
+    /// the old snapshot stays live.
+    pub fn from_toml_file(path: &std::path::Path) -> gadgetron_core::error::Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            gadgetron_core::error::GadgetronError::Config(format!(
+                "workbench catalog: failed to read {path:?}: {e}",
+            ))
+        })?;
+        let file: CatalogFile = toml::from_str(&text).map_err(|e| {
+            gadgetron_core::error::GadgetronError::Config(format!(
+                "workbench catalog: TOML parse failed for {path:?}: {e}",
+            ))
+        })?;
+        Ok(Self {
+            views: file.views,
+            actions: file.actions,
+            allow_direct_actions: file.allow_direct_actions.unwrap_or(true),
+        })
+    }
+
+    // -----------------------------------------------------------------------
     // Lookup
     // -----------------------------------------------------------------------
 
@@ -395,6 +461,98 @@ mod tests {
         let v = catalog.find_view("knowledge-activity-recent");
         assert!(v.is_some(), "seed view must be found");
         assert_eq!(v.unwrap().id, "knowledge-activity-recent");
+    }
+
+    #[test]
+    fn from_toml_file_round_trips_a_minimal_catalog() {
+        // ISSUE 8 TASK 8.4 — file-based catalog source. Write a tiny
+        // TOML, parse it, and assert the parsed shape + that
+        // `into_snapshot` builds a validator for the described action.
+        let dir =
+            std::env::temp_dir().join(format!("gadgetron-catalog-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("catalog.toml");
+        std::fs::write(
+            &path,
+            r#"
+allow_direct_actions = false
+
+[[views]]
+id = "v1"
+title = "View one"
+owner_bundle = "e2e"
+source_kind = "activity"
+source_id = "recent"
+placement = "left_rail"
+renderer = "timeline"
+data_endpoint = "/x"
+action_ids = []
+
+[[actions]]
+id = "a1"
+title = "Action one"
+owner_bundle = "e2e"
+source_kind = "gadget"
+source_id = "test.ping"
+gadget_name = "test.ping"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "t"
+input_schema = { type = "object", properties = { n = { type = "integer" } }, required = ["n"], additionalProperties = false }
+"#,
+        )
+        .unwrap();
+
+        let catalog = DescriptorCatalog::from_toml_file(&path).expect("parse ok");
+        assert_eq!(catalog.views.len(), 1);
+        assert_eq!(catalog.actions.len(), 1);
+        assert!(
+            !catalog.allow_direct_actions(),
+            "allow_direct_actions=false must round-trip"
+        );
+        assert_eq!(
+            catalog.find_action("a1").unwrap().gadget_name.as_deref(),
+            Some("test.ping")
+        );
+
+        // Snapshotting must compile a validator for the action.
+        let snap = catalog.into_snapshot();
+        assert!(
+            snap.validators.contains_key("a1"),
+            "validator must exist for a1 post-snapshot"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_toml_file_surfaces_parse_errors() {
+        let dir =
+            std::env::temp_dir().join(format!("gadgetron-catalog-test-err-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.toml");
+        std::fs::write(&path, "this is = not valid =====").unwrap();
+        let err = DescriptorCatalog::from_toml_file(&path).expect_err("must reject bad toml");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("TOML parse failed"),
+            "error must name the failure; got {msg:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_toml_file_surfaces_missing_file() {
+        let path = std::env::temp_dir().join("gadgetron-catalog-missing-file-xyz.toml");
+        let _ = std::fs::remove_file(&path);
+        let err = DescriptorCatalog::from_toml_file(&path).expect_err("missing file must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("failed to read"),
+            "missing-file error must name the failure; got {msg:?}"
+        );
     }
 
     #[test]
