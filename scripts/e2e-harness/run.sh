@@ -1011,6 +1011,33 @@ fi
 # failure) or 400 — anything in the 4xx family is the correct
 # answer; 500 / 200 is a wire regression.
 
+log "=== Gate 7n.2: body size limit 413 ==="
+# server.rs:291 layers `RequestBodyLimitLayer::new(MAX_BODY_BYTES)`
+# (4 MiB default per MAX_BODY_BYTES const). A body that exceeds
+# this must surface as 413 Payload Too Large — that's the wire
+# contract the /v1 + /api/v1 surfaces promise for DoS resistance.
+#
+# Generate a ~5 MiB payload (5,242,880 bytes of 'a'). We don't
+# care that the inner JSON is well-formed because the body-size
+# layer fires BEFORE the Json extractor. A regression that
+# removes the layer would accept the whole body and proceed to
+# the Json extractor, which would then 422 on the malformed
+# content — Gate 7n.2 catches that by asserting 413 specifically.
+BIG_BODY="/tmp/harness-big-body.bin"
+head -c 5242880 /dev/zero | tr '\0' 'a' > "$BIG_BODY"
+BIG_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/v1/chat/completions" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data-binary "@$BIG_BODY" 2>&1 || true)"
+rm -f "$BIG_BODY"
+if [ "$BIG_CODE" = "413" ]; then
+  pass "5 MiB POST /v1/chat/completions → 413 (body-size guard)"
+else
+  fail "body-size guard regressed (expected 413, got $BIG_CODE)" \
+    "(200 = limit layer dropped; 500 = unhandled guard error)"
+fi
+
 log "=== Gate 7n: malformed chat body → 4xx ==="
 BAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
   -X POST "$GAD_BASE/v1/chat/completions" \
