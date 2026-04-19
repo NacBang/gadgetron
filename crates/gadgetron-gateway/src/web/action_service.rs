@@ -105,6 +105,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
     async fn invoke(
         &self,
         actor: &AuthenticatedContext,
+        actor_scopes: &[gadgetron_core::context::Scope],
         action_id: &str,
         request: InvokeWorkbenchActionRequest,
     ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError> {
@@ -125,12 +126,12 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // required_scope: doc §2.4.1 says return 404 (not 403) to avoid
         // leaking existence of scope-restricted actions.
         // disabled_reason from allow_direct_actions=false: 403 forbidden.
+        //
+        // Drift-fix follow-up to PR 7: `actor_scopes` is now threaded
+        // through from `TenantContext.scopes` by the handler — no more
+        // hardcoded placeholder slice.
         // ---------------------------------------------------------------
-        // TODO doc-10: replace Scope::OpenAiCompat with actor.scopes.
-        use gadgetron_core::context::Scope;
         if let Some(required) = descriptor.required_scope {
-            // Placeholder scope check until doc-10 lands.
-            let actor_scopes = [Scope::OpenAiCompat];
             if !actor_scopes.contains(&required) {
                 return Err(WorkbenchHttpError::ActionNotFound {
                     action_id: action_id.to_string(),
@@ -327,6 +328,14 @@ mod tests {
         AuthenticatedContext::system()
     }
 
+    /// Test helper — default scope slice (`OpenAiCompat`) that matches
+    /// what the gateway threaded through before drift-fix PR 7's scope
+    /// threading landed. Tests that want a scope-gated action use an
+    /// empty slice explicitly.
+    fn actor_scopes_default() -> [gadgetron_core::context::Scope; 1] {
+        [gadgetron_core::context::Scope::OpenAiCompat]
+    }
+
     // -----------------------------------------------------------------------
     // Step 2: ActionNotFound
     // -----------------------------------------------------------------------
@@ -339,7 +348,7 @@ mod tests {
             client_invocation_id: None,
         };
         let err = svc
-            .invoke(&actor(), "nonexistent-action", req)
+            .invoke(&actor(), &actor_scopes_default(), "nonexistent-action", req)
             .await
             .unwrap_err();
         match err {
@@ -363,7 +372,7 @@ mod tests {
             client_invocation_id: None,
         };
         let err = svc
-            .invoke(&actor(), "knowledge-search", req)
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
             .await
             .unwrap_err();
         match err {
@@ -383,7 +392,7 @@ mod tests {
             args: serde_json::json!({"query": "hello", "max_results": 5}),
             client_invocation_id: None,
         };
-        let resp = svc.invoke(&actor(), "knowledge-search", req).await.unwrap();
+        let resp = svc.invoke(&actor(), &actor_scopes_default(), "knowledge-search", req).await.unwrap();
         assert_eq!(resp.result.status, "ok");
     }
 
@@ -396,7 +405,7 @@ mod tests {
             client_invocation_id: None,
         };
         let err = svc
-            .invoke(&actor(), "knowledge-search", req)
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
             .await
             .unwrap_err();
         match err {
@@ -416,7 +425,7 @@ mod tests {
             client_invocation_id: None,
         };
         let err = svc
-            .invoke(&actor(), "knowledge-search", req)
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
             .await
             .unwrap_err();
         match err {
@@ -438,7 +447,7 @@ mod tests {
             client_invocation_id: Some(ciid),
         };
         let resp1 = svc
-            .invoke(&actor(), "knowledge-search", req1)
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req1)
             .await
             .unwrap();
         assert_eq!(resp1.result.status, "ok");
@@ -449,7 +458,7 @@ mod tests {
             client_invocation_id: Some(ciid),
         };
         let resp2 = svc
-            .invoke(&actor(), "knowledge-search", req2)
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req2)
             .await
             .unwrap();
         // Both must be "ok" (same cached response).
@@ -489,7 +498,7 @@ mod tests {
             client_invocation_id: None,
         };
         let resp = svc
-            .invoke(&actor(), "delete-everything", req)
+            .invoke(&actor(), &actor_scopes_default(), "delete-everything", req)
             .await
             .unwrap();
         assert_eq!(resp.result.status, "pending_approval");
@@ -507,7 +516,7 @@ mod tests {
             args: serde_json::json!({"query": "test knowledge"}),
             client_invocation_id: None,
         };
-        let resp = svc.invoke(&actor(), "knowledge-search", req).await.unwrap();
+        let resp = svc.invoke(&actor(), &actor_scopes_default(), "knowledge-search", req).await.unwrap();
         assert_eq!(resp.result.status, "ok");
         assert!(resp.result.approval_id.is_none());
         assert!(resp.result.audit_event_id.is_none());
@@ -539,7 +548,7 @@ mod tests {
             client_invocation_id: None,
         };
 
-        let resp = svc.invoke(&actor(), "knowledge-search", req).await.unwrap();
+        let resp = svc.invoke(&actor(), &actor_scopes_default(), "knowledge-search", req).await.unwrap();
 
         // Status must be "ok"
         assert_eq!(resp.result.status, "ok", "status must be ok");

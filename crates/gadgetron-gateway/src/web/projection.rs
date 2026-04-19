@@ -150,22 +150,34 @@ impl WorkbenchProjectionService for InProcessWorkbenchProjection {
         }
     }
 
-    async fn views(&self) -> Result<WorkbenchRegisteredViewsResponse, WorkbenchHttpError> {
-        // TODO doc-10: replace &[Scope::OpenAiCompat] with actor.scopes when
-        // AuthenticatedContext carries identity. See §2.1.1 note in design doc.
-        use gadgetron_core::context::Scope;
-        let actor_scopes = [Scope::OpenAiCompat];
-        let views = self.descriptor_catalog.visible_views(&actor_scopes);
+    async fn views(
+        &self,
+        actor_scopes: &[gadgetron_core::context::Scope],
+    ) -> Result<WorkbenchRegisteredViewsResponse, WorkbenchHttpError> {
+        // Drift-fix follow-up to PR 7 (doc-10): the handler now threads
+        // the caller's real scopes through instead of the old hardcoded
+        // `[Scope::OpenAiCompat]` placeholder.
+        let views = self.descriptor_catalog.visible_views(actor_scopes);
         Ok(WorkbenchRegisteredViewsResponse { views })
     }
 
-    async fn view_data(&self, view_id: &str) -> Result<WorkbenchViewData, WorkbenchHttpError> {
-        // TODO doc-10: check actor scope against descriptor.required_scope.
-        let descriptor = self.descriptor_catalog.find_view(view_id).ok_or_else(|| {
-            WorkbenchHttpError::ViewNotFound {
+    async fn view_data(
+        &self,
+        actor_scopes: &[gadgetron_core::context::Scope],
+        view_id: &str,
+    ) -> Result<WorkbenchViewData, WorkbenchHttpError> {
+        // Scope-gated lookup: if the caller's scopes do not admit the
+        // view, surface `ViewNotFound` (404) rather than 403 so we
+        // don't leak existence of scope-restricted views per doc
+        // §2.4.1.
+        let descriptor = self
+            .descriptor_catalog
+            .visible_views(actor_scopes)
+            .into_iter()
+            .find(|v| v.id == view_id)
+            .ok_or_else(|| WorkbenchHttpError::ViewNotFound {
                 view_id: view_id.to_string(),
-            }
-        })?;
+            })?;
 
         // Seed view: knowledge-activity-recent → stub empty timeline payload.
         // Real data wiring is a follow-up (W3-WEB-3 / activity source integration).
@@ -180,11 +192,11 @@ impl WorkbenchProjectionService for InProcessWorkbenchProjection {
         })
     }
 
-    async fn actions(&self) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError> {
-        // TODO doc-10: replace &[Scope::OpenAiCompat] with actor.scopes.
-        use gadgetron_core::context::Scope;
-        let actor_scopes = [Scope::OpenAiCompat];
-        let actions = self.descriptor_catalog.visible_actions(&actor_scopes);
+    async fn actions(
+        &self,
+        actor_scopes: &[gadgetron_core::context::Scope],
+    ) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError> {
+        let actions = self.descriptor_catalog.visible_actions(actor_scopes);
         Ok(WorkbenchRegisteredActionsResponse { actions })
     }
 }
