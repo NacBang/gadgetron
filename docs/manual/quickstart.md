@@ -69,6 +69,37 @@ export OPENAI_API_KEY="sk-your-openai-key"
 
 If you are using a self-hosted provider such as vLLM or Ollama, export only the variables your chosen provider block requires.
 
+Also export the admin-bootstrap password (used by Step 4.5):
+
+```sh
+export GADGETRON_ADMIN_PW="pick-a-real-password-here"
+```
+
+The env var **name** is referenced from `gadgetron.toml` in Step 4.5. Choose any name you like (the examples use `GADGETRON_ADMIN_PW`); keep the value in your shell / secret manager, never in the config file.
+
+---
+
+## Step 4.5 — Configure first-admin bootstrap
+
+Every pg-backed `gadgetron serve` run checks the `users` table at startup. On a **fresh database** the table is empty and serve will **hard-fail** unless `[auth.bootstrap]` is set in `gadgetron.toml`. The block is the only supported path to create the first admin without hand-crafting SQL (ISSUE 14 TASK 14.2 / v0.5.7).
+
+Open `gadgetron.toml` from Step 3 and add:
+
+```toml
+[auth.bootstrap]
+admin_email         = "admin@example.com"
+admin_display_name  = "Initial Admin"
+admin_password_env  = "GADGETRON_ADMIN_PW"     # NAME of the env var set in Step 4
+```
+
+Three rules to remember:
+
+- `admin_password_env` holds the env var **name**, not the password. The gateway reads `std::env::var("GADGETRON_ADMIN_PW")` at startup → argon2id PHC hash → `users.password_hash`.
+- If the named env var is unset or empty, startup fails with `bootstrap requires $GADGETRON_ADMIN_PW to be set`. Set it before `./demo.sh start`.
+- On subsequent restarts, `[auth.bootstrap]` is ignored with a warn log (the users table is no longer empty). Remove the block on the next deploy to keep secrets out of the config file.
+
+`--no-db` deployments skip this entirely — there is no users table to check. See [configuration.md §`[auth.bootstrap]`](configuration.md#authbootstrap) for the full behavior matrix.
+
 ---
 
 ## Step 5 — Start the demo and verify health
