@@ -372,6 +372,31 @@ require_signature = false
 
 ---
 
+### `[quota_rate_limit]`
+
+Per-tenant token-bucket rate limiter. Landed in ISSUE 11 TASK 11.2 / v0.5.2 / PR #231. Opt-in: the default (`requests_per_minute = 0`) makes the limiter a no-op, so deployments that upgrade from 0.5.1 or earlier see zero behavior change until they configure a non-zero rate.
+
+```toml
+[quota_rate_limit]
+# Requests per minute per tenant. 0 = disabled (default). Limiter
+# becomes a no-op that always accepts, preserving the pre-TASK-11.2
+# behavior for deployments that haven't opted in.
+requests_per_minute = 120
+
+# Max burst size. 0 = defaults to `requests_per_minute` (so new
+# tenants don't get surprise bursts they can't sustain — the first
+# minute allows as many requests as the steady-state cap).
+burst = 120
+```
+
+**How it works.** `TokenBucketRateLimiter` in `gadgetron-xaas::quota::rate_limit` holds per-tenant buckets in a sharded `DashMap`. Tokens refill lazily at `consume()` call time using a monotonic `Instant` clock (so wall-clock skew can't cause double-spends), with fractional accounting so tiny refill increments don't round to zero. The limiter is wrapped by `RateLimitedQuotaEnforcer`, a composite `QuotaEnforcer` that runs the rate check FIRST in `check_pre` — if the bucket is empty, the request is rejected with 429 without even querying the cost-snapshot backend (fail fast). On accept, `check_pre` delegates to the inner `QuotaEnforcer` (today `InMemoryQuotaEnforcer`) for the daily-cents cost check.
+
+**Two independent 429 paths today.** The rate limiter and the cost enforcer each emit `GadgetronError::QuotaExceeded`, so both surface as HTTP 429 with the same wire shape (the TASK 11.1 `Retry-After: 60` header + `retry_after_seconds: 60` body field). The `60`-second value is the conservative constant documented in [`api-reference.md §Foundational error codes`](api-reference.md#foundational-error-codes); the real refill countdown is not yet threaded through `GadgetronError` — that's a follow-up, not part of the currently-numbered ISSUE 11 TASKs (which are 11.3 Postgres-backed spend tracking + 11.4 `/web` 429 UI surface). Operators debugging a rate-vs-cost rejection today should grep tracing for `quota_rate_limited` (rate path) vs `quota_exceeded daily_used_cents=…` (cost path) — the error envelope alone doesn't distinguish them.
+
+**Defaults safety.** `burst = 0` is deliberately interpreted as "match `requests_per_minute`" rather than "no burst allowed" — the latter would make any traffic faster than exactly one-per-interval trip 429 on the very first extra request. Matching `requests_per_minute` means a fresh tenant can absorb one full minute of traffic before backing off to the steady-state rate, which is what most client SDKs already assume.
+
+---
+
 ### `[agent]`
 
 Penny subprocess runtime의 상위 설정입니다.

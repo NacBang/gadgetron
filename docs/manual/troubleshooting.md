@@ -307,16 +307,33 @@ After updating, the next request will use the new scopes (cache TTL is 10 minute
 
 ### HTTP 429 Quota Exceeded
 
-**What you observe:**
+**What you observe:** HTTP status 429 with the following response (ISSUE 11 TASK 11.1 / v0.5.1 / PR #230 widened the body with the `retry_after_seconds` field AND added the `Retry-After` HTTP header):
 
-```json
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+Content-Type: application/json
+
 {
   "error": {
     "message": "Your API usage quota has been exceeded. Update quota_configs table to increase limits, or see docs/manual/troubleshooting.md.",
     "type": "quota_error",
-    "code": "quota_exceeded"
+    "code": "quota_exceeded",
+    "retry_after_seconds": 60
   }
 }
+```
+
+**Client backoff:** Both `Retry-After: 60` (HTTP header, RFC 7231) and `.error.retry_after_seconds: 60` (JSON body) carry the same value. SDK clients should honor whichever surface they already read — the header follows the standard OAuth / GitHub / Stripe convention, the body field follows the OpenAI structured-error convention. Either one lets you back off deterministically instead of retrying in a tight loop and chewing through the rest of your daily budget on retry traffic.
+
+```python
+# Minimal Python snippet honoring either surface
+import time, requests
+r = requests.post(url, headers=headers, json=payload)
+if r.status_code == 429:
+    wait = int(r.headers.get("Retry-After", r.json()["error"].get("retry_after_seconds", 60)))
+    time.sleep(wait)
+    r = requests.post(url, headers=headers, json=payload)  # retry once
 ```
 
 **Why:** The tenant's `daily_limit_cents` has been reached. The current quota enforcer is in-memory (`InMemoryQuotaEnforcer`). It checks the `daily_used_cents` value from the `quota_configs` table against the `daily_limit_cents`. If `daily_limit_cents - daily_used_cents <= 0`, requests are rejected.
@@ -337,7 +354,11 @@ SET daily_used_cents = 0
 WHERE tenant_id = 'your-tenant-uuid-here';
 ```
 
-**Note:** `InMemoryQuotaEnforcer` does not currently write usage back to PostgreSQL — `record_post` only marks the in-memory token as used. The `daily_used_cents` column in the database is not incremented by the current implementation. Until PostgreSQL-backed quota enforcement lands, 429 is triggered only when `daily_limit_cents - daily_used_cents <= 0` at request time (based on whatever value is already in the database when the tenant context is loaded).
+**Retry-After value is conservative today (TASK 11.1 deliberate non-feature).** The `60` seconds is `QUOTA_RETRY_AFTER_SECONDS`, a constant. Two 429 paths emit it: the cost-based `InMemoryQuotaEnforcer` (day boundary at 00:00 UTC — so 60s is usually an under-estimate when daily-exhausted) AND the new TASK 11.2 / PR #231 `TokenBucketRateLimiter` wrapped by `RateLimitedQuotaEnforcer` when operators opt in via `[quota_rate_limit]` (refill granularity is sub-second per-tenant but the wire still reports 60s). SDK clients that retry after 60s may get another 429 on either path and should back off with exponential backoff on top. Exact refill-countdown threading is **not** part of the currently-numbered ISSUE 11 TASKs (which are 11.3 Postgres-backed spend tracking + 11.4 `/web` 429 UI surface) — it's an acknowledged future follow-up with no TASK number on trunk today.
+
+**Why 4xx responses other than 429 don't carry `Retry-After`:** The `Retry-After` header has specific RFC 7231 semantics that SDK clients act on — auto-retry on 429/503, not on 401/403/404. Adding it to 403 would confuse retry logic and could mask permanent permission failures as transient rate-limit ones. `ApiError::into_response` explicitly checks `status == TOO_MANY_REQUESTS` before setting the header + widening the body.
+
+**Note (write-back behavior depends on which enforcer is active):** `InMemoryQuotaEnforcer` (selected when `pg_pool.is_none()`) does NOT write usage back to PostgreSQL — `record_post` only marks the in-memory token as used, so `daily_used_cents` in the DB stays stale. `PgQuotaEnforcer` (selected when `pg_pool.is_some()`, ISSUE 11 TASK 11.3 / PR #232 / v0.5.3) DOES increment both `daily_used_cents` + `monthly_used_cents` via one UPDATE per `record_post` with CASE-expression rollover (daily zeros at UTC midnight, monthly at first-of-month). `record_post` is fire-and-forget — UPDATE failures log via `tracing::error` but never propagate because the request already succeeded. CLI picks the right enforcer automatically based on whether a Postgres pool is wired at startup. Both enforcers are wrapped by `RateLimitedQuotaEnforcer` when `[quota_rate_limit]` is configured (TASK 11.2 / PR #231).
 
 ---
 

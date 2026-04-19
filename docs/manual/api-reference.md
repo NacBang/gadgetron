@@ -50,7 +50,7 @@ Foundational error codes emitted by the request pipeline — auth, scoping, rout
 | `invalid_api_key` | 401 | `authentication_error` | Missing, malformed, or revoked API key |
 | `forbidden` | 403 | `permission_error` | Valid key but wrong scope for the requested route |
 | `request_too_large` | 413 | `invalid_request_error` | Request body exceeds the 4 MiB limit — see [Troubleshooting — HTTP 413](troubleshooting.md#http-413--request-body-too-large) |
-| `quota_exceeded` | 429 | `quota_error` | Tenant's daily spending limit reached |
+| `quota_exceeded` | 429 | `quota_error` | Tenant's daily spending limit reached. **Every HTTP 429 response carries both the `Retry-After: 60` HTTP header AND a `retry_after_seconds: 60` field inside the error JSON body** (ISSUE 11 TASK 11.1 / v0.5.1 / PR #230) — SDK clients that honor either surface back off deterministically instead of retrying in a tight loop. `retry_after_seconds` is `Null`-absent from non-429 responses (403, 401, 404 keep the base body shape since `Retry-After` has specific HTTP semantics). `QUOTA_RETRY_AFTER_SECONDS = 60` is a conservative constant today; TASK 11.2 (PR #231, shipped) added the `TokenBucketRateLimiter` but did NOT yet thread its exact refill time through `QuotaToken` — the `Retry-After` value still reports the 60s upper bound for both the rate-limit and daily-cost rejection paths. Real refill-countdown threading is a future follow-up not tracked in the currently-numbered ISSUE 11 TASKs (which are 11.3 Postgres-backed spend tracking + 11.4 `/web` 429 UI surface). |
 | `config_error` | 400 | `invalid_request_error` | Server configuration is invalid |
 | `routing_failure` | 503 | `server_error` | No provider available to serve the request |
 | `provider_error` | 502 | `api_error` | Upstream LLM provider returned an error |
@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.5.0",
+  "gateway_version": "0.5.3",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.0"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.3"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.5.0"
+    "version": "0.5.3"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.5.0"},
+    {"id": "gadgetron-core", "version": "0.5.3"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1391,7 +1391,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
   "count": 2,
   "bundles": [
     {
-      "bundle": {"id": "gadgetron-core", "version": "0.5.0"},
+      "bundle": {"id": "gadgetron-core", "version": "0.5.3"},
       "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
       "action_count": 5,
       "view_count": 3

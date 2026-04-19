@@ -240,7 +240,7 @@ catalog, tenant self-service, quotas + SLA enforcement. Turns Gadgetron
 from "self-host" to "accounts you sell."
 
 ### In-flight ISSUE (11)
-- **ISSUE 11 — quotas + rate limits** (in-flight; 0.5.1 ships TASK 11.1)
+- **ISSUE 11 — quotas + rate limits** (in-flight; 0.5.1 / 0.5.2 ship TASK 11.1 / 11.2 respectively; TASK 11.3 Postgres-backed spend tracking + TASK 11.4 `/web` 429 UI surface remaining)
   - TASK 11.1 ✅ — structured 429 + `Retry-After` header (0.5.0 →
     0.5.1). Every `ApiError` response with status 429 now sets the
     `Retry-After: 60` HTTP header AND adds `retry_after_seconds:
