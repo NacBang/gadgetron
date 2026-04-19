@@ -1664,6 +1664,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 11d — /web/wiki interactive CRUD E2E (real browser, real server)
+# ---------------------------------------------------------------------------
+#
+# Gate 11c proved the HTML for /web/wiki is served. This gate drives
+# the page from a real headless Chromium through the full product
+# loop — sign in, list, open, edit + save (sentinel marker), search
+# for the sentinel. Every step hits the Rust server for real (no
+# route mocks). When this gate is green the product demonstrably
+# works from a browser.
+#
+# Skips gracefully if playwright-core isn't available (same policy
+# as Gate 11 screenshot). `--no-screenshot` also skips this — the
+# two gates share the same browser dep.
+if [ "$SKIP_SCREENSHOT" -eq 1 ]; then
+  skip "Gate 11d /web/wiki interactive E2E (--no-screenshot)"
+elif command -v node >/dev/null 2>&1; then
+  WIKI_E2E_SHOT="$ART_DIR/screenshots/wiki-e2e.png"
+  WIKI_E2E_LOG="$ART_DIR/wiki-e2e.log"
+  mkdir -p "$ART_DIR/screenshots"
+  if node "$HARNESS_DIR/wiki-e2e.mjs" "$GAD_BASE" "$TEST_API_KEY" \
+       "$WIKI_E2E_SHOT" >"$WIKI_E2E_LOG" 2>&1; then
+    pass "$(tail -1 "$WIKI_E2E_LOG" | head -c 200)"
+  else
+    WIKI_E2E_RC=$?
+    if [ "$WIKI_E2E_RC" = "3" ] || grep -q 'playwright-core not found' "$WIKI_E2E_LOG"; then
+      skip "Gate 11d /web/wiki E2E (playwright-core unavailable)"
+    else
+      fail "Gate 11d /web/wiki interactive E2E failed" \
+        "$(head -c 800 "$WIKI_E2E_LOG")"
+    fi
+  fi
+else
+  skip "Gate 11d /web/wiki E2E (no node — skipping)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 12 — ERROR log scrape
 # ---------------------------------------------------------------------------
 
