@@ -70,7 +70,7 @@ export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadget
 ./demo.sh logs
 ```
 
-`quickstart.md` covers the provider block you need in `gadgetron.toml`, tenant/API-key creation, and the first request path. `./demo.sh stop` shuts the local demo down.
+`quickstart.md` covers the provider block you need in `gadgetron.toml`, tenant/API-key creation, and the first request path. `./demo.sh stop` shuts the local demo down. See **"What success looks like"** below (after the macOS section) for representative output of each `demo.sh` command — line skeletons are verbatim from `demo.sh`; PID values, filesystem paths, and URLs are runtime-substituted from your checkout.
 
 ---
 
@@ -135,6 +135,68 @@ export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadget
 ./demo.sh status
 ./demo.sh logs
 ```
+
+### What success looks like
+
+All demo state lives under `.gadgetron/demo/` inside the repo. The log is always at `.gadgetron/demo/gadgetron.log` (NOT `.gadgetron/state/...`).
+
+The blocks below show representative output. Field **labels and prefixes** (`PID:`, `Status:`, `Health:`, `Hint:`, etc.) are verbatim from `demo.sh`. **Values** after the label — numeric PIDs, absolute filesystem paths, port-bound URLs, `launchctl` service IDs — are runtime-substituted and will differ on your checkout. The examples use `/path/to/gadgetron/` as a stand-in for your repo root.
+
+**`./demo.sh start` — Linux / nohup path:**
+
+```
+Demo started.
+  PID: 48213
+  URL: http://127.0.0.1:8080/web
+  Health: http://127.0.0.1:8080/health
+  Log: /path/to/gadgetron/.gadgetron/demo/gadgetron.log
+  DB: postgresql:///gadgetron_demo
+```
+
+**`./demo.sh start` — macOS / launchctl path** (no PID line — supervised by `launchd`):
+
+```
+Demo started.
+  URL: http://127.0.0.1:8080/web
+  Health: http://127.0.0.1:8080/health
+  Log: /path/to/gadgetron/.gadgetron/demo/gadgetron.log
+  Launchd: gui/501/com.gadgetron.demo
+  DB: postgresql:///gadgetron_demo
+```
+
+If `start` prints `Server exited during startup. Recent log output:` (Linux/nohup path) or `LaunchAgent exited during startup. Recent log output:` (macOS/launchctl path) followed by 40 tailed log lines, the process died before the `/health` probe responded — read the tail and consult `troubleshooting.md`.
+
+**`./demo.sh status` — healthy:**
+
+```
+Config: /path/to/gadgetron/gadgetron.toml
+Bind:   127.0.0.1:8080
+DB:     postgresql:///gadgetron_demo
+Log:    /path/to/gadgetron/.gadgetron/demo/gadgetron.log
+Status: running
+PID:    48213
+Health: ok (http://127.0.0.1:8080/health)
+Web:    http://127.0.0.1:8080/web
+```
+
+**`./demo.sh status` — degraded (health probe failed):** the `Status:` line still prints `running` or `launchctl loaded`, but instead of `Health: ok` you get:
+
+```
+Health: unavailable (http://127.0.0.1:8080/health)
+Hint:   PostgreSQL on postgresql:///gadgetron_demo is missing pgvector
+```
+
+The `Hint:` line only appears when the log contains the string `extension "vector" is not available`. No hint + `Health: unavailable` means the cause is something else — tail the log.
+
+**`./demo.sh status` — stopped:** one of these script-defined variants (the parenthetical reason varies; the PID value is runtime-substituted):
+
+```
+Status: stopped (no PID file)
+Status: stopped (stale PID file: 48213)
+Status: stopped (launchctl job not loaded)
+```
+
+**`./demo.sh logs`** — tails the last `GADGETRON_DEMO_TAIL_LINES` (default 80) lines of `.gadgetron/demo/gadgetron.log`. Use `./demo.sh logs -f` to follow. If the file doesn't exist, `logs` exits non-zero with `Log file not found: <log-path>` (the path portion is the runtime-resolved `LOG_FILE` value) — this usually means `start` has never been invoked from this checkout.
 
 ---
 

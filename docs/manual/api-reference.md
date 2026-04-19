@@ -351,6 +351,16 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ready
 # 503  (PostgreSQL down or pool exhausted)
 ```
 
+### GET /favicon.ico
+
+Returns HTTP 204 No Content with an empty body. Only mounted when the binary is built with the default `web-ui` feature (the headless build does not register this route). Required because browsers unconditionally request `/favicon.ico` when rendering `/web`; without it, every page load emits a 404 into the gateway log.
+
+No authentication, no scope.
+
+### GET /web/
+
+Permanent redirect (HTTP 308) to the `/web` base path (`gadgetron_web::BASE_PATH`). Present because some browser flows follow a trailing-slash-insensitive URL convention. Only mounted when built with the `web-ui` feature.
+
 ```sh
 # Full response body
 curl -s http://localhost:8080/ready
@@ -532,7 +542,14 @@ Payload for a single registered view. The shell calls `data_endpoint` from the v
 }
 ```
 
-`payload` shape is renderer-specific and typed at the bundle layer.
+`payload` shape is renderer-specific and typed at the bundle layer. On trunk today only one view ships (`knowledge-activity-recent`, a timeline stub from the seed_p2b bundle) whose payload is always `{"entries": []}` — the real activity-feed wiring is tracked as W3-WEB-3 follow-up work. Concretely:
+
+```json
+{
+  "view_id": "knowledge-activity-recent",
+  "payload": { "entries": [] }
+}
+```
 
 **Errors:** `404 workbench_view_not_found` — returned both when `view_id` is not registered AND when the caller's scopes do not admit an existing-but-scope-gated view. The two cases are deliberately indistinguishable to avoid leaking existence of scope-restricted views (callers without admin scope get 404, not 403, on views they shouldn't know exist).
 
