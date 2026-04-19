@@ -59,6 +59,104 @@ impl QuotaEnforcer for InMemoryQuotaEnforcer {
     }
 }
 
+/// Postgres-backed quota enforcer (ISSUE 11 TASK 11.3).
+///
+/// `check_pre` delegates to the `QuotaSnapshot` the middleware
+/// already loaded (same as the in-memory path). The value of a pg
+/// enforcer is in `record_post`: we run one UPDATE against
+/// `quota_configs` that increments both `daily_used_cents` and
+/// `monthly_used_cents`, with CASE-expression rollover logic:
+/// - If `usage_day != CURRENT_DATE`, reset the daily counter to
+///   `$cost` (this request's cost).
+/// - If `usage_day`'s month differs from CURRENT_DATE's month,
+///   reset the monthly counter to `$cost`.
+///
+/// No background rollover job — the first post-rollover request
+/// does the zeroing. Fire-and-forget: errors are logged but never
+/// propagate (we already served the request; the snapshot on the
+/// next check will reflect the post-increment state).
+pub struct PgQuotaEnforcer {
+    pool: sqlx::PgPool,
+}
+
+impl PgQuotaEnforcer {
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl QuotaEnforcer for PgQuotaEnforcer {
+    async fn check_pre(
+        &self,
+        tenant_id: Uuid,
+        snapshot: &QuotaSnapshot,
+    ) -> Result<QuotaToken, GadgetronError> {
+        // The middleware already pre-fetched the snapshot at request
+        // entry so this check is hot-path and allocation-free.
+        // Future TASKs may replace this with a per-request fresh
+        // query to catch races between concurrent requests, but for
+        // ISSUE 11 the snapshot reflects reality closely enough
+        // given the rate-limit gate upstream.
+        if snapshot.remaining_daily_cents() <= 0 {
+            return Err(GadgetronError::QuotaExceeded { tenant_id });
+        }
+        Ok(QuotaToken::new(tenant_id, 0))
+    }
+
+    async fn record_post(&self, token: &QuotaToken, actual_cost_cents: i64) {
+        token.mark_used();
+        let res = sqlx::query(
+            r#"
+            UPDATE quota_configs
+            SET
+                daily_used_cents = CASE
+                    WHEN usage_day = CURRENT_DATE THEN daily_used_cents + $2
+                    ELSE $2
+                END,
+                monthly_used_cents = CASE
+                    WHEN DATE_TRUNC('month', usage_day::timestamp)
+                       = DATE_TRUNC('month', CURRENT_DATE::timestamp)
+                    THEN monthly_used_cents + $2
+                    ELSE $2
+                END,
+                usage_day = CURRENT_DATE,
+                updated_at = NOW()
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(token.tenant_id)
+        .bind(actual_cost_cents)
+        .execute(&self.pool)
+        .await;
+        match res {
+            Ok(result) if result.rows_affected() == 0 => {
+                tracing::warn!(
+                    target: "quota.pg",
+                    tenant_id = %token.tenant_id,
+                    "quota_configs row missing — usage increment skipped"
+                );
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    target: "quota.pg",
+                    tenant_id = %token.tenant_id,
+                    actual_cost_cents,
+                    "usage incremented"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "quota.pg",
+                    tenant_id = %token.tenant_id,
+                    error = %e,
+                    "failed to increment tenant usage — drift until next reset"
+                );
+            }
+        }
+    }
+}
+
 /// Composite enforcer that runs a per-tenant rate-limit check
 /// BEFORE delegating the cost-based snapshot check to an inner
 /// enforcer (ISSUE 11 TASK 11.2).

@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.2** (post-ISSUE 11 TASK 11.2 — token-bucket rate limiter)
+**Current version: 0.5.3** (post-ISSUE 11 TASK 11.3 — pg-backed spend tracking)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -259,8 +259,14 @@ from "self-host" to "accounts you sell."
     5 unit tests pin bucket semantics (within burst, exceeds burst
     with retry hint, refill after wait, disabled limiter, per-tenant
     isolation).
-  - TASK 11.3 — Postgres-backed daily/monthly spend tracking that
-    actually increments on `record_post`.
+  - TASK 11.3 ✅ — Postgres-backed spend tracking (0.5.2 → 0.5.3).
+    New `PgQuotaEnforcer` runs one UPDATE per `record_post` against
+    `quota_configs`, incrementing `daily_used_cents` +
+    `monthly_used_cents` with CASE-expression rollover so the
+    counters zero on day / month boundaries without a background
+    job. Migration adds `usage_day DATE` column; CLI picks
+    `PgQuotaEnforcer` when a pool is available, else falls back to
+    the in-memory enforcer.
   - TASK 11.4 — `/web` UI surface for the 429 path (quota status
     banner, retry countdown).
 - **ISSUE 12 — integer-cent billing**: metering pipeline, usage → invoice
