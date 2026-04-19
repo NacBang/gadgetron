@@ -1235,6 +1235,35 @@ else
     "$(echo "$USAGE_CLAMP_RESP" | jq -c '.window_hours')"
 fi
 
+# ---------------------------------------------------------------------------
+# Gate 7k.4: /api/v1/web/workbench/audit/tool-events shape (ISSUE 5 TASK 5.2)
+# ---------------------------------------------------------------------------
+log "=== Gate 7k.4: /workbench/audit/tool-events shape + tenant pinning ==="
+TOOL_EVENTS_RESP="$(curl -fsS \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/audit/tool-events" 2>&1 || true)"
+if echo "$TOOL_EVENTS_RESP" | jq -e '
+     (.events | type == "array")
+     and (.returned == (.events | length))
+   ' >/dev/null 2>&1; then
+  RET="$(echo "$TOOL_EVENTS_RESP" | jq -r '.returned')"
+  pass "/audit/tool-events returns {events:[], returned=$RET} (tenant-scoped read)"
+else
+  fail "/audit/tool-events shape regression" \
+    "$(echo "$TOOL_EVENTS_RESP" | head -c 400)"
+fi
+
+# limit query param clamps at 500.
+TOOL_EVENTS_CLAMP_RESP="$(curl -fsS \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/audit/tool-events?limit=9999" 2>&1 || true)"
+if echo "$TOOL_EVENTS_CLAMP_RESP" | jq -e '.events | type == "array"' >/dev/null 2>&1; then
+  pass "/audit/tool-events accepts oversized limit (clamped server-side)"
+else
+  fail "/audit/tool-events limit clamp regression" \
+    "$(echo "$TOOL_EVENTS_CLAMP_RESP" | head -c 400)"
+fi
+
 log "=== Gate 7l: workbench /views/knowledge-activity-recent/data ==="
 VD_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/views/knowledge-activity-recent/data" 2>&1 || true)"

@@ -70,6 +70,27 @@ pub enum ActivityEvent {
         state: String,
         resolved_by_user_id: Uuid,
     },
+    /// One Penny tool call finished (success or error). Emitted from
+    /// the GadgetAuditEventWriter when an `ActivityBus` handle is
+    /// wired (ISSUE 5 TASK 5.3) — mirrors the `ActionCompleted`
+    /// shape so the dashboard can treat both audit planes uniformly
+    /// in its live feed.
+    ///
+    /// `tenant_id` is `Uuid::nil()` when the upstream
+    /// `GadgetAuditEvent` reports a missing / None tenant_id
+    /// string — the dashboard filters those out client-side.
+    ToolCallCompleted {
+        tenant_id: Uuid,
+        tool_name: String,
+        category: String,
+        /// `"read"` / `"write"` / `"destructive"`.
+        tier: String,
+        /// `"success"` / `"error"`.
+        outcome: String,
+        error_code: Option<String>,
+        elapsed_ms: i64,
+        conversation_id: Option<String>,
+    },
 }
 
 impl ActivityEvent {
@@ -80,6 +101,7 @@ impl ActivityEvent {
             Self::ChatCompleted { tenant_id, .. } => *tenant_id,
             Self::ActionCompleted { tenant_id, .. } => *tenant_id,
             Self::ApprovalResolved { tenant_id, .. } => *tenant_id,
+            Self::ToolCallCompleted { tenant_id, .. } => *tenant_id,
         }
     }
 }

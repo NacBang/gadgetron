@@ -792,6 +792,56 @@ pub async fn list_audit_events(
     Ok(Json(AuditEventsResponse { events, returned }))
 }
 
+/// Query parameters for `GET /audit/tool-events` (Penny tool-call
+/// audit, ISSUE 5 TASK 5.2).
+#[derive(Debug, Deserialize)]
+pub struct ToolAuditEventsQuery {
+    pub tool_name: Option<String>,
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: Option<i64>,
+}
+
+/// Response shape for `GET /audit/tool-events`.
+#[derive(Debug, serde::Serialize)]
+pub struct ToolAuditEventsResponse {
+    pub events: Vec<gadgetron_xaas::audit::ToolAuditRow>,
+    pub returned: usize,
+}
+
+/// `GET /audit/tool-events` — tenant-scoped read over
+/// `tool_audit_events` (Penny tool-call trail).
+///
+/// Mirrors `/audit/events` shape but queries the OTHER audit plane.
+/// Both endpoints exist so the dashboard can pull action + tool
+/// events into two side-by-side panels without a UNION at DB level.
+pub async fn list_tool_audit_events(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<ToolAuditEventsQuery>,
+) -> Result<Json<ToolAuditEventsResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "tool audit query requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let filter = gadgetron_xaas::audit::ToolAuditQueryFilter {
+        tenant_id: ctx.tenant_id.to_string(),
+        tool_name: query.tool_name,
+        since: query.since,
+        limit,
+    };
+    let events = gadgetron_xaas::audit::query_tool_audit_events(pool, &filter)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "tool audit query failed: {e}"
+            )))
+        })?;
+    let returned = events.len();
+    Ok(Json(ToolAuditEventsResponse { events, returned }))
+}
+
 /// `POST /actions/:action_id` — direct action invocation.
 ///
 /// Requires the action service to be wired in `GatewayWorkbenchService`.
@@ -882,6 +932,8 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/approvals/{approval_id}/deny", post(deny_action))
         // ISSUE 3 TASK 3.4 — tenant-scoped audit event query.
         .route("/audit/events", get(list_audit_events))
+        // ISSUE 5 TASK 5.2 — Penny tool-call audit surface.
+        .route("/audit/tool-events", get(list_tool_audit_events))
         // ISSUE 4 TASK 4.1 — operator usage summary rollup.
         .route("/usage/summary", get(get_usage_summary))
         // ISSUE 4 TASK 4.3 — live activity WebSocket feed.

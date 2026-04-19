@@ -204,6 +204,7 @@ fn make_state_with_coordinator() -> (AppState, Arc<InMemoryActivityCaptureStore>
         penny_assembler: None,
         activity_capture_store: Some(store.clone()),
         candidate_coordinator: Some(coord),
+        activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
     };
 
     (state, store)

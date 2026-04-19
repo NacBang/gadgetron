@@ -131,6 +131,7 @@ impl StreamEndGuard {
     /// wired, the amendment path also publishes a `ChatCompleted`
     /// event so the /events/ws subscribers see the streaming-chat
     /// completion in real time (ISSUE 4 TASK 4.4).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_activity_bus(
         audit_writer: Arc<AuditWriter>,
         coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
