@@ -59,6 +59,20 @@ pub struct WebConfig {
     /// malformed file can't take the workbench down.
     #[serde(default)]
     pub catalog_path: Option<String>,
+    /// Optional path to a directory of `bundle.toml` manifests (one per
+    /// immediate subdirectory). When set, the reload handler loads
+    /// every manifest, merges their view/action descriptors into a
+    /// single catalog, and swaps it in atomically (ISSUE 9 TASK 9.2).
+    ///
+    /// Precedence when both are set: `bundles_dir` wins over
+    /// `catalog_path`. Neither set → falls back to the hardcoded
+    /// `seed_p2b()` seed catalog.
+    ///
+    /// Duplicate view or action ids across bundles surface as a
+    /// hard error so a collision can't silently swallow one
+    /// bundle's actions.
+    #[serde(default)]
+    pub bundles_dir: Option<String>,
 }
 
 fn default_web_enabled() -> bool {
@@ -74,6 +88,7 @@ impl Default for WebConfig {
             enabled: default_web_enabled(),
             api_base_path: default_api_base_path(),
             catalog_path: None,
+            bundles_dir: None,
         }
     }
 }

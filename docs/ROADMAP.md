@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.6** (post-ISSUE 9 TASK 9.1 bundle metadata)
+**Current version: 0.4.7** (post-ISSUE 9 TASK 9.2 multi-bundle aggregation)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -161,8 +161,14 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     First-party bundle shipped at `bundles/gadgetron-core/bundle.toml`
     mirroring `seed_p2b()` exactly (guarded by a drift test that
     asserts both catalogs produce the same action id set).
-  - TASK 9.2 — multi-bundle aggregation (load a bundle directory,
-    merge all manifests into one catalog; collision handling).
+  - TASK 9.2 ✅ — multi-bundle aggregation (0.4.6 → 0.4.7). New
+    `[web] bundles_dir` config key + `DescriptorCatalog::from_bundle_dir()`
+    scan every `<dir>/<name>/bundle.toml`, merge into one catalog.
+    Duplicate action/view ids across bundles surface as a hard
+    error naming both bundles — no silent winners. Reload response
+    gains `bundles: [BundleMetadata, ...]` so admin tooling shows
+    every contributing bundle. Precedence: `bundles_dir` >
+    `catalog_path` > `seed_p2b` fallback.
   - TASK 9.3 — `seed_p2b()` retired in favor of shipping
     `bundles/gadgetron-core/` as the default source.
 
