@@ -280,8 +280,27 @@ from "self-host" to "accounts you sell."
 check (11.2) → pg cost check (11.3) → dispatch → pg record_post
 increment (11.3). Rejections carry structured 429 +
 Retry-After (11.1). Tenants introspect usage via /quota/status
-(11.4). EPIC 4 still has ISSUEs 12 (billing), 13 (HF catalog),
-14 (tenant self-service) before close + `v1.0.0`.
+(11.4). ISSUE 11 covers the **fail-closed enforcement** half of
+EPIC 4 — even if commercialization ships later, quotas + rate
+limits are already production infrastructure for abuse / DoS
+defense, independent of billing monetization.
+
+**Scope direction (2026-04-20).** ISSUE 12 (integer-cent
+billing), ISSUE 13 (HF catalog monetization), ISSUE 14 (tenant
+self-service / sign-up / org hierarchy) are the
+**commercialization layer** of EPIC 4 and are now scheduled as
+**deferred / opportunistic**, not gate-blockers for `v1.0.0`.
+The v1.0.0 "first production release" cut can land once the
+core product surfaces (knowledge layer + Penny + bundle / plug
+platform + multi-user login via Google OAuth + quotas + rate
+limits + observability) meet the production bar. Drift fixes
+that document billing code **already on trunk** (e.g. TASK 12.1
+`billing_events` ledger) remain in scope — what's deprioritized
+is proactively shipping the remaining billing / HF / onboarding
+TASKs. EPIC 4 "complete" for the purpose of the `v1.0.0` tag no
+longer implies every ISSUE 12+13+14 TASK has landed; those can
+ship as post-1.0 patch / minor bumps once market pull justifies
+the work.
 ### In-flight ISSUE (12)
 - **ISSUE 12 — integer-cent billing** (in-flight; 0.5.5 ships TASK 12.1)
   - TASK 12.1 ✅ — billing ledger writer + query endpoint (0.5.4 →
@@ -299,8 +318,7 @@ Retry-After (11.1). Tenants introspect usage via /quota/status
 - **ISSUE 14 — tenant self-service**: sign-up, key rotation, org/team
   hierarchy, role-scoped API keys.
 
-Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
-(first production-ready release — major bump because API stabilizes).
+Heavily cross-cuts `gadgetron-xaas` crate. **Close criteria (revised 2026-04-20)**: EPIC 4 "close" for the `v1.0.0` tag is satisfied by ISSUE 11 (quotas + rate limits) landing alongside core product surfaces meeting production bar — integer-cent billing (12) / HF catalog (13) / tenant self-service (14) are **deferred / opportunistic** and do not block the release cut. Any of 12 / 13 / 14 TASKs still wanted post-1.0 ship as patch / minor bumps on top. Close → **tag `v1.0.0`** (first production-ready release — major bump because API stabilizes).
 
 ## EPIC 5 — Cluster platform (2-3 months, post-1.0)
 
@@ -320,7 +338,7 @@ no tag.
 - `v0.3.0` — EPIC 1 complete
 - `v0.4.0` — EPIC 2 complete
 - `v0.5.0` — EPIC 3 complete
-- `v1.0.0` — EPIC 4 complete (first production release)
+- `v1.0.0` — EPIC 4 "complete for 1.0" (ISSUE 11 + core product surfaces; ISSUE 12/13/14 commercialization layer deferred per 2026-04-20 scope direction, can ship post-1.0)
 - `v2.0.0` — EPIC 5 complete
 
 ## Updating this document
