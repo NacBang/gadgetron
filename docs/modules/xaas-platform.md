@@ -468,7 +468,7 @@ pub struct AuditEntry {
     pub output_tokens: u32,
     pub latency_ms: u32,
     pub status_code: u16,
-    pub cost_cents: i64,                // D-8: i64 cents (Phase 1 은 0)
+    pub cost_cents: i64,                // D-8: i64 cents (P2B / ISSUE 4 PR #194 부터 실 값; 그 이전은 0)
     pub timestamp: DateTime<Utc>,
 }
 ```
@@ -630,7 +630,7 @@ Phase 1 HTTP status 매핑 전체 테이블은 `docs/design/xaas/phase1.md §2.4
 
 ## 8. 과금 엔진 `[P2]`
 
-> **Phase 1 에서는 `cost_cents` 를 `audit_log` 에 기록만 합니다** (항상 0). 실제 계산 로직은 Phase 2 에서 추가.
+> **Phase 1 에서는 `cost_cents` 를 `audit_log` 에 기록만 했습니다** (항상 0). **P2B / ISSUE 4 PR #194** 가 `gadgetron_core::pricing` 모듈을 추가하여 모델별 pricing 테이블을 기반으로 chat audit 경로에서 실 값을 계산·기록하기 시작했습니다. `/api/v1/web/workbench/usage/summary` 의 `chat.total_cost_cents` 가 이 값을 윈도 sum 으로 노출합니다. 본 §8 아래의 LedgerEntry / 과금 파이프라인은 여전히 EPIC 4 (ISSUE 12) 스코프로 별도 ISSUE 입니다.
 
 ### 8.1 LedgerEntry 모델 (D-8)
 
