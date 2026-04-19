@@ -336,6 +336,21 @@ pub fn build_router(state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
+        // ISSUE 15 TASK 15.1 — cookie session endpoints. Not Bearer-authed;
+        // login handles its own email/password check, logout/whoami read
+        // the session cookie. Safe to mount publicly.
+        .route(
+            "/api/v1/auth/login",
+            post(crate::auth_session::login_handler),
+        )
+        .route(
+            "/api/v1/auth/logout",
+            post(crate::auth_session::logout_handler),
+        )
+        .route(
+            "/api/v1/auth/whoami",
+            get(crate::auth_session::whoami_handler),
+        )
         .with_state(state); // state moved here (last consumer)
 
     Router::new()
