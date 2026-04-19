@@ -256,8 +256,6 @@ Gemini uses the default Google AI Studio endpoint; there is no `endpoint` or `ba
 
 #### vLLM
 
-Available as of Sprint 4.
-
 ```toml
 [providers.gemma4]
 type = "vllm"
@@ -265,17 +263,13 @@ type = "vllm"
 # (required) Full URL to your vLLM instance, including port.
 # Override with an environment variable if needed: endpoint = "${VLLM_ENDPOINT}"
 endpoint = "http://10.100.1.5:8100"
-
-# (required) List of model IDs this provider can serve.
-# Must match the model name as vLLM knows it (--served-model-name or default).
-models = ["gemma-4-27b-it"]
 ```
+
+`ProviderConfig::Vllm` accepts only `endpoint` and optional `api_key` — there is **no `models` field**. Gadgetron discovers the served models from vLLM's OpenAI-compatible `GET /v1/models` endpoint at runtime (same pattern as Ollama). If the model list is empty or missing, verify the vLLM server is running and that its `--served-model-name` / `--model` arguments are set (see [vLLM: OpenAI-Compatible Server](https://docs.vllm.ai/en/stable/serving/openai_compatible_server/)).
 
 vLLM does not require an API key when running in its default open mode. If your vLLM instance has `--api-key` configured, add `api_key = "${VLLM_API_KEY}"`.
 
 #### SGLang
-
-Available as of Sprint 4.
 
 ```toml
 [providers.glm]
@@ -283,10 +277,9 @@ type = "sglang"
 
 # (required) Full URL to your SGLang instance, including port.
 endpoint = "http://10.100.1.110:30000"
-
-# (required) List of model IDs this provider can serve.
-models = ["glm-4-9b-chat"]
 ```
+
+`ProviderConfig::Sglang` accepts only `endpoint` and optional `api_key` — there is **no `models` field**. Gadgetron discovers the served model from SGLang's OpenAI-compatible `GET /v1/models` endpoint at runtime (see [SGLang: OpenAI APIs](https://docs.sglang.io/basic_usage/openai_api_completions.html)). SGLang typically serves one model per process.
 
 SGLang does not require an API key by default. For reasoning models such as GLM-5.1, Gadgetron forwards the `reasoning_content` field in the response if the model returns it. See [api-reference.md](api-reference.md) for the field description.
 

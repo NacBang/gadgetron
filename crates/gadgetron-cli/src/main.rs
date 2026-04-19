@@ -2263,7 +2263,6 @@ const ANNOTATED_CONFIG_TEMPLATE: &str = r#"# Gadgetron Configuration
 bind = "0.0.0.0:8080"
 
 # Request timeout in milliseconds. Requests exceeding this are cancelled.
-# Env override: GADGETRON_REQUEST_TIMEOUT_MS
 request_timeout_ms = 30000
 
 # ---------------------------------------------------------------------------

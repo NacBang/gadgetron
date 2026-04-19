@@ -120,4 +120,4 @@ python3 eval/run_eval.py --no-report              # 리포트 파일 생략
   실패하면 `wiki-roundtrip` 부터 다시 돌리십시오.
 - 평가는 실제 Claude Code 서브프로세스를 띄우므로 Penny 전체 파이프라인
   (MCP stdio, SearXNG 라운드트립 포함)의 진짜 latency를 측정합니다.
-  Round 1 기준 로컬 맥북에서 6 시나리오 전체가 약 70초 내에 끝납니다.
+  8 시나리오 전체가 로컬 맥북에서 1분대에 끝나는 것이 일반적입니다 (정확한 wall-clock은 네트워크·SearXNG 응답 시간에 따라 변동).
