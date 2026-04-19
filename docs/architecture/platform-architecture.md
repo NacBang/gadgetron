@@ -658,7 +658,7 @@ impl GadgetronError {
 // Provider           → 502
 // Routing            → 502
 // StreamInterrupted  → 502 (연결 종료 + audit)
-// QuotaExceeded      → 429   ← 429 responses alone carry both `Retry-After: 60` HTTP header AND `retry_after_seconds: 60` in the JSON body (ISSUE 11 TASK 11.1 / v0.5.1 / PR #230). `ApiError::into_response` 가 `status == TOO_MANY_REQUESTS` 일 때만 두 surface 를 widen; 다른 4xx (403/401/404) 는 base shape 유지 — `Retry-After` 는 RFC 7231 semantics 상 SDK auto-retry 가 act 하는 surface 이므로 permanent 실패에 싣지 않음. `QUOTA_RETRY_AFTER_SECONDS = 60` 은 conservative constant, TASK 11.2 이 `QuotaToken` 을 통해 real refill 시간을 전달할 예정.
+// QuotaExceeded      → 429   ← 429 responses alone carry both `Retry-After: 60` HTTP header AND `retry_after_seconds: 60` in the JSON body (ISSUE 11 TASK 11.1 / v0.5.1 / PR #230). `ApiError::into_response` 가 `status == TOO_MANY_REQUESTS` 일 때만 두 surface 를 widen; 다른 4xx (403/401/404) 는 base shape 유지 — `Retry-After` 는 RFC 7231 semantics 상 SDK auto-retry 가 act 하는 surface 이므로 permanent 실패에 싣지 않음. `QUOTA_RETRY_AFTER_SECONDS = 60` 은 conservative constant; TASK 11.2 / PR #231 shipped `TokenBucketRateLimiter` 하지만 real refill 시간을 `QuotaToken` 으로 전달하는 작업은 shipped 되지 않음 — currently-numbered ISSUE 11 TASKs (11.3 Postgres spend tracking + 11.4 `/web` 429 UI) 중 어느 것에도 포함되지 않은 미래 follow-up 임.
 // TenantNotFound     → 401
 // Forbidden          → 403   ← B-8 정정 (v0: 401 오류)
 // Billing            → 402
