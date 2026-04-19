@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-bundle-document-formats"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "gadgetron-core",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1274,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-gateway"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-knowledge"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-node"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-penny"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-provider"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-router"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-scheduler"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-testing"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-tui"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-web"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "axum",
  "axum-test",
@@ -1510,10 +1510,11 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-xaas"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "chrono",
+ "dashmap",
  "gadgetron-core",
  "hex",
  "moka",
