@@ -21,7 +21,7 @@ use gadgetron_knowledge::service::KnowledgeService;
 use uuid::Uuid;
 
 use super::workbench::{WorkbenchHttpError, WorkbenchProjectionService};
-use crate::web::catalog::DescriptorCatalog;
+use crate::web::catalog::CatalogSnapshot;
 
 // ---------------------------------------------------------------------------
 // InProcessWorkbenchProjection
@@ -37,13 +37,11 @@ pub struct InProcessWorkbenchProjection {
     pub knowledge: Option<Arc<KnowledgeService>>,
     /// Gateway crate version string (use `env!("CARGO_PKG_VERSION")`).
     pub gateway_version: &'static str,
-    /// Shared descriptor snapshot — atomically swappable via
-    /// `POST /api/v1/web/workbench/admin/reload-catalog` (ISSUE 8
-    /// TASK 8.1). Every read loads the current `Arc<DescriptorCatalog>`
-    /// so in-flight requests keep reading their snapshot while a
-    /// reload swaps the pointer for future requests. O(1) `Arc::clone`
-    /// on reload; no allocation on read.
-    pub descriptor_catalog: Arc<ArcSwap<DescriptorCatalog>>,
+    /// Shared catalog snapshot — atomically swappable via
+    /// `POST /api/v1/web/workbench/admin/reload-catalog` (ISSUE 8).
+    /// Bundles the `DescriptorCatalog` and its pre-compiled validators
+    /// so a reload replaces BOTH in one atomic swap.
+    pub descriptor_catalog: Arc<ArcSwap<CatalogSnapshot>>,
 }
 
 #[async_trait]
@@ -163,8 +161,8 @@ impl WorkbenchProjectionService for InProcessWorkbenchProjection {
         // Drift-fix follow-up to PR 7 (doc-10): the handler now threads
         // the caller's real scopes through instead of the old hardcoded
         // `[Scope::OpenAiCompat]` placeholder.
-        let catalog = self.descriptor_catalog.load();
-        let views = catalog.visible_views(actor_scopes);
+        let snapshot = self.descriptor_catalog.load();
+        let views = snapshot.catalog.visible_views(actor_scopes);
         Ok(WorkbenchRegisteredViewsResponse { views })
     }
 
@@ -177,8 +175,9 @@ impl WorkbenchProjectionService for InProcessWorkbenchProjection {
         // view, surface `ViewNotFound` (404) rather than 403 so we
         // don't leak existence of scope-restricted views per doc
         // §2.4.1.
-        let catalog = self.descriptor_catalog.load();
-        let descriptor = catalog
+        let snapshot = self.descriptor_catalog.load();
+        let descriptor = snapshot
+            .catalog
             .visible_views(actor_scopes)
             .into_iter()
             .find(|v| v.id == view_id)
@@ -203,8 +202,8 @@ impl WorkbenchProjectionService for InProcessWorkbenchProjection {
         &self,
         actor_scopes: &[gadgetron_core::context::Scope],
     ) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError> {
-        let catalog = self.descriptor_catalog.load();
-        let actions = catalog.visible_actions(actor_scopes);
+        let snapshot = self.descriptor_catalog.load();
+        let actions = snapshot.catalog.visible_actions(actor_scopes);
         Ok(WorkbenchRegisteredActionsResponse { actions })
     }
 }

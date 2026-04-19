@@ -73,7 +73,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
         knowledge: None,
         gateway_version: "0.0.0-test",
         descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-            DescriptorCatalog::seed_p2b(),
+            DescriptorCatalog::seed_p2b().into_snapshot(),
         )),
     });
     AppState {
