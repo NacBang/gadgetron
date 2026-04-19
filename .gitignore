@@ -16,3 +16,11 @@
 # Per AGENTS.md the project is tool-independent — adapters stay user-level
 # (e.g. ~/.claude/agents/) and do not ship in the repo.
 /.claude/
+
+# graphify: cache directory + volatile scratch files regenerated on every
+# commit / pull via the post-* hooks. The curated surfaces
+# (`GRAPH_REPORT.md`, `graph.json`, `graph.html`) stay committed; the
+# cache / scratch files do not — they produce diff churn on every commit
+# without adding reviewable signal.
+graphify-out/cache/
+graphify-out/.graphify_*
