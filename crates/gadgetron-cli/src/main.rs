@@ -132,6 +132,18 @@ enum Commands {
         command: KeyCmd,
     },
 
+    /// Manage users (ISSUE 14 TASK 14.7). Requires PostgreSQL.
+    User {
+        #[command(subcommand)]
+        command: UserCmd,
+    },
+
+    /// Manage teams (ISSUE 14 TASK 14.7). Requires PostgreSQL.
+    Team {
+        #[command(subcommand)]
+        command: TeamCmd,
+    },
+
     /// Generate an annotated gadgetron.toml in the current directory.
     ///
     /// If stdin is a TTY, prompts for each field interactively.
@@ -356,6 +368,54 @@ enum KeyCmd {
     },
 }
 
+/// Subcommands for `gadgetron user` (ISSUE 14 TASK 14.7).
+#[derive(Subcommand)]
+enum UserCmd {
+    /// Create a user in the default tenant.
+    Create {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        name: String,
+        /// `member`, `admin`, or `service`.
+        #[arg(long, default_value = "member")]
+        role: String,
+        /// Name of an env var carrying the password. Omit for `service`.
+        /// e.g. --password-env GAD_USER_PASSWORD, with that env set before run.
+        #[arg(long)]
+        password_env: Option<String>,
+    },
+    /// List users in the default tenant.
+    List,
+    /// Delete a user. Applies the single-admin guard.
+    Delete {
+        #[arg(long)]
+        user_id: Uuid,
+    },
+}
+
+/// Subcommands for `gadgetron team` (ISSUE 14 TASK 14.7).
+#[derive(Subcommand)]
+enum TeamCmd {
+    /// Create a team in the default tenant.
+    Create {
+        /// kebab-case id (e.g., "platform"). Max 32 chars. 'admins' is reserved.
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List teams in the default tenant.
+    List,
+    /// Delete a team (CASCADE removes members).
+    Delete {
+        #[arg(long)]
+        id: String,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -410,6 +470,53 @@ async fn main() -> Result<()> {
         }) => {
             let pool = connect_pg().await?;
             key_revoke(&pool, key_id).await
+        }
+        Some(Commands::User {
+            command:
+                UserCmd::Create {
+                    email,
+                    name,
+                    role,
+                    password_env,
+                },
+        }) => {
+            let pool = connect_pg().await?;
+            cmd_user_create(&pool, email, name, role, password_env).await
+        }
+        Some(Commands::User {
+            command: UserCmd::List,
+        }) => {
+            let pool = connect_pg().await?;
+            cmd_user_list(&pool).await
+        }
+        Some(Commands::User {
+            command: UserCmd::Delete { user_id },
+        }) => {
+            let pool = connect_pg().await?;
+            cmd_user_delete(&pool, user_id).await
+        }
+        Some(Commands::Team {
+            command:
+                TeamCmd::Create {
+                    id,
+                    display_name,
+                    description,
+                },
+        }) => {
+            let pool = connect_pg().await?;
+            cmd_team_create(&pool, id, display_name, description).await
+        }
+        Some(Commands::Team {
+            command: TeamCmd::List,
+        }) => {
+            let pool = connect_pg().await?;
+            cmd_team_list(&pool).await
+        }
+        Some(Commands::Team {
+            command: TeamCmd::Delete { id },
+        }) => {
+            let pool = connect_pg().await?;
+            cmd_team_delete(&pool, id).await
         }
         Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
@@ -1079,6 +1186,136 @@ async fn key_revoke(pool: &sqlx::PgPool, key_id: Uuid) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE 14 TASK 14.7 — user + team CLI (default-tenant-scoped)
+// ---------------------------------------------------------------------------
+//
+// These subcommands target the hardcoded DEFAULT tenant
+// ('00000000-0000-0000-0000-000000000001'). Multi-tenant
+// management is out of P2B scope; extend when per-tenant CLI
+// flows are needed. All commands delegate to `gadgetron_xaas`
+// helpers so the logic is shared with the HTTP handlers.
+
+async fn cmd_user_create(
+    pool: &sqlx::PgPool,
+    email: String,
+    name: String,
+    role: String,
+    password_env: Option<String>,
+) -> Result<()> {
+    use gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID;
+    use gadgetron_xaas::identity::{create_user, Role};
+
+    let role_parsed = Role::parse(&role).ok_or_else(|| {
+        anyhow::anyhow!("role must be one of: member, admin, service (got '{role}')")
+    })?;
+    let password = match password_env {
+        Some(env) => Some(std::env::var(&env).map_err(|_| {
+            anyhow::anyhow!("env var {env} is not set (required for non-service users)")
+        })?),
+        None => None,
+    };
+    let row = create_user(
+        pool,
+        DEFAULT_TENANT_ID,
+        &email,
+        &name,
+        role_parsed,
+        password.as_deref(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("create_user: {e}"))?;
+    println!("User created: {}", row.id);
+    println!("  Email:        {}", row.email);
+    println!("  Display name: {}", row.display_name);
+    println!("  Role:         {}", row.role);
+    Ok(())
+}
+
+async fn cmd_user_list(pool: &sqlx::PgPool) -> Result<()> {
+    use gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID;
+    use gadgetron_xaas::identity::list_users;
+
+    let rows = list_users(pool, DEFAULT_TENANT_ID, 500)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_users: {e}"))?;
+    println!("Users in default tenant ({} rows):", rows.len());
+    for r in rows {
+        let active = if r.is_active { " " } else { "×" };
+        println!(
+            "  [{active}] {id}  {role:<7}  {email:<32}  {name}",
+            id = r.id,
+            role = r.role,
+            email = r.email,
+            name = r.display_name
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_user_delete(pool: &sqlx::PgPool, user_id: Uuid) -> Result<()> {
+    use gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID;
+    use gadgetron_xaas::identity::delete_user;
+
+    delete_user(pool, DEFAULT_TENANT_ID, user_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("delete_user: {e}"))?;
+    println!("User deleted: {user_id}");
+    Ok(())
+}
+
+async fn cmd_team_create(
+    pool: &sqlx::PgPool,
+    id: String,
+    display_name: String,
+    description: Option<String>,
+) -> Result<()> {
+    use gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID;
+    use gadgetron_xaas::teams::create_team;
+
+    let row = create_team(
+        pool,
+        DEFAULT_TENANT_ID,
+        &id,
+        &display_name,
+        description.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("create_team: {e}"))?;
+    println!("Team created: {}", row.id);
+    println!("  Display name: {}", row.display_name);
+    if let Some(d) = row.description.as_deref() {
+        println!("  Description:  {d}");
+    }
+    Ok(())
+}
+
+async fn cmd_team_list(pool: &sqlx::PgPool) -> Result<()> {
+    use gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID;
+    use gadgetron_xaas::teams::list_teams;
+
+    let rows = list_teams(pool, DEFAULT_TENANT_ID)
+        .await
+        .map_err(|e| anyhow::anyhow!("list_teams: {e}"))?;
+    println!("Teams in default tenant ({} rows):", rows.len());
+    for r in rows {
+        println!("  {id:<32}  {name}", id = r.id, name = r.display_name);
+    }
+    Ok(())
+}
+
+async fn cmd_team_delete(pool: &sqlx::PgPool, id: String) -> Result<()> {
+    use gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID;
+    use gadgetron_xaas::teams::delete_team;
+
+    delete_team(pool, DEFAULT_TENANT_ID, &id)
+        .await
+        .map_err(|e| anyhow::anyhow!("delete_team: {e}"))?;
+    println!("Team deleted: {id}");
     Ok(())
 }
 

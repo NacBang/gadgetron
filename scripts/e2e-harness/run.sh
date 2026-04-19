@@ -1599,6 +1599,73 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7v.4 — CLI user + team subcommands (ISSUE 14 TASK 14.7)
+# ---------------------------------------------------------------------------
+#
+# Exercise the `gadgetron user {create,list,delete}` + `gadgetron team
+# {create,list,delete}` flows against the harness's real Postgres.
+# These target the DEFAULT tenant (00000000-0000-0000-0000-000000000001)
+# where the bootstrap admin already lives. After each CLI op, parse
+# stdout and/or query the DB via `psql` (already available in the
+# harness env via docker compose postgres) to assert the effect.
+log "=== Gate 7v.4: CLI user + team subcommands (ISSUE 14 TASK 14.7) ==="
+
+# User create — use a scoped env var for the password to avoid shell expansion.
+export GAD_HARNESS_USER_PW="correct-horse-cli"
+CLI_USER_OUT="$ART_DIR/cli-user-create.log"
+if "$GAD_BIN" user create \
+    --email cli-harness@example.com \
+    --name "CLI Harness" \
+    --role member \
+    --password-env GAD_HARNESS_USER_PW \
+    >"$CLI_USER_OUT.stdout" 2>"$CLI_USER_OUT"; then
+  CLI_USER_ID="$(awk '/^User created:/ {print $3}' "$CLI_USER_OUT.stdout" | head -1)"
+  if [ -n "$CLI_USER_ID" ]; then
+    pass "gadgetron user create → $CLI_USER_ID"
+  else
+    fail "gadgetron user create: stdout missing UUID" "$(cat "$CLI_USER_OUT.stdout")"
+  fi
+else
+  fail "gadgetron user create" "$(cat "$CLI_USER_OUT")"
+fi
+
+CLI_USER_LIST="$("$GAD_BIN" user list 2>&1 || true)"
+if echo "$CLI_USER_LIST" | grep -q "cli-harness@example.com"; then
+  pass "gadgetron user list surfaces the new user"
+else
+  fail "gadgetron user list missing new user" "$(echo "$CLI_USER_LIST" | head -c 400)"
+fi
+
+if [ -n "${CLI_USER_ID:-}" ]; then
+  if "$GAD_BIN" user delete --user-id "$CLI_USER_ID" >"$ART_DIR/cli-user-delete.log" 2>&1; then
+    pass "gadgetron user delete succeeded"
+  else
+    fail "gadgetron user delete" "$(cat "$ART_DIR/cli-user-delete.log")"
+  fi
+fi
+
+# Team create
+if "$GAD_BIN" team create --id cli-harness-team --display-name "CLI Harness Team" \
+    >"$ART_DIR/cli-team-create.log" 2>&1; then
+  pass "gadgetron team create → cli-harness-team"
+else
+  fail "gadgetron team create" "$(cat "$ART_DIR/cli-team-create.log")"
+fi
+
+CLI_TEAM_LIST="$("$GAD_BIN" team list 2>&1 || true)"
+if echo "$CLI_TEAM_LIST" | grep -q "cli-harness-team"; then
+  pass "gadgetron team list surfaces the new team"
+else
+  fail "gadgetron team list missing team" "$(echo "$CLI_TEAM_LIST" | head -c 400)"
+fi
+
+if "$GAD_BIN" team delete --id cli-harness-team >"$ART_DIR/cli-team-delete.log" 2>&1; then
+  pass "gadgetron team delete succeeded"
+else
+  fail "gadgetron team delete" "$(cat "$ART_DIR/cli-team-delete.log")"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
 # ---------------------------------------------------------------------------
 #
