@@ -111,7 +111,7 @@ crates/gadgetron-xaas/
     │   ├── entry.rs                 # AuditEntry struct (chat audit)
     │   ├── writer.rs                # AuditWriter (mpsc channel -> batch insert, chat audit)
     │   ├── action_event.rs          # [P2B] ActionAuditEventWriter + ActionAuditRow + query_action_audit_events (direct-action audit, ISSUE 3 / 0.2.6 / PR #188) — core trait is `gadgetron_core::audit::ActionAuditSink`
-    │   └── tool_event.rs            # [EPIC 2] run_gadget_audit_writer + ToolAuditRow + ToolAuditQueryFilter + query_tool_audit_events (Penny tool-call audit, ISSUE 5 / 0.2.8 / PR #199) — core trait `gadgetron_core::audit::GadgetAuditEventSink` shipped in P2A; ISSUE 5 replaced the Noop sink with a Postgres consumer + query
+    │   └── tool_event.rs            # [EPIC 2] run_gadget_audit_writer + ToolAuditRow + ToolAuditQueryFilter + query_tool_audit_events (Penny tool-call audit, ISSUE 5 / 0.2.8 / PR #199); GadgetAuditEventWriter::with_coordinator() + gadget_audit_to_captured fan-out to CapturedActivityEvent { origin: Penny, kind: GadgetToolCall } (ISSUE 6 / 0.2.9 / PR #201) — core trait `gadgetron_core::audit::GadgetAuditEventSink` shipped in P2A; ISSUE 5 replaced the Noop sink with a Postgres consumer + query; ISSUE 6 added the coordinator fan-out so Penny tool calls also appear in `/workbench/activity` via the CapturedActivityEvent path
     ├── db/
     │   └── migrations/              # sqlx PostgreSQL migrations
     │       ├── 20260411000001_tenants.sql
