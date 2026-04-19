@@ -402,7 +402,7 @@ crates/gadgetron-gateway/src/
 3. **DescriptorCatalog**
    - 입력: `BundleRegistry`, `enabled_surface_families`, actor scope, bundle enabled state
    - 출력: filtered `WorkbenchViewDescriptor[]`, `WorkbenchActionDescriptor[]`
-   - 저장: immutable snapshot 을 `tokio::sync::RwLock<Arc<DescriptorSnapshot>>` 로 보관
+   - 저장: immutable snapshot 을 **`Arc<ArcSwap<DescriptorCatalog>>`** 로 보관 (EPIC 3 / ISSUE 8 TASK 8.1 / PR #211 — 원래 설계의 `tokio::sync::RwLock<Arc<DescriptorSnapshot>>` 에서 변경). 읽기 측 (`projection.rs` + `action_service.rs`) 은 매 요청마다 `load()` 로 `Arc<DescriptorCatalog>` 스냅샷을 획득하므로 in-flight 요청은 그 스냅샷 기준으로 마무리되고, 미래의 hot-reload 경로 (TASK 8.2 endpoint / 8.3 fs-watcher / 8.4 SIGHUP) 가 새 Catalog 를 만들어 `store(new)` 로 포인터를 atomic 하게 교체한다. RwLock 대비 writer 가 in-flight reader 를 block 하지 않는 `arc-swap` 의 hand-off 가 hot-reload 요구사항과 정확히 맞는다.
 4. **ActivityProjector**
    - 입력: Penny request timeline, direct action capture log, approval state changes, canonical writeback events
    - 출력: 시간 역순 `WorkbenchActivityEntry[]`
