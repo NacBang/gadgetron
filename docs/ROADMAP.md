@@ -280,8 +280,17 @@ from "self-host" to "accounts you sell."
 check (11.2) → pg cost check (11.3) → dispatch → pg record_post
 increment (11.3). Rejections carry structured 429 +
 Retry-After (11.1). Tenants introspect usage via /quota/status
-(11.4). EPIC 4 still has ISSUEs 12 (billing), 13 (HF catalog),
-14 (tenant self-service) before close + `v1.0.0`.
+(11.4). **Post-ISSUE-11 progress** (2026-04-19/20): ISSUE 12
+closed at telemetry scope (12.1 + 12.2 shipped; 12.3–12.5
+DEFERRED per 2026-04-20 commercialization-layer direction).
+ISSUE 14 closed via PR #246 / v0.5.7 — multi-user-foundation
+infrastructure, not commercialization; reclassified OUT of the
+original "12/13/14 deferred" bucket. ISSUE 15 TASK 15.1 closed
+via PR #248 / v0.5.8 (cookie-session login API). EPIC 4
+remaining before `v1.0.0`: ISSUE 13 (HF catalog — DEFERRED as
+commercialization layer) + ISSUE 16 (web UI login form +
+unified Bearer-or-cookie middleware + Google OAuth social
+login, non-commercialization multi-user completion).
 - **ISSUE 12 — billing event telemetry** ✅ closed at telemetry scope
   (invoicing deferred per user directive 2026-04-19 "과금과 같은 상업화는
   뒤로 미뤄도 된다")

@@ -1,13 +1,13 @@
 # 08 — Identity, Users, Teams, Admin (D1 / D2 / D7 / D8)
 
 > **담당**: PM (Claude)
-> **상태**: Approved
+> **상태**: Approved → **IMPLEMENTED on trunk** (post-PR-#246 / v0.5.7 closes ISSUE 14 — users/teams/team_members/user_sessions schema shipped via TASK 14.1, argon2id first-admin bootstrap via TASK 14.2, admin user CRUD via TASK 14.3, user self-service keys via TASK 14.4, team + member CRUD via TASK 14.5, `gadgetron user` + `gadgetron team` CLI via TASK 14.7. HTTP cookie-session login API shipped via PR #248 / ISSUE 15 TASK 15.1 / v0.5.8 — `POST /api/v1/auth/login` + `/logout` + `GET /whoami`. **Web UI login form + unified Bearer-or-cookie middleware + Google OAuth social login** still deferred to ISSUE 16 — only piece of this design doc not on trunk yet.)
 > **작성일**: 2026-04-18
-> **최종 업데이트**: 2026-04-18
+> **최종 업데이트**: 2026-04-18 (design) · 2026-04-20 (implementation landed: PR #246 + PR #248)
 > **Parent**: `docs/adr/ADR-P2A-08-multi-user-foundation.md`, `docs/process/04-decision-log.md` D-20260418-02
 > **Sibling**: [`09-knowledge-acl.md`](09-knowledge-acl.md), [`10-penny-permission-inheritance.md`](10-penny-permission-inheritance.md)
-> **Drives**: P2B 구현 — `users` / `teams` / `team_members` 스키마, user session, admin bootstrap, CLI/REST, web UI 로그인
-> **관련 크레이트**: `gadgetron-xaas` (스키마 + 인증 로직), `gadgetron-core` (타입), `gadgetron-gateway` (session middleware), `gadgetron-cli` (user/team 서브커맨드), `gadgetron-web` (로그인 UI)
+> **Drives**: P2B 구현 — `users` / `teams` / `team_members` 스키마 ✅ shipped, user session ✅ shipped, admin bootstrap ✅ shipped, CLI/REST ✅ shipped, web UI 로그인 ⏳ ISSUE 16
+> **관련 크레이트**: `gadgetron-xaas` (스키마 + 인증 로직) ✅, `gadgetron-core` (타입) ✅, `gadgetron-gateway` (session middleware) ✅, `gadgetron-cli` (user/team 서브커맨드) ✅, `gadgetron-web` (로그인 UI) ⏳ ISSUE 16
 > **Phase**: [P2B]
 
 ---
