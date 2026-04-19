@@ -693,11 +693,11 @@ curl -s http://localhost:8080/ready
 
 The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
 
-All eight routes are always mounted on trunk; the CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured.
+All thirteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` and `/audit/events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
-- `GET /views`, `GET /actions` — return the four descriptors in `seed_p2b` (see `GET /actions` below).
+- `GET /views`, `GET /actions` — return the five descriptors in `seed_p2b` (see `GET /actions` below; ISSUE 3 / v0.2.6 added `wiki-delete` as the fifth, the canonical approval-gated action).
 - `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:50-63`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
 
 **What is stubbed on trunk today:**
