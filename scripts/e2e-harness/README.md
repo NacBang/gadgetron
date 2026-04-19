@@ -17,8 +17,9 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; eight PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
-#175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e). Run
+refresh; nine PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
+#175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
+7h.8 — 64 → 69 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -36,14 +37,16 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7c | `/workbench/activity` | `{entries: [], is_truncated: bool}` shape |
 | 7d | `/workbench/knowledge-status` | `canonical_ready == true` + `search_ready` + `relation_ready` fields |
 | 7e | `/workbench/views` | non-empty array |
-| 7f | `/workbench/actions` | non-empty array |
+| 7f | `/workbench/actions` | non-empty array + 5 seed ids including `wiki-delete` (PR #188 widened `length >= 4` → `>= 5`) |
 | 7g | auth + scope (chat endpoint) | no-Bearer→401, bad-Bearer→401, Mgmt route via OpenAiCompat→403 |
 | 7h.0 | workbench subtree auth | workbench POST + GET without Bearer → 401 |
 | 7h.1 | happy-path POST `/actions/knowledge-search` | `.result.status ∈ {ok, pending_approval}` end-to-end |
 | 7h.1b | real Gadget dispatch populates `payload` | PR #175: `knowledge-search` returns non-empty `result.payload` from the registered `wiki.search` Gadget (proves `Arc<dyn GadgetDispatcher>` wiring) |
 | 7h.2 | replay cache hit | same `client_invocation_id` returns byte-identical body (PR #131 moka) |
 | 7h.3 | JSON-schema validation | `args.query` as integer → 400 (ActionInvalidArgs) |
-| 7h.6 | E2E wiki CRUD via workbench | PR #176: `wiki-write` → `knowledge-search` finds the new page → `wiki-read` returns its content, exercising all four seed actions |
+| 7h.6 | E2E wiki CRUD via workbench | PR #176: `wiki-write` → `knowledge-search` finds the new page → `wiki-read` returns its content, exercising four of the five seed actions (wiki-delete is the approval-gated fifth) |
+| 7h.7 | approval lifecycle (wiki-delete) | PR #188: seed a delete target via wiki-write, POST `/actions/wiki-delete` → `status=pending_approval` + `approval_id`, POST `/approvals/:id/approve` → dispatch resumes + `status=ok`, second approve of same id → 409 `workbench_approval_already_resolved` |
+| 7h.8 | `GET /audit/events` | PR #188: unfiltered GET returns the rows from prior gates (wiki-write + wiki-delete); `?action_id=wiki-write` narrows server-side (not client-side) |
 | 7h | action 404 on unknown id | POST `/actions/does-not-exist` → 404 |
 | 7i | `/v1/models` listing | `{object: "list", data: [...]}` |
 | 7j | `/favicon.ico` | 200 or 204 (public, no auth) |
