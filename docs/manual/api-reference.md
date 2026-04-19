@@ -839,9 +839,37 @@ curl -s http://localhost:8080/ready
 
 ## Workbench endpoints (Phase 2A)
 
-The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. Most endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes; the one exception is the `/admin/*` sub-tree added in ISSUE 8 TASK 8.2 (`POST /admin/reload-catalog` today), which requires `Management` and is checked by a dedicated rule in `scope_guard_middleware` that precedes the broader workbench match so workbench users cannot self-reload.
+The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell.
 
-All fifteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7, one tool-call audit route added in ISSUE 5 / v0.2.8, one admin hot-reload route added in ISSUE 8 TASK 8.2 / v0.4.2 under the new `/admin/` sub-tree which requires `Management` scope instead of `OpenAiCompat`). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` + `/audit/events` + `/audit/tool-events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`; Penny-attributed activity capture is skipped when `candidate_coordinator` is `None`, per ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query; PR #199 / v0.2.8 extended it for Penny tool-call audit persistence; PR #201 / v0.2.9 threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
+**Route inventory (fifteen routes, always mounted on trunk):**
+
+| Set | Count | Scope | Shipped in |
+|-----|-------|-------|-----------|
+| Read + action + evidence + knowledge-status + views + data + `/actions` list + invoke | 8 | `OpenAiCompat` | ISSUE 1–2 / v0.2.0–v0.2.5 |
+| Approval approve + deny + `GET /audit/events` | 3 | `OpenAiCompat` | ISSUE 3 / v0.2.6 (PR #188) |
+| `/usage/summary` + `/events/ws` | 2 | `OpenAiCompat` | ISSUE 4 / v0.2.7 (PR #194) |
+| `/audit/tool-events` | 1 | `OpenAiCompat` | ISSUE 5 / v0.2.8 (PR #199) |
+| `/admin/reload-catalog` | 1 | **`Management`** | ISSUE 8 TASK 8.2 / v0.4.2 (PR #213) |
+
+The `/admin/*` sub-tree is the one scope exception — `scope_guard_middleware` matches the `/admin/` prefix with `Management` **before** the broader workbench rule, so an OpenAiCompat workbench key cannot self-reload the catalog (returns 403 `scope_required`).
+
+**Degraded mode.** `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` (`crates/gadgetron-cli/src/main.rs:1256-1331`) returns `Some(...)` even when all four arguments are `None`. Per-subsystem fallbacks:
+
+- `bootstrap` + descriptor catalog — still reachable.
+- Gadget dispatch — returns empty payload.
+- Activity capture — no-op.
+- Approval store — falls back to in-memory.
+- `ActionAuditSink` — falls back to `NoopActionAuditSink`.
+- `/usage/summary`, `/audit/events`, `/audit/tool-events` — return 400 `config_error` without a pool.
+- `/events/ws` — opens against a zero-publisher `ActivityBus`.
+- Penny-attributed activity capture — skipped when `candidate_coordinator` is `None` (ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing).
+
+**Parameter-addition history** — how `build_workbench`'s signature grew over the EPIC 1/2 ISSUEs:
+
+- PR #188 / v0.2.6 — added `pg_pool` (fourth parameter) so the action-audit writer + approval store can take a Postgres pool when one is configured.
+- PR #194 / v0.2.7 — reused `pg_pool` for the usage rollup + audit query.
+- PR #199 / v0.2.8 — extended `pg_pool` use to Penny tool-call audit persistence.
+- PR #201 / v0.2.9 — threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
