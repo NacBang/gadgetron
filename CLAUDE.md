@@ -79,6 +79,54 @@ gstack is **recommended**, not mandatory — contributors who choose not to
 install it should document any ad-hoc browser automation they use so the
 team can triage drift.
 
+## Routine cycle workflow
+
+Before starting any implementation task, run the following sequence in
+order. This keeps the repo state coherent, the AST current, and the PR
+gate sharp:
+
+1. **Pull `main`** — `git fetch origin main && git pull --ff-only
+   origin main`. Check `git log --oneline HEAD..origin/main` for
+   surprises (new ADRs, config schema changes, breaking renames).
+2. **Refresh AST** — `graphify update .` (the post-merge hook does
+   this automatically on `git pull`; run manually when unsure).
+   `graphify-out/GRAPH_REPORT.md` is your first read on "where does
+   this live?" questions — see the `## graphify` section.
+3. **Audit / polish the harness** — open
+   `scripts/e2e-harness/run.sh`, scan for `TODO`, `FIXME`, stale
+   gates, hardcoded values that should be env-driven, duplicated
+   curl/jq patterns. Improve the harness BEFORE adding new gates —
+   a brittle harness produces flaky PR verdicts. Minimum polish
+   each cycle: fix one thing you notice.
+
+   Every cycle also re-asks two coverage questions:
+   **(a) docs ↔ harness parity** — every endpoint, config key,
+   and wire contract documented in `docs/manual/` or
+   `docs/design/` should have a harness assertion. Gaps = silent
+   drift waiting to happen.
+   **(b) implementation coverage** — every code path Gadgetron
+   ships (chat Ok/Err, streaming Ok/Err, workbench CRUD, action
+   invoke 200/404/403, SSE `[DONE]`, SSE error event, auth 401,
+   scope 403, quota 429, admission gates) should have at least
+   one gate. If `cargo test` is the only thing that exercises a
+   path, consider whether the harness ALSO needs to — integration
+   regressions hide in the wire-level gaps unit tests can't see.
+
+   Log gaps as `TODO(harness-coverage-N):` comments in
+   `run.sh` and burn them down over subsequent cycles.
+4. **Research similar implementations** — before landing any
+   non-trivial change, spend a pass on how others solved this. Web
+   search, blog posts, GitHub code search, research papers where
+   applicable. Capture the key insight in the PR body ("prior art:
+   X does Y; we adopt Z because …"). Don't reinvent what a
+   well-known pattern already solved; don't copy what doesn't fit.
+5. **Team consensus → decide → implement → test → PR → merge**.
+   Don't skip 1-4.
+
+Rule: if the cron loop is re-entering a cycle, steps 1-3 are
+mandatory every iteration. Step 4 scales with task novelty —
+trivial tweaks skip it, architecture changes require it.
+
 ## PR gate (E2E harness)
 
 **Every feature PR MUST make `./scripts/e2e-harness/run.sh` green before it
