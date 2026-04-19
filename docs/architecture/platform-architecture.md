@@ -4217,7 +4217,7 @@ Cross-ref: Axis C §2.C.4.5 for `terminationGracePeriodSeconds: 70` Helm value.
 | `GET /api/v1/usage` | 제공 | **minor 이내 안정** | 집계 필드 추가 | 기존 집계 필드 제거·단위 변경 (→ major bump) |
 | `GET /api/v1/costs` | 제공 | **minor 이내 안정** | 비용 필드 추가 | 기존 필드 제거·단위 변경 (→ major bump) |
 | `/api/v1/xaas/*` (테넌트·쿼터·감사) | 제공 | **Phase 2 안정화까지 불안정** | Phase 1 기간 중 breaking change 허용 (내부 운영용), Phase 2 이후 additive-only | Phase 2 안정화 이후 필드 제거 |
-| `/api/v1/web/workbench/*` (projection + actions + approvals + audit + usage + events ws) | 제공 (ISSUE 1–6, v0.2.0–v0.2.9) | **EPIC 1 close 이전 불안정, 이후 additive-only** | EPIC 1 (v0.3.0) 태그 전까지 응답 shape 변경 허용 (/web 클라이언트와 동시 rev). 태그 후 additive-only. 열세 개 개별 엔드포인트 목록은 `docs/manual/api-reference.md §Workbench endpoints` 참조 (하나의 SSOT). | v0.3.0 이후 기존 필드 제거·이름 변경·shape 재구성 (→ major bump) |
+| `/api/v1/web/workbench/*` (projection + actions + approvals + audit + usage + events ws) | 제공 (ISSUE 1–6, v0.2.0–v0.2.9) | **additive-only** (EPIC 1 CLOSED with v0.3.0 tag, PR #208) | 응답에 필드 추가만 허용 — 기존 필드 제거·이름 변경·shape 재구성 → major bump. 14 개 개별 엔드포인트 목록은 `docs/manual/api-reference.md §Workbench endpoints` 참조 (하나의 SSOT; ISSUE 5 / PR #199 가 14 번째 `/audit/tool-events` 를 추가). | 기존 필드 제거·이름 변경·shape 재구성 (→ major bump) |
 
 **SSE 이벤트 계약 (안정, Phase 1~3)**:
 - 스트림 청크: `data: {"id":"...","object":"chat.completion.chunk","choices":[...]}\n\n`
@@ -4247,6 +4247,13 @@ Cross-ref: Axis C §2.C.4.5 for `terminationGracePeriodSeconds: 70` Helm value.
 | `ModelState` | `gadgetron-core/src/node.rs` | **additive** | Phase 1 확정 variant: `Unloaded`, `Loading { since: Instant }`, `Running { port: u16, pid: u32 }`, `Failed { reason: String, failed_at: Instant }`, `Evicting`. Phase 2 추가 후보 없음 (현재). | yes |
 | `EvictionPolicy` | `gadgetron-core/src/scheduler.rs` | **additive** | Phase 1 확정 variant: `Lru`, `Priority`, `CostBased`, `WeightedLru { priority_weight: f32 }`. `CostBased`는 Phase 1에서 `ModelDeployment.priority: i32` 기반 stub — Phase 2에서 실 `$/token` 데이터 연결. `Fifo` [P2 candidate], `Manual` not in Phase 1. | yes |
 | `ParallelismConfig` | `gadgetron-core/src/scheduler.rs` | **stable** | Phase 1 필드: `tp_size: u32`, `pp_size: u32`, `ep_size: u32`, `dp_size: u32`, `numa_bind: Option<u32>`. Phase 2 이후 필드 추가 시 `#[serde(default)]`. | no |
+| `GadgetDispatcher` | `gadgetron-core/src/agent/tools.rs` | **stable** (P2A 이후 P2B / EPIC 2 사이클 내내 동일) | trait 자체 안정 — 새 메서드 추가 시 default impl `Err(GadgetError::NotImplemented)` 필수로 기존 impl 무중단. Dispatch 경로가 PR #175 (workbench) → PR #205 (`/v1/tools/{name}/invoke`, MCP invoke) 양쪽에서 재사용 됨. | N/A (trait) |
+| `GadgetCatalog` | `gadgetron-core/src/agent/tools.rs` | **stable** (EPIC 2 / ISSUE 7 TASK 7.1, PR #204) | `GadgetDispatcher` 와 동일한 crate-boundary 패턴 — 새 메서드 추가는 default impl 필수. schemas 확장은 `GadgetSchema` 필드 추가 (additive). | N/A (trait) |
+| `ActionAuditSink` | `gadgetron-core/src/audit/action.rs` | **stable** (P2B / ISSUE 3, PR #188) | sync send, fire-and-forget 의미론 영구. `ActionAuditEvent` enum 은 `#[non_exhaustive]`로 variant 추가 허용 (ApprovalGranted 같은 후속 variant 가 들어올 자리). | N/A (trait) |
+| `ActionAuditEvent` | `gadgetron-core/src/audit/action.rs` | **additive** (`#[non_exhaustive]`) | 현재 variant: `DirectActionCompleted`. 후속 ISSUE 에서 ApprovalGranted / ApprovalDenied / ApprovalTimedOut 등 추가 가능. | yes |
+| `ApprovalStore` | `gadgetron-core/src/workbench/approval.rs` | **stable** (P2B / ISSUE 3, PR #188) | async trait — create / get / mark_approved / mark_denied 네 메서드 확정. 새 상태 (`Cancelled` 등) 는 별도 메서드 추가 + `ApprovalState` variant 추가 로 수용. | N/A (trait) |
+| `ApprovalState` | `gadgetron-core/src/workbench/approval.rs` | **additive** (`#[non_exhaustive]`) | 현재 variant: `Pending`, `Approved`, `Denied`. `Cancelled` / `TimedOut` 등 후속 variant 수용. | yes |
+| `ActivityBus` + `ActivityEvent` | `gadgetron-core/src/activity_bus.rs` | **additive** (`#[non_exhaustive]` on ActivityEvent) | 현재 variant: `ChatCompleted` (ISSUE 4 / PR #194), `ToolCallCompleted` (ISSUE 5 / PR #199). 새 variant 추가 허용 — `/events/ws` 프레임 소비자는 `"type"` 디스크리미네이터로 분기. | yes (ActivityEvent) |
 
 **자동 변경 감지 전략**: `cargo semver-checks`를 CI에 등록 (Phase 2 시작 시). major version 없이 `gadgetron-core` public API가 제거·변경되면 CI fail.
 
