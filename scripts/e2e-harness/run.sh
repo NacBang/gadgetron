@@ -1341,6 +1341,107 @@ else
   fail "admin/bundles OpenAiCompat: expected 403, got $DISCOVER_403_CODE" ""
 fi
 
+# Gate 7q.6 — POST /admin/bundles installs a bundle (ISSUE 10 TASK 10.2).
+# The bundle directory grows by one; a subsequent GET /admin/bundles
+# MUST list the new id. We do NOT reload — that's the operator's
+# choice per the design (install is composable with reload).
+log "=== Gate 7q.6: admin/bundles install + list cycle ==="
+INSTALL_TOML='[bundle]
+id = "t102-test-bundle"
+version = "0.1.0"
+
+[[actions]]
+id = "t102-test-action"
+title = "t102 test"
+owner_bundle = "t102-test-bundle"
+source_kind = "gadget"
+source_id = "t102.ping"
+gadget_name = "t102.ping"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "e2e-install-test"
+input_schema = { type = "object" }
+'
+# jq -n ... builds the JSON envelope so bash-quoting of the TOML
+# text doesn't land multi-line inside a raw curl data flag.
+INSTALL_BODY="$(jq -n --arg t "$INSTALL_TOML" '{bundle_toml: $t}')"
+INSTALL_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$INSTALL_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles" 2>&1 || true)"
+if echo "$INSTALL_RESP" | jq -e '.installed == true and .bundle_id == "t102-test-bundle"' >/dev/null 2>&1; then
+  pass "admin/bundles install: t102-test-bundle written to disk"
+else
+  fail "admin/bundles install shape regressed" "$(echo "$INSTALL_RESP" | head -c 400)"
+fi
+
+# Cross-check: discovery now lists the new bundle.
+DISCOVER_POST_INSTALL="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles" 2>&1 || true)"
+if echo "$DISCOVER_POST_INSTALL" \
+  | jq -e '.bundles[] | select(.bundle.id == "t102-test-bundle")' >/dev/null 2>&1; then
+  pass "admin/bundles lists t102-test-bundle after install"
+else
+  fail "admin/bundles discovery missed t102-test-bundle" \
+    "$(echo "$DISCOVER_POST_INSTALL" | head -c 400)"
+fi
+
+# Gate 7q.7 — path traversal guard. Operator attempts install with
+# a malicious id; handler must reject before touching the filesystem.
+EVIL_TOML='[bundle]
+id = "../etc/passwd"
+version = "0.1.0"
+
+[[actions]]
+id = "evil"
+title = "evil"
+owner_bundle = "evil"
+source_kind = "gadget"
+source_id = "evil.go"
+gadget_name = "evil.go"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "t"
+input_schema = { type = "object" }
+'
+EVIL_BODY="$(jq -n --arg t "$EVIL_TOML" '{bundle_toml: $t}')"
+EVIL_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$EVIL_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles" 2>&1 || true)"
+# GadgetronError::Config maps to 400; any 4xx rejection passes here.
+case "$EVIL_CODE" in
+  4*) pass "admin/bundles rejects path-traversal id (HTTP $EVIL_CODE)" ;;
+  *)  fail "admin/bundles accepted path-traversal id (HTTP $EVIL_CODE)" "" ;;
+esac
+
+# Gate 7q.8 — DELETE /admin/bundles/{id} uninstalls; list shrinks.
+UNINSTALL_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles/t102-test-bundle" 2>&1 || true)"
+if echo "$UNINSTALL_RESP" | jq -e '.uninstalled == true and .bundle_id == "t102-test-bundle"' >/dev/null 2>&1; then
+  pass "admin/bundles uninstall removes t102-test-bundle"
+else
+  fail "admin/bundles uninstall shape regressed" "$(echo "$UNINSTALL_RESP" | head -c 400)"
+fi
+
+DISCOVER_POST_UNINSTALL="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles" 2>&1 || true)"
+STILL_PRESENT="$(echo "$DISCOVER_POST_UNINSTALL" \
+  | jq -r '[.bundles[] | select(.bundle.id == "t102-test-bundle")] | length' 2>/dev/null || echo -1)"
+if [ "$STILL_PRESENT" = "0" ]; then
+  pass "admin/bundles discovery no longer lists t102-test-bundle after uninstall"
+else
+  fail "uninstall leaked: t102-test-bundle still in discovery" \
+    "$(echo "$DISCOVER_POST_UNINSTALL" | head -c 400)"
+fi
+
 # Gate 7q.2 — OpenAiCompat-scoped caller MUST get 403 (admin surface).
 RELOAD_403_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $TEST_API_KEY" \

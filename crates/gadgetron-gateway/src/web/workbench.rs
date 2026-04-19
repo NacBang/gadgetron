@@ -961,6 +961,196 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/admin/reload-catalog", post(reload_catalog_handler))
         // ISSUE 10 TASK 10.1 — bundle discovery.
         .route("/admin/bundles", get(list_bundles_handler))
+        // ISSUE 10 TASK 10.2 — bundle install.
+        .route("/admin/bundles", post(install_bundle_handler))
+        // ISSUE 10 TASK 10.2 — bundle uninstall.
+        .route(
+            "/admin/bundles/{bundle_id}",
+            axum::routing::delete(uninstall_bundle_handler),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// POST/DELETE /api/v1/web/workbench/admin/bundles — ISSUE 10 TASK 10.2
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /admin/bundles`. Operator sends the full
+/// manifest text; handler validates + writes to disk.
+#[derive(Debug, serde::Deserialize)]
+pub struct InstallBundleRequest {
+    /// Complete `bundle.toml` text. Must include a `[bundle]` table
+    /// with a valid `id` (id drives the install directory name).
+    pub bundle_toml: String,
+}
+
+/// Response for `POST /admin/bundles`.
+#[derive(Debug, serde::Serialize)]
+pub struct InstallBundleResponse {
+    pub installed: bool,
+    /// Installed bundle's id — matches the directory name under
+    /// `bundles_dir`.
+    pub bundle_id: String,
+    /// Absolute path of the written `bundle.toml` (operator can
+    /// `cat` / `grep` this to verify).
+    pub manifest_path: String,
+    /// Hint to the operator that the live catalog hasn't changed
+    /// yet — trigger `POST /admin/reload-catalog` or `SIGHUP` to
+    /// pick up the new bundle. Keeps install idempotent: installing
+    /// the same manifest twice doesn't rapid-fire reload the
+    /// workbench underneath running requests.
+    pub reload_hint: &'static str,
+}
+
+/// Response for `DELETE /admin/bundles/{id}`.
+#[derive(Debug, serde::Serialize)]
+pub struct UninstallBundleResponse {
+    pub uninstalled: bool,
+    pub bundle_id: String,
+    pub reload_hint: &'static str,
+}
+
+/// Validate a bundle id against the reserved character set.
+/// **Wire-frozen** — these are the only characters the filesystem
+/// layer will accept for a bundle directory name. Any caller-
+/// provided id outside this set must be rejected BEFORE it touches
+/// the filesystem to prevent path traversal (`..`, slashes, null
+/// bytes) or platform-specific filename weirdness.
+fn validate_bundle_id(id: &str) -> Result<(), WorkbenchHttpError> {
+    if id.is_empty() || id.len() > 64 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle id {id:?} must be 1-64 chars",
+        ))));
+    }
+    for c in id.chars() {
+        let ok = c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        if !ok {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle id {id:?} contains invalid char {c:?}; allowed: [a-zA-Z0-9_-]",
+            ))));
+        }
+    }
+    Ok(())
+}
+
+/// `POST /api/v1/web/workbench/admin/bundles` — install a bundle by
+/// writing its manifest to `{bundles_dir}/{id}/bundle.toml`. Does
+/// NOT reload the live catalog (operator composes install + reload
+/// deliberately).
+///
+/// Requires scope: **Management**.
+///
+/// Errors:
+/// - 503 `Config` when `bundles_dir` isn't wired.
+/// - 400 `Config` on invalid TOML, missing `[bundle]` table, or
+///   malformed bundle id (reserved chars, too long).
+/// - 409 via `Config` when a bundle with that id already exists —
+///   TASK 10.2 requires explicit uninstall before re-install to
+///   avoid silent overwrites.
+pub async fn install_bundle_handler(
+    State(state): State<AppState>,
+    Json(req): Json<InstallBundleRequest>,
+) -> Result<Json<InstallBundleResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let dir_cfg = svc.bundles_dir.as_deref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle install requires `[web] bundles_dir` to be configured".into(),
+        ))
+    })?;
+
+    // Parse + validate the manifest before touching the filesystem.
+    let file: crate::web::catalog::CatalogFile = toml::from_str(&req.bundle_toml).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: TOML parse failed: {e}",
+        )))
+    })?;
+    let bundle_meta = file.bundle.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle install: manifest must declare a [bundle] table with id + version".into(),
+        ))
+    })?;
+    validate_bundle_id(&bundle_meta.id)?;
+
+    let dir = std::path::Path::new(dir_cfg);
+    let target_dir = dir.join(&bundle_meta.id);
+    if target_dir.exists() {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: directory {target_dir:?} already exists — uninstall first",
+        ))));
+    }
+
+    std::fs::create_dir_all(&target_dir).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: cannot create {target_dir:?}: {e}",
+        )))
+    })?;
+    let manifest_path = target_dir.join("bundle.toml");
+    std::fs::write(&manifest_path, &req.bundle_toml).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: cannot write {manifest_path:?}: {e}",
+        )))
+    })?;
+
+    tracing::info!(
+        target: "workbench.admin",
+        bundle_id = %bundle_meta.id,
+        bundle_version = %bundle_meta.version,
+        manifest_path = %manifest_path.display(),
+        "bundle installed (operator must reload to activate)"
+    );
+
+    Ok(Json(InstallBundleResponse {
+        installed: true,
+        bundle_id: bundle_meta.id.clone(),
+        manifest_path: manifest_path.to_string_lossy().into_owned(),
+        reload_hint: "POST /api/v1/web/workbench/admin/reload-catalog or send SIGHUP to activate",
+    }))
+}
+
+/// `DELETE /api/v1/web/workbench/admin/bundles/{bundle_id}` —
+/// remove a bundle directory. Like install, does NOT reload the
+/// live catalog automatically.
+///
+/// Errors:
+/// - 503 `Config` when `bundles_dir` isn't wired.
+/// - 400 `Config` on malformed bundle id.
+/// - 404 `Config` when the bundle directory doesn't exist.
+pub async fn uninstall_bundle_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<UninstallBundleResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let dir_cfg = svc.bundles_dir.as_deref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle uninstall requires `[web] bundles_dir` to be configured".into(),
+        ))
+    })?;
+    validate_bundle_id(&bundle_id)?;
+
+    let dir = std::path::Path::new(dir_cfg);
+    let target_dir = dir.join(&bundle_id);
+    if !target_dir.exists() {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle uninstall: {target_dir:?} does not exist",
+        ))));
+    }
+
+    std::fs::remove_dir_all(&target_dir).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle uninstall: cannot remove {target_dir:?}: {e}",
+        )))
+    })?;
+
+    tracing::info!(
+        target: "workbench.admin",
+        bundle_id = %bundle_id,
+        "bundle uninstalled (operator must reload to deactivate)"
+    );
+
+    Ok(Json(UninstallBundleResponse {
+        uninstalled: true,
+        bundle_id,
+        reload_hint: "POST /api/v1/web/workbench/admin/reload-catalog or send SIGHUP to activate",
+    }))
 }
 
 // ---------------------------------------------------------------------------

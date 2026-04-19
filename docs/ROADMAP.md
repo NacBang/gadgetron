@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.9** (post-ISSUE 10 TASK 10.1 — bundle discovery)
+**Current version: 0.4.10** (post-ISSUE 10 TASK 10.2 — bundle install/uninstall)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -187,8 +187,17 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     bundles: [{bundle, source_path, action_count, view_count}]}`.
     Harness gates 7q.4 (shape + gadgetron-core enumerated) and
     7q.5 (RBAC).
-  - TASK 10.2 — install/uninstall endpoints that add/remove bundle
-    directories at runtime.
+  - TASK 10.2 ✅ — install / uninstall endpoints (0.4.9 → 0.4.10).
+    `POST /admin/bundles` accepts `{bundle_toml}`, validates the
+    manifest declares `[bundle]` with an id matching `[a-zA-Z0-9_-]+`
+    (1-64 chars, path-traversal safe), writes
+    `{bundles_dir}/{id}/bundle.toml`. `DELETE
+    /admin/bundles/{id}` removes the directory. Both composable
+    with reload — operator triggers `POST /admin/reload-catalog`
+    or SIGHUP when ready to activate. 409-class error if
+    re-installing an existing id. Harness gates 7q.6 (install +
+    discovery round-trip), 7q.7 (path-traversal rejected), 7q.8
+    (uninstall + discovery round-trip).
   - TASK 10.3 — per-bundle scope isolation (bundles declare
     `required_scope`, aggregator filters by actor).
   - TASK 10.4 — signed manifests (Ed25519 signature check on
