@@ -737,21 +737,38 @@ with HTTP 403.
 
 **What you observe:** The endpoint returns HTTP 400 with a `config_error` body mentioning "catalog reload requires a configured workbench with a descriptor catalog handle" — **even with a Management-scoped key**.
 
-**Why:** The handler reads `state.workbench.descriptor_catalog` (the shared `Arc<ArcSwap<DescriptorCatalog>>` handle wired in TASK 8.1 / PR #211). Production `build_workbench` always sets the field, so a 400 here means you are running a headless test fixture or a custom build path that constructs `GatewayWorkbenchService` without threading the ArcSwap handle through. On trunk this is a defensive guard, not a user-facing failure mode.
+**Why:** The handler reads `state.workbench.descriptor_catalog` — the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired in TASK 8.1 / PR #211 (originally `Arc<ArcSwap<DescriptorCatalog>>`, widened to `CatalogSnapshot` in TASK 8.3 / PR #214 so the handle carries both catalog and pre-compiled JSON-schema validators). Production `build_workbench` always sets the field, so a 400 here means you are running a headless test fixture or a custom build path that constructs `GatewayWorkbenchService` without threading the ArcSwap handle through. On trunk this is a defensive guard, not a user-facing failure mode.
 
-**Fix:** Start the server through the CLI (`gadgetron serve --config gadgetron.toml`) rather than an in-process test harness. The CLI always calls `build_workbench(...)` which sets the handle. If you are writing an integration test and need the reload endpoint, mirror the pattern in `crates/gadgetron-gateway/tests/web_2b_descriptor_endpoints.rs` that threads `Some(Arc::new(ArcSwap::from_pointee(DescriptorCatalog::seed_p2b())))` into the service constructor.
+**Fix:** Start the server through the CLI (`gadgetron serve --config gadgetron.toml`) rather than an in-process test harness. The CLI always calls `build_workbench(...)` which sets the handle. If you are writing an integration test and need the reload endpoint, mirror the pattern in `crates/gadgetron-gateway/tests/web_2b_descriptor_endpoints.rs` that threads `Some(Arc::new(ArcSwap::from_pointee(DescriptorCatalog::seed_p2b().into_snapshot())))` into the service constructor (note the trailing `.into_snapshot()` call — this is the step that compiles validators for every action and bundles them with the catalog into a `CatalogSnapshot`, which is what the ArcSwap expects to hold post-PR #214).
 
 ---
 
 ### `/admin/reload-catalog` succeeds but `action_count` looks unchanged
 
-**What you observe:** POST `/admin/reload-catalog`, response is `{reloaded:true, source:"seed_p2b", action_count:5, view_count:3}`, but `action_count` matches what was there before the reload — it looks like nothing happened.
+**What you observe:** POST `/admin/reload-catalog`, response is `{reloaded:true, source:"seed_p2b", action_count:5, view_count:3, source_path:null}`, but `action_count` matches what was there before the reload — it looks like nothing happened.
 
-**Why:** Expected behavior on trunk through v0.4.2. ISSUE 8 TASK 8.2 ships the ArcSwap plumbing + the endpoint; **the source of the "fresh" catalog is still hardcoded `DescriptorCatalog::seed_p2b()`**. Reload on seed_p2b always produces an identical catalog — the endpoint proves the atomic swap lands, not that the catalog changed. Harness Gate 7q.1 explicitly asserts this: the response `action_count` must equal the live `GET /workbench/actions` count right after, which only catches the "swap happened but read path still sees old pointer" regression, not a "content changed" outcome.
+**Why:** Expected behavior when `[web] catalog_path` is NOT configured in `gadgetron.toml`. The reload handler's fallback source is the hand-coded `DescriptorCatalog::seed_p2b()` which always produces an identical catalog — the endpoint proves the atomic swap lands, not that the catalog changed. The `source_path: null` field in the response is the confirmation you're on the fallback path. Harness Gate 7q.1 asserts the cross-check invariant: the response `action_count` must equal the live `GET /workbench/actions` count right after, catching the "swap happened but read path still sees old pointer" regression.
 
-**Fix:** None on v0.4.2 — this is the intended contract. TASK 8.3 (fs-watcher) will add file-based loading so a reload actually picks up on-disk descriptor edits; `source` in the response will then widen from `"seed_p2b"` to `"config_file"` / `"bundle_manifest"` (wire-stable enum — see `docs/manual/api-reference.md` §POST /admin/reload-catalog). Until then, treat the endpoint as a plumbing liveness probe.
+**Fix:** Configure `[web] catalog_path = "/absolute/path/to/catalog.toml"` in `gadgetron.toml` (ISSUE 8 TASK 8.4 / v0.4.4, PR #216). After that, edits to the TOML file are picked up on the next `POST /admin/reload-catalog` and the response will carry `source: "config_file"` + `source_path: "<that path>"`. See [`configuration.md`](configuration.md#web) §`[web]` for the full key documentation and the parse-failure guarantee.
 
-**Note on schema validators (TASK 8.2 known limitation).** Even on trunk where the catalog content never changes, readers should know: `InProcessWorkbenchActionService` pre-compiles JSON-schema validators at construction time and the reload endpoint does **not** rebuild them. This is safe while `seed_p2b` is the only source (schemas identical across reloads), but TASK 8.3 must either rebuild the action service on swap or migrate validators into the ArcSwap alongside the catalog. If you see action invocations accepting arg shapes that the descriptor schema should reject after a future TASK-8.3 reload, this is the bug to file.
+**Note on schema validators (TASK 8.3 closed this gap in PR #214).** Through v0.4.2 the endpoint had a known limitation: `InProcessWorkbenchActionService` pre-compiled JSON-schema validators at construction and did NOT rebuild them on reload — safe with `seed_p2b` (schemas identical across reloads) but unsafe for a future file-based source. TASK 8.3 fixed this by introducing `CatalogSnapshot { catalog, validators }` and widening the handle from `Arc<ArcSwap<DescriptorCatalog>>` to `Arc<ArcSwap<CatalogSnapshot>>`. Today a reload runs `DescriptorCatalog::into_snapshot()` which compiles validators for every action in the fresh catalog, then stores the `(catalog, validators)` pair atomically — readers see a consistent generation on every request. If you see action invocations passing the `args` JSON schema after a `catalog_path` TOML edit + reload even though the new TOML rejects that shape, the snapshot-read contract is broken (file a bug citing this recipe + the exact commit of the edit).
+
+---
+
+### HTTP 500 — `config_error` on `/admin/reload-catalog` after editing `catalog_path` TOML
+
+**What you observe:** `[web] catalog_path` is configured, you edit the TOML file, POST `/admin/reload-catalog`, and the endpoint returns HTTP 500 with a `config_error` body that embeds the file path and a parse / IO error message (e.g. `"failed to parse /etc/gadgetron/catalog.toml: expected '=' at line 12"`). `GET /workbench/actions` still returns the PREVIOUS catalog's actions — not the (broken) edit.
+
+**Why:** ISSUE 8 TASK 8.4 (PR #216 / v0.4.4) added a hard guarantee: `DescriptorCatalog::from_toml_file(path)` returns `GadgetronError::Config` on any IO or parse failure, and **the reload handler does NOT replace the running `Arc<ArcSwap<CatalogSnapshot>>` on failure**. A malformed edit cannot take the workbench down — the previously-loaded catalog keeps serving live traffic while you fix the TOML.
+
+**Fix:**
+
+1. Read the exact error message in the response body — it names the path AND the specific serde / IO error (e.g. `"missing field 'actions'"`, `"invalid type: integer, expected string"`, `"no such file or directory"`).
+2. Correct the TOML in your editor. Schema reference: `CatalogFile` mirrors `WorkbenchViewDescriptor` + `WorkbenchActionDescriptor` (see [`configuration.md`](configuration.md#web) §`[web]` for the design-doc link).
+3. `curl -fsS -X POST -H "Authorization: Bearer $MGMT_KEY" http://localhost:8080/api/v1/web/workbench/admin/reload-catalog` again. Success returns the usual 200 with `source: "config_file"` + `source_path`.
+4. Live clients never saw the broken edit — they were reading through the unchanged snapshot the entire time. No restart required.
+
+If the reload 500s with a `config_error` that does NOT name a file path (just says `"catalog reload requires a configured workbench with a descriptor catalog handle"`), you're hitting the TASK 8.2 defensive guard instead — see §HTTP 400 `config_error` above for that recipe.
 
 ---
 

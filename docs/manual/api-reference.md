@@ -839,15 +839,43 @@ curl -s http://localhost:8080/ready
 
 ## Workbench endpoints (Phase 2A)
 
-The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. Most endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes; the one exception is the `/admin/*` sub-tree added in ISSUE 8 TASK 8.2 (`POST /admin/reload-catalog` today), which requires `Management` and is checked by a dedicated rule in `scope_guard_middleware` that precedes the broader workbench match so workbench users cannot self-reload.
+The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell.
 
-All fifteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7, one tool-call audit route added in ISSUE 5 / v0.2.8, one admin hot-reload route added in ISSUE 8 TASK 8.2 / v0.4.2 under the new `/admin/` sub-tree which requires `Management` scope instead of `OpenAiCompat`). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` + `/audit/events` + `/audit/tool-events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`; Penny-attributed activity capture is skipped when `candidate_coordinator` is `None`, per ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query; PR #199 / v0.2.8 extended it for Penny tool-call audit persistence; PR #201 / v0.2.9 threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
+**Route inventory (fifteen routes, always mounted on trunk):**
+
+| Set | Count | Scope | Shipped in |
+|-----|-------|-------|-----------|
+| Read + action + evidence + knowledge-status + views + data + `/actions` list + invoke | 8 | `OpenAiCompat` | ISSUE 1–2 / v0.2.0–v0.2.5 |
+| Approval approve + deny + `GET /audit/events` | 3 | `OpenAiCompat` | ISSUE 3 / v0.2.6 (PR #188) |
+| `/usage/summary` + `/events/ws` | 2 | `OpenAiCompat` | ISSUE 4 / v0.2.7 (PR #194) |
+| `/audit/tool-events` | 1 | `OpenAiCompat` | ISSUE 5 / v0.2.8 (PR #199) |
+| `/admin/reload-catalog` | 1 | **`Management`** | ISSUE 8 TASK 8.2 / v0.4.2 (PR #213) |
+
+The `/admin/*` sub-tree is the one scope exception — `scope_guard_middleware` matches the `/admin/` prefix with `Management` **before** the broader workbench rule, so an OpenAiCompat workbench key cannot self-reload the catalog (returns 403 `scope_required`).
+
+**Degraded mode.** `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` (`crates/gadgetron-cli/src/main.rs:1256-1331`) returns `Some(...)` even when all four arguments are `None`. Per-subsystem fallbacks:
+
+- `bootstrap` + descriptor catalog — still reachable.
+- Gadget dispatch — returns empty payload.
+- Activity capture — no-op.
+- Approval store — falls back to in-memory.
+- `ActionAuditSink` — falls back to `NoopActionAuditSink`.
+- `/usage/summary`, `/audit/events`, `/audit/tool-events` — return 400 `config_error` without a pool.
+- `/events/ws` — opens against a zero-publisher `ActivityBus`.
+- Penny-attributed activity capture — skipped when `candidate_coordinator` is `None` (ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing).
+
+**Parameter-addition history** — how `build_workbench`'s signature grew over the EPIC 1/2 ISSUEs:
+
+- PR #188 / v0.2.6 — added `pg_pool` (fourth parameter) so the action-audit writer + approval store can take a Postgres pool when one is configured.
+- PR #194 / v0.2.7 — reused `pg_pool` for the usage rollup + audit query.
+- PR #199 / v0.2.8 — extended `pg_pool` use to Penny tool-call audit persistence.
+- PR #201 / v0.2.9 — threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
 - `GET /views`, `GET /actions` — return the five descriptors in `seed_p2b` (see `GET /actions` below; ISSUE 3 / v0.2.6 added `wiki-delete` as the fifth, the canonical approval-gated action).
 - `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:50-63`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
-- `POST /admin/reload-catalog` — atomic `Arc<ArcSwap<DescriptorCatalog>>` store (ISSUE 8 TASK 8.2 / v0.4.2). Management-scoped; in-flight requests finish against their catalog snapshot. Today's only source is `seed_p2b`; TASK 8.3 widens to file-based. See §POST /admin/reload-catalog below.
+- `POST /admin/reload-catalog` — atomic `Arc<ArcSwap<CatalogSnapshot>>` store (ISSUE 8 TASK 8.2 / v0.4.2 endpoint shape; TASK 8.3 / v0.4.3 upgraded the handle from `DescriptorCatalog` to `CatalogSnapshot { catalog, validators }` via PR #214 so a reload swaps catalog + pre-compiled JSON-schema validators in lockstep). Management-scoped; in-flight requests finish against their snapshot. Today's only source is `seed_p2b`; TASK 8.4 widens to file-based loading. See §POST /admin/reload-catalog below.
 
 **What is stubbed on trunk today:**
 - `activity.entries` — the endpoint read path still returns `[]` (see §/activity). The underlying capture flow IS live: `CapturedActivityEvent` rows land in the coordinator for both direct-action (ISSUE 3) and Penny tool calls (ISSUE 6 / PR #201). Read-side projection (PSL-1) is the remaining gap.
@@ -884,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.2",
+  "gateway_version": "0.4.4",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -903,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.2"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.4"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1250,27 +1278,52 @@ Refuse a `pending_approval` record. No dispatch occurs.
 
 ### POST /api/v1/web/workbench/admin/reload-catalog
 
-Atomically swap the in-memory `DescriptorCatalog` for a fresh one. Landed in ISSUE 8 TASK 8.2 / v0.4.2 (PR #213) as the first endpoint under the new `/api/v1/web/workbench/admin/` subtree.
+Atomically swap the in-memory `CatalogSnapshot` (catalog + pre-compiled JSON-schema validators) for a fresh one. Landed in ISSUE 8 TASK 8.2 / v0.4.2 (PR #213) as the first endpoint under the new `/api/v1/web/workbench/admin/` subtree. TASK 8.3 / v0.4.3 (PR #214) upgraded the underlying handle from `Arc<ArcSwap<DescriptorCatalog>>` to `Arc<ArcSwap<CatalogSnapshot>>` so a reload now swaps catalog and validators in lockstep — closing the TASK 8.2 known-limitation where validators were pre-compiled at service construction and not rebuilt on reload.
 
 **Scope:** `Management` — **not** `OpenAiCompat`. Added as a new rule in `scope_guard_middleware` (`crates/gadgetron-gateway/src/middleware/scope.rs:38-43`) that matches `/api/v1/web/workbench/admin/` **before** the broader `/api/v1/web/workbench/` rule, so workbench users cannot self-reload the catalog. Any call from an OpenAiCompat key returns 403 (`scope_required`).
 
 **Request:** empty body (`Content-Type: application/json` is accepted but ignored — the handler reads no fields).
 
+**Example (curl, local demo):**
+```bash
+# Use a Management-scoped key (the OpenAiCompat chat key will 403).
+export MGMT_KEY=$(gadgetron key create --tenant-id "$(gadgetron tenant list | jq -r '.[0].id')" --scope management | jq -r '.raw_key')
+
+curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/reload-catalog
+```
+
 **Response (HTTP 200):**
+
+When `[web] catalog_path` is NOT configured (fallback to hand-coded `seed_p2b()`):
 ```json
 {
   "reloaded": true,
   "action_count": 5,
   "view_count": 3,
-  "source": "seed_p2b"
+  "source": "seed_p2b",
+  "source_path": null
+}
+```
+
+When `[web] catalog_path = "/path/to/catalog.toml"` is configured (ISSUE 8 TASK 8.4 / v0.4.4):
+```json
+{
+  "reloaded": true,
+  "action_count": 5,
+  "view_count": 3,
+  "source": "config_file",
+  "source_path": "/path/to/catalog.toml"
 }
 ```
 
 - `reloaded` — always `true` on 200. Clients key observability on this wire field rather than on the HTTP status so a structured audit log can quote the exact flag.
 - `action_count` / `view_count` — counts in the catalog **after** the swap, computed with all three scopes (`OpenAiCompat`, `Management`, `XaasAdmin`) in the visibility filter so the totals reflect every descriptor the fresh catalog carries.
-- `source` — wire-stable enum. Today always `"seed_p2b"` (the only source on trunk is the hand-coded `DescriptorCatalog::seed_p2b()`). TASK 8.3 will widen this to `"config_file"` / `"bundle_manifest"` as reload sources grow.
+- `source` — wire-stable enum. `"seed_p2b"` when no `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback). `"config_file"` when a `catalog_path` is configured and the TOML file parsed successfully (ISSUE 8 TASK 8.4 / PR #216). Future sources will widen this further (`"bundle_manifest"` when ISSUE 9 lands).
+- `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"`. Admin tooling uses this to confirm which file produced the live catalog.
 
-**Plumbing.** The handler reads the shared `Arc<ArcSwap<DescriptorCatalog>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate), constructs a fresh catalog from the current source, and calls `ArcSwap::store()` to atomically publish it. In-flight requests holding an `Arc<DescriptorCatalog>` snapshot finish against the old pointer; any request that reads the handle after the store sees the new pointer. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`.
+**Plumbing.** The handler reads the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate, rev-bumped to `CatalogSnapshot` in TASK 8.3 / PR #214). To build the fresh catalog: if `WebConfig.catalog_path` is `Some(path)` (TASK 8.4 / PR #216), the handler calls `DescriptorCatalog::from_toml_file(path)` which reads + parses the TOML via the `CatalogFile` shape (serde-derived fields matching `WorkbenchViewDescriptor` / `WorkbenchActionDescriptor`). If `catalog_path` is `None` the handler falls back to `DescriptorCatalog::seed_p2b()`. The resulting `DescriptorCatalog` is then turned into a snapshot via `into_snapshot()` (which compiles JSON-schema validators for every action), and `ArcSwap::store()` atomically publishes the `(catalog, validators)` pair. In-flight requests holding an `Arc<CatalogSnapshot>` snapshot finish reading BOTH catalog and validators from the old pointer; any request that reads the handle after the store sees the new pointer for both sides. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`, `crates/gadgetron-gateway/src/web/catalog.rs::CatalogSnapshot`, and `DescriptorCatalog::from_toml_file` in the same catalog module.
 
 **Errors:**
 
@@ -1278,8 +1331,9 @@ Atomically swap the in-memory `DescriptorCatalog` for a fresh one. Landed in ISS
 |------|------|------|
 | `scope_required` | 403 | Caller's API key scope is not `Management` (e.g. OpenAiCompat workbench key). Enforced by `scope_guard_middleware`, not the handler. |
 | `config_error` | 503-class (400 on trunk wire) | `state.workbench.descriptor_catalog` is `None`. This only happens in headless test builds that skip `build_workbench` — production paths always set the handle, so the guard is defensive. |
+| `config_error` | 500 | `catalog_path` is configured but the TOML file failed to read or parse (file missing, invalid syntax, schema mismatch). Error message embeds the file path and the specific serde / IO error (TASK 8.4 / PR #216). **The running snapshot is NOT replaced on failure** — a malformed edit cannot take the workbench down. Fix the TOML and retry the reload. |
 
-**Known limitation (ISSUE 8 TASK 8.2, deferred to TASK 8.3).** Schema validators on `InProcessWorkbenchActionService` are pre-compiled at service construction time and are **not** rebuilt by this endpoint. Because the current source (`seed_p2b`) produces schema-stable output, validators remain correct on every reload. When TASK 8.3 moves the source to file-based loading (where schemas may change between reloads), validator rebuild must land with it — either by rebuilding the whole action service on swap, or by migrating validators into the ArcSwap alongside the catalog. Flagged in the handler docstring.
+**Validator rebuild (TASK 8.3 shipped in PR #214).** The TASK 8.2 known-limitation — validators on `InProcessWorkbenchActionService` pre-compiled at construction and NOT rebuilt by reload — is closed. `CatalogSnapshot` bundles the catalog with its pre-compiled JSON-schema validators so one `ArcSwap::store()` replaces both sides. No reader can observe a new catalog paired with old validators (or vice versa). This was a hard prerequisite for TASK 8.4's file-based source (where a legitimate TOML edit can change schemas between reloads); TASK 8.4 / PR #216 ships that file source on top of this foundation.
 
 E2E Gate 7q.1 verifies the swap lands (shape assertion + cross-check that `action_count` in the response equals the count `GET /workbench/actions` reports immediately after — catches the "swap happened but read path still points at the old pointer" regression). Gate 7q.2 verifies that an OpenAiCompat-scoped key gets 403 on this endpoint (RBAC enforced).
 

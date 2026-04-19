@@ -3,7 +3,7 @@
 > **담당**: @gateway-router-lead
 > **상태**: Approved
 > **작성일**: 2026-04-18
-> **최종 업데이트**: 2026-04-19 — EPIC 3 / ISSUE 8 TASK 8.1 (PR #211 ArcSwap 플러밍) + TASK 8.2 (PR #213 `POST /admin/reload-catalog` Management-scoped endpoint) 반영.
+> **최종 업데이트**: 2026-04-19 — EPIC 3 / ISSUE 8 TASK 8.1 (PR #211 `Arc<ArcSwap<DescriptorCatalog>>` 플러밍 substrate) + TASK 8.2 (PR #213 `POST /admin/reload-catalog` Management-scoped endpoint) + TASK 8.3 (PR #214 `CatalogSnapshot { catalog, validators }` 번들링 — 핸들이 `Arc<ArcSwap<CatalogSnapshot>>` 로 확장되어 reload 가 catalog + pre-compiled JSON-schema validators 를 lockstep 으로 교체) 반영.
 > **관련 크레이트**: `gadgetron-gateway`, `gadgetron-core`, `gadgetron-knowledge`, `gadgetron-xaas`, `gadgetron-web`, `gadgetron-penny`
 > **Phase**: [P2B] primary / [P2B-EPIC3] workbench admin sub-tree (catalog hot-reload, Management-scoped) / [P2C] subscriptions + incremental refresh
 > **관련 문서**: `docs/design/gateway/wire-up.md`, `docs/design/gateway/route-groups-and-scope-gates.md` (scope gate ordering SSOT — admin sub-tree 포함), `docs/design/web/expert-knowledge-workbench.md`, `docs/design/core/knowledge-candidate-curation.md`, `docs/design/core/knowledge-plug-architecture.md`, `docs/design/phase2/08-identity-and-users.md`, `docs/design/phase2/09-knowledge-acl.md`, `docs/design/phase2/10-penny-permission-inheritance.md`, `docs/design/phase2/12-external-gadget-runtime.md`, `docs/manual/api-reference.md` §POST /api/v1/web/workbench/admin/reload-catalog, `docs/reviews/pm-decisions.md`
@@ -341,7 +341,7 @@ pub struct AppState {
 | `POST /api/v1/web/workbench/actions/:action_id` | `OpenAiCompat` | descriptor lookup + `required_scope` + schema validation + approval + downstream ACL | direct action invoke |
 | `GET /api/v1/web/workbench/activity` | `OpenAiCompat` | actor/tenant filtering | Penny + UserDirect feed |
 | `GET /api/v1/web/workbench/requests/:request_id/evidence` | `OpenAiCompat` | actor/tenant/request correlation | request-scoped evidence |
-| `POST /api/v1/web/workbench/admin/reload-catalog` | **`Management`** (admin sub-tree) | ArcSwap store on `descriptor_catalog` handle | ISSUE 8 TASK 8.2 / PR #213 — Management-scoped hot-reload; OpenAiCompat 키는 403 |
+| `POST /api/v1/web/workbench/admin/reload-catalog` | **`Management`** (admin sub-tree) | ArcSwap store on `descriptor_catalog` handle — 새 catalog 를 `into_snapshot()` 으로 validator 번들링한 뒤 `Arc<ArcSwap<CatalogSnapshot>>` 에 atomic 하게 교체 | ISSUE 8 TASK 8.2 / PR #213 endpoint + TASK 8.3 / PR #214 `CatalogSnapshot { catalog, validators }` 번들링 — catalog + pre-compiled JSON-schema validators 를 lockstep 으로 swap; OpenAiCompat 키는 403 |
 
 `scope_guard_middleware` 수정 규칙 (2026-04-19 기준 trunk, ISSUE 8 TASK 8.2 / PR #213 반영 — 정본은 [`route-groups-and-scope-gates.md §2.1.3`](./route-groups-and-scope-gates.md)):
 
@@ -409,7 +409,7 @@ crates/gadgetron-gateway/src/
 3. **DescriptorCatalog**
    - 입력: `BundleRegistry`, `enabled_surface_families`, actor scope, bundle enabled state
    - 출력: filtered `WorkbenchViewDescriptor[]`, `WorkbenchActionDescriptor[]`
-   - 저장: immutable snapshot 을 **`Arc<ArcSwap<DescriptorCatalog>>`** 로 보관 (EPIC 3 / ISSUE 8 TASK 8.1 / PR #211 — 원래 설계의 `tokio::sync::RwLock<Arc<DescriptorSnapshot>>` 에서 변경). 읽기 측 (`projection.rs` + `action_service.rs`) 은 매 요청마다 `load()` 로 `Arc<DescriptorCatalog>` 스냅샷을 획득하므로 in-flight 요청은 그 스냅샷 기준으로 마무리되고, hot-reload 경로는 새 Catalog 를 만들어 `store(new)` 로 포인터를 atomic 하게 교체한다. RwLock 대비 writer 가 in-flight reader 를 block 하지 않는 `arc-swap` 의 hand-off 가 hot-reload 요구사항과 정확히 맞는다. TASK 8.2 shipped (PR #213) — `POST /api/v1/web/workbench/admin/reload-catalog` Management-scoped endpoint 가 이 handle 에 `store()` 를 호출한다. TASK 8.3 (fs-watcher 자동 reload + schema validator rebuild) 와 TASK 8.4 (SIGHUP 핸들러) 가 남은 reload trigger surface.
+   - 저장: immutable snapshot 을 **`Arc<ArcSwap<CatalogSnapshot>>`** 로 보관 (EPIC 3 / ISSUE 8 — TASK 8.1 / PR #211 에서 `tokio::sync::RwLock<Arc<DescriptorSnapshot>>` → `Arc<ArcSwap<DescriptorCatalog>>` 로 전환, TASK 8.3 / PR #214 에서 `CatalogSnapshot { catalog, validators }` 로 rev — pre-compiled JSON-schema validators 가 catalog 와 함께 스냅샷에 번들되어 atomic swap 한 번으로 둘이 lockstep 으로 교체된다). 읽기 측 (`projection.rs` + `action_service.rs`) 은 매 요청마다 `load()` 로 `Arc<CatalogSnapshot>` 스냅샷을 획득하므로 in-flight 요청은 그 스냅샷 기준으로 마무리 (catalog 와 validator 양쪽 모두 같은 세대를 읽는다 — mismatched pair 관찰 불가), hot-reload 경로는 새 Catalog 를 만들어 `DescriptorCatalog::into_snapshot()` 으로 validator 를 컴파일해 묶은 뒤 `store(new)` 로 포인터를 atomic 하게 교체한다. RwLock 대비 writer 가 in-flight reader 를 block 하지 않는 `arc-swap` 의 hand-off 가 hot-reload 요구사항과 정확히 맞는다. TASK 8.2 shipped (PR #213) — `POST /api/v1/web/workbench/admin/reload-catalog` Management-scoped endpoint 가 이 handle 에 `store()` 를 호출한다. TASK 8.3 shipped (PR #214) — 위 `CatalogSnapshot` 번들링 으로 TASK 8.2 validator-rebuild 제한 해소. TASK 8.4 (file-based catalog source + fs-watcher 자동 reload) 와 TASK 8.5 (SIGHUP 핸들러) 가 남은 reload trigger surface.
 4. **ActivityProjector**
    - 입력: Penny request timeline, direct action capture log, approval state changes, canonical writeback events
    - 출력: 시간 역순 `WorkbenchActivityEntry[]`
