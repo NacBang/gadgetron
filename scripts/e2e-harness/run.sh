@@ -1664,6 +1664,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 11e — left-rail wiki tab links to /web/wiki (ISSUE A.2)
+# ---------------------------------------------------------------------------
+#
+# The main /web landing page's LeftRail now includes a "Wiki" tab that
+# links to /web/wiki (the standalone workbench page). This gate pins
+# the discoverability contract: a user signed into /web must see a
+# `nav-tab-wiki` element with `href` pointing at `/web/wiki`. A
+# regression that renames the tab, drops the link, or points it
+# elsewhere would silently strand users on the chat page with no
+# path to the wiki UI.
+#
+# We grep the static HTML for the data-testid + the href. Static
+# export means the markup is already there — no need to boot a
+# browser for this check.
+WEB_HTML="$(curl -fsSL "$GAD_BASE/web" 2>&1 || true)"
+if echo "$WEB_HTML" | grep -q 'data-testid="nav-tab-wiki"'; then
+  # Confirm the wiki tab's href points at /web/wiki (Next's basePath
+  # rewrite turns `/wiki` in the source into `/web/wiki` in the HTML).
+  if echo "$WEB_HTML" | grep -qE 'data-testid="nav-tab-wiki"[^>]*href="/web/wiki"'; then
+    pass "/web left-rail has nav-tab-wiki → /web/wiki link"
+  else
+    fail "/web left-rail has nav-tab-wiki but href is wrong" \
+      "$(echo "$WEB_HTML" | grep -oE '[^>]{0,60}nav-tab-wiki[^>]{0,120}' | head -1)"
+  fi
+else
+  fail "/web left-rail missing nav-tab-wiki (ISSUE A.2 regression)" \
+    "no 'nav-tab-wiki' data-testid in landing HTML"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 11d — /web/wiki interactive CRUD E2E (real browser, real server)
 # ---------------------------------------------------------------------------
 #
