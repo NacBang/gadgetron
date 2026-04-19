@@ -137,7 +137,9 @@ Markdown 렌더는 `react-markdown` + `remark-gfm` (GitHub-flavoured) 입니다.
 
 ## `/web/dashboard` — operator observability (ISSUE 4 / v0.2.7)
 
-PR #194 shipped `/web/dashboard` as a sibling of `/web` 와 `/web/wiki`: tenant-scoped live tiles driven by `GET /usage/summary` (24-hour rollup over chat / direct-action / Penny tool planes) plus a WebSocket feed from `GET /events/ws` that streams `ActivityEvent` frames as they publish. LeftRail adds a "Dashboard" tab next to Chat / Wiki.
+PR #194 shipped `/web/dashboard` as a sibling of `/web` 와 `/web/wiki`: tenant-scoped live tiles driven by `GET /usage/summary` (24-hour rollup over chat / direct-action / tool-call planes) plus a WebSocket feed from `GET /events/ws` that streams `ActivityEvent` frames as they publish. LeftRail adds a "Dashboard" tab next to Chat / Wiki.
+
+**"tools" plane scope.** `/usage/summary.tools.total` aggregates `tool_audit_events` regardless of caller origin — Penny-originated tool calls (audit owner_id NULL in P2A) AND external MCP client calls via `POST /v1/tools/{name}/invoke` (audit owner_id = api_key_id, ISSUE 7 TASK 7.3 / PR #207) land on the same plane and count together. Operators querying `/audit/tool-events?tool_name=...` can still separate the two populations client-side with `owner_id` presence.
 
 **Shipped `ActivityEvent` publishers:** `ChatCompleted` (ISSUE 4 / PR #194 — `StreamEndGuard` Drop 경로), `ToolCallCompleted` (ISSUE 5 / PR #199 — `run_gadget_audit_writer` fan-out). ISSUE 6 / PR #201 also fans out Penny tool calls to `CapturedActivityEvent` (for `/workbench/activity`) but those flow through a separate coordinator capture path — they do NOT appear as `/events/ws` frames. The `ActivityBus` broadcast channel is the live-tiles signal; the coordinator is the durable activity-feed signal.
 

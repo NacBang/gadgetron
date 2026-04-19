@@ -839,14 +839,15 @@ curl -s http://localhost:8080/ready
 
 ## Workbench endpoints (Phase 2A)
 
-The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
+The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. Most endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes; the one exception is the `/admin/*` sub-tree added in ISSUE 8 TASK 8.2 (`POST /admin/reload-catalog` today), which requires `Management` and is checked by a dedicated rule in `scope_guard_middleware` that precedes the broader workbench match so workbench users cannot self-reload.
 
-All fourteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7, one tool-call audit route added in ISSUE 5 / v0.2.8). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` + `/audit/events` + `/audit/tool-events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`; Penny-attributed activity capture is skipped when `candidate_coordinator` is `None`, per ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query; PR #199 / v0.2.8 extended it for Penny tool-call audit persistence; PR #201 / v0.2.9 threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
+All fifteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7, one tool-call audit route added in ISSUE 5 / v0.2.8, one admin hot-reload route added in ISSUE 8 TASK 8.2 / v0.4.2 under the new `/admin/` sub-tree which requires `Management` scope instead of `OpenAiCompat`). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` + `/audit/events` + `/audit/tool-events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`; Penny-attributed activity capture is skipped when `candidate_coordinator` is `None`, per ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query; PR #199 / v0.2.8 extended it for Penny tool-call audit persistence; PR #201 / v0.2.9 threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
 - `GET /views`, `GET /actions` — return the five descriptors in `seed_p2b` (see `GET /actions` below; ISSUE 3 / v0.2.6 added `wiki-delete` as the fifth, the canonical approval-gated action).
 - `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:50-63`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
+- `POST /admin/reload-catalog` — atomic `Arc<ArcSwap<DescriptorCatalog>>` store (ISSUE 8 TASK 8.2 / v0.4.2). Management-scoped; in-flight requests finish against their catalog snapshot. Today's only source is `seed_p2b`; TASK 8.3 widens to file-based. See §POST /admin/reload-catalog below.
 
 **What is stubbed on trunk today:**
 - `activity.entries` — the endpoint read path still returns `[]` (see §/activity). The underlying capture flow IS live: `CapturedActivityEvent` rows land in the coordinator for both direct-action (ISSUE 3) and Penny tool calls (ISSUE 6 / PR #201). Read-side projection (PSL-1) is the remaining gap.
@@ -883,7 +884,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.1",
+  "gateway_version": "0.4.2",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -902,7 +903,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.1"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.2"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1244,6 +1245,43 @@ Refuse a `pending_approval` record. No dispatch occurs.
 ```
 
 **Errors:** same shape as `approve` (404 / 409 / 403 / 400). Cross-tenant deny returns `forbidden`.
+
+---
+
+### POST /api/v1/web/workbench/admin/reload-catalog
+
+Atomically swap the in-memory `DescriptorCatalog` for a fresh one. Landed in ISSUE 8 TASK 8.2 / v0.4.2 (PR #213) as the first endpoint under the new `/api/v1/web/workbench/admin/` subtree.
+
+**Scope:** `Management` — **not** `OpenAiCompat`. Added as a new rule in `scope_guard_middleware` (`crates/gadgetron-gateway/src/middleware/scope.rs:38-43`) that matches `/api/v1/web/workbench/admin/` **before** the broader `/api/v1/web/workbench/` rule, so workbench users cannot self-reload the catalog. Any call from an OpenAiCompat key returns 403 (`scope_required`).
+
+**Request:** empty body (`Content-Type: application/json` is accepted but ignored — the handler reads no fields).
+
+**Response (HTTP 200):**
+```json
+{
+  "reloaded": true,
+  "action_count": 5,
+  "view_count": 3,
+  "source": "seed_p2b"
+}
+```
+
+- `reloaded` — always `true` on 200. Clients key observability on this wire field rather than on the HTTP status so a structured audit log can quote the exact flag.
+- `action_count` / `view_count` — counts in the catalog **after** the swap, computed with all three scopes (`OpenAiCompat`, `Management`, `XaasAdmin`) in the visibility filter so the totals reflect every descriptor the fresh catalog carries.
+- `source` — wire-stable enum. Today always `"seed_p2b"` (the only source on trunk is the hand-coded `DescriptorCatalog::seed_p2b()`). TASK 8.3 will widen this to `"config_file"` / `"bundle_manifest"` as reload sources grow.
+
+**Plumbing.** The handler reads the shared `Arc<ArcSwap<DescriptorCatalog>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate), constructs a fresh catalog from the current source, and calls `ArcSwap::store()` to atomically publish it. In-flight requests holding an `Arc<DescriptorCatalog>` snapshot finish against the old pointer; any request that reads the handle after the store sees the new pointer. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management` (e.g. OpenAiCompat workbench key). Enforced by `scope_guard_middleware`, not the handler. |
+| `config_error` | 503-class (400 on trunk wire) | `state.workbench.descriptor_catalog` is `None`. This only happens in headless test builds that skip `build_workbench` — production paths always set the handle, so the guard is defensive. |
+
+**Known limitation (ISSUE 8 TASK 8.2, deferred to TASK 8.3).** Schema validators on `InProcessWorkbenchActionService` are pre-compiled at service construction time and are **not** rebuilt by this endpoint. Because the current source (`seed_p2b`) produces schema-stable output, validators remain correct on every reload. When TASK 8.3 moves the source to file-based loading (where schemas may change between reloads), validator rebuild must land with it — either by rebuilding the whole action service on swap, or by migrating validators into the ArcSwap alongside the catalog. Flagged in the handler docstring.
+
+E2E Gate 7q.1 verifies the swap lands (shape assertion + cross-check that `action_count` in the response equals the count `GET /workbench/actions` reports immediately after — catches the "swap happened but read path still points at the old pointer" regression). Gate 7q.2 verifies that an OpenAiCompat-scoped key gets 403 on this endpoint (RBAC enforced).
 
 ---
 

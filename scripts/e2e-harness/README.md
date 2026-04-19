@@ -17,9 +17,10 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; fourteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
+refresh; fifteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
 #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
-7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207 7i.4 — 64 → 81 PASS). Run
+7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207 7i.4,
+#213 7q.1 + 7q.2 — 64 → 83 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -57,6 +58,8 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7k.2 | Management `/api/v1/costs` | PR #169: sibling of 7k — same scope, same pass set; catches scope-handler divergence |
 | 7k.3 | `/workbench/usage/summary` shape (OpenAiCompat scope) | PR #194: all three sub-objects (`chat`, `actions`, `tools`) present with fixed fields even in a zero-state window; `window_hours` echoed from the query param (default 24, clamp `[1,168]`) |
 | 7k.4 | `/workbench/audit/tool-events` shape + limit clamp | PR #199: `{events:[], returned=N}` with `returned == events|length` (tenant-pinned read); `?limit=9999` silently clamps server-side (contract is `[1,500]`) |
+| 7q.1 | `/workbench/admin/reload-catalog` happy path (Management scope) | PR #213: `{reloaded:true, source:"seed_p2b", action_count:N, view_count:N}` response shape + cross-check that `action_count` equals the live `GET /workbench/actions` listing right after (catches "swap happened but read path still sees old pointer" regression from the TASK 8.1 ArcSwap substrate) |
+| 7q.2 | `/workbench/admin/reload-catalog` RBAC enforcement | PR #213: same endpoint called with an OpenAiCompat key → 403 (admin sub-tree scope rule precedes the broader workbench rule in `scope_guard_middleware`) |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |

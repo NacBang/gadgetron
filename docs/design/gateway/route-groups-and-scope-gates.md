@@ -3,11 +3,11 @@
 > **담당**: @gateway-router-lead
 > **상태**: Approved
 > **작성일**: 2026-04-18
-> **최종 업데이트**: 2026-04-18
+> **최종 업데이트**: 2026-04-19 — [P2B-EPIC3] `/api/v1/web/workbench/admin/*` Management-scope sub-tree (ISSUE 8 TASK 8.2 / PR #213) 추가 반영.
 > **관련 크레이트**: `gadgetron-gateway`, `gadgetron-core`, `gadgetron-xaas`, `gadgetron-web`, `gadgetron-knowledge`
-> **Phase**: [P1] primary / [P2A] embedded web mount / [P2B] workbench scope exception
-> **관련 문서**: `docs/design/gateway/wire-up.md`, `docs/design/gateway/workbench-projection-and-actions.md`, `docs/design/core/workbench-shared-types.md`, `docs/design/web/expert-knowledge-workbench.md`, `docs/design/phase2/03-gadgetron-web.md`, `docs/process/04-decision-log.md` D-20260414-02, D-20260418-14, `docs/reviews/pm-decisions.md` D-6/D-7/D-11/D-12
-> **보정 범위**: 2026-04-18 기준 `origin/main` 의 실제 gateway router/build/scope contract 는 이 문서가 authoritative 이다. `docs/design/gateway/wire-up.md` 는 Sprint-era wide draft 로 유지하되, 현재 trunk 의 route-group 분류, scope gate, 413 shaping, `AppState` optional field semantics 는 본 문서를 우선한다.
+> **Phase**: [P1] primary / [P2A] embedded web mount / [P2B] workbench scope exception / [P2B-EPIC3] workbench admin sub-tree (Management-scoped catalog hot-reload, PR #213)
+> **관련 문서**: `docs/design/gateway/wire-up.md`, `docs/design/gateway/workbench-projection-and-actions.md`, `docs/design/core/workbench-shared-types.md`, `docs/design/web/expert-knowledge-workbench.md`, `docs/design/phase2/03-gadgetron-web.md`, `docs/process/04-decision-log.md` D-20260414-02, D-20260418-14, `docs/manual/api-reference.md` §POST /api/v1/web/workbench/admin/reload-catalog, `docs/reviews/pm-decisions.md` D-6/D-7/D-11/D-12
+> **보정 범위**: 2026-04-18 기준 `origin/main` 의 실제 gateway router/build/scope contract 는 이 문서가 authoritative 이다. `docs/design/gateway/wire-up.md` 는 Sprint-era wide draft 로 유지하되, 현재 trunk 의 route-group 분류, scope gate (2026-04-19 기준 4 개 prefix — admin sub-tree 포함), 413 shaping, `AppState` optional field semantics 는 본 문서를 우선한다.
 
 ---
 
@@ -169,6 +169,7 @@ Route group matrix:
 | `/ready` | 없음 | 없음 | gateway runtime | [P1] | DB/no-db readiness probe |
 | `/web/*` | 없음 | 없음 | embedded `gadgetron-web` | [P2A] | static shell only, feature+config gated |
 | `/v1/*` | Bearer | `Scope::OpenAiCompat` | OpenAI-compatible data plane | [P1] | `/v1/chat/completions`, `/v1/models` |
+| `/api/v1/web/workbench/admin/*` | Bearer | `Scope::Management` | workbench admin plane (catalog hot-reload today; future bundle install/uninstall) | [P2B-EPIC3] | **must be matched BEFORE** the broader workbench rule — shipped in ISSUE 8 TASK 8.2 / PR #213 |
 | `/api/v1/web/workbench/*` | Bearer | `Scope::OpenAiCompat` | workbench read/action plane | [P2B] | explicit exception under `/api/v1/*` |
 | `/api/v1/xaas/*` | Bearer | `Scope::XaasAdmin` | XaaS control plane | [P2+] | reserved in scope table even before all routes land |
 | 기타 `/api/v1/*` | Bearer | `Scope::Management` | admin/operator API | [P1] | nodes, deploy, usage, costs |
@@ -194,13 +195,19 @@ let authenticated_routes = Router::new()
 - `/web/*` 는 public asset tree 이고, `/api/v1/web/workbench/*` 는 authenticated JSON API tree 다.
 - `build_router_with_web()` 는 항상 `build_router()` 를 먼저 조립한 뒤 base router 위에 `/web` subtree 를 덧씌운다.
 
-#### 2.1.3 Scope gate mapping [P1] [P2B]
+#### 2.1.3 Scope gate mapping [P1] [P2B] [P2B-EPIC3]
 
 ```rust
 let required_scope: Option<Scope> = if path.starts_with("/v1/") {
     Some(Scope::OpenAiCompat)
 } else if path.starts_with("/api/v1/xaas/") {
     Some(Scope::XaasAdmin)
+} else if path.starts_with("/api/v1/web/workbench/admin/") {
+    // [P2B-EPIC3] ISSUE 8 TASK 8.2 (PR #213): admin sub-tree under the
+    // workbench namespace is privileged (catalog hot-reload today; future
+    // bundle install/uninstall). Must be matched BEFORE the broader
+    // workbench rule so OpenAiCompat callers get 403 on /admin/*.
+    Some(Scope::Management)
 } else if path.starts_with("/api/v1/web/workbench/") {
     Some(Scope::OpenAiCompat)
 } else if path.starts_with("/api/v1/") {
@@ -212,6 +219,7 @@ let required_scope: Option<Scope> = if path.starts_with("/v1/") {
 
 계약:
 
+- `/api/v1/web/workbench/admin/` 분기는 `/api/v1/web/workbench/` 일반 workbench 분기보다 앞에 와야 한다 — 순서가 뒤집히면 OpenAiCompat 키가 `/admin/reload-catalog` 같은 Management-only 엔드포인트에 접근할 수 있는 즉각적인 privilege regression 이다. [P2B-EPIC3]
 - `/api/v1/web/workbench/` 분기는 `/api/v1/` catch-all 보다 앞에 와야 한다.
 - `ScopeGuard` 는 authenticated route stack 안에서만 실행된다. `/health`, `/ready`, `/web/*` 는 이 middleware 에 도달하지 않는다.
 - `TenantContext` 가 request extensions 에 없으면 fail-closed 한다. 이는 layer-ordering 위반 방어장치다.
@@ -379,7 +387,7 @@ STRIDE 요약:
 | 자산 | 신뢰 경계 | 위협 | 완화 |
 |---|---|---|---|
 | `gad_*` API key | client -> authenticated route stack | Spoofing | `ApiKey::parse` + hash validation + 401 audit |
-| management namespace | `TenantContext` -> `ScopeGuard` | Elevation of Privilege | ordered prefix match (`/api/v1/web/workbench/*` before `/api/v1/*`) + regression tests |
+| management namespace | `TenantContext` -> `ScopeGuard` | Elevation of Privilege | ordered prefix match: `/api/v1/web/workbench/admin/*` (Management, [P2B-EPIC3] PR #213) 먼저 → `/api/v1/web/workbench/*` (OpenAiCompat) 다음 → `/api/v1/*` (Management) catch-all + regression tests (harness Gate 7q.2 = OpenAiCompat 키가 `/admin/reload-catalog` 호출 시 403) |
 | error envelope | body-limit layer -> SDK client | Information Disclosure / DX breakage | `openai_shape_413` 가 plain-text 413 을 JSON 으로 정규화 |
 | audit trail | auth/scope failure path -> `AuditWriter` | Repudiation | 401/403 failure audit entry |
 | gateway memory/CPU | external request body | DoS | 4 MiB body limit at outer edge |
@@ -486,7 +494,7 @@ Oversize request
 | `format_body_limit`, `openai_shape_413` | 413 응답이 plain text 가 아니라 OpenAI-shaped JSON 으로 정규화된다 |
 | `auth_middleware` | missing/malformed/revoked auth 가 401 + audit 로 fail-closed 한다 |
 | `tenant_context_middleware` | `ValidatedKey` 를 `TenantContext` 로 변환하고 request_id 를 재사용한다 |
-| `scope_guard_middleware` | `/v1/*`, `/api/v1/xaas/*`, `/api/v1/web/workbench/*`, `/api/v1/*` 순서가 정확히 적용된다 |
+| `scope_guard_middleware` | `/v1/*`, `/api/v1/xaas/*`, `/api/v1/web/workbench/admin/*` ([P2B-EPIC3]), `/api/v1/web/workbench/*`, `/api/v1/*` 순서가 정확히 적용된다. harness Gate 7q.2 가 `/admin/reload-catalog` 에 OpenAiCompat 키로 호출 시 403 을 확인하여 ordering regression 을 잡는다 |
 | `metrics_middleware` | `tui_tx` 가 있을 때만 `WsMessage::RequestLog` emit, 없을 때 no-op |
 | `workbench_routes()` | OpenAiCompat key 로 bootstrap 접근 가능, request evidence not found 가 404 envelope 로 직렬화된다 |
 | `ready_handler` | `no_db` / missing pool / reachable PG 상태에 따라 200 또는 503 을 반환한다 |

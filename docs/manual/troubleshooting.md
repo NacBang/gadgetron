@@ -717,6 +717,44 @@ Parallel failure on the read side: `GET /audit/tool-events` also 400s without a 
 
 ---
 
+### HTTP 403 — `scope_required` on `POST /api/v1/web/workbench/admin/reload-catalog`
+
+**What you observe:** Calling the catalog hot-reload endpoint with a workbench / chat API key returns:
+
+```json
+{"error": {"code": "scope_required", "message": "..."}}
+```
+
+with HTTP 403.
+
+**Why:** ISSUE 8 TASK 8.2 (PR #213 / v0.4.2) added the `/api/v1/web/workbench/admin/` sub-tree for privileged catalog operations. `scope_guard_middleware` gates this prefix at `Scope::Management` — **not** `OpenAiCompat` — because letting workbench users self-reload the catalog would turn the read-side scope masking into a no-op (self-reload lets a caller reshape what they can then see). The rule fires **before** the broader `/api/v1/web/workbench/*` OpenAiCompat rule, so the 403 comes from the scope layer, not from the handler. Harness Gate 7q.2 pins this exact contract.
+
+**Fix:** Use a `Management`-scoped API key. Create one with `gadgetron key create --tenant-id <uuid> --scope management` (the CLI surface accepts the scope name; verify with `gadgetron key list`). See `docs/manual/auth.md` §Scope system for the full scope matrix. The same key works for the rest of the `/api/v1/*` operator surface (`/api/v1/nodes`, `/api/v1/usage`, etc.).
+
+---
+
+### HTTP 400 — `config_error` on `POST /api/v1/web/workbench/admin/reload-catalog`
+
+**What you observe:** The endpoint returns HTTP 400 with a `config_error` body mentioning "catalog reload requires a configured workbench with a descriptor catalog handle" — **even with a Management-scoped key**.
+
+**Why:** The handler reads `state.workbench.descriptor_catalog` (the shared `Arc<ArcSwap<DescriptorCatalog>>` handle wired in TASK 8.1 / PR #211). Production `build_workbench` always sets the field, so a 400 here means you are running a headless test fixture or a custom build path that constructs `GatewayWorkbenchService` without threading the ArcSwap handle through. On trunk this is a defensive guard, not a user-facing failure mode.
+
+**Fix:** Start the server through the CLI (`gadgetron serve --config gadgetron.toml`) rather than an in-process test harness. The CLI always calls `build_workbench(...)` which sets the handle. If you are writing an integration test and need the reload endpoint, mirror the pattern in `crates/gadgetron-gateway/tests/web_2b_descriptor_endpoints.rs` that threads `Some(Arc::new(ArcSwap::from_pointee(DescriptorCatalog::seed_p2b())))` into the service constructor.
+
+---
+
+### `/admin/reload-catalog` succeeds but `action_count` looks unchanged
+
+**What you observe:** POST `/admin/reload-catalog`, response is `{reloaded:true, source:"seed_p2b", action_count:5, view_count:3}`, but `action_count` matches what was there before the reload — it looks like nothing happened.
+
+**Why:** Expected behavior on trunk through v0.4.2. ISSUE 8 TASK 8.2 ships the ArcSwap plumbing + the endpoint; **the source of the "fresh" catalog is still hardcoded `DescriptorCatalog::seed_p2b()`**. Reload on seed_p2b always produces an identical catalog — the endpoint proves the atomic swap lands, not that the catalog changed. Harness Gate 7q.1 explicitly asserts this: the response `action_count` must equal the live `GET /workbench/actions` count right after, which only catches the "swap happened but read path still sees old pointer" regression, not a "content changed" outcome.
+
+**Fix:** None on v0.4.2 — this is the intended contract. TASK 8.3 (fs-watcher) will add file-based loading so a reload actually picks up on-disk descriptor edits; `source` in the response will then widen from `"seed_p2b"` to `"config_file"` / `"bundle_manifest"` (wire-stable enum — see `docs/manual/api-reference.md` §POST /admin/reload-catalog). Until then, treat the endpoint as a plumbing liveness probe.
+
+**Note on schema validators (TASK 8.2 known limitation).** Even on trunk where the catalog content never changes, readers should know: `InProcessWorkbenchActionService` pre-compiles JSON-schema validators at construction time and the reload endpoint does **not** rebuild them. This is safe while `seed_p2b` is the only source (schemas identical across reloads), but TASK 8.3 must either rebuild the action service on swap or migrate validators into the ArcSwap alongside the catalog. If you see action invocations accepting arg shapes that the descriptor schema should reject after a future TASK-8.3 reload, this is the bug to file.
+
+---
+
 ## Log interpretation
 
 **Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.

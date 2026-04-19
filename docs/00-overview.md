@@ -1,6 +1,6 @@
 # Gadgetron — 전체 설계 개요
 
-> **버전**: `0.4.0` (Phase 2 EPIC 1 + EPIC 2 CLOSED; Phase 3 EPIC 3+ 준비) · 이전 tag `v0.4.0` (EPIC 2 closure), `v0.3.0` (EPIC 1 closure), `v0.1.0-phase1` (역사) · 버저닝 정책 `docs/process/06-versioning-policy.md`
+> **버전**: `0.4.2` (Phase 2 EPIC 1 + EPIC 2 CLOSED; Phase 2 EPIC 3 **Plugin platform ACTIVE** — ISSUE 8 TASK 8.1 shipped as PR #211 `Arc<ArcSwap<DescriptorCatalog>>` 플러밍, TASK 8.2 shipped as PR #213 `POST /api/v1/web/workbench/admin/reload-catalog` Management-scoped hot-reload; TASK 8.3 + 8.4 남음) · 이전 tag `v0.4.0` (EPIC 2 closure), `v0.3.0` (EPIC 1 closure), `v0.1.0-phase1` (역사) · EPIC 3 close → `v0.5.0` tag, EPIC 4 close → `v1.0.0` (first production release) · 버저닝 정책 `docs/process/06-versioning-policy.md`
 > **에디션**: 2021
 > **라이선스**: MIT
 > **최소 Rust**: 1.80
@@ -457,9 +457,14 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - ~~Streaming audit `latency_ms=0` (dispatch-time only)~~ — **해결 (P2B / ISSUE 4 PR #194)**. `StreamEndGuard` Drop 경로에서 amendment `AuditEntry` 를 보내 실제 `latency_ms` + `output_tokens` + `cost_cents` 를 기록 (`crates/gadgetron-gateway/src/stream_end_guard.rs:241-285`). 남은 한계: streaming 의 `input_tokens` 는 여전히 `0` (provider 가 delta stream 에 prompt token 을 재보고하지 않음 — router upstream rework 필요한 별도 ISSUE).
 - Audit `provider=None` (실제 라우팅된 provider 미기록) — 여전히 유효. `RoutingDecision` 을 handler 까지 surface 하는 rework 이 별도 ISSUE 로 남아 있음.
 
-### Phase 2 — Knowledge Layer + Penny + Bundle Surfaces (v0.2 → **v0.4.0**, EPIC 1 + EPIC 2 CLOSED)
+### Phase 2 — Knowledge Layer + Penny + Bundle Surfaces (v0.2 → **v0.4.2**, EPIC 1 + EPIC 2 CLOSED; EPIC 3 Plugin platform **ACTIVE**)
 
 **목표**: Phase 1 substrate 위에 지식 레이어(LLM Wiki + 웹 조사 + RAW 입수 + 검색 인덱스), Penny, 그리고 Bundle/Plug/Gadget 확장 surface를 올려 지식 협업 플랫폼을 구성.
+
+**진행 상태 (2026-04-19)**:
+- EPIC 1 (Workbench MVP) — **CLOSED**, tag `v0.3.0`, PR #208. ISSUE 1–4 통합 (workbench projection + 직접 액션 승인 흐름 + dashboard observability).
+- EPIC 2 (Agent autonomy) — **CLOSED**, tag `v0.4.0`, PR #209. ISSUE 5–7 통합 (tool-call audit 영속화 + Penny fan-out + `/v1/tools` 외부 MCP surface).
+- EPIC 3 (Plugin platform) — **ACTIVE**. ISSUE 8 (DescriptorCatalog hot-reload) 진행 중: TASK 8.1 ✅ (PR #211 `Arc<ArcSwap<_>>` 플러밍, 0.4.1), TASK 8.2 ✅ (PR #213 `POST /admin/reload-catalog` Management-scoped endpoint, 0.4.2). TASK 8.3 (fs-watcher 자동 reload + schema validator rebuild), TASK 8.4 (SIGHUP 핸들러) 남음. ISSUE 9 (real bundle manifests), ISSUE 10 (bundle marketplace) 계획됨. EPIC 3 close → tag `v0.5.0`.
 
 **신규 크레이트 (3개)**:
 - `gadgetron-knowledge` — 지식 레이어 구성요소 (wiki / SearXNG 프록시 / stdio Gadget 서버).
