@@ -1145,7 +1145,63 @@ Tenant-scoped read over `action_audit_events` — the rows the `ActionAuditSink`
 | `config_error` | 400 | `pg_pool` is not configured on this server (in-memory / demo mode). The endpoint requires Postgres. |
 | `config_error` | 400 | Underlying SQL query failed — message includes the sqlx error. |
 
-E2E Gate 7h.8 verifies an unfiltered GET returns the rows from prior gates and that `?action_id=wiki-write` narrows server-side (not client-side).
+E2E Gate 7h.8 verifies an unfiltered GET returns the rows from prior gates and that `?action_id=wiki-write` narrows server-side (not client-side). The sibling endpoint `GET /audit/tool-events` (below) exposes the other audit plane (Penny tool-calls, `tool_audit_events`) with the same query shape.
+
+---
+
+### GET /api/v1/web/workbench/audit/tool-events
+
+Tenant-scoped read over `tool_audit_events` — the Penny tool-call trail, parallel to `/audit/events` which covers workbench direct-action audit. Landed in ISSUE 5 / v0.2.8 (`crates/gadgetron-gateway/src/web/workbench.rs::list_tool_audit_events`, backed by `crates/gadgetron-xaas/src/audit/tool_event.rs::query_tool_audit_events`). Until PR #199 the sink that emitted these rows was a `NoopGadgetAuditEventSink`, so the table filled only in dev fixtures — this endpoint makes the plane readable now that the Postgres-backed `run_gadget_audit_writer` persists each row.
+
+**Auth:** `OpenAiCompat`.
+
+**Query parameters** (all optional):
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `tool_name` | string | — | Exact-match filter (e.g. `wiki.write`). No wildcard / prefix matching. |
+| `since` | RFC3339 timestamp | — | Inclusive lower bound on `created_at`. |
+| `limit` | integer | 100 | Clamped to `[1, 500]`. Out-of-range values are silently clamped. |
+
+**Tenant boundary:** the handler always pins queries to the authenticated actor's `tenant_id`. No cross-tenant read path.
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "id": 12345,
+      "tool_name": "wiki.write",
+      "tier": "write",
+      "category": "knowledge",
+      "outcome": "success",
+      "error_code": null,
+      "elapsed_ms": 84,
+      "conversation_id": "conv-abc",
+      "claude_session_uuid": null,
+      "owner_id": null,
+      "tenant_id": "manycoresoft",
+      "created_at": "2026-04-19T08:04:30.412Z"
+    }
+  ],
+  "returned": 1
+}
+```
+
+- Rows are ordered `created_at DESC` (newest first).
+- `outcome` ∈ `"success"` | `"error"`. Unlike `/audit/events`, there is no `pending_approval` outcome on this plane — approval-flow variants are planned future work on `GadgetAuditEvent` (see ADR-P2A-06 remaining items).
+- `error_code` is non-null only when `outcome == "error"`. Value is the short-form `GadgetError::error_code()` string.
+- `conversation_id` / `claude_session_uuid` / `owner_id` are nullable — populated by the emit site when a native Claude session is active; P2A/P2B single-user paths leave them NULL.
+- `returned` mirrors `events.len()`.
+
+**Errors:**
+
+| Code | HTTP | When |
+|---|---|---|
+| `config_error` | 400 | `pg_pool` not configured (in-memory / demo mode). The sink falls back to Noop and the query endpoint has nothing to return. |
+| `config_error` | 400 | Underlying SQL query failed — message includes the sqlx error. |
+
+E2E Gate 7k.4 covers the shape + clamp contract.
 
 ---
 
@@ -1204,7 +1260,7 @@ E2E Gate 7k.3 verifies the response shape (all three sub-objects present, fields
 
 ### GET /api/v1/web/workbench/events/ws
 
-WebSocket endpoint — tenant-filtered live activity feed. Subscribers receive `ActivityEvent` JSON frames in real time as the `ActivityBus` publishes them (today: chat completions; more publishers land as ISSUE 5/6 wire them). Landed in ISSUE 4 / v0.2.7 (`crates/gadgetron-gateway/src/web/workbench.rs::events_ws_handler`).
+WebSocket endpoint — tenant-filtered live activity feed. Subscribers receive `ActivityEvent` JSON frames in real time as the `ActivityBus` publishes them. Shipped publishers today: `ChatCompleted` (ISSUE 4 / PR #194), `ToolCallCompleted` (ISSUE 5 / PR #199 — Penny tool-call trail fans out from the audit writer). More publishers (Penny-originated workbench activity attribution) are planned under ISSUE 6. Landed in ISSUE 4 / v0.2.7 (`crates/gadgetron-gateway/src/web/workbench.rs::events_ws_handler`).
 
 **Auth:** `OpenAiCompat`. The standard `Authorization: Bearer …` header works for WebSocket upgrade requests issued from non-browser clients. **Browser clients** cannot set `Authorization` on WS upgrades — use the **query-token fallback** `?token=gad_live_…` scoped to this route. Middleware strips `?token=` before logging (`crates/gadgetron-gateway/src/middleware/auth.rs`).
 
