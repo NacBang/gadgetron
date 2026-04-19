@@ -594,6 +594,54 @@ on the approve / deny / cancel endpoints, or similar 400 `audit event query requ
 
 ---
 
+### HTTP 400 — `usage summary requires Postgres`
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "usage summary requires Postgres (no pool configured)",
+    "type": "invalid_request_error",
+    "code": "config_error"
+  }
+}
+```
+
+on `GET /api/v1/web/workbench/usage/summary`.
+
+**Why:** ISSUE 4 / v0.2.7 `/usage/summary` runs three aggregate SQL queries against the three audit tables (`audit_log`, `action_audit_events`, `tool_audit_events`) in parallel via `tokio::join!`. Without a Postgres pool the handler can't issue those queries, so it returns 400 instead of silently returning zeros. This matches the behaviour of `GET /audit/events` (which also 400s without a pool).
+
+**Fix:** Same as the approval-store case above — provision `DATABASE_URL` pointing at a pgvector-enabled Postgres. The `/web/dashboard` page that consumes this endpoint will show its auth gate with an error toast when the underlying request 400s.
+
+---
+
+### `/events/ws` closes immediately with a `{"type":"lag",…}` frame
+
+**What you observe:** WebSocket connects, the server sends a JSON text frame:
+
+```json
+{"type":"lag","missed":42,"message":"subscriber lagged; reconnect to resume"}
+```
+
+then closes the socket.
+
+**Why:** ISSUE 4 / v0.2.7 `/events/ws` is backed by a bounded `tokio::sync::broadcast::channel`. When your subscriber falls behind the publisher rate (network lag, tab backgrounded, client CPU-starved), the broadcast receiver reports `RecvError::Lagged(N)` — the `N` most recent events were dropped before you got to them. Silently swallowing the drop would hide real overflow; the server instead sends the explicit `lag` frame then closes so the client has a definitive signal.
+
+**Fix:** Reconnect the WebSocket and re-sync baseline via `GET /usage/summary`. Do NOT try to infer "missed" events from the tile deltas — `/usage/summary` provides the authoritative window counters. The `/web/dashboard` page implements this reconnect loop (open WS → on lag frame, re-fetch summary → reopen WS). If lag frames fire repeatedly under low load, investigate publisher-side bursts (many concurrent chat completions) or an undersized channel — the channel capacity is compiled in at `crates/gadgetron-core/src/activity_bus.rs`.
+
+---
+
+### `/events/ws` upgrade returns HTTP 401 from the browser
+
+**What you observe:** Browser `new WebSocket(url)` fails with a 401 during upgrade; console shows `WebSocket connection to 'wss://…/events/ws' failed`.
+
+**Why:** Browsers cannot attach an `Authorization: Bearer …` header to WebSocket upgrades. The gateway's auth middleware therefore accepts a **query-token fallback** scoped ONLY to `/events/ws`: append `?token=gad_live_…` to the URL. If the token is missing, malformed, or belongs to another tenant, the upgrade is rejected with 401 before the protocol switches.
+
+**Fix:** Build the URL with the key appended, e.g. `wss://localhost:8080/api/v1/web/workbench/events/ws?token=gad_live_xxxxx`. The `/web/dashboard` page does this automatically. Server-side, the auth middleware strips `?token=` from the request URI before the request-id and trace lines log, so keys don't appear in `gadgetron.log`. Non-browser clients (curl, websocat, Rust `tokio-tungstenite`) should continue using the `Authorization` header — the query-token fallback is browser-only scaffolding.
+
+---
+
 ## Log interpretation
 
 **Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.
