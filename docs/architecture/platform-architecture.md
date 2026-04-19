@@ -4217,6 +4217,7 @@ Cross-ref: Axis C §2.C.4.5 for `terminationGracePeriodSeconds: 70` Helm value.
 | `GET /api/v1/usage` | 제공 | **minor 이내 안정** | 집계 필드 추가 | 기존 집계 필드 제거·단위 변경 (→ major bump) |
 | `GET /api/v1/costs` | 제공 | **minor 이내 안정** | 비용 필드 추가 | 기존 필드 제거·단위 변경 (→ major bump) |
 | `/api/v1/xaas/*` (테넌트·쿼터·감사) | 제공 | **Phase 2 안정화까지 불안정** | Phase 1 기간 중 breaking change 허용 (내부 운영용), Phase 2 이후 additive-only | Phase 2 안정화 이후 필드 제거 |
+| `/api/v1/web/workbench/*` (projection + actions + approvals + audit + usage + events ws) | 제공 (ISSUE 1–6, v0.2.0–v0.2.9) | **EPIC 1 close 이전 불안정, 이후 additive-only** | EPIC 1 (v0.3.0) 태그 전까지 응답 shape 변경 허용 (/web 클라이언트와 동시 rev). 태그 후 additive-only. 열세 개 개별 엔드포인트 목록은 `docs/manual/api-reference.md §Workbench endpoints` 참조 (하나의 SSOT). | v0.3.0 이후 기존 필드 제거·이름 변경·shape 재구성 (→ major bump) |
 
 **SSE 이벤트 계약 (안정, Phase 1~3)**:
 - 스트림 청크: `data: {"id":"...","object":"chat.completion.chunk","choices":[...]}\n\n`
