@@ -1493,6 +1493,112 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7v.3 — teams + members CRUD (ISSUE 14 TASK 14.5)
+# ---------------------------------------------------------------------------
+#
+# Create a team, add a member, list, remove, delete. All under
+# Management scope. Invalid id regex + 'admins' reserved + cross-tenant
+# user rejection are covered by in-module logic; gate pins the wire.
+log "=== Gate 7v.3: teams + members CRUD (ISSUE 14 TASK 14.5) ==="
+
+# Create a test user first so the team-member add has a real user.
+TUSER_BODY='{"email":"harness-team-user@example.com","display_name":"Harness Team User","role":"member","password":"correct horse 3"}'
+TUSER_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$TUSER_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+TUSER_ID="$(echo "$TUSER_RESP" | jq -r '.id // ""' 2>/dev/null)"
+if [ -n "$TUSER_ID" ]; then
+  pass "created member user for team-member test (id=$TUSER_ID)"
+else
+  fail "team-member test setup: could not create user" \
+    "$(echo "$TUSER_RESP" | head -c 400)"
+fi
+
+# Create team.
+TEAM_BODY='{"id":"harness-team","display_name":"Harness Team","description":"gate 7v.3 test fixture"}'
+TEAM_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$TEAM_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams" 2>&1 || true)"
+TEAM_ID="$(echo "$TEAM_RESP" | jq -r '.id // ""' 2>/dev/null)"
+if [ "$TEAM_ID" = "harness-team" ]; then
+  pass "POST /admin/teams created team (id=$TEAM_ID)"
+else
+  fail "POST /admin/teams regressed" "$(echo "$TEAM_RESP" | head -c 400)"
+fi
+
+# Invalid id — regex rejects uppercase.
+BAD_TEAM='{"id":"BadName","display_name":"X"}'
+BAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$BAD_TEAM" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams" 2>&1 || true)"
+if [ "$BAD_CODE" != "200" ]; then
+  pass "invalid team id rejected (status=$BAD_CODE)"
+else
+  fail "invalid team id accepted" ""
+fi
+
+# Add member.
+ADD_BODY="$(jq -cn --arg uid "$TUSER_ID" '{user_id: $uid, role: "member"}')"
+ADD_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ADD_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team/members" 2>&1 || true)"
+ADD_USER_ID="$(echo "$ADD_RESP" | jq -r '.user_id // ""' 2>/dev/null)"
+if [ "$ADD_USER_ID" = "$TUSER_ID" ]; then
+  pass "POST /admin/teams/harness-team/members added user"
+else
+  fail "add team member regressed" "$(echo "$ADD_RESP" | head -c 400)"
+fi
+
+# List members — expect the one we just added.
+MEMBERS_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team/members" 2>&1 || true)"
+MEMBER_COUNT="$(echo "$MEMBERS_RESP" | jq '.members | length' 2>/dev/null || echo -1)"
+if [ "${MEMBER_COUNT:-0}" -eq 1 ]; then
+  pass "list team members returned count=1"
+else
+  fail "list team members regressed — expected 1, got $MEMBER_COUNT" \
+    "$(echo "$MEMBERS_RESP" | head -c 400)"
+fi
+
+# Remove member.
+REMOVE_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team/members/$TUSER_ID" 2>&1 || true)"
+if echo "$REMOVE_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+  pass "DELETE team member succeeded"
+else
+  fail "DELETE team member regressed" "$(echo "$REMOVE_RESP" | head -c 400)"
+fi
+
+# Delete team.
+DEL_TEAM_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team" 2>&1 || true)"
+if echo "$DEL_TEAM_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+  pass "DELETE /admin/teams/harness-team succeeded"
+else
+  fail "DELETE team regressed" "$(echo "$DEL_TEAM_RESP" | head -c 400)"
+fi
+
+# RBAC — OpenAiCompat caller on /admin/teams → 403.
+TEAMS_RBAC_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams" 2>&1 || true)"
+if [ "$TEAMS_RBAC_CODE" = "403" ]; then
+  pass "admin/teams RBAC — OpenAiCompat key → 403"
+else
+  fail "admin/teams RBAC regressed — expected 403, got $TEAMS_RBAC_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
 # ---------------------------------------------------------------------------
 #

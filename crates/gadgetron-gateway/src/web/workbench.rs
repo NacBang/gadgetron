@@ -1028,6 +1028,155 @@ pub async fn revoke_my_key_handler(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// ISSUE 14 TASK 14.5 — teams + team_members CRUD
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListTeamsResponse {
+    pub teams: Vec<gadgetron_xaas::teams::TeamRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateTeamRequest {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListMembersResponse {
+    pub members: Vec<gadgetron_xaas::teams::TeamMemberRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct AddMemberRequest {
+    pub user_id: uuid::Uuid,
+    #[serde(default = "default_member_role")]
+    pub role: String,
+}
+fn default_member_role() -> String {
+    "member".into()
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SimpleOkResponse {
+    pub ok: bool,
+}
+
+pub async fn list_teams_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<ListTeamsResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
+    })?;
+    let teams = gadgetron_xaas::teams::list_teams(pool, ctx.tenant_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("list_teams: {e}")))
+        })?;
+    let returned = teams.len();
+    Ok(Json(ListTeamsResponse { teams, returned }))
+}
+
+pub async fn create_team_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreateTeamRequest>,
+) -> Result<Json<gadgetron_xaas::teams::TeamRow>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
+    })?;
+    let row = gadgetron_xaas::teams::create_team(
+        pool,
+        ctx.tenant_id,
+        &body.id,
+        &body.display_name,
+        body.description.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("create_team: {e}"))))?;
+    Ok(Json(row))
+}
+
+pub async fn delete_team_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+) -> Result<Json<SimpleOkResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
+    })?;
+    gadgetron_xaas::teams::delete_team(pool, ctx.tenant_id, &team_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("delete_team: {e}")))
+        })?;
+    Ok(Json(SimpleOkResponse { ok: true }))
+}
+
+pub async fn list_team_members_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+) -> Result<Json<ListMembersResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
+    })?;
+    let members = gadgetron_xaas::teams::list_team_members(pool, ctx.tenant_id, &team_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("list_team_members: {e}")))
+        })?;
+    let returned = members.len();
+    Ok(Json(ListMembersResponse { members, returned }))
+}
+
+pub async fn add_team_member_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(team_id): axum::extract::Path<String>,
+    Json(body): Json<AddMemberRequest>,
+) -> Result<Json<gadgetron_xaas::teams::TeamMemberRow>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
+    })?;
+    let row = gadgetron_xaas::teams::add_team_member(
+        pool,
+        ctx.tenant_id,
+        &team_id,
+        body.user_id,
+        &body.role,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!("add_team_member: {e}")))
+    })?;
+    Ok(Json(row))
+}
+
+pub async fn remove_team_member_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path((team_id, user_id)): axum::extract::Path<(String, uuid::Uuid)>,
+) -> Result<Json<SimpleOkResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
+    })?;
+    gadgetron_xaas::teams::remove_team_member(pool, ctx.tenant_id, &team_id, user_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("remove_team_member: {e}")))
+        })?;
+    Ok(Json(SimpleOkResponse { ok: true }))
+}
+
 /// `GET /usage/summary` — tenant-scoped operations rollup.
 ///
 /// Aggregates over the past `window_hours` (default 24, clamped
@@ -1381,6 +1530,25 @@ pub fn workbench_routes() -> Router<AppState> {
         .route(
             "/keys/{key_id}",
             axum::routing::delete(revoke_my_key_handler),
+        )
+        // ISSUE 14 TASK 14.5 — teams + members CRUD.
+        .route("/admin/teams", get(list_teams_handler))
+        .route("/admin/teams", post(create_team_handler))
+        .route(
+            "/admin/teams/{team_id}",
+            axum::routing::delete(delete_team_handler),
+        )
+        .route(
+            "/admin/teams/{team_id}/members",
+            get(list_team_members_handler),
+        )
+        .route(
+            "/admin/teams/{team_id}/members",
+            post(add_team_member_handler),
+        )
+        .route(
+            "/admin/teams/{team_id}/members/{user_id}",
+            axum::routing::delete(remove_team_member_handler),
         )
 }
 
