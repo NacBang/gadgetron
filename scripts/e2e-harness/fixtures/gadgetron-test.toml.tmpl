@@ -17,6 +17,13 @@ request_timeout_ms = 30000
 [web]
 enabled = true
 api_base_path = "/v1"
+# ISSUE 9 TASK 9.3 — point bundles_dir at the in-tree `bundles/` so
+# the harness boots against the first-party `gadgetron-core` bundle
+# (instead of the hardcoded `seed_p2b()` fallback). `reload-catalog`
+# from this boot hits `from_bundle_dir` and surfaces
+# `bundles: [{id: "gadgetron-core", ...}]` in the response — pinned
+# by Gate 7q.3.
+bundles_dir = "@BUNDLES_DIR@"
 
 [router.default_strategy]
 type = "round_robin"
