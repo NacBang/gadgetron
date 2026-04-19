@@ -1,11 +1,11 @@
 # Phase 2 Overview — Assistant Plane on Agentic Cluster Collaboration Platform
 
-> **Status**: Draft v3 (Round 2 review addressed — 4 reviewers, 2026-04-13) — **partial supersede 2026-04-14**
+> **Status**: Draft v3 (Round 2 review addressed — 4 reviewers, 2026-04-13) — **partial supersede 2026-04-14** — **Phase 2A scope IMPLEMENTED** on trunk (EPIC 1 Workbench MVP CLOSED `v0.3.0` PR #208 + EPIC 2 Agent autonomy CLOSED `v0.4.0` PR #209, both 2026-04-19). §3 "Phase 2A MVP Scope (4 weeks)" content — knowledge layer + Penny adapter + `gadgetron-web` shell + tool registry Path 1 — shipped across ISSUEs 1–7; remaining items listed as Phase 2A in this doc (Penny-subprocess approval bridge, mTLS, `/metrics`) are deferred per ADR-P2A-06 / scheduled for EPIC 5 / not yet in an active ROADMAP v2 ISSUE.
 > **Author**: PM (Claude)
 > **Date**: 2026-04-13 (v3) · 2026-04-14 (partial supersede)
 > **Supersedes**: Draft v2 (addressed Round 0 chief-architect + Round 1.5 dx/security + Round 2 qa feedback)
 >
-> ⚠ **2026-04-15 partial supersede notice**: The canonical product framing now lives in `docs/design/ops/agentic-cluster-collaboration.md`. This document should be read as the **Phase 2A assistant-plane scope document**, not the whole product definition. Sections still mentioning legacy `[penny]`, `gadgetron penny init`, `key create --no-db`, or `rmcp` are historical unless explicitly updated below. OpenWebUI-related content remains superseded by `docs/process/04-decision-log.md` **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md`.
+> ⚠ **2026-04-15 partial supersede notice**: The canonical product framing now lives in `docs/design/ops/agentic-cluster-collaboration.md`. This document should be read as the **Phase 2A assistant-plane scope document**, not the whole product definition. Sections still mentioning legacy `[penny]`, `gadgetron penny init`, `key create --no-db`, or `rmcp` are historical unless explicitly updated below. OpenWebUI-related content remains superseded by `docs/process/04-decision-log.md` **D-20260414-02** and `docs/design/phase2/03-gadgetron-web.md`. For the shipping-state index of sibling design docs, see their own Status headers (01 / 02 / 03 / 04 / 05 all carry "IMPLEMENTED on trunk" annotations as of 2026-04-20).
 
 ## Table of Contents
 
