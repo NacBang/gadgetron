@@ -1415,7 +1415,7 @@ fi
 # Gate 12 — ERROR log scrape
 # ---------------------------------------------------------------------------
 
-log "=== Gate 12: ERROR log scrape ==="
+log "=== Gate 12: ERROR + WARN log scrape ==="
 
 # Intentional errors from Gate 9b (stream_fail mock) are expected
 # and get filtered out here — they come in as
@@ -1430,6 +1430,25 @@ else
   ERR_COUNT="$(echo "$ERR_LINES" | wc -l | tr -d ' ')"
   fail "$ERR_COUNT unexpected ERROR entries in gadgetron.log" \
     "$(echo "$ERR_LINES" | head -5)"
+fi
+
+# Gate 12 extension: WARN scrape with whitelist. Catches
+# newly-emerging WARNs (e.g. audit channel overflow, provider
+# timeout, quota drift) that ERROR-only scrapes miss. Whitelist
+# the known-benign P2A warnings (ask-mode noise, missing git
+# config) — any OTHER WARN is flagged as a regression-candidate.
+WARN_LINES="$(sed "$STRIP_ANSI" "$GAD_LOG" 2>/dev/null \
+  | grep -E ' WARN ' \
+  | grep -vE 'ask mode has no effect in Phase 2A' \
+  | grep -vE 'git config user\.name / user\.email not set' \
+  | grep -vE 'scope denied .*path=/api/v1/' \
+  || true)"
+if [ -z "$WARN_LINES" ]; then
+  pass "no unexpected WARN entries in gadgetron.log (P2A ask-mode + git-config benign WARNs whitelisted)"
+else
+  WARN_COUNT="$(echo "$WARN_LINES" | wc -l | tr -d ' ')"
+  fail "$WARN_COUNT unexpected WARN entries in gadgetron.log (tighten the whitelist or fix the regression)" \
+    "$(echo "$WARN_LINES" | head -5 | head -c 1000)"
 fi
 
 # ---------------------------------------------------------------------------
