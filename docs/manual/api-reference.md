@@ -136,6 +136,240 @@ All `knowledge_*` errors use the same OpenAI-shaped envelope shown above (`{"err
 
 All five bodies are emitted with the standard `x-request-id` header; include that UUID in any bug report. Streaming callers (`/v1/chat/completions` with `stream: true`) that hit a terminal error receive the envelope inside an `event: error` SSE frame and the stream terminates **without** a trailing `data: [DONE]` — see the [Streaming error frame](#post-v1chatcompletions) example under `POST /v1/chat/completions` below. E2E Gate 9b formally certifies this contract. Every streaming request also produces two correlated AuditEntry rows (dispatch + amendment); on the error path the amendment's `status` is `"error"` rather than `"ok"` (see [troubleshooting.md §Streaming requests](troubleshooting.md#streaming-requests-stream-true)).
 
+### Penny / Wiki error bodies (examples)
+
+These bodies surface from the Penny subprocess boundary (`gadgetron-penny`) and from the wiki MCP gadget family (`wiki.get`, `wiki.put`, `wiki.delete`, `wiki.rename`). They use the same OpenAI-shaped envelope as every other error — the `message` strings below are emitted verbatim by `GadgetronError::error_message()` in `crates/gadgetron-core/src/error.rs`, with `{path}`, `{bytes}`, `{limit}`, `{pattern}`, `{seconds}`, `{name}`, `{reason}`, `{tool}`, `{remaining}`, `{conversation_id}` slots interpolated at runtime. Penny subprocess variants never leak raw subprocess stderr (enforced by the `penny_agent_error_message_does_not_contain_stderr` test in core). Streaming callers receive the same envelope inside an `event: error` SSE frame; the stream terminates without `data: [DONE]`.
+
+`penny_not_installed` (HTTP 503, `server_error`) — the `claude` CLI is not on PATH. Operator fix: install Claude Code and run `claude login` on the server (see [penny.md](penny.md)):
+
+```json
+{
+  "error": {
+    "message": "The Penny assistant is not available. The Claude Code CLI (`claude`) was not found on the server. Contact your administrator to install Claude Code and run `claude login`.",
+    "type": "server_error",
+    "code": "penny_not_installed"
+  }
+}
+```
+
+`penny_spawn_failed` (HTTP 503, `server_error`) — subprocess could not be spawned (permissions, ulimit, SELinux). Investigate via `RUST_LOG=gadgetron_penny=debug`:
+
+```json
+{
+  "error": {
+    "message": "The Penny assistant is not available. The server could not start the Claude Code process. Run `gadgetron serve` with `RUST_LOG=gadgetron_penny=debug` for spawn diagnostics, or check `journalctl -u gadgetron` for spawn errors.",
+    "type": "server_error",
+    "code": "penny_spawn_failed"
+  }
+}
+```
+
+`penny_agent_error` (HTTP 500, `server_error`) — subprocess exited non-zero mid-stream. The stderr tail is redacted server-side before logging and is **never** echoed in this body:
+
+```json
+{
+  "error": {
+    "message": "The Penny assistant encountered an error and stopped. The assistant process exited unexpectedly. Try again; if the problem persists, contact your administrator.",
+    "type": "server_error",
+    "code": "penny_agent_error"
+  }
+}
+```
+
+`penny_timeout` (HTTP 504, `server_error`) — wallclock exceeded `penny.request_timeout_secs`. 504 carries RFC 9110 §15.5.5 semantics: the upstream (Penny subprocess) did not respond in time; the caller may retry with a simpler request or raise the limit:
+
+```json
+{
+  "error": {
+    "message": "The Penny assistant did not respond in time (limit: 120s). Your request may have been too complex. Try a shorter or simpler request.",
+    "type": "server_error",
+    "code": "penny_timeout"
+  }
+}
+```
+
+`penny_tool_unknown` (HTTP 500, `server_error`) — agent called a Gadget name the live registry does not know. Usually a cached-manifest/registry mismatch; restart `gadgetron serve` to refresh:
+
+```json
+{
+  "error": {
+    "message": "The agent requested tool \"wiki.archive\", which is not registered on this server. This usually means a version mismatch between the agent's cached tool manifest and the live MCP registry. Restart `gadgetron serve` to refresh the manifest.",
+    "type": "server_error",
+    "code": "penny_tool_unknown"
+  }
+}
+```
+
+`penny_tool_denied` (HTTP 403, `permission_error`) — Gadget call blocked by policy (never-mode subcategory, feature gate, reserved namespace). Operator-facing `reason` string from the MCP server; safe to surface:
+
+```json
+{
+  "error": {
+    "message": "A tool call was denied by policy: destructive tier disabled in [agent.tools.destructive]. Check your `[agent.tools.*]` configuration in `gadgetron.toml`.",
+    "type": "permission_error",
+    "code": "penny_tool_denied"
+  }
+}
+```
+
+`penny_tool_rate_limited` (HTTP 429, `quota_error`) — Destructive-tier tool exceeded `max_per_hour`. Wait or raise the limit:
+
+```json
+{
+  "error": {
+    "message": "Tool \"wiki.delete\" is rate-limited (0/10 calls remaining this hour). Wait and retry, or increase `[agent.tools.destructive].max_per_hour` in `gadgetron.toml`.",
+    "type": "quota_error",
+    "code": "penny_tool_rate_limited"
+  }
+}
+```
+
+`penny_tool_approval_timeout` (HTTP 504, `server_error`) — approval flow timed out waiting for user decision. Reserved for P2B; in P2A this indicates a misconfiguration (no approval UI exists yet):
+
+```json
+{
+  "error": {
+    "message": "A tool call required user approval but none arrived within 300 seconds. (Approval flow is not functional in Phase 2A — this error indicates a misconfiguration or a forward-compat P2B path.)",
+    "type": "server_error",
+    "code": "penny_tool_approval_timeout"
+  }
+}
+```
+
+`penny_tool_invalid_args` (HTTP 400, `invalid_request_error`) — agent passed args that failed the tool's input schema. Agent-side bug; rephrase the user request:
+
+```json
+{
+  "error": {
+    "message": "The agent passed invalid arguments to a tool: missing required field `path`. This is an agent-side bug; try rephrasing your request.",
+    "type": "invalid_request_error",
+    "code": "penny_tool_invalid_args"
+  }
+}
+```
+
+`penny_tool_execution` (HTTP 500, `server_error`) — tool dispatch succeeded but the provider-side execution failed (SearXNG HTTP error, wiki write I/O fault, etc.). Check server logs for the underlying cause:
+
+```json
+{
+  "error": {
+    "message": "A tool failed to execute: SearXNG backend returned HTTP 502. Check server logs for details.",
+    "type": "server_error",
+    "code": "penny_tool_execution"
+  }
+}
+```
+
+`penny_session_not_found` (HTTP 404, `server_error`) — caller sent `conversation_id` but `SessionStore` has no entry (expired / evicted / cold start). Retry without `conversation_id` or with a fresh id:
+
+```json
+{
+  "error": {
+    "message": "Conversation \"conv_01HP...\" is not known to this server. The conversation may have expired or been evicted from the session store. Start a new conversation without a conversation_id, or with a fresh id.",
+    "type": "server_error",
+    "code": "penny_session_not_found"
+  }
+}
+```
+
+`penny_session_concurrent` (HTTP 429, `server_error`) — two concurrent requests for the same `conversation_id`; the second lost the per-session mutex race. Retry after the first turn settles:
+
+```json
+{
+  "error": {
+    "message": "Conversation \"conv_01HP...\" is already serving another request. Wait for the current turn to finish, then retry.",
+    "type": "server_error",
+    "code": "penny_session_concurrent"
+  }
+}
+```
+
+`penny_session_corrupted` (HTTP 500, `server_error`) — Claude Code reported the session UUID as unknown or the jsonl file is unreadable. The store entry is discarded server-side; the next retry falls through the first-turn branch and creates a fresh session:
+
+```json
+{
+  "error": {
+    "message": "Conversation \"conv_01HP...\" session state is unreadable. The session has been discarded; retry with the same conversation_id to start a fresh session.",
+    "type": "server_error",
+    "code": "penny_session_corrupted"
+  }
+}
+```
+
+`wiki_invalid_path` (HTTP 400, `invalid_request_error`) — path traversal rejected by `wiki::fs::resolve_path`. `..`, absolute paths, or control characters all fail here:
+
+```json
+{
+  "error": {
+    "message": "The requested wiki page path is invalid. Page paths must not contain `..`, absolute paths, or special characters.",
+    "type": "invalid_request_error",
+    "code": "wiki_invalid_path"
+  }
+}
+```
+
+`wiki_page_too_large` (HTTP 413, `invalid_request_error`) — body exceeds `wiki_max_page_bytes`. 413 carries RFC 9110 §15.5.14 semantics (content too large — a request-level constraint, not a server bug). Split the content into multiple smaller pages:
+
+```json
+{
+  "error": {
+    "message": "Page too large: 2097152 bytes exceeds the 1048576-byte limit. Split the content into multiple smaller pages.",
+    "type": "invalid_request_error",
+    "code": "wiki_page_too_large"
+  }
+}
+```
+
+`wiki_credential_blocked` (HTTP 422, `invalid_request_error`) — content matched a BLOCK credential pattern (PEM / AKIA / GCP / etc. per `01-knowledge-layer.md §4.8`). 422 carries RFC 9110 §15.5.21 semantics (syntactically valid but semantically rejected). Remove the secret and retry:
+
+```json
+{
+  "error": {
+    "message": "Credential detected in content (pattern: AKIA_ACCESS_KEY). Wiki writes must not contain unambiguous secrets. Remove the credential and retry.",
+    "type": "invalid_request_error",
+    "code": "wiki_credential_blocked"
+  }
+}
+```
+
+`wiki_git_corrupted` (HTTP 503, `server_error`) — git repo is in an inconsistent state (locked index, detached HEAD, missing objects). Operator-only fix; inspect the wiki directory manually:
+
+```json
+{
+  "error": {
+    "message": "The wiki git repository is in an inconsistent state. Run `git status` in the wiki directory and resolve manually.",
+    "type": "server_error",
+    "code": "wiki_git_corrupted"
+  }
+}
+```
+
+`wiki_conflict` (HTTP 409, `server_error`) — merge conflict during auto-commit; another writer mutated the same path concurrently. 409 carries RFC 9110 §15.5.10 semantics (resource state conflict). Resolve manually then retry:
+
+```json
+{
+  "error": {
+    "message": "A wiki page could not be saved because it was modified by another process (path: notes/release-playbook.md). Resolve the git conflict in the wiki directory, then retry.",
+    "type": "server_error",
+    "code": "wiki_conflict"
+  }
+}
+```
+
+`wiki_page_not_found` (HTTP 404, `invalid_request_error`) — requested page does not exist on `wiki.get` / `wiki.delete` / `wiki.rename`. Use `wiki.list` or `wiki.search` to discover existing paths. (The `KnowledgeService` boundary normalizes this to `knowledge_document_not_found` with the same 404; `wiki_page_not_found` surfaces when a tool path bypasses the service wrapper.):
+
+```json
+{
+  "error": {
+    "message": "Wiki page not found: notes/missing-page.md. Check the page name; use `wiki.list` or `wiki.search` to find existing pages.",
+    "type": "invalid_request_error",
+    "code": "wiki_page_not_found"
+  }
+}
+```
+
+All bodies are emitted with the standard `x-request-id` header; include that UUID in any bug report. Streaming requests that terminate on any of these errors follow the same SSE `event: error` convention documented for knowledge errors above (no trailing `data: [DONE]`), and every streaming request produces the same dispatch + amendment AuditEntry pair with `status = "error"`.
+
 ---
 
 ## OpenAI-compatible endpoints
@@ -500,20 +734,22 @@ Actor-visible registered view descriptors. The shell uses these to build the lef
 
 **Response:**
 
+On trunk today the `seed_p2b` catalog (`crates/gadgetron-gateway/src/web/catalog.rs`) registers exactly one view, emitted as:
+
 ```json
 {
   "views": [
     {
       "id": "knowledge-activity-recent",
-      "title": "Recent Activity",
-      "owner_bundle": "gadgetron-knowledge",
-      "source_kind": "builtin",
-      "source_id": "activity_feed",
+      "title": "최근 활동",
+      "owner_bundle": "core",
+      "source_kind": "activity",
+      "source_id": "recent",
       "placement": "left_rail",
       "renderer": "timeline",
       "data_endpoint": "/api/v1/web/workbench/views/knowledge-activity-recent/data",
-      "refresh_seconds": 30,
-      "action_ids": [],
+      "refresh_seconds": 5,
+      "action_ids": ["knowledge-search"],
       "required_scope": null,
       "disabled_reason": null
     }
@@ -565,22 +801,32 @@ Actor-visible registered action descriptors. The shell renders these as affordan
 
 **Response:**
 
+The `seed_p2b` catalog registers exactly one action on trunk, `knowledge-search`, emitted as:
+
 ```json
 {
   "actions": [
     {
-      "id": "wiki.write",
-      "title": "Save to Wiki",
-      "owner_bundle": "gadgetron-knowledge",
+      "id": "knowledge-search",
+      "title": "지식 검색",
+      "owner_bundle": "core",
       "source_kind": "gadget",
-      "source_id": "wiki.write",
-      "gadget_name": "wiki.write",
-      "placement": "context_menu",
-      "kind": "mutation",
-      "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } },
+      "source_id": "wiki.search",
+      "gadget_name": "wiki.search",
+      "placement": "center_main",
+      "kind": "query",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "max_results": { "type": "integer", "minimum": 1, "maximum": 20 }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
       "destructive": false,
       "requires_approval": false,
-      "knowledge_hint": "Write or update a wiki page",
+      "knowledge_hint": "wiki.search 가젯을 직접 호출합니다.",
       "required_scope": null,
       "disabled_reason": null
     }
@@ -588,7 +834,7 @@ Actor-visible registered action descriptors. The shell renders these as affordan
 }
 ```
 
-`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`.
+`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`. `input_schema` is a JSON Schema fragment; arg validation on `POST /actions/{action_id}` runs against it (additionalProperties=false rejects unknown keys).
 
 ---
 
@@ -600,16 +846,16 @@ Invoke a registered direct action.
 
 **Path parameters:** `action_id` — string ID from `GET /actions`.
 
-**Request body:**
+**Request body:** shape depends on the target action's `input_schema`. For the seed `knowledge-search` action:
 
 ```json
 {
-  "args": { "path": "ops/notes/my-note.md", "content": "..." },
-  "client_invocation_id": "uuid-or-null"
+  "args": { "query": "wiki seed", "max_results": 5 },
+  "client_invocation_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
-`client_invocation_id` is optional. When provided, the server holds a 5-minute TTL replay cache keyed on `(tenant_id, action_id, client_invocation_id)` to deduplicate double-clicks and retries.
+`client_invocation_id` is optional. When provided, the server holds a 5-minute TTL replay cache keyed on `(tenant_id, action_id, client_invocation_id)` to deduplicate double-clicks and retries — a repeat invocation with the same `client_invocation_id` within the TTL returns the cached response (including the original `activity_event_id`) rather than re-executing the action. The cache stores a typed `InvokeWorkbenchActionResponse` and re-serializes on each hit; because the struct is deterministic and serde's JSON output is stable, the re-serialized bytes are identical in practice. E2E Gate 7h.2 verifies this end-to-end by asserting the two response bodies are byte-for-byte equal.
 
 **Response:**
 
