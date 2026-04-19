@@ -1088,6 +1088,20 @@ else
     "first-chunk-json: $(echo "$FIRST_CHUNK_JSON" | head -c 400)"
 fi
 
+# All chunks in a single stream MUST share the same `.id` —
+# OpenAI's streaming contract. Assemblers (LangChain callback
+# handlers, etc.) group chunks by id; a regression that rotates
+# the id per-chunk silently breaks downstream correlation.
+UNIQUE_IDS_COUNT="$(echo "$STREAM_RESP" | grep '^data: ' | grep -v '^data: \[DONE\]' \
+  | sed 's/^data: //' | jq -r '.id' 2>/dev/null | sort -u | wc -l | tr -d ' ')"
+if [ "$UNIQUE_IDS_COUNT" = "1" ]; then
+  pass "streaming chunks share one .id (OpenAI correlation contract)"
+else
+  fail "streaming chunks have $UNIQUE_IDS_COUNT distinct .id values (expected 1)" \
+    "$(echo "$STREAM_RESP" | grep '^data: ' | grep -v '^data: \[DONE\]' \
+       | sed 's/^data: //' | jq -r '.id' 2>/dev/null | sort -u | head -c 400)"
+fi
+
 # ---------------------------------------------------------------------------
 # Gate 9b — streaming chat ERROR path (Drop-guard Err arm, PR 6 coverage)
 # ---------------------------------------------------------------------------
