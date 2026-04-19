@@ -55,6 +55,8 @@ The gateway processes this in the `auth_middleware` layer (layer 4 in the Tower 
 
 6. **Audit** every 401 failure (SOC2 CC6.7). Failed authentication attempts are logged to the audit channel regardless of the failure reason. The tenant and key IDs are `00000000-0000-0000-0000-000000000000` for unauthenticated failures (no real IDs are available).
 
+**Query-token fallback for `/events/ws`** (ISSUE 4 / v0.2.7). Browser JavaScript cannot attach an `Authorization` header to a `new WebSocket(url)` upgrade request, so the auth middleware accepts `?token=gad_live_…` as a secondary source **scoped only to the `/events/ws` route**. The fallback reuses the same `ApiKey::parse` + hash-lookup path (no separate validator) and strips `?token=` from the request URI before tracing spans and request-log lines land, so raw keys never appear in `gadgetron.log`. Every other authenticated route still rejects requests that lack the `Authorization` header — 401. Non-browser WS clients (curl `--header`, websocat `-H`, `tokio-tungstenite`) should continue using the header. See [troubleshooting.md §`/events/ws` upgrade returns HTTP 401 from the browser](troubleshooting.md#events-ws-upgrade-returns-http-401-from-the-browser) for the operator recipe.
+
 After successful authentication, `tenant_context_middleware` constructs a `TenantContext` from the `ValidatedKey`, and `scope_guard_middleware` checks that the key's scopes satisfy the route's requirement.
 
 ---

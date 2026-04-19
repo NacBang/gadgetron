@@ -453,9 +453,9 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - Phase 1 v0.1.0 manual QA Tests 1-9 전부 통과 (P99 bench: 65ns resolve, 50µs middleware chain, 20-15000× SLO 여유)
 - Hotfix PRs #7-10: streaming audit latency Phase 1 semantics 명확화, 401 `invalid_api_key` + 413 `request_too_large` OpenAI-compat, `--tui` TTY pre-check, 매뉴얼 동기화
 
-**Phase 1 알려진 제약 (Phase 2 TODO)**:
-- Streaming audit `latency_ms=0` (dispatch-time only; 02-penny-agent.md의 Drop guard 접근법이 Phase 2에서 동일 패턴 활용)
-- Audit `provider=None` (실제 라우팅된 provider 미기록)
+**Phase 1 알려진 제약 (Phase 2 진행 상황)**:
+- ~~Streaming audit `latency_ms=0` (dispatch-time only)~~ — **해결 (P2B / ISSUE 4 PR #194)**. `StreamEndGuard` Drop 경로에서 amendment `AuditEntry` 를 보내 실제 `latency_ms` + `output_tokens` + `cost_cents` 를 기록 (`crates/gadgetron-gateway/src/stream_end_guard.rs:241-285`). 남은 한계: streaming 의 `input_tokens` 는 여전히 `0` (provider 가 delta stream 에 prompt token 을 재보고하지 않음 — router upstream rework 필요한 별도 ISSUE).
+- Audit `provider=None` (실제 라우팅된 provider 미기록) — 여전히 유효. `RoutingDecision` 을 handler 까지 surface 하는 rework 이 별도 ISSUE 로 남아 있음.
 
 ### Phase 2 — Knowledge Layer + Penny + Bundle Surfaces (v0.2, **진행 중**)
 

@@ -119,6 +119,8 @@ If you enabled Penny, `GET /v1/models` should also include `penny`, and `http://
 
 **Try the browser wiki workbench.** Since 0.2.0 the same `[knowledge]` config also serves a browser-driven wiki CRUD UI at `http://127.0.0.1:8080/web/wiki` (standalone URL) or as the "Wiki" left-rail tab inside `/web`. Click a seed page in the left list to exercise the read → edit → save loop — `wiki-read` fetches content, the Markdown renders inline (react-markdown + remark-gfm), a toast confirms on save. E2E Gate 11d drives this same loop in a real Chromium under the harness. See [web.md §/web/wiki](web.md#web-wiki--브라우저-워크벤치-wiki-crud) for the full UI-to-action mapping.
 
+**Try the operator dashboard.** Since 0.2.7 `/web/dashboard` ships as a third sibling tab (Chat / Wiki / Dashboard) with tenant-scoped live tiles for chat, direct-action, and Penny tool planes — backed by `GET /usage/summary` for the 24-hour rollup and a `/events/ws` WebSocket for real-time `ChatCompleted` events. See [web.md §`/web/dashboard`](web.md#webdashboard--operator-observability-issue-4--v027). Gates 7k.3 + 11f cover the shape and the page render.
+
 ---
 
 ## Step 8 — Stop the demo
