@@ -134,7 +134,7 @@ All `knowledge_*` errors use the same OpenAI-shaped envelope shown above (`{"err
 }
 ```
 
-All five bodies are emitted with the standard `x-request-id` header; include that UUID in any bug report. Streaming callers (`/v1/chat/completions` with `stream: true`) receive the same envelope serialized inside a single `data: {...}` SSE frame followed by `data: [DONE]`, matching OpenAI's SSE error convention.
+All five bodies are emitted with the standard `x-request-id` header; include that UUID in any bug report. Streaming callers (`/v1/chat/completions` with `stream: true`) that hit a terminal error receive the envelope inside an `event: error` SSE frame and the stream terminates **without** a trailing `data: [DONE]` — see the [Streaming error frame](#post-v1chatcompletions) example under `POST /v1/chat/completions` below. E2E Gate 9b formally certifies this contract. Every streaming request also produces two correlated AuditEntry rows (dispatch + amendment); on the error path the amendment's `status` is `"error"` rather than `"ok"` (see [troubleshooting.md §Streaming requests](troubleshooting.md#streaming-requests-stream-true)).
 
 ---
 
@@ -466,7 +466,7 @@ Per-request evidence: tool traces, knowledge citations, and knowledge candidates
 
 `tool_traces[].outcome`: `"success"` | `"denied"` | `"error"`. `args_digest` is a 16-character SHA-256 prefix of the raw args — not the raw args.
 
-**Errors:** `404 workbench_request_not_found` when `request_id` is not visible to the actor.
+**Errors:** `404 workbench_request_not_found` when `request_id` is not registered. (The endpoint currently has no actor-scoped visibility filter beyond the `OpenAiCompat` route gate; ACL-hiding of specific requests is a planned extension that would return 404 rather than 403 to match the `/views/{id}/data` convention.)
 
 ---
 
