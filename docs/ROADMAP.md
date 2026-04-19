@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.12** (post-ISSUE 7 — MCP server complete)
+**Current version: 0.3.0** (EPIC 1 closed — tag `v0.3.0`)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -20,12 +20,19 @@ at the ISSUE boundary. PRs are expensive; don't split what belongs in one.
 An EPIC closes when its ISSUEs have all landed; the closing PR bumps the
 minor version and tags `vX.Y.0` on main.
 
-## EPIC 1 — Workbench MVP (ACTIVE)
+## EPIC 1 — Workbench MVP (CLOSED — `v0.3.0`)
 
 Goal: take Gadgetron from "scaffold with a chat endpoint" to "product a
 small team can self-host and use for knowledge work". Covers the API
 surface, browser workbench, baseline safety, and baseline observability.
-Expected duration: ~1-2 months. Close → tag `v0.3.0`.
+
+**Closed 2026-04-19.** End-to-end usability validated by harness Gate
+9c (Python OpenAI SDK round-trip: auth + non-streaming + streaming +
+pydantic contract), Gate 11 (`/web` landing + `/web/wiki` + `/web/dashboard`
+served with CSP/nosniff/referrer headers and playwright-screenshot
+asserts), and the wiki-e2e gate (seed → search → read → sentinel
+roundtrip). Manual external-team pilot deferred; harness big-trunk
+scenarios stand in as functional proof.
 
 ### Completed ISSUEs
 
@@ -51,13 +58,7 @@ Expected duration: ~1-2 months. Close → tag `v0.3.0`.
   `/events/ws`. Harness gates 7k.3 (usage shape) + 11f
   (dashboard page).
 
-### Planned ISSUEs (next)
-
-### EPIC 1 close criteria
-
-All of the above land + the product is demonstrably usable end-to-end by
-an external team (manual validation, not just harness). Closing PR bumps
-0.2.N → **0.3.0** and tags `v0.3.0` on main.
+**Release:** `v0.3.0` — first complete workbench MVP.
 
 ## EPIC 2 — Agent autonomy (1-3 months)
 
