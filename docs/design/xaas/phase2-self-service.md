@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — tenant self-service implementation plan (ISSUE 14)
 
 > **담당**: @xaas-platform-lead
-> **상태**: TASK 14.1 migration landed; 14.2+ in-flight
+> **상태**: ISSUE 14 ✅ CLOSED (PR #246 / v0.5.7, 2026-04-19). TASK 14.6 split out to ISSUE 15 ✅ CLOSED (PR #248 / v0.5.8).
 > **작성일**: 2026-04-19
 > **설계 출처**: `docs/design/phase2/08-identity-and-users.md` (approved 2026-04-18)
 > **이 문서**: 상위 설계(08) → 구체적 마이그레이션/엔드포인트/TASK 분해로 브리징
@@ -19,16 +19,17 @@ TASK 순서는 무엇인지, ISSUE 14 close까지의 패치 버전 경로.
 
 | TASK | 결과물 | 상태 |
 |------|-------|-----|
-| **14.1** users/teams/sessions 마이그레이션 + api_keys 확장 + audit_log 확장 | `20260420000004_users_teams_sessions.sql` | ✅ (this commit) |
-| **14.2** Bootstrap flow — `users` 비었을 때 `[auth.bootstrap]` config + `GADGETRON_BOOTSTRAP_ADMIN_PASSWORD` 환경변수로 첫 admin 생성 | `gadgetron-xaas/src/auth/bootstrap.rs` + CLI wiring | pending |
-| **14.3** Admin user CRUD 엔드포인트 — `GET /api/v1/users`, `POST /api/v1/users`, `DELETE /api/v1/users/{id}` | `gadgetron-gateway/src/web/users.rs` | pending |
-| **14.4** User self-service API key 엔드포인트 — `GET /api/v1/keys`, `POST /api/v1/keys`, `DELETE /api/v1/keys/{id}` (revoke-then-create rotation) | `gadgetron-gateway/src/web/keys.rs` | pending |
-| **14.5** Teams + team_members CRUD — `POST /api/v1/teams`, `POST /api/v1/teams/{id}/members`, `DELETE /api/v1/teams/{id}/members/{user_id}` | `gadgetron-gateway/src/web/teams.rs` | pending |
-| **14.6** (OPTIONAL, can ship after ISSUE 14 close) web UI 세션 로그인 — `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` + cookie 미들웨어 | `gadgetron-gateway/src/web/auth.rs` | deferred to ISSUE 15 if scope grows |
-| **14.7** CLI subcommands — `gadgetron user {create,list,revoke}`, `gadgetron team`, `gadgetron auth login` | `gadgetron-cli` 확장 | pending |
+| **14.1** users/teams/sessions 마이그레이션 + api_keys 확장 + audit_log 확장 | `20260420000004_users_teams_sessions.sql` | ✅ PR #246 |
+| **14.2** Bootstrap flow — `users` 비었을 때 `[auth.bootstrap]` config + `GADGETRON_BOOTSTRAP_ADMIN_PASSWORD` 환경변수로 첫 admin 생성 | `gadgetron-xaas/src/auth/bootstrap.rs` + CLI wiring | ✅ PR #246 |
+| **14.3** Admin user CRUD 엔드포인트 — `GET/POST/DELETE /admin/users/*` | `crates/gadgetron-xaas/src/identity.rs` + `gadgetron-gateway/src/web/workbench.rs` | ✅ PR #246 |
+| **14.4** User self-service API key 엔드포인트 — `GET/POST /keys`, `DELETE /keys/{id}` | `crates/gadgetron-xaas/src/identity_keys.rs` + gateway | ✅ PR #246 |
+| **14.5** Teams + team_members CRUD — `GET/POST/DELETE /admin/teams/*` + `/members/*` | `crates/gadgetron-xaas/src/teams.rs` + gateway | ✅ PR #246 |
+| **14.6** → **ISSUE 15** web UI 세션 로그인 — `/auth/login`, `/auth/logout`, `/auth/whoami` | `crates/gadgetron-xaas/src/sessions.rs` + `crates/gadgetron-gateway/src/auth_session.rs` | ✅ PR #248 (ISSUE 15 close) |
+| **14.7** CLI subcommands — `gadgetron user {create,list,delete}`, `gadgetron team {create,list,delete}` | `gadgetron-cli` main.rs | ✅ PR #246 |
 
-ISSUE 14 close 조건: 14.1-14.5 + 14.7 모두 landed + harness green. 14.6은 wall-clock
-이 부족하면 ISSUE 15로 분리. 버전 bump: 0.5.6 → 0.5.7.
+**CLOSED**: ISSUE 14 merged as PR #246 / v0.5.7, ISSUE 15 (ex-14.6) as PR #248 / v0.5.8. Harness 126 PASS at ISSUE 15 close.
+
+남은 ISSUE 16 후속 스코프: web UI 로그인 form (React/Tailwind), 단일 auth middleware가 Bearer or cookie 둘 다 accept, session rotation on cookie refresh.
 
 ## 3. TASK 14.1 마이그레이션 (배포 상태)
 
