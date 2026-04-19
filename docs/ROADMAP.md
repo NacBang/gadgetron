@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.8** (post-ISSUE 9 TASK 9.3 — bundle-driven default)
+**Current version: 0.4.9** (post-ISSUE 10 TASK 10.1 — bundle discovery)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -178,9 +178,21 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     stays as a unit-test fixture + drift-guard reference (the
     bundle file must keep matching its action id set).
 
-### Planned ISSUEs
-- **ISSUE 10 — bundle marketplace**: discovery + install/uninstall API,
-  per-bundle scope isolation, signed manifests.
+### In-flight ISSUE (10)
+- **ISSUE 10 — bundle marketplace** (in-flight; 0.4.9 ships TASK 10.1)
+  - TASK 10.1 ✅ — bundle discovery endpoint (0.4.8 → 0.4.9).
+    `GET /api/v1/web/workbench/admin/bundles` (Management-scoped)
+    enumerates every bundle under `[web] bundles_dir` without
+    touching the live catalog. Response: `{bundles_dir, count,
+    bundles: [{bundle, source_path, action_count, view_count}]}`.
+    Harness gates 7q.4 (shape + gadgetron-core enumerated) and
+    7q.5 (RBAC).
+  - TASK 10.2 — install/uninstall endpoints that add/remove bundle
+    directories at runtime.
+  - TASK 10.3 — per-bundle scope isolation (bundles declare
+    `required_scope`, aggregator filters by actor).
+  - TASK 10.4 — signed manifests (Ed25519 signature check on
+    install).
 
 Close → tag `v0.5.0`.
 
