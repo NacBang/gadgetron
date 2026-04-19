@@ -2262,9 +2262,6 @@ const ANNOTATED_CONFIG_TEMPLATE: &str = r#"# Gadgetron Configuration
 # Env override: GADGETRON_BIND
 bind = "0.0.0.0:8080"
 
-# Request timeout in milliseconds. Requests exceeding this are cancelled.
-request_timeout_ms = 30000
-
 # ---------------------------------------------------------------------------
 # Providers — configure at least one LLM backend.
 # Uncomment and fill in the appropriate section.

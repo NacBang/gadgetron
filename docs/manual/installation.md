@@ -21,7 +21,7 @@ sudo apt-get install -y \
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
-rustc --version   # must be 1.80 or later
+rustc --version   # workspace MSRV is 1.80; the repo pins 1.94.0 via rust-toolchain.toml and rustup will auto-install it on first cargo build
 cargo --version
 ```
 
@@ -94,7 +94,7 @@ brew install postgresql@16 git
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
-rustc --version   # must be 1.80 or later
+rustc --version   # workspace MSRV is 1.80; the repo pins 1.94.0 via rust-toolchain.toml and rustup will auto-install it on first cargo build
 ```
 
 ### Step 4: Clone and build
@@ -142,7 +142,7 @@ export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@127.0.0.1:5432/gadget
 
 | Component | Minimum version | Install command |
 |-----------|----------------|-----------------|
-| Rust | 1.80 | `rustup` (see above) |
+| Rust | 1.80 MSRV (repo pins 1.94.0 via `rust-toolchain.toml`) | `rustup` (see above) |
 | PostgreSQL | 16 recommended | `apt install postgresql` / `brew install postgresql@16` |
 | `pgvector` | must match the PostgreSQL major version | Docker `pgvector/pgvector:pg16` or your distro's pgvector package |
 | OpenSSL dev | any | `apt install libssl-dev` (Ubuntu only; macOS includes it) |
