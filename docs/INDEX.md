@@ -16,7 +16,8 @@
 | 크레이트/모듈 구현 작업 | [`modules/`](modules/) 해당 모듈 + [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis B | [`design/phase2/`](design/phase2/) active work |
 | 배포·운영·장애 대응 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis C, F | [`modules/deployment-operations.md`](modules/deployment-operations.md) |
 | 성능·레이턴시 분석 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis H | |
-| Phase 2A active 작업 | [`design/phase2/00-overview.md`](design/phase2/00-overview.md) | [`design/phase2/01..04`](design/phase2/) |
+| 현재 EPIC / ISSUE / TASK 계획 | [`ROADMAP.md`](ROADMAP.md) (canonical, PR #186 이후) | [`design/phase2/00-overview.md`](design/phase2/00-overview.md) (설계 세부), [`design/phase2/01..04`](design/phase2/) |
+| 버전·릴리스 태그 정책 | [`ROADMAP.md`](ROADMAP.md) §Release tagging + [`process/06-versioning-policy.md`](process/06-versioning-policy.md) | `Cargo.toml` `[workspace.package] version` (SSOT) |
 | 확정된 설계 결정 확인 | [`adr/README.md`](adr/README.md) (ADR 인덱스) | [`reviews/pm-decisions.md`](reviews/pm-decisions.md), [`process/04-decision-log.md`](process/04-decision-log.md) |
 | 에이전트 역할 조회 | [`agents/`](agents/) | [`process/00-agent-roster.md`](process/00-agent-roster.md), [`AGENTS.md`](../AGENTS.md) |
 | 설계 문서 작성·리뷰 규정 | [`process/01-workflow.md`](process/01-workflow.md) | [`process/02-document-template.md`](process/02-document-template.md), [`process/03-review-rubric.md`](process/03-review-rubric.md) |
@@ -65,7 +66,7 @@ modules/*.md           (per-domain detailed spec — lead owner 별)
 
 | 영역 | 주 문서 | 보조 |
 |---|---|---|
-| **제품 비전 / 로드맵** | [`00-overview.md`](00-overview.md) §1, §5 | [`README.md`](../README.md) |
+| **제품 비전 / 로드맵** | [`ROADMAP.md`](ROADMAP.md) (EPIC/ISSUE/TASK 트리, 릴리스 태그, 활성 EPIC) | [`00-overview.md`](00-overview.md) §1, §5 (역사적), [`README.md`](../README.md) (요약) |
 | **크레이트 의존성 그래프** | [`00-overview.md`](00-overview.md) §2.1, §6 | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) §2.A |
 | **HTTP API 표면** | [`manual/api-reference.md`](manual/api-reference.md) | [`modules/gateway-routing.md`](modules/gateway-routing.md) |
 | **라우팅 전략 (6종)** | [`modules/gateway-routing.md`](modules/gateway-routing.md) | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis B |
@@ -113,3 +114,4 @@ modules/*.md           (per-domain detailed spec — lead owner 별)
 - 새 레이어(예: `docs/api/`)가 생기면 §2 3층 구조 재검토
 - 역할이 중복되는 문서를 추가하지 말 것 — 기존 문서에 병합 또는 링크만 달기
 - 문서를 archive로 옮길 때 §1·§3의 링크가 깨지지 않는지 확인
+- ROADMAP.md 가 EPIC closure 로 크게 갱신되면 §1 "현재 EPIC/ISSUE/TASK 계획" 행의 EPIC 번호 + §3 "제품 비전 / 로드맵" 행을 함께 점검

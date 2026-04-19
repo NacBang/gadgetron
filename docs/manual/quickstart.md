@@ -115,7 +115,9 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   }' | jq .
 ```
 
-If you enabled Penny, `GET /v1/models` should also include `penny`, and `http://127.0.0.1:8080/web` should serve the embedded Web UI.
+If you enabled Penny, `GET /v1/models` should also include `penny`, and `http://127.0.0.1:8080/web` should serve the embedded Web UI (chat shell).
+
+**Try the browser wiki workbench.** Since 0.2.0 the same `[knowledge]` config also serves a browser-driven wiki CRUD UI at `http://127.0.0.1:8080/web/wiki` (standalone URL) or as the "Wiki" left-rail tab inside `/web`. Click a seed page in the left list to exercise the read → edit → save loop — `wiki-read` fetches content, the Markdown renders inline (react-markdown + remark-gfm), a toast confirms on save. E2E Gate 11d drives this same loop in a real Chromium under the harness. See [web.md §/web/wiki](web.md#web-wiki--브라우저-워크벤치-wiki-crud) for the full UI-to-action mapping.
 
 ---
 

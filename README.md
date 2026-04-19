@@ -2,7 +2,7 @@
 
 Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes), **Penny** drives it on the user's behalf, and capabilities expand through **Bundles** that expose core-facing **Plugs** and Penny-facing **Gadgets**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
 
-**Version**: `0.2.0` — Phase 2A (Path 1). Current focus: knowledge layer, Penny runtime, and embedded Web UI. Interactive approval flow is deferred to Phase 2B per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md).
+**Version**: `0.2.5` — EPIC 1 (Workbench MVP) in progress. `POST /v1/chat/completions` + Penny runtime + embedded Web UI + browser-driven wiki CRUD (`/web/wiki`) all ship on trunk. Interactive approval flow is deferred to ISSUE 3 (production safety) per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md). Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## How it works
 
@@ -219,22 +219,25 @@ docker exec gadgetron-dev bash -c 'source /root/.cargo/env && cargo test --works
 
 The authoritative ADR index lives in [`docs/adr/README.md`](docs/adr/README.md). This README intentionally does not restate ADR counts or ranges, because the index is the only place that should change when new decisions land.
 
-## Phase 2A Progress
+## Roadmap
 
-Tracked in [`docs/design/phase2/00-overview.md §15`](docs/design/phase2/00-overview.md). 20 of 29 TDD steps complete under Path 1.
+Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tree, versioning policy, and tag schedule. Summary of what's shipped today on trunk (0.2.5):
 
-| Phase | Steps | Status |
-|-------|-------|--------|
-| **1 Knowledge foundation** | 1-5 | ✅ wiki::{fs, git, secrets, link, index} + search::searxng |
-| **2 Agent control plane** | 6-9 | ✅ AppConfig `[penny]` → `[agent.brain]` migration, AgentConfig fields, PennyErrorKind tool variants, EnvResolver, ask-mode warn |
-| **3 Gadget registry + provider** | 10-14 | ✅ `GadgetRegistry`, wiki aggregate + `KnowledgeGadgetProvider`, cross-crate integration (12 absorbed, 13 deferred to P2B) |
-| **4 Penny subprocess** | 15-21 | ✅ mcp_config (M1), spawn, redact (M2), session, stream, provider, inline tests |
-| **5 CLI wiring** | 22-26 | ✅ register_penny_if_configured, `gadgetron mcp serve` subcommand; 24 (`init` `[agent]` emit) / 25 (feature gates) / 26 (gateway no-op) remain |
-| **6 Integration + E2E** | 27-29 | 🔲 fake_claude + real Claude E2E + gadgetron-web smoke |
+### Completed ISSUEs (EPIC 1 — Workbench MVP)
 
-**Test matrix** (Rust 1.94 / Ubuntu 22.04 Docker): ~500 tests pass across the workspace, 0 failures excluding `gadgetron-testing` e2e (which requires live PostgreSQL).
+| Version | ISSUE | Shipped in |
+|---------|-------|------------|
+| `0.2.0` | **ISSUE 1** — OpenAI-compat gateway + browser-driven wiki CRUD | #175 real `GadgetDispatcher`, #176 4-action `seed_p2b` catalog, #177 `/web/wiki` UI, #179 Gate 11d interactive Playwright E2E |
+| `0.2.1`–`0.2.4` | **ISSUE 2** — workbench UX polish + workflow bootstrap | #180 ROADMAP, #181 markdown render, #182 left-rail Wiki tab, #184 save/error toasts |
+| `0.2.5` | **ISSUE 2b** — ROADMAP v2 recalibration | #186 (EPIC/ISSUE/TASK terminology + versioning policy) |
 
-Current workspace state is larger than the historical sprint table above: the repository has 200+ tests today, and full E2E coverage requires PostgreSQL to be available.
+### Next in EPIC 1
+- **ISSUE 3 (NEXT)** — production safety: `ActionAuditEventSink` trait + Postgres impl, `ApprovalStore`, `/api/v1/audit/events` query endpoint, harness gates for audit + approval lifecycle. Bumps to `0.2.6` on merge.
+- **ISSUE 4** — operator observability: usage summary endpoint + `/web` dashboard, cost tracking, live activity feed.
+
+EPIC 1 closure tags `v0.3.0`. Subsequent EPICs (Agent autonomy → `v0.4.0`, Plugin platform → `v0.5.0`, Multi-tenant → `v1.0.0`, Cluster platform → `v2.0.0`) are planned in `docs/ROADMAP.md`.
+
+**E2E harness baseline**: 60+ gates on `./scripts/e2e-harness/run.sh --quick --no-screenshot` (see [`scripts/e2e-harness/README.md`](scripts/e2e-harness/README.md) for the gate table). Every PR must make the harness green before merge.
 
 ## Team
 

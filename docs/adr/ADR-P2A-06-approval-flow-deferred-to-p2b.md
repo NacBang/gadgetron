@@ -13,6 +13,8 @@
 
 **Canonical terminology note**: this ADR predates the Bundle/Plug/Gadget rename. Current code and canonical docs use `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. Historical references below to `McpToolProvider`, `McpToolRegistry`, and `KnowledgeToolProvider` are legacy names.
 
+**Reframing note (2026-04-19, post-[ROADMAP v2](../ROADMAP.md) / PR #186)**: The discrete "Phase 2B" block framing this ADR uses is rehomed. The first slice of the approval work is now scheduled as **ISSUE 3 — production safety** inside EPIC 1 (Workbench MVP), targeting version `0.2.6` NEXT per [`docs/ROADMAP.md` §ISSUE 3](../ROADMAP.md). **ISSUE 3 covers only a subset** of this ADR's §"Phase 2B (reopened scope)" list — specifically item 2 (`ApprovalRegistry` / now named `ApprovalStore` + `POST /approvals/:id/approve` + resume-on-approve lifecycle), plus new audit-sink work (`ActionAuditEventSink` trait + Postgres impl + `/api/v1/audit/events` query endpoint) that isn't in the original ADR list. Items 1, 3–7, and the subsequent items 8–13 of the §"Phase 2B" list below (cross-process bridge design, ADR-P2A-01 Part 3 behavioral test, `Scope::AgentApproval` middleware, SSE approval events, `<ApprovalCard>` React UI, rate limiter, `sanitize_args`, digest fields, namespace hardening, DX polish) remain future work beyond ISSUE 3 and will land in later ROADMAP ISSUEs as they are scheduled. The 13-item list itself is unchanged — only the framing (a discrete "Phase 2B" block vs. a series of tracked ISSUEs) was updated by ROADMAP v2.
+
 ## Context
 
 On 2026-04-14, PR #17 landed the agent-centric control plane (ADR-P2A-05) with `04-mcp-tool-registry.md` Draft v1. The doc specified:
@@ -148,7 +150,9 @@ This is acceptable for the stated P2A user persona: a single-user personal assis
 - `p2a_rejects_gadgetron_local_mode_at_startup` test
 - `ask` mode startup warning emitter
 
-### Phase 2B (reopened scope)
+### Phase 2B (reopened scope) — partially rehomed to ROADMAP ISSUE 3 (v0.2.6)
+
+> Per the Reframing note in the ADR header: the "Phase 2B" framing here is preserved for historical fidelity. The live home of item 2 (`ApprovalStore` + approve endpoint + resume-on-approve lifecycle) is [`docs/ROADMAP.md` §ISSUE 3 — production safety](../ROADMAP.md), which also adds new audit-sink work (`ActionAuditEventSink` + Postgres + `/api/v1/audit/events`). Items 1, 3–13 below remain future work beyond ISSUE 3 and will be folded into later ROADMAP ISSUEs as they are scheduled.
 
 P2B adds the approval flow on top of the P2A scaffold. Concrete work items:
 

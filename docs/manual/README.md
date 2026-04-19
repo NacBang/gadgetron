@@ -4,7 +4,7 @@ Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional P
 
 ## Source-of-truth scope
 
-This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.2.2`). If a behaviour is described here, it exists in the binary you can `cargo build` from `main`.
+This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.2.5`). If a behaviour is described here, it exists in the binary you can `cargo build` from `main`.
 
 The contract vs. neighbouring doc clusters:
 
