@@ -114,6 +114,7 @@ fn make_state_with_coordinator(
         workbench: Some(Arc::new(GatewayWorkbenchService {
             projection,
             actions: Some(action_svc),
+            approval_store: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,

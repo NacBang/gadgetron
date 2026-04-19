@@ -392,6 +392,21 @@ fn workbench_err_to_gadgetron(err: WorkbenchHttpError) -> GadgetronError {
             GadgetronError::Config(format!("action args validation failed: {detail}"))
         }
         WorkbenchHttpError::DirectActionsDisabled => GadgetronError::Forbidden,
+        // ISSUE 3 TASK 3.3 approval variants — Penny shared-context
+        // assembler never sees these today (they originate on the
+        // workbench approval endpoints), but the match has to be
+        // exhaustive. Map to the nearest shared error so a future
+        // caller path stays coherent.
+        WorkbenchHttpError::ApprovalNotFound => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: "approval".into(),
+            },
+            message: "Approval not found.".into(),
+        },
+        WorkbenchHttpError::ApprovalAlreadyResolved { state } => GadgetronError::Config(
+            format!("approval already resolved (state={state})"),
+        ),
+        WorkbenchHttpError::ApprovalForbidden => GadgetronError::Forbidden,
     }
 }
 

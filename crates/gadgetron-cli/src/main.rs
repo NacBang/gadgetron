@@ -1302,6 +1302,18 @@ fn build_workbench(
         Arc::new(NoopActionAuditSink)
     };
 
+    // Wire the approval store. The in-memory store is fine for P2A
+    // (single-instance, restart-loses-pending is acceptable); a
+    // Postgres-backed store slots in behind the same trait when
+    // Gadgetron grows to multi-instance. The SAME store instance is
+    // shared between the action service (step 6 `create`) and the
+    // approval endpoints (`mark_approved` / `mark_denied`), so a
+    // `pending_approval` returned from invoke is visible to the
+    // subsequent approve call.
+    let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> = Arc::new(
+        gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
+    );
+
     let action_svc: Arc<dyn WorkbenchActionService> =
         Arc::new(InProcessWorkbenchActionService::new_full(
             catalog,
@@ -1309,11 +1321,13 @@ fn build_workbench(
             candidate_coordinator,
             gadget_dispatcher,
             audit_sink,
+            Some(approval_store.clone()),
         ));
 
     Some(Arc::new(GatewayWorkbenchService {
         projection,
         actions: Some(action_svc),
+        approval_store: Some(approval_store),
     }))
 }
 

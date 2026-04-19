@@ -19,7 +19,8 @@ use gadgetron_core::{
         AuthenticatedContext,
     },
     workbench::{
-        InvokeWorkbenchActionRequest, InvokeWorkbenchActionResponse, WorkbenchActionResult,
+        ApprovalRequest, ApprovalStore, InvokeWorkbenchActionRequest,
+        InvokeWorkbenchActionResponse, WorkbenchActionResult,
     },
 };
 use uuid::Uuid;
@@ -65,6 +66,11 @@ pub struct InProcessWorkbenchActionService {
     /// `NoopActionAuditSink` is the default when persistence isn't
     /// configured.
     pub audit_sink: Arc<dyn ActionAuditSink>,
+    /// Optional approval store. When present, step 6 persists a real
+    /// `ApprovalRequest` instead of returning a bare
+    /// `Uuid::new_v4()` — the approve endpoint can then look up the
+    /// record and resume dispatch.
+    pub approval_store: Option<Arc<dyn ApprovalStore>>,
 }
 
 impl InProcessWorkbenchActionService {
@@ -100,20 +106,21 @@ impl InProcessWorkbenchActionService {
             coordinator,
             gadget_dispatcher,
             Arc::new(gadgetron_core::audit::NoopActionAuditSink),
+            None,
         )
     }
 
-    /// Build the full-configured service: dispatcher + audit sink.
-    /// This is the production constructor. Thin convenience wrappers
-    /// above default the sink to `NoopActionAuditSink` so existing
-    /// callers (unit tests, degraded-mode composition) don't have to
-    /// know about audit.
+    /// Build the full-configured service: dispatcher + audit sink +
+    /// approval store. This is the production constructor. Thin
+    /// convenience wrappers above default the sink to
+    /// `NoopActionAuditSink` and the approval store to `None`.
     pub fn new_full(
         descriptor_catalog: DescriptorCatalog,
         replay_cache: InMemoryReplayCache,
         coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
         gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>>,
         audit_sink: Arc<dyn ActionAuditSink>,
+        approval_store: Option<Arc<dyn ApprovalStore>>,
     ) -> Self {
         // Build schema validators for all actions in the catalog.
         // We iterate visible_actions with the broadest scope so we compile
@@ -150,6 +157,7 @@ impl InProcessWorkbenchActionService {
             schema_validators: validators,
             gadget_dispatcher,
             audit_sink,
+            approval_store,
         }
     }
 }
@@ -260,15 +268,43 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         let start_instant = std::time::Instant::now();
 
         // ---------------------------------------------------------------
-        // Step 6: Approval gate stub.
+        // Step 6: Approval gate.
+        //
+        // When `approval_store` is wired (production), we persist an
+        // `ApprovalRequest` so the `POST /approvals/:id/approve`
+        // endpoint can later look it up + resume dispatch. When the
+        // store is absent (unit tests, minimal composition), we fall
+        // back to a bare `Uuid::new_v4()` — the approval id is still
+        // returned but resume is not possible.
         // ---------------------------------------------------------------
         let needs_approval = descriptor.requires_approval || descriptor.destructive;
         if needs_approval {
             let approval_id = Uuid::new_v4();
+            if let Some(store) = &self.approval_store {
+                let record = ApprovalRequest::new_pending(
+                    approval_id,
+                    actor,
+                    action_id,
+                    descriptor.gadget_name.clone(),
+                    request.args.clone(),
+                );
+                if let Err(e) = store.create(record).await {
+                    tracing::error!(
+                        action_id = %action_id,
+                        error = %e,
+                        "approval_store.create failed; returning 500 equivalent",
+                    );
+                    return Err(WorkbenchHttpError::Core(
+                        gadgetron_core::error::GadgetronError::Config(format!(
+                            "approval store failure: {e}"
+                        )),
+                    ));
+                }
+            }
             // Emit audit event for the pending-approval path so the
             // approval queue has a stable id to attach subsequent
-            // `ApprovalGranted` / `ApprovalDenied` events to once the
-            // approval-flow TASK lands. Echoed into the response.
+            // `ApprovalGranted` / `ApprovalDenied` events to. Echoed
+            // into the response.
             let audit_event_id = Uuid::new_v4();
             self.audit_sink.send(ActionAuditEvent::DirectActionCompleted {
                 event_id: audit_event_id,
@@ -453,6 +489,86 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         }
 
         Ok(resp)
+    }
+
+    /// Resume a previously-approved request. Dispatches the gadget
+    /// with the args stored at invoke time, emits the appropriate
+    /// audit event, and returns the ok / error response.
+    ///
+    /// Steps 1-6 of the invoke flow are NOT re-run — they already ran
+    /// at the original invoke (scope gate, schema validation,
+    /// pending_approval persistence). The approval having been marked
+    /// `Approved` by the approval endpoint is the license to dispatch;
+    /// this method is the seam where that license gets redeemed.
+    async fn resume_approval(
+        &self,
+        actor: &AuthenticatedContext,
+        _actor_scopes: &[gadgetron_core::context::Scope],
+        approval: ApprovalRequest,
+    ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError> {
+        let descriptor = self
+            .descriptor_catalog
+            .find_action(&approval.action_id)
+            .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
+                action_id: approval.action_id.clone(),
+            })?;
+        let start_instant = std::time::Instant::now();
+        let audit_event_id = Uuid::new_v4();
+        let mut payload: Option<serde_json::Value> = None;
+        if let (Some(dispatcher), Some(gadget_name)) = (
+            self.gadget_dispatcher.as_ref(),
+            descriptor.gadget_name.as_deref(),
+        ) {
+            match dispatcher
+                .dispatch_gadget(gadget_name, approval.args.clone())
+                .await
+            {
+                Ok(result) => {
+                    payload = Some(result.content);
+                }
+                Err(e) => {
+                    self.audit_sink.send(ActionAuditEvent::DirectActionCompleted {
+                        event_id: audit_event_id,
+                        action_id: approval.action_id.clone(),
+                        gadget_name: Some(gadget_name.to_string()),
+                        actor_user_id: actor.user_id,
+                        tenant_id: actor.tenant_id,
+                        outcome: ActionAuditOutcome::Error {
+                            error_code: e.error_code().to_string(),
+                        },
+                        elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                    });
+                    tracing::warn!(
+                        action_id = %approval.action_id,
+                        gadget_name = %gadget_name,
+                        approval_id = %approval.id,
+                        error = %e,
+                        audit_event_id = %audit_event_id,
+                        "approved-dispatch failed; surfacing as error",
+                    );
+                    return Err(WorkbenchHttpError::Core(e.into()));
+                }
+            }
+        }
+        self.audit_sink.send(ActionAuditEvent::DirectActionCompleted {
+            event_id: audit_event_id,
+            action_id: approval.action_id.clone(),
+            gadget_name: descriptor.gadget_name.clone(),
+            actor_user_id: actor.user_id,
+            tenant_id: actor.tenant_id,
+            outcome: ActionAuditOutcome::Success,
+            elapsed_ms: start_instant.elapsed().as_millis() as u64,
+        });
+        let result = WorkbenchActionResult {
+            status: "ok".into(),
+            approval_id: Some(approval.id),
+            activity_event_id: None,
+            audit_event_id: Some(audit_event_id),
+            refresh_view_ids: vec![],
+            knowledge_candidates: vec![],
+            payload,
+        };
+        Ok(InvokeWorkbenchActionResponse { result })
     }
 }
 
@@ -899,6 +1015,7 @@ mod tests {
             None,
             None,
             sink.clone() as Arc<dyn gadgetron_core::audit::ActionAuditSink>,
+            None,
         );
         let req = InvokeWorkbenchActionRequest {
             args: serde_json::json!({"query": "audit-ok"}),
@@ -965,6 +1082,7 @@ mod tests {
             None,
             None,
             sink.clone() as Arc<dyn gadgetron_core::audit::ActionAuditSink>,
+            None,
         );
         let req = InvokeWorkbenchActionRequest {
             args: serde_json::json!({}),
@@ -1021,6 +1139,7 @@ mod tests {
             None,
             Some(Arc::new(FailingDispatcher)),
             sink.clone() as Arc<dyn gadgetron_core::audit::ActionAuditSink>,
+            None,
         );
         let req = InvokeWorkbenchActionRequest {
             args: serde_json::json!({"query": "x"}),
@@ -1045,5 +1164,136 @@ mod tests {
             },
             _ => unreachable!("only DirectActionCompleted shipping today"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SUBTASK 3.3.2 — approval persistence + resume
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_with_approval_store_persists_pending_record() {
+        use crate::web::approval_store::InMemoryApprovalStore;
+        use gadgetron_core::workbench::{
+            ApprovalState, ApprovalStore, WorkbenchActionDescriptor, WorkbenchActionKind,
+            WorkbenchActionPlacement,
+        };
+        let mut catalog = DescriptorCatalog::seed_p2b();
+        catalog.actions.push(WorkbenchActionDescriptor {
+            id: "needs-approval".into(),
+            title: "Needs Approval".into(),
+            owner_bundle: "ops".into(),
+            source_kind: "gadget".into(),
+            source_id: "wiki.write".into(),
+            gadget_name: Some("wiki.write".into()),
+            placement: WorkbenchActionPlacement::ContextMenu,
+            kind: WorkbenchActionKind::Mutation,
+            input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":true}),
+            destructive: false,
+            requires_approval: true,
+            knowledge_hint: "approval-gated".into(),
+            required_scope: None,
+            disabled_reason: None,
+        });
+        let store: Arc<dyn ApprovalStore> = Arc::new(InMemoryApprovalStore::new());
+        let svc = InProcessWorkbenchActionService::new_full(
+            catalog,
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            None,
+            None,
+            Arc::new(gadgetron_core::audit::NoopActionAuditSink),
+            Some(store.clone()),
+        );
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"note": "keep this"}),
+            client_invocation_id: None,
+        };
+        let resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "needs-approval", req)
+            .await
+            .unwrap();
+        assert_eq!(resp.result.status, "pending_approval");
+        let approval_id = resp.result.approval_id.unwrap();
+        let persisted = store.get(approval_id).await.unwrap();
+        assert_eq!(persisted.state, ApprovalState::Pending);
+        assert_eq!(persisted.action_id, "needs-approval");
+        assert_eq!(persisted.args["note"], "keep this");
+    }
+
+    #[tokio::test]
+    async fn resume_approval_dispatches_with_stored_args() {
+        use crate::web::approval_store::InMemoryApprovalStore;
+        use gadgetron_core::workbench::{
+            ApprovalStore, WorkbenchActionDescriptor, WorkbenchActionKind,
+            WorkbenchActionPlacement,
+        };
+
+        #[derive(Clone)]
+        struct EchoDispatcher;
+        #[async_trait]
+        impl gadgetron_core::agent::tools::GadgetDispatcher for EchoDispatcher {
+            async fn dispatch_gadget(
+                &self,
+                _name: &str,
+                args: serde_json::Value,
+            ) -> Result<
+                gadgetron_core::agent::tools::GadgetResult,
+                gadgetron_core::agent::tools::GadgetError,
+            > {
+                Ok(gadgetron_core::agent::tools::GadgetResult {
+                    content: serde_json::json!({"echo": args}),
+                    is_error: false,
+                })
+            }
+        }
+
+        let mut catalog = DescriptorCatalog::seed_p2b();
+        catalog.actions.push(WorkbenchActionDescriptor {
+            id: "sensitive-write".into(),
+            title: "Sensitive Write".into(),
+            owner_bundle: "ops".into(),
+            source_kind: "gadget".into(),
+            source_id: "wiki.write".into(),
+            gadget_name: Some("wiki.write".into()),
+            placement: WorkbenchActionPlacement::ContextMenu,
+            kind: WorkbenchActionKind::Mutation,
+            input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":true}),
+            destructive: false,
+            requires_approval: true,
+            knowledge_hint: "approval-gated".into(),
+            required_scope: None,
+            disabled_reason: None,
+        });
+        let store: Arc<dyn ApprovalStore> = Arc::new(InMemoryApprovalStore::new());
+        let svc = InProcessWorkbenchActionService::new_full(
+            catalog,
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            None,
+            Some(Arc::new(EchoDispatcher)),
+            Arc::new(gadgetron_core::audit::NoopActionAuditSink),
+            Some(store.clone()),
+        );
+
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"name": "pages/ops/audit", "content": "body"}),
+            client_invocation_id: None,
+        };
+        let invoke_resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "sensitive-write", req)
+            .await
+            .unwrap();
+        assert_eq!(invoke_resp.result.status, "pending_approval");
+        let approval_id = invoke_resp.result.approval_id.unwrap();
+
+        // Approve (same actor — same tenant boundary).
+        let approved = store.mark_approved(approval_id, &actor()).await.unwrap();
+
+        let resume_resp = svc
+            .resume_approval(&actor(), &actor_scopes_default(), approved)
+            .await
+            .unwrap();
+        assert_eq!(resume_resp.result.status, "ok");
+        let payload = resume_resp.result.payload.unwrap();
+        assert_eq!(payload["echo"]["name"], "pages/ops/audit");
+        assert_eq!(payload["echo"]["content"], "body");
     }
 }
