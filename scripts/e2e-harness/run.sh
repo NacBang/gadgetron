@@ -1137,6 +1137,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7i.2 — /v1/tools MCP-style tool discovery (ISSUE 7 TASK 7.1)
+# ---------------------------------------------------------------------------
+#
+# `/v1/tools` enumerates the operator-allowed Gadget schemas via the
+# `GadgetCatalog` trait so external MCP clients (claude-code, custom
+# agents) can discover available tools. Shape: `{tools: [...], count}`.
+#
+# The harness runs WITHOUT a knowledge section, so the registry is
+# unwired — the endpoint MUST return `{tools: [], count: 0}` with 200
+# (NOT 404, NOT 500). This gate pins the empty-registry contract so
+# client code can rely on it shape-stable even when the deployment
+# has no Gadgets registered.
+
+log "=== Gate 7i.2: /v1/tools tool discovery ==="
+TOOLS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/v1/tools" 2>&1 || true)"
+if echo "$TOOLS_RESP" | jq -e '(.tools | type == "array") and (.count | type == "number")' \
+  >/dev/null 2>&1; then
+  TOOL_COUNT="$(echo "$TOOLS_RESP" | jq '.count')"
+  pass "/v1/tools returns {tools:[...], count:N} (count=$TOOL_COUNT)"
+else
+  fail "/v1/tools shape regressed" "$(echo "$TOOLS_RESP" | head -c 400)"
+fi
+
+# Unauthenticated request MUST be 401 — /v1/tools lives inside the
+# OpenAiCompat-scoped authenticated router.
+TOOLS_401_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  "$GAD_BASE/v1/tools" 2>&1 || true)"
+if [ "$TOOLS_401_CODE" = "401" ]; then
+  pass "/v1/tools without auth → 401"
+else
+  fail "/v1/tools without auth: expected 401, got $TOOLS_401_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7j — /favicon.ico served (public route, no auth)
 # ---------------------------------------------------------------------------
 #

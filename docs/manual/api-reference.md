@@ -643,6 +643,61 @@ curl -s http://localhost:8080/v1/models \
 
 ---
 
+### GET /v1/tools
+
+Requires scope: `OpenAiCompat`
+
+MCP-style tool discovery. Returns the operator-allowed Gadget schema
+set — the same set Penny is allowed to dispatch at runtime — so external
+agents (`claude-code`, custom MCP clients, or any HTTP caller that
+wants to enumerate capabilities before issuing a tool call) can
+discover what is available on this deployment.
+
+Shipped in ISSUE 7 (v0.2.10). The backing trait is
+`gadgetron_core::agent::tools::GadgetCatalog`; concrete catalogs are
+assembled at startup when `[knowledge]` is configured. A deployment
+without Gadgets returns `{"tools": [], "count": 0}` — this is the
+shape-stable empty case, not an error.
+
+**Response:**
+
+HTTP 200
+
+```json
+{
+  "tools": [
+    {
+      "name": "wiki.search",
+      "description": "Search the wiki for pages matching a query.",
+      "tier": "read",
+      "input_schema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] },
+      "idempotent": true
+    }
+  ],
+  "count": 1
+}
+```
+
+Fields:
+
+- `tools[].name` — namespaced gadget name (`{category}.{gadget}`), matches the `--allowed-tools` format used by Claude Code.
+- `tools[].tier` — one of `"read" | "write" | "destructive"`. Write/Destructive tools may still be filtered out of Penny's allowed set by operator config (`[agent.gadgets.write]` / `[agent.gadgets.destructive]`); the `/v1/tools` listing already reflects that filter.
+- `tools[].input_schema` — JSON Schema (draft-07) for the `args` object passed to a tool call.
+- `tools[].idempotent` — hint only. `null` = no claim; `true` = safe to retry; `false` = MUST NOT be retried.
+- `count` — deduped tool count (duplicates in the raw registry collapse to the last registration per `GadgetRegistryBuilder::freeze`).
+
+**Example:**
+
+```sh
+curl -s http://localhost:8080/v1/tools \
+  -H "Authorization: Bearer gad_live_your32chartoken00000000000000" \
+  | jq .
+```
+
+E2E Gate 7i.2 pins both the shape and the 401-on-missing-auth contract.
+
+---
+
 ## Health endpoints
 
 These endpoints require no authentication and no scope. They are intended for load balancers, Kubernetes liveness/readiness probes, and monitoring systems.

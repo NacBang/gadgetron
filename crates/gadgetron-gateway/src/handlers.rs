@@ -431,6 +431,54 @@ pub async fn list_models_handler(State(state): State<AppState>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// GET /v1/tools
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/tools` — MCP-style tool discovery (ISSUE 7 TASK 7.1).
+///
+/// Lists every gadget registered with the Penny `GadgetRegistry` in
+/// the form external MCP clients expect: `{tools: [{name, description,
+/// tier, category, input_schema}], count}`.
+///
+/// Response notes:
+/// - Deduped on `schema.name` — duplicates in `all_schemas` (operator
+///   misconfig, see `GadgetRegistryBuilder::freeze`) collapse to the
+///   last-registered entry, matching dispatch behavior.
+/// - Returns `{"tools": [], "count": 0}` with 200 when the registry is
+///   unwired (no `[knowledge]` section) — keeps clients happy.
+pub async fn list_tools_handler(State(state): State<AppState>) -> Response {
+    use gadgetron_core::agent::tools::GadgetTier;
+    use std::collections::BTreeMap;
+    let mut deduped: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    if let Some(catalog) = state.tool_catalog.as_ref() {
+        for schema in catalog.all_schemas() {
+            let tier_str = match schema.tier {
+                GadgetTier::Read => "read",
+                GadgetTier::Write => "write",
+                GadgetTier::Destructive => "destructive",
+            };
+            deduped.insert(
+                schema.name.clone(),
+                serde_json::json!({
+                    "name": schema.name,
+                    "description": schema.description,
+                    "tier": tier_str,
+                    "input_schema": schema.input_schema,
+                    "idempotent": schema.idempotent,
+                }),
+            );
+        }
+    }
+    let tools: Vec<serde_json::Value> = deduped.into_values().collect();
+    let count = tools.len();
+    Json(serde_json::json!({
+        "tools": tools,
+        "count": count,
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // inject_shared_context_block — PSL-1b helper
 // ---------------------------------------------------------------------------
 
@@ -741,6 +789,7 @@ mod tests {
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
+            tool_catalog: None,
         }
     }
 
@@ -1152,6 +1201,7 @@ mod tests {
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
+            tool_catalog: None,
         }
     }
 

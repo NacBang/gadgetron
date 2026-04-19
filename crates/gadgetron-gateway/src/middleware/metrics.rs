@@ -149,6 +149,7 @@ mod tests {
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
+            tool_catalog: None,
         }
     }
 
@@ -221,6 +222,7 @@ mod tests {
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
+            tool_catalog: None,
         };
         let app = build_router(state);
 
