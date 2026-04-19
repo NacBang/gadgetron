@@ -21,4 +21,6 @@ pub use config::{
     AgentConfig, BrainConfig, BrainMode, BrainShimConfig, DestructiveGadgetsConfig,
     ExtraConfirmation, GadgetMode, GadgetsConfig, WriteGadgetsConfig,
 };
-pub use tools::{GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier};
+pub use tools::{
+    GadgetDispatcher, GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
+};

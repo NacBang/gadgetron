@@ -268,6 +268,22 @@ impl GadgetRegistry {
     }
 }
 
+/// `GadgetDispatcher` impl for the gateway seam (workbench direct
+/// actions). Delegates to the inherent `dispatch()` method so the L3
+/// allowed-names gate is preserved for any path that reaches the
+/// registry — Penny's agent loop AND the workbench path both go through
+/// the same gate.
+#[async_trait::async_trait]
+impl gadgetron_core::agent::tools::GadgetDispatcher for GadgetRegistry {
+    async fn dispatch_gadget(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        self.dispatch(name, args).await
+    }
+}
+
 /// Determine whether a tool should appear in `--allowed-tools`.
 ///
 /// Per ADR-P2A-06 §"Tier + Mode in P2A", `Ask` is treated as `Never` because

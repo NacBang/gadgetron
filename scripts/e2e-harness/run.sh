@@ -800,6 +800,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7h.1b: real Gadget dispatch populates `payload`
+# ---------------------------------------------------------------------------
+#
+# Before PR (real gadget dispatch): step 7 of the workbench action flow
+# synthesized an empty result — `payload` was always null. With the
+# dispatcher wired (GadgetDispatcher trait + Penny's GadgetRegistry),
+# knowledge-search actually calls `wiki.search` and the raw
+# `GadgetResult.content` lands in `result.payload`.
+#
+# The assertion is tight: payload must be non-null + an object + contain
+# the `hits` array that `wiki.search` returns. A regression that drops
+# the dispatcher wiring (e.g. future refactor of `build_workbench`)
+# would flip payload back to null and this gate catches it.
+log "=== Gate 7h.1b: real Gadget dispatch populates payload ==="
+# Use a fresh ciid so we bypass the replay cache from 7h.1.
+DISPATCH_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DISPATCH_BODY="$(jq -cn --arg ciid "$DISPATCH_CIID" \
+  '{args: {query: "Gadgetron"}, client_invocation_id: $ciid}')"
+DISPATCH_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/knowledge-search" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$DISPATCH_BODY" 2>&1 || true)"
+if echo "$DISPATCH_RESP" | jq -e \
+     '.result.status == "ok"
+      and (.result.payload | type == "object")
+      and (.result.payload.hits | type == "array")' \
+     >/dev/null 2>&1; then
+  HIT_COUNT="$(echo "$DISPATCH_RESP" | jq -r '.result.payload.hits | length')"
+  pass "real Gadget dispatch: payload.hits is array (len=$HIT_COUNT)"
+else
+  fail "real Gadget dispatch regression: payload missing or wrong shape" \
+    "$(echo "$DISPATCH_RESP" | jq -c '.result | {status, payload}' | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7h.2: replay cache — same client_invocation_id returns cached
 # ---------------------------------------------------------------------------
 #
