@@ -11,6 +11,11 @@ pub struct ValidatedKey {
     pub api_key_id: Uuid,
     pub tenant_id: Uuid,
     pub scopes: Vec<Scope>,
+    /// Owning user (ISSUE 17 — populated for both Bearer and cookie
+    /// auth paths when the DB row has `api_keys.user_id` set, OR the
+    /// cookie-session middleware synthesizes it from the session row).
+    /// `None` for legacy keys predating ISSUE 14 TASK 14.1 backfill.
+    pub user_id: Option<Uuid>,
 }
 
 #[async_trait]
@@ -32,6 +37,7 @@ impl KeyValidator for InMemoryKeyValidator {
             api_key_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
             scopes: vec![Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin],
+            user_id: None,
         }))
     }
 
@@ -71,7 +77,7 @@ impl KeyValidator for PgKeyValidator {
         }
 
         let row: Option<KeyRow> = sqlx::query_as(
-            "SELECT id, tenant_id, scopes FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL",
+            "SELECT id, tenant_id, scopes, user_id FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL",
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -90,6 +96,7 @@ impl KeyValidator for PgKeyValidator {
             api_key_id: row.id,
             tenant_id: row.tenant_id,
             scopes,
+            user_id: row.user_id,
         });
 
         self.cache
@@ -109,4 +116,5 @@ struct KeyRow {
     id: Uuid,
     tenant_id: Uuid,
     scopes: Vec<String>,
+    user_id: Option<Uuid>,
 }

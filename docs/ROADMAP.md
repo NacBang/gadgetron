@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.9** (post-ISSUE 16 close — unified Bearer-or-cookie auth middleware)
+**Current version: 0.5.10** (post-ISSUE 17 close — ValidatedKey.user_id plumbed through both auth paths)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -325,7 +325,9 @@ login, non-commercialization multi-user completion).
   - Web UI login FORM (React/Tailwind) + unified middleware (Bearer OR cookie) deferred to ISSUE 16.
 - **ISSUE 16 ✅ unified Bearer-or-cookie auth middleware** (v0.5.9, closed 2026-04-19)
   - TASK 16.1 ✅ — `auth_middleware` falls back to session cookie when no Bearer header. Session → user_id → role → synthesized `ValidatedKey` with role-derived scopes (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`; service blocked). `api_key_id = Uuid::nil()` sentinel for cookie sessions — audit attribution via user_id follows when `audit_log.actor_user_id` plumbing completes. Harness gate 7v.6 (cookie → admin endpoint + cookie → OpenAiCompat endpoint + no-auth 401).
-  - Web UI login FORM (React/Tailwind in gadgetron-web) splits to **ISSUE 17**.
+  - Web UI login FORM (React/Tailwind in gadgetron-web) splits to ISSUE 18.
+- **ISSUE 17 ✅ ValidatedKey.user_id plumbing** (v0.5.10, closed 2026-04-19)
+  - TASK 17.1 ✅ — `ValidatedKey` gains `user_id: Option<Uuid>`. `PgKeyValidator::validate` SELECTs `api_keys.user_id`. Cookie-session middleware populates from `session.user_id`. Downstream audit/billing/telemetry can now read the owning user without an extra DB round-trip. Follow-up plumbing into `AuditWriter` / action + tool audit sinks is ISSUE 19 (post-backfill). No new harness gates — behavior-preserving data-flow change (48 unit tests + 129 harness gates confirm).
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).

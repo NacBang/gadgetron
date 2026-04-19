@@ -155,6 +155,7 @@ async fn validate_session_and_build_key(
         api_key_id: Uuid::nil(),
         tenant_id: session.tenant_id,
         scopes,
+        user_id: Some(session.user_id),
     }))
 }
 

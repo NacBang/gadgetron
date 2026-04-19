@@ -85,6 +85,7 @@ impl PreWarmedCacheValidator {
             api_key_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
             scopes: vec![Scope::OpenAiCompat],
+            user_id: None,
         });
 
         // moka insert is async; use block_in_place since we're outside tokio here.
