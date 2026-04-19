@@ -1205,6 +1205,36 @@ case "$COSTS_CODE" in
       "expected 200 (live) or 501/503 (stub); got $COSTS_CODE" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Gate 7k.3: /api/v1/web/workbench/usage/summary shape (ISSUE 4 TASK 4.1)
+# ---------------------------------------------------------------------------
+log "=== Gate 7k.3: /workbench/usage/summary shape + defaults ==="
+USAGE_RESP="$(curl -fsS \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/usage/summary" 2>&1 || true)"
+if echo "$USAGE_RESP" | jq -e '
+     (.window_hours | type == "number")
+     and (.chat | has("requests") and has("total_cost_cents") and has("avg_latency_ms"))
+     and (.actions | has("total") and has("success") and has("pending_approval"))
+     and (.tools | has("total") and has("errors"))
+   ' >/dev/null 2>&1; then
+  pass "/usage/summary returns expected tri-plane rollup shape"
+else
+  fail "/usage/summary shape regression" \
+    "$(echo "$USAGE_RESP" | head -c 400)"
+fi
+
+# window_hours query param clamps at 168.
+USAGE_CLAMP_RESP="$(curl -fsS \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/usage/summary?window_hours=9999" 2>&1 || true)"
+if echo "$USAGE_CLAMP_RESP" | jq -e '.window_hours == 168' >/dev/null 2>&1; then
+  pass "/usage/summary clamps window_hours to 168 (max)"
+else
+  fail "/usage/summary window_hours clamp regression" \
+    "$(echo "$USAGE_CLAMP_RESP" | jq -c '.window_hours')"
+fi
+
 log "=== Gate 7l: workbench /views/knowledge-activity-recent/data ==="
 VD_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/views/knowledge-activity-recent/data" 2>&1 || true)"
@@ -1805,6 +1835,24 @@ if echo "$WEB_HTML" | grep -q 'data-testid="nav-tab-wiki"'; then
 else
   fail "/web left-rail missing nav-tab-wiki (ISSUE A.2 regression)" \
     "no 'nav-tab-wiki' data-testid in landing HTML"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 11f: /web/dashboard page is reachable + LeftRail dashboard tab
+# exists (ISSUE 4 TASK 4.4)
+# ---------------------------------------------------------------------------
+DASH_RESP="$(curl -fsSL "$GAD_BASE/web/dashboard" 2>&1 || true)"
+if echo "$DASH_RESP" | grep -q -iE 'dashboard-auth-gate|data-testid="dashboard"'; then
+  pass "/web/dashboard page served"
+else
+  fail "/web/dashboard page missing expected markers" \
+    "$(echo "$DASH_RESP" | head -c 300)"
+fi
+if echo "$WEB_HTML" | grep -qE 'data-testid="nav-tab-dashboard"[^>]*href="/web/dashboard"'; then
+  pass "/web left-rail has nav-tab-dashboard → /web/dashboard link"
+else
+  fail "/web left-rail missing nav-tab-dashboard" \
+    "ISSUE 4 TASK 4.4 regression — dashboard tab not wired"
 fi
 
 # ---------------------------------------------------------------------------
