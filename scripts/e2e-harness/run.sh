@@ -427,6 +427,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7b — wiki seed pages (knowledge layer smoke)
+# ---------------------------------------------------------------------------
+#
+# `gadgetron serve` injects N seed pages into a fresh wiki at startup.
+# We assert the log line lands (count > 0) so a future regression that
+# silently skips seeding shows up here rather than in a chat test much
+# later in the run.
+
+log "=== Gate 7b: wiki seed injection ==="
+# `tracing` wraps field values in ANSI escapes when stderr is a TTY — even
+# when redirected. Strip them before regex-matching `count=N`.
+STRIP_ANSI='s/\x1B\[[0-9;]*[A-Za-z]//g'
+SEED_LINE="$(grep 'wiki_seed.*injected' "$GAD_LOG" 2>/dev/null | sed "$STRIP_ANSI" | head -1 || true)"
+SEED_COUNT="$(echo "$SEED_LINE" | grep -oE 'count=[0-9]+' | head -1 | cut -d= -f2)"
+if [ -n "${SEED_COUNT:-}" ] && [ "$SEED_COUNT" -gt 0 ] 2>/dev/null; then
+  pass "wiki seed pages injected (count=$SEED_COUNT)"
+else
+  fail "wiki seed pages NOT injected — knowledge layer cold-start regression" \
+    "$(grep -iE 'wiki|seed' "$GAD_LOG" 2>/dev/null | head -5)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7c — workbench activity endpoint (Penny-shared-surface read)
+# ---------------------------------------------------------------------------
+#
+# Empty shape is `{"entries": [], "is_truncated": false}` on a fresh install.
+# Any regression that drops `.entries` (renamed, typo, wrong casing) is caught.
+
+log "=== Gate 7c: workbench /activity ==="
+ACT_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/activity?limit=5" 2>&1 || true)"
+if echo "$ACT_RESP" | jq -e '(.entries | type == "array") and (.is_truncated | type == "boolean")' \
+  >/dev/null 2>&1; then
+  ENTRY_COUNT="$(echo "$ACT_RESP" | jq '.entries | length')"
+  pass "/workbench/activity ok (entries=$ENTRY_COUNT, is_truncated=$(echo "$ACT_RESP" | jq '.is_truncated'))"
+else
+  fail "/workbench/activity shape regressed" "$(echo "$ACT_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7d — workbench knowledge-status (plug health surface)
+# ---------------------------------------------------------------------------
+#
+# Live shape: `{"canonical_ready":bool, "search_ready":bool,
+# "relation_ready":bool, "stale_reasons":[...], "last_ingest_at":null|str}`.
+# We assert the three readiness flags exist and `canonical_ready` is true —
+# the canonical wiki plug is the backbone of the knowledge layer and
+# "canonical_ready=false" is a hard cold-start regression.
+
+log "=== Gate 7d: workbench /knowledge-status ==="
+KS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/knowledge-status" 2>&1 || true)"
+if echo "$KS_RESP" | jq -e '(.canonical_ready == true) and (has("search_ready")) and (has("relation_ready"))' \
+  >/dev/null 2>&1; then
+  CANONICAL="$(echo "$KS_RESP" | jq '.canonical_ready')"
+  SEARCH="$(echo "$KS_RESP" | jq '.search_ready')"
+  RELATION="$(echo "$KS_RESP" | jq '.relation_ready')"
+  pass "/workbench/knowledge-status canonical=$CANONICAL search=$SEARCH relation=$RELATION"
+else
+  fail "/workbench/knowledge-status regressed (canonical_ready must be true, fields must exist)" \
+    "$(echo "$KS_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 8 — non-streaming chat completion
 # ---------------------------------------------------------------------------
 
