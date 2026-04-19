@@ -744,7 +744,7 @@ Fields:
 | 400  | `mcp_invalid_args`       | `args` failed the gadget's own input validation.                         |
 | 403  | `mcp_denied_by_policy`   | L3 allowed-names gate rejected: operator disabled the tool.              |
 | 404  | `mcp_unknown_tool`       | No gadget registered with that name.                                     |
-| 408  | `mcp_approval_timeout`   | Destructive tool's approval prompt timed out (P2B+).                     |
+| 408  | `mcp_approval_timeout`   | Destructive tool's approval prompt timed out. **Not emitted on trunk today** — the Penny-side cross-process approval bridge (ADR-P2A-06 SEC-MCP-B1) hasn't been wired yet, so the 408 surface stays dormant. The error-code string is reserved in the enum so clients can key on it in advance. The direct-action workbench approval flow (`wiki-delete` → `/approvals/{id}/approve|deny`) shipped at v0.2.6 and surfaces different error codes — see §Approvals. |
 | 429  | `mcp_rate_limited`       | Per-tool hourly cap exceeded.                                            |
 | 500  | `mcp_execution_failed`   | The gadget itself errored — usually infrastructure (wiki disk full, etc.). |
 | 503  | `mcp_not_available`      | Dispatcher unwired on this deployment (no `[knowledge]` section).        |
