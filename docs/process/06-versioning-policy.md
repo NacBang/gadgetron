@@ -79,8 +79,8 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
 
 ## 7. 현재 상태
 
-- **Workspace version**: `0.2.6` (Phase 2A — EPIC 1 진행 중)
-- **활성 EPIC**: EPIC 1 (Workbench MVP). 현재까지 shipped — ISSUE 1 (0.2.0), ISSUE 2 (0.2.1→0.2.4), ISSUE 2b (0.2.5), ISSUE 3 (0.2.6, PR #188 — production safety: ActionAuditSink + ApprovalStore + approve/deny + /audit/events). 남은 ISSUE — ISSUE 4 (operator observability, NEXT).
-- **다음 patch bump**: ISSUE 4 머지 시 `0.2.6` → `0.2.7`.
-- **다음 minor bump**: EPIC 1 (ISSUE 4 까지) 클로즈 시 `v0.3.0` 태그와 함께 `0.3.0` bump.
+- **Workspace version**: `0.2.7` (Phase 2A — EPIC 1 close-criteria 단계 진입)
+- **활성 EPIC**: EPIC 1 (Workbench MVP). 현재까지 shipped — ISSUE 1 (0.2.0), ISSUE 2 (0.2.1→0.2.4), ISSUE 2b (0.2.5), ISSUE 3 (0.2.6, PR #188 — production safety), ISSUE 4 (0.2.7, PR #194 — operator observability: `/usage/summary` + `/events/ws` + `/web/dashboard` + cost_cents pricing). EPIC 1 의 계획된 ISSUE 4 종결 — 남은 건 close criteria (external-team manual validation) 통과 후 minor bump.
+- **다음 patch bump**: 별도 hotfix ISSUE 가 열리지 않는 한, EPIC 1 close 가 `0.2.7` → `0.3.0` minor bump 으로 바로 이동.
+- **다음 minor bump**: EPIC 1 close 시 `v0.3.0` 태그와 함께 `0.3.0` bump.
 - **이전 tag**: `v0.1.0-phase1` (역사적).

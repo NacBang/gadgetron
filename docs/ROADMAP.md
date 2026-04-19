@@ -36,13 +36,13 @@ Expected duration: ~1-2 months. Close → tag `v0.3.0`.
   Shipped across PRs #180, #181, #182, #184. (Also over-split.)
 - **ISSUE 2b — roadmap recalibration** (0.2.4 → 0.2.5, PR #186)
   Granularity rule clarified (this doc).
-- **ISSUE 3 — production safety** (0.2.5 → 0.2.6)
+- **ISSUE 3 — production safety** (0.2.5 → 0.2.6, PR #188)
   ActionAuditSink trait + Postgres-backed writer, approval flow
   (ApprovalStore + approve/deny endpoints + resume), `wiki-delete`
   added to seed_p2b as the canonical approval-gated action,
   `GET /api/v1/web/workbench/audit/events` query endpoint.
   Harness gates 7h.7 (lifecycle) + 7h.8 (audit query).
-- **ISSUE 4 — operator observability** (0.2.6 → 0.2.7)
+- **ISSUE 4 — operator observability** (0.2.6 → 0.2.7, PR #194)
   `GET /usage/summary` tri-plane rollup, model pricing table
   (`gadgetron_core::pricing`) populating real `cost_cents`,
   in-process `ActivityBus` + `GET /events/ws` WebSocket feed,

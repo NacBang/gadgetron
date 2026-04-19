@@ -135,6 +135,16 @@ Markdown 렌더는 `react-markdown` + `remark-gfm` (GitHub-flavoured) 입니다.
 
 모든 terminal 경로는 `action_audit_events` 에 로그되며 `GET /api/v1/web/workbench/audit/events` 로 조회 가능합니다. E2E Gate 7h.7 이 invoke → approve → ok → 이중-approve 409 를 검증하고, Gate 7h.8 이 audit rows 를 조회합니다 (`scripts/e2e-harness/run.sh`).
 
+## `/web/dashboard` — operator observability (ISSUE 4 / v0.2.7)
+
+PR #194 shipped `/web/dashboard` as a sibling of `/web` 와 `/web/wiki`: tenant-scoped live tiles driven by `GET /usage/summary` (24-hour rollup over chat / direct-action / Penny tool planes) plus a WebSocket feed from `GET /events/ws` that streams `ActivityEvent` frames as they publish. LeftRail adds a "Dashboard" tab next to Chat / Wiki.
+
+**Auth flow — browser-specific.** The WebSocket upgrade path cannot carry an `Authorization` header from browser JavaScript, so the page uses the query-token fallback: `wss://…/events/ws?token=gad_live_…`. The auth middleware checks `?token=` **only** for this route and strips it from logs before the request-id line lands on disk (`crates/gadgetron-gateway/src/middleware/auth.rs`). Non-browser clients should keep using the standard `Authorization: Bearer …` header.
+
+**Lag handling.** When the broadcast channel backs up (subscriber slower than publishers), the server sends a structured `{"type":"lag", "missed":N, …}` frame then closes. The page MUST reconnect and re-sync via `GET /usage/summary` — silent drops would mask a real load problem.
+
+**E2E gates.** `scripts/e2e-harness/run.sh` Gate 7k.3 pins the `/usage/summary` response shape (all three sub-objects present, zero-state layout stable). Gate 11f renders `/web/dashboard` with an authenticated key and asserts both the pre-auth `dashboard-auth-gate` and the post-auth `dashboard` testid are addressable.
+
 **Save / error 토스트** (ISSUE 2, 0.2.4 via PR #184 — `sonner` 라이브러리): 저장에 성공하면 우측 하단에 "Saved <page>" 토스트가, 실패하면 "Save failed" 에러 토스트가 설명과 함께 표시됩니다. 페이지 열기 실패(`wiki.get` 오류) 시에도 "Failed to open <page>" 에러 토스트가 나타납니다. DOM 의 `<section data-sonner-toaster>` 엘리먼트로 확인 가능하며, Gate 11d Playwright E2E 에서 이 DOM 을 assert 해 회귀를 막습니다.
 
 ### 인증
