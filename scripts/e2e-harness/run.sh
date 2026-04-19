@@ -172,6 +172,51 @@ skip() {
   echo "SKIP: $1" >> "$ART_DIR/summary.txt"
 }
 
+# Strip ANSI escape sequences — `tracing` colorizes field=value pairs
+# on disk even when stderr is redirected, so gates that regex the log
+# need to filter these out first. Shared across Gate 7b (wiki seed
+# count) and Gate 9b (error audit line).
+STRIP_ANSI='s/\x1B\[[0-9;]*[A-Za-z]//g'
+
+# ---------------------------------------------------------------------------
+# HTTP helpers — consolidate the curl patterns each gate would otherwise
+# re-inline. All take the API key as the FIRST arg so callers can pass
+# `$TEST_API_KEY` (OpenAiCompat scope) or `$MGMT_API_KEY` (Management
+# scope) without ambiguity. Return ONLY the relevant bytes on stdout
+# (status code, or body) — no logging, no side effects.
+# ---------------------------------------------------------------------------
+
+# Plain HTTP status code for a GET. Usage:
+#   CODE=$(http_get_code "$TEST_API_KEY" "$GAD_BASE/api/v1/web/workbench/views")
+http_get_code() {
+  local key="$1"
+  local url="$2"
+  curl -s -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $key" \
+    "$url" 2>&1 || echo "curl-failed"
+}
+
+# Plain HTTP status code for a POST with JSON body. Usage:
+#   CODE=$(http_post_code "$TEST_API_KEY" "$URL" '{"args":{}}')
+http_post_code() {
+  local key="$1"
+  local url="$2"
+  local body="$3"
+  curl -s -o /dev/null -w '%{http_code}' \
+    -X POST "$url" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    -d "$body" 2>&1 || echo "curl-failed"
+}
+
+# Full response body for a GET expecting 2xx — stderr silenced but
+# returned stdout on error, so callers can `head -c 400` for context.
+http_get_body() {
+  local key="$1"
+  local url="$2"
+  curl -fsS -H "Authorization: Bearer $key" "$url" 2>&1 || true
+}
+
 MOCK_PID=""
 MOCK_ERROR_PID=""
 GAD_PID=""
@@ -536,9 +581,9 @@ fi
 # later in the run.
 
 log "=== Gate 7b: wiki seed injection ==="
-# `tracing` wraps field values in ANSI escapes when stderr is a TTY — even
-# when redirected. Strip them before regex-matching `count=N`.
-STRIP_ANSI='s/\x1B\[[0-9;]*[A-Za-z]//g'
+# `STRIP_ANSI` is defined at the top of the script (near the pass/
+# fail helpers). Strips `tracing`'s colorization so the
+# `count=N` regex matches regardless of TTY state.
 SEED_LINE="$(grep 'wiki_seed.*injected' "$GAD_LOG" 2>/dev/null | sed "$STRIP_ANSI" | head -1 || true)"
 SEED_COUNT="$(echo "$SEED_LINE" | grep -oE 'count=[0-9]+' | head -1 | cut -d= -f2)"
 if [ -n "${SEED_COUNT:-}" ] && [ "$SEED_COUNT" -gt 0 ] 2>/dev/null; then
@@ -685,11 +730,9 @@ fi
 # gate covers the simpler "genuinely unknown id" path.
 
 log "=== Gate 7h: action 404 on unknown id ==="
-ACTION_404_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
-  -X POST "$GAD_BASE/api/v1/web/workbench/actions/does-not-exist" \
-  -H "Authorization: Bearer $TEST_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"args":{},"client_invocation_id":null}' 2>&1 || true)"
+ACTION_404_CODE="$(http_post_code "$TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/actions/does-not-exist" \
+  '{"args":{},"client_invocation_id":null}')"
 if [ "$ACTION_404_CODE" = "404" ]; then
   pass "POST /actions/does-not-exist → 404"
 else
@@ -743,9 +786,7 @@ fi
 # 200 with Management.
 
 log "=== Gate 7k: Management-scoped /api/v1/usage ==="
-USAGE_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer $MGMT_API_KEY" \
-  "$GAD_BASE/api/v1/usage" 2>&1 || true)"
+USAGE_CODE="$(http_get_code "$MGMT_API_KEY" "$GAD_BASE/api/v1/usage")"
 # We assert RBAC passes — anything BUT 403 / 401 is acceptable.
 # Today the route is 501 (stub implementation, real aggregator lands
 # in a follow-up PR); what matters for this gate is that the scope
@@ -795,9 +836,8 @@ log "=== Gate 7m: request_evidence 404 on unknown uuid ==="
 # `Path<Uuid>` extractor accepts it and we reach the projection's
 # `RequestNotFound` branch (404) rather than the extractor's 400.
 RAND_UUID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-EV_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer $TEST_API_KEY" \
-  "$GAD_BASE/api/v1/web/workbench/requests/$RAND_UUID/evidence" 2>&1 || true)"
+EV_CODE="$(http_get_code "$TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/requests/$RAND_UUID/evidence")"
 if [ "$EV_CODE" = "404" ]; then
   pass "GET /workbench/requests/$RAND_UUID/evidence → 404"
 else
