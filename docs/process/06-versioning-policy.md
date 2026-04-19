@@ -79,9 +79,7 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
 
 ## 7. 현재 상태
 
-- **Workspace version**: `0.2.12` (EPIC 1 close-criteria + EPIC 2 전 ISSUE shipped)
-- **활성 EPIC**: EPIC 1 (Workbench MVP) close-criteria 단계 + EPIC 2 (Agent autonomy) close-criteria 단계 진입. EPIC 1 shipped — ISSUE 1 (0.2.0), ISSUE 2 (0.2.1→0.2.4), ISSUE 2b (0.2.5), ISSUE 3 (0.2.6, PR #188), ISSUE 4 (0.2.7, PR #194). EPIC 2 shipped — ISSUE 5 (0.2.8, PR #199), ISSUE 6 (0.2.9, PR #201), **ISSUE 7 (first-class MCP server, 0.2.9 → 0.2.12, 3 PRs — PR #204 TASK 7.1 discovery `GET /v1/tools`, PR #205 TASK 7.2 invoke `POST /v1/tools/{name}/invoke`, PR #207 TASK 7.3 cross-session audit — `tool_audit_events` 행 마다 authenticated actor 의 `owner_id` + `tenant_id` 를 기록; 외부 MCP 클라이언트가 dispatch 한 tool call 이 기존 Penny-origin 열과 동일 테이블에서 상관 가능)**. EPIC 2 계획된 ISSUE 5/6/7 모두 종료 — 남은 건 close criteria 통과 후 minor bump.
-- **다음 patch bump**: 별도 hotfix / 후속 ISSUE 가 열리지 않는 한, EPIC 1 close 가 `0.2.12` → `0.3.0` minor bump 으로, EPIC 2 close 가 `0.3.0` → `0.4.0` minor bump 으로 이동.
-- **다음 minor bump**: EPIC 1 close 시 `v0.3.0` 태그. EPIC 2 close 시 `v0.4.0` 태그. TASK 단위 patch bump 패턴 (PR #204/#205/#207 이 사례) 은 EPIC 2 close 까지 고정.
-- **다음 minor bump**: EPIC 1 close 시 `v0.3.0` 태그. EPIC 2 close 시 `v0.4.0` 태그.
-- **이전 tag**: `v0.1.0-phase1` (역사적).
+- **Workspace version**: `0.3.0` (EPIC 1 CLOSED — tag `v0.3.0` cut via PR #208; EPIC 2 전 ISSUE shipped, close-criteria 단계)
+- **활성 EPIC**: EPIC 1 (Workbench MVP) **CLOSED (v0.3.0)** + EPIC 2 (Agent autonomy) close-criteria 단계. EPIC 1 shipped — ISSUE 1 (0.2.0), ISSUE 2 (0.2.1→0.2.4), ISSUE 2b (0.2.5), ISSUE 3 (0.2.6, PR #188), ISSUE 4 (0.2.7, PR #194); EPIC close = minor bump 0.2.12 → 0.3.0 + git tag `v0.3.0` (PR #208). EPIC 2 shipped — ISSUE 5 (0.2.8, PR #199), ISSUE 6 (0.2.9, PR #201), **ISSUE 7 (first-class MCP server, 0.2.9 → 0.2.12, 3 PRs — PR #204 TASK 7.1 discovery `GET /v1/tools`, PR #205 TASK 7.2 invoke `POST /v1/tools/{name}/invoke`, PR #207 TASK 7.3 cross-session audit — `tool_audit_events` 행 마다 authenticated actor 의 `owner_id` + `tenant_id` 를 기록; 외부 MCP 클라이언트가 dispatch 한 tool call 이 기존 Penny-origin 열과 동일 테이블에서 상관 가능)**. EPIC 2 계획된 ISSUE 5/6/7 모두 종료 — 남은 건 close criteria 통과 후 `0.4.0` minor bump.
+- **다음 minor bump**: EPIC 2 close 시 `0.3.x` → `0.4.0` + tag `v0.4.0`. TASK 단위 patch bump 패턴 (PR #204/#205/#207 이 사례) 은 EPIC 2 close 까지 고정.
+- **이전 tag**: `v0.3.0` (EPIC 1 closure, 2026-04-19), `v0.1.0-phase1` (역사적).
