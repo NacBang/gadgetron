@@ -362,6 +362,47 @@ WHERE tenant_id = 'your-tenant-uuid-here';
 
 ---
 
+### "How do I check my quota without hitting 429?" — `/quota/status` recipe
+
+**What you want:** proactively monitor daily + monthly spend WITHOUT triggering a 429 first. Useful for UI dashboards, SDK clients wanting to back off before rate-limited, and ops teams wanting to send a warning at 80% usage instead of discovering exhaustion at 100%.
+
+**Use `/quota/status`** (ISSUE 11 TASK 11.4 / v0.5.4 / PR #234). OpenAiCompat scope — the same API key that issues `/v1/chat/completions` calls works here, no Management rights needed.
+
+```bash
+curl -fsS -H "Authorization: Bearer $API_KEY" \
+  http://localhost:8080/api/v1/web/workbench/quota/status \
+  | jq .
+```
+
+Response (always current — the SQL runs the same CASE rollover as `record_post`, so values reflect any day/month boundary crossing regardless of when the tenant last sent a chargeable request):
+
+```json
+{
+  "usage_day": "2026-04-20",
+  "daily":   { "used_cents": 342,   "limit_cents": 1000000,  "remaining_cents": 999658 },
+  "monthly": { "used_cents": 15240, "limit_cents": 10000000, "remaining_cents": 9984760 }
+}
+```
+
+**Proactive backoff pattern:** watch `.daily.remaining_cents` and back off when it crosses a threshold (e.g. `< 0.1 * daily.limit_cents`). This is kinder to users than waiting for 429 — the request that would have triggered 429 gets deferred instead of rejected.
+
+```python
+import requests
+def can_spend(estimated_cents: int) -> bool:
+    r = requests.get(url + "/quota/status", headers={"Authorization": f"Bearer {API_KEY}"})
+    r.raise_for_status()
+    return r.json()["daily"]["remaining_cents"] >= estimated_cents
+
+if not can_spend(500):        # planning to spend up to 5¢ this call
+    time.sleep(60 * 60)       # back off for an hour, daily resets at UTC midnight
+```
+
+**"Fresh tenant" response shape** — sometimes operators see a response with default limits (`1000000` daily, `10000000` monthly) on a brand-new tenant that hasn't made any chargeable requests yet. This is intentional: when `quota_configs` has no row for the tenant, the handler returns schema defaults so the UI can render "fresh tenant, full quota" instead of 4xx during provisioning. Once the first chargeable request lands (via `PgQuotaEnforcer::record_post`), a real row is upserted and subsequent responses reflect the operator-configured limits.
+
+**Limits come from `quota_configs`, NOT from `quota_status` itself** — raising a tenant's quota means UPDATING `quota_configs.daily_limit_cents` + `quota_configs.monthly_limit_cents`; the next `/quota/status` call picks it up immediately (no cache, direct SELECT). See [`HTTP 429 Quota Exceeded`](#http-429-quota-exceeded) above for the SQL snippets.
+
+---
+
 ### GET /ready returns HTTP 503
 
 **What you observe:** `curl http://localhost:8080/ready` returns HTTP 503.

@@ -17,13 +17,15 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; twenty-six PRs have landed since (#169 7k.2, #172 7n.2,
+refresh; thirty PRs have landed since (#169 7k.2, #172 7n.2,
 #173 9c, #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188
 7h.7 + 7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207
 7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220 / #226 /
-#227 / #228 no-new-gates — ISSUE 8 TASKs 8.3 / 8.4 / 8.5 + ISSUE 9
-TASKs 9.1 / 9.2 + ISSUE 10 TASK 10.3 + ISSUE 10 TASK 10.4 + EPIC 3
-close all reuse the existing Gate 7q.1 cross-check (response
+#227 / #228 / #230 / #231 / #232 no-new-gates — ISSUE 8 TASKs 8.3
+/ 8.4 / 8.5 + ISSUE 9 TASKs 9.1 / 9.2 + ISSUE 10 TASK 10.3 + ISSUE
+10 TASK 10.4 + EPIC 3 close + **ISSUE 11 TASK 11.1 / 11.2 / 11.3**
+(Retry-After header + body, token-bucket rate limiter, PgQuota
+Enforcer UPDATE) all reuse the existing Gate 7q.1 cross-check (response
 `action_count` vs live `/workbench/actions` count) which implicitly
 proves both catalog and validators swapped in lockstep (TASK 8.3),
 the file-based source produced a valid snapshot (TASK 8.4
@@ -57,8 +59,15 @@ response shape + `gadgetron-core` enumeration with `action_count=5`
 with the `validate_bundle_id()` path-traversal regex, so the
 harness pins: 7q.6 install a dummy bundle → discovery lists it;
 7q.7 install with `id = "../etc/passwd"` → 4xx rejection BEFORE any
-filesystem write; 7q.8 uninstall → discovery no longer lists it —
-64 → 91 PASS). Run
+filesystem write; 7q.8 uninstall → discovery no longer lists it;
+**#234 7k.5** — ISSUE 11 TASK 11.4 shipped `GET /api/v1/web/
+workbench/quota/status` (OpenAiCompat tenant introspection), so the
+harness pins the response shape `{usage_day, daily, monthly}` +
+`daily.remaining_cents + daily.used_cents == daily.limit_cents` on
+the bootstrap-gap fallback path (test config doesn't populate
+`quota_configs` so the gate specifically exercises the schema-
+default path that returns 1_000_000 cents daily / 10_000_000 cents
+monthly / usage_day=today instead of 400/404) — 64 → 92 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -96,6 +105,7 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7k.2 | Management `/api/v1/costs` | PR #169: sibling of 7k — same scope, same pass set; catches scope-handler divergence |
 | 7k.3 | `/workbench/usage/summary` shape (OpenAiCompat scope) | PR #194: all three sub-objects (`chat`, `actions`, `tools`) present with fixed fields even in a zero-state window; `window_hours` echoed from the query param (default 24, clamp `[1,168]`) |
 | 7k.4 | `/workbench/audit/tool-events` shape + limit clamp | PR #199: `{events:[], returned=N}` with `returned == events|length` (tenant-pinned read); `?limit=9999` silently clamps server-side (contract is `[1,500]`) |
+| 7k.5 | `/workbench/quota/status` shape + bootstrap-gap fallback | PR #234 / TASK 11.4: `GET /api/v1/web/workbench/quota/status` (OpenAiCompat) returns `{usage_day, daily: {used_cents, limit_cents, remaining_cents}, monthly: {...}}`; harness test config doesn't populate `quota_configs` so this gate specifically exercises the **schema-default fallback** (`limit_cents = 1_000_000` daily / `10_000_000` monthly / `usage_day = today`). Asserts `daily.remaining_cents + daily.used_cents == daily.limit_cents` + matching invariants for monthly. Catches: (a) handler 400/404 regression when `quota_configs` row missing (would break the UI's "fresh tenant" rendering), (b) CASE-rollover SQL drift that makes `remaining_cents` inconsistent with `limit_cents - used_cents`, (c) scope regression that promotes the endpoint back to Management. |
 | 7q.1 | `/workbench/admin/reload-catalog` happy path (Management scope) | PR #213 (original) + PR #222 (retargeted): `{reloaded:true, source:"bundles_dir", action_count:N, view_count:N}` response shape + cross-check that `action_count` equals the live `GET /workbench/actions` listing right after (catches "swap happened but read path still sees old pointer" regression from the TASK 8.1 ArcSwap substrate). **Assertion history**: originally pinned `source:"seed_p2b"` (PR #213, TASK 8.2 default); PR #222 / TASK 9.3 flipped the harness config to `[web] bundles_dir = <repo>/bundles` so the assertion is now `source:"bundles_dir"` — this proves the bundle loader is wired end-to-end and that operators' default production path is harness-covered. PR #214 / TASK 8.3 re-uses this gate: since `/workbench/actions` reads validators from the same `Arc<ArcSwap<CatalogSnapshot>>` snapshot, an `action_count` match proves both sides (catalog + validators) published together — no "new catalog against old validators" window. |
 | 7q.2 | `/workbench/admin/reload-catalog` RBAC enforcement | PR #213: same endpoint called with an OpenAiCompat key → 403 (admin sub-tree scope rule precedes the broader workbench rule in `scope_guard_middleware`) |
 | 7q.3 | `/workbench/admin/reload-catalog` contributing-bundles list | PR #222 / TASK 9.3: `.bundles[0].id == "gadgetron-core"` on the reload response when the harness boots against `bundles_dir = <repo>/bundles`. Catches (a) a rename of the first-party bundle (`bundles/gadgetron-core/bundle.toml` → some other id), (b) a silent drop of the `bundles` field from the response (e.g. serde attribute regression removing `skip_serializing_if` or changing `pub bundles: Vec<...>` back to `Option<...>` semantics), (c) the `from_bundle_dir` merge path silently falling through to a different source. |

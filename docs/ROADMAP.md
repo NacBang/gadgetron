@@ -239,8 +239,8 @@ Goal: XaaS mode shippable — integer-cent billing (ADR-D-8), HuggingFace
 catalog, tenant self-service, quotas + SLA enforcement. Turns Gadgetron
 from "self-host" to "accounts you sell."
 
-### In-flight ISSUE (11)
-- **ISSUE 11 — quotas + rate limits** (in-flight; 0.5.1 / 0.5.2 ship TASK 11.1 / 11.2 respectively; TASK 11.3 Postgres-backed spend tracking + TASK 11.4 `/web` 429 UI surface remaining)
+### Completed ISSUEs
+- **ISSUE 11 — quotas + rate limits** — all 4 TASKs shipped across 0.5.1 / 0.5.2 / 0.5.3 / 0.5.4 (PRs #230 / #231 / #232 / #234). Quota pipeline is end-to-end: rate-limit check (11.2) → pg cost check (11.3) → dispatch → pg record_post increment (11.3), rejections carry structured 429 + Retry-After (11.1), tenants introspect usage via `GET /quota/status` (11.4). UI integration (dashboard banner, 429 countdown) rides on the 11.4 endpoint as a gadgetron-web follow-up.
   - TASK 11.1 ✅ — structured 429 + `Retry-After` header (0.5.0 →
     0.5.1). Every `ApiError` response with status 429 now sets the
     `Retry-After: 60` HTTP header AND adds `retry_after_seconds:

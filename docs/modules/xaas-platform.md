@@ -103,10 +103,21 @@ crates/gadgetron-xaas/
     ├── tenant/                      # [P1]
     │   ├── model.rs                 # Tenant, TenantContext (request-scoped)
     │   └── registry.rs              # TenantRegistry trait + PgTenantRegistry
-    ├── quota/                       # [P1]
+    ├── quota/                       # [P1] + [EPIC 4] rate limit + pg spend tracking
     │   ├── config.rs                # QuotaConfig (RPM/TPM/concurrent_max)
-    │   ├── enforcer.rs              # QuotaEnforcer (pre-check/post-record)
-    │   └── bucket.rs                # TokenBucket (RPM + TPM refill)
+    │   ├── enforcer.rs              # QuotaEnforcer trait, InMemoryQuotaEnforcer (P1),
+    │   │                             # [EPIC 4 ISSUE 11] PgQuotaEnforcer (TASK 11.3 / PR #232 —
+    │   │                             #   Postgres-backed daily + monthly spend via CASE-
+    │   │                             #   expression rollover UPDATE on `quota_configs`,
+    │   │                             #   fire-and-forget on failure), RateLimitedQuotaEnforcer
+    │   │                             #   (TASK 11.2 / PR #231 — composite wrapping an inner
+    │   │                             #   QuotaEnforcer with a per-tenant TokenBucketRateLimiter,
+    │   │                             #   check_pre runs rate check FIRST for fail-fast)
+    │   ├── bucket.rs                # TokenBucket (RPM + TPM refill) — P1 cost token bucket
+    │   └── rate_limit.rs            # [EPIC 4 ISSUE 11 TASK 11.2 / PR #231]
+    │                                #   TokenBucketRateLimiter — DashMap-sharded per-tenant
+    │                                #   buckets, lazy refill at consume() time, monotonic
+    │                                #   Instant clock (skew-proof), fractional tokens
     ├── audit/                       # [P1] chat-side + [P2B] direct-action side + [EPIC 2] Penny tool-call side
     │   ├── entry.rs                 # AuditEntry struct (chat audit)
     │   ├── writer.rs                # AuditWriter (mpsc channel -> batch insert, chat audit)
@@ -119,7 +130,17 @@ crates/gadgetron-xaas/
     │       ├── 20260411000003_quotas.sql
     │       ├── 20260411000004_audit_log.sql           # chat audit (P1)
     │       ├── 20260416000001_tool_audit_events.sql   # Penny tool-call audit TABLE (P2A / ADR-P2A-06 addendum) — rows started landing with ISSUE 5 / PR #199 when the Noop sink was replaced by `run_gadget_audit_writer`
-    │       └── 20260419000001_action_audit_events.sql # direct-action audit (P2B / ISSUE 3 / PR #188)
+    │       ├── 20260419000001_action_audit_events.sql # direct-action audit (P2B / ISSUE 3 / PR #188)
+    │       └── 20260420000001_quota_usage_day.sql     # [EPIC 4 ISSUE 11 TASK 11.3 / PR #232]
+    │                                                  # adds `usage_day DATE DEFAULT CURRENT_DATE`
+    │                                                  # column to quota_configs so PgQuotaEnforcer's
+    │                                                  # CASE-expression rollover (daily zeros at UTC
+    │                                                  # midnight, monthly at first-of-month) can
+    │                                                  # compare against a DB-stored date. Default
+    │                                                  # today for existing rows so first post-
+    │                                                  # migration request doesn't spuriously zero
+    │                                                  # monthly usage. Partial index for operator
+    │                                                  # spend reports.
     │
     ├── billing/                     # [P2] — 추가 예정 모듈
     │   ├── ledger.rs                # LedgerEntry (i64 cents)
@@ -451,6 +472,112 @@ CREATE TABLE quotas (
 - Burst credit (5분 windowed token refund)
 - Monthly soft limit (warning email + grace period)
 - Model-level override (특정 고가 모델 제한)
+
+### 5.6 EPIC 4 ISSUE 11 enforcement stack — landed on trunk today
+
+Trunk 에는 §5.2–5.5 에서 설명한 P1 token-bucket 설계 위에 EPIC 4 ISSUE 11 이 3 개의 새 `QuotaEnforcer` 구현 + 1 개 composite wrapper 를 쌓았다. startup 시 composition chain 은:
+
+```text
+┌─ gateway handler (chat completion 경로) ─────────────────────────────────┐
+│                                                                          │
+│   RateLimitedQuotaEnforcer (composite, TASK 11.2 / PR #231 / v0.5.2)    │
+│     ├─ step 0: TokenBucketRateLimiter::consume(tenant_id, 1)             │
+│     │            (rate check — fail-fast, no snapshot query on reject)   │
+│     │            매 requests_per_minute 에 refill, burst 최대 burst 토큰 │
+│     │            reject 시 → GadgetronError::QuotaExceeded → HTTP 429    │
+│     │            (TASK 11.1 Retry-After: 60 + retry_after_seconds: 60)   │
+│     │                                                                    │
+│     └─ step 1: 내부 QuotaEnforcer::check_pre 위임                        │
+│                  ↓                                                       │
+│                 CLI init_serve_runtime 가 pg_pool 유무로 선택 ↓         │
+│                                                                          │
+│   ┌─────────────────────────────────┬─────────────────────────────────┐ │
+│   │ PgQuotaEnforcer                 │ InMemoryQuotaEnforcer (P1)      │ │
+│   │ (TASK 11.3 / PR #232 / v0.5.3)  │                                 │ │
+│   │                                 │                                 │ │
+│   │ pg_pool.is_some() 일 때 선택    │ pg_pool 없을 때 fallback       │ │
+│   │ check_pre: moka-cached          │ check_pre: moka-cached          │ │
+│   │   QuotaSnapshot 에서 비용 체크  │   QuotaSnapshot (§5.2 동일)     │ │
+│   │ record_post: 한 번의 UPDATE     │ record_post: 인메모리 token     │ │
+│   │   쿼리가 daily_used_cents +     │   mark-used, DB 는 건드리지     │ │
+│   │   monthly_used_cents 를 CASE    │   않음 (P1 original 동작)       │ │
+│   │   expression 으로 rollover      │                                 │ │
+│   │   (daily UTC midnight, monthly  │                                 │ │
+│   │   first-of-month — background  │                                 │ │
+│   │   job 없음, 첫 post-boundary    │                                 │ │
+│   │   요청에서 rollover)            │                                 │ │
+│   │ 실패 시 fire-and-forget —       │                                 │ │
+│   │   tracing::error 만 로그,       │                                 │ │
+│   │   request 는 이미 성공          │                                 │ │
+│   └─────────────────────────────────┴─────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why rate-first composition.** TASK 11.2 가 check_pre 에서 rate 체크를 cost 체크보다 먼저 실행하도록 설계된 이유: 한 악성 client 가 quota 를 의도적으로 초과시키려고 rapid-fire retry 를 해도 DB snapshot lookup 비용 (캐시 miss 시 ~5ms) 을 지불하지 않고 token-bucket 만으로 빠르게 거절할 수 있다. Cost 체크가 먼저였다면 매 거절마다 Postgres 왕복이 발생해 bad actor 가 서버를 소비할 수 있다.
+
+**Why CASE-expression rollover.** TASK 11.3 의 rollover 는 매 request 에서 `usage_day = CURRENT_DATE` 를 비교해 하루/한 달 경계가 넘었으면 누적값을 reset 한다. Background job (cron / scheduled task) 없이 "lazy rollover" 로 구현했기 때문에: (1) 추가 인프라 없음, (2) 시계 skew 문제 없음 (DB 의 CURRENT_DATE 가 single source of truth), (3) tenant 가 activity 없는 기간 동안 아무 DB write 가 없으므로 idle 비용 0. Trade-off: 오퍼레이터가 "이 tenant 의 today 사용량" 를 쿼리할 때 마지막 request 이후 경계가 넘어갔으면 stale 값을 볼 수 있음 — 하지만 그건 report 쿼리 쪽에서 `WHERE usage_day = CURRENT_DATE` 로 필터하면 해결된다 (partial index 가 그 쿼리를 지원).
+
+**Config**:
+
+```toml
+[quota_rate_limit]                        # TASK 11.2 opt-in (default off)
+requests_per_minute = 120                 # 0 = disabled (limiter는 no-op)
+burst = 120                                # 0 = requests_per_minute (매칭 default)
+```
+
+**PostgreSQL schema — `quota_configs` 확장** (migration `20260420000001_quota_usage_day.sql`):
+
+```sql
+ALTER TABLE quota_configs
+    ADD COLUMN usage_day DATE NOT NULL DEFAULT CURRENT_DATE;
+
+CREATE INDEX quota_configs_usage_day_idx
+    ON quota_configs (usage_day)
+    WHERE usage_day >= CURRENT_DATE - INTERVAL '31 days';
+```
+
+기존 row 는 DEFAULT 로 CURRENT_DATE 를 얻어, 첫 post-migration request 에서 spuriously monthly usage 가 zero 되지 않는다. Partial index 는 operator 의 "최근 31일 지출" 리포트를 위한 것 — full index 가 아니라서 오래된 row 를 index 에 포함시키는 오버헤드를 피함.
+
+### 5.7 Tenant 내부 조회 엔드포인트 (TASK 11.4 / PR #234 / v0.5.4)
+
+`GET /api/v1/web/workbench/quota/status` 가 §5.6 의 write-path 와 대칭인 read-path. OpenAiCompat scope — Management 권한 없이 사용자가 자기 tenant 의 사용량을 볼 수 있다. Cross-tenant read 는 설계상 안 됨 (`tenant_id` 는 `TenantContext` 에서만 읽음, 쿼리 파라미터로 오버라이드 불가).
+
+**Response shape** (integer cents):
+
+```json
+{
+  "usage_day": "2026-04-20",
+  "daily":   { "used_cents": 342,    "limit_cents": 1000000,    "remaining_cents": 999658 },
+  "monthly": { "used_cents": 15240,  "limit_cents": 10000000,   "remaining_cents": 9984760 }
+}
+```
+
+**CASE rollover inline in SELECT**. §5.6 의 write-path 는 매 request 마다 UPDATE 로 rollover 를 적용하지만, 마지막 request 이후 day/month boundary 를 넘어간 tenant 는 `quota_configs` row 가 아직 stale — `usage_day` 가 어제거나 지난 달일 수 있음. Status 엔드포인트는 이를 해결하기 위해 SELECT 에서 동일 CASE 식을 project 한다:
+
+```sql
+SELECT
+    CURRENT_DATE AS usage_day,
+    CASE WHEN usage_day = CURRENT_DATE THEN daily_used_cents   ELSE 0 END AS daily_used_cents,
+    CASE WHEN date_trunc('month', usage_day) = date_trunc('month', CURRENT_DATE)
+         THEN monthly_used_cents ELSE 0 END AS monthly_used_cents,
+    daily_limit_cents,
+    monthly_limit_cents
+  FROM quota_configs
+  WHERE tenant_id = $1;
+```
+
+즉 reader 는 항상 "지금 맞는" 숫자를 본다 — DB 의 `usage_day` 값이 어제든 today 든 무관. 다음 write (`record_post`) 때 UPDATE 가 row 를 갱신한다.
+
+**Bootstrap-gap fallback**. Tenant 가 막 생성되고 `quota_configs` 에 row 가 아직 없으면 (tenant provisioning 이 quota row insert 를 아직 안 함), 핸들러는 4xx 대신 schema default 를 반환한다:
+
+- `limit_cents`: daily = 1_000_000 ($10k), monthly = 10_000_000 ($100k)
+- `used_cents`: 0
+- `remaining_cents` = `limit_cents`
+- `usage_day`: `CURRENT_DATE` (UTC)
+
+근거: UI 가 "fresh tenant, full quota" 를 렌더하게 해서 tenant 프로비저닝 중에 나타나는 4xx error 혼란을 피함. Harness Gate 7k.5 가 이 경로를 specifically 탄다 (test config 가 `quota_configs` 를 populate 하지 않아, gate 가 fallback shape + 값을 고정한다).
+
+**Operator workflow**. `/web` dashboard 에 quota banner 를 그릴 때 이 엔드포인트를 polling — response 가 cheap 하고 ArcSwap 같은 shared mutable state 를 건드리지 않으므로 높은 빈도 polling 이 safe. SDK client 는 429 받기 전에 `remaining_cents == 0` 을 미리 감지해 backoff 시작할 수 있음 (429 발생 후 Retry-After 를 보는 것보다 UX 가 더 부드러움).
 
 ---
 
