@@ -24,10 +24,57 @@ pub struct AppConfig {
     /// which matters for golden-file testing and operator diffs.
     #[serde(default)]
     pub bundles: BTreeMap<String, BundleOverride>,
+    /// Per-tenant rate-limit settings (ISSUE 11 TASK 11.2). Default
+    /// `requests_per_minute = 0` disables rate limiting — preserves
+    /// pre-TASK-11.2 behavior for deployments that haven't opted in.
+    #[serde(default)]
+    pub quota_rate_limit: RateLimitConfig,
     /// Opt-in feature toggles. Currently only `tenant_plug_overrides_accepted_as_reserved`
     /// per ADDENDUM-01 §2 — additional toggles land here as P2B evolves.
     #[serde(default)]
     pub features: FeaturesConfig,
+}
+
+/// Per-tenant token-bucket rate limit (ISSUE 11 TASK 11.2). When
+/// `requests_per_minute == 0` (the default), the rate limiter is a
+/// no-op — every request passes the rate check. When positive,
+/// each tenant gets a bucket with `burst` max capacity refilling
+/// at `requests_per_minute / 60` tokens per second.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Sustained rate in requests per minute. `0` disables.
+    #[serde(default)]
+    pub requests_per_minute: u32,
+    /// Maximum burst size. Defaults to `requests_per_minute` when
+    /// unset (`0`), matching the sustained rate so new tenants
+    /// don't get surprise bursts they can't sustain.
+    #[serde(default)]
+    pub burst: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 0,
+            burst: 0,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    /// Effective burst — defaults to `requests_per_minute` when the
+    /// operator didn't set `burst` explicitly.
+    pub fn effective_burst(&self) -> u32 {
+        if self.burst == 0 {
+            self.requests_per_minute
+        } else {
+            self.burst
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.requests_per_minute > 0
+    }
 }
 
 /// Gadgetron Web UI (`gadgetron-web` crate) configuration.
@@ -389,6 +436,7 @@ impl Default for AppConfig {
             web: WebConfig::default(),
             agent: crate::agent::AgentConfig::default(),
             bundles: BTreeMap::new(),
+            quota_rate_limit: RateLimitConfig::default(),
             features: FeaturesConfig::default(),
         }
     }

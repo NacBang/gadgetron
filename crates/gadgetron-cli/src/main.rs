@@ -1548,7 +1548,31 @@ async fn init_serve_runtime(
 ) -> Result<(axum::Router, ServerRuntimeHandles)> {
     // Phase 1 keeps quota enforcement in-memory; the DB-backed implementation
     // lands later without changing the serve orchestration.
-    let quota_enforcer = Arc::new(InMemoryQuotaEnforcer) as SharedQuotaEnforcer;
+    //
+    // ISSUE 11 TASK 11.2: when the operator configures
+    // `[quota_rate_limit] requests_per_minute > 0`, wrap the plain
+    // in-memory enforcer in `RateLimitedQuotaEnforcer` so every
+    // request passes a per-tenant token-bucket check BEFORE the
+    // cost check. No-op otherwise — existing deployments with no
+    // rate-limit config keep the pre-TASK-11.2 behavior.
+    let base_enforcer: SharedQuotaEnforcer = Arc::new(InMemoryQuotaEnforcer);
+    let quota_enforcer: SharedQuotaEnforcer = if config.quota_rate_limit.is_enabled() {
+        use gadgetron_xaas::quota::enforcer::RateLimitedQuotaEnforcer;
+        use gadgetron_xaas::quota::rate_limit::TokenBucketRateLimiter;
+        let limiter = Arc::new(TokenBucketRateLimiter::new(
+            config.quota_rate_limit.requests_per_minute,
+            config.quota_rate_limit.effective_burst(),
+        ));
+        tracing::info!(
+            target: "quota.rate_limit",
+            requests_per_minute = config.quota_rate_limit.requests_per_minute,
+            burst = config.quota_rate_limit.effective_burst(),
+            "per-tenant token-bucket rate limiter enabled"
+        );
+        Arc::new(RateLimitedQuotaEnforcer::new(base_enforcer, limiter))
+    } else {
+        base_enforcer
+    };
     let (audit_writer, audit_handle) = init_audit_runtime();
     let tui_tx = init_tui_channel(tui_enabled);
     // ISSUE 5 TASK 5.3: build the ActivityBus HERE (one shared handle
@@ -2797,6 +2821,7 @@ mod tests {
             web: gadgetron_core::config::WebConfig::default(),
             agent: gadgetron_core::agent::AgentConfig::default(),
             bundles: std::collections::BTreeMap::new(),
+            quota_rate_limit: Default::default(),
             features: gadgetron_core::config::FeaturesConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
@@ -2834,6 +2859,7 @@ mod tests {
             web: gadgetron_core::config::WebConfig::default(),
             agent: gadgetron_core::agent::AgentConfig::default(),
             bundles: std::collections::BTreeMap::new(),
+            quota_rate_limit: Default::default(),
             features: gadgetron_core::config::FeaturesConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
@@ -2871,6 +2897,7 @@ mod tests {
             web: gadgetron_core::config::WebConfig::default(),
             agent: gadgetron_core::agent::AgentConfig::default(),
             bundles: std::collections::BTreeMap::new(),
+            quota_rate_limit: Default::default(),
             features: gadgetron_core::config::FeaturesConfig::default(),
         };
         let map = build_providers(&cfg).expect("Gemini provider must now be implemented");

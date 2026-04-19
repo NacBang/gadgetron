@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.1** (post-ISSUE 11 TASK 11.1 — structured 429 + Retry-After)
+**Current version: 0.5.2** (post-ISSUE 11 TASK 11.2 — token-bucket rate limiter)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -249,9 +249,16 @@ from "self-host" to "accounts you sell."
     unit tests pin the shape (429 carries both + non-429 omits
     both). Retry-After constant is conservative today; TASK 11.2's
     token-bucket enforcer will thread the real refill time through.
-  - TASK 11.2 — token-bucket rate limiter (requests-per-minute +
-    burst per tenant) replacing the always-allow
-    `InMemoryQuotaEnforcer` check.
+  - TASK 11.2 ✅ — token-bucket rate limiter (0.5.1 → 0.5.2).
+    `TokenBucketRateLimiter` in `gadgetron-xaas::quota::rate_limit`
+    with per-tenant buckets sharded via `DashMap`, lazy refill at
+    consume time, monotonic-clock safe. `RateLimitedQuotaEnforcer`
+    wraps the in-memory cost enforcer when `[quota_rate_limit]
+    requests_per_minute > 0`; rate rejections surface as 429
+    (TASK 11.1's Retry-After header already covers client back-off).
+    5 unit tests pin bucket semantics (within burst, exceeds burst
+    with retry hint, refill after wait, disabled limiter, per-tenant
+    isolation).
   - TASK 11.3 — Postgres-backed daily/monthly spend tracking that
     actually increments on `record_post`.
   - TASK 11.4 — `/web` UI surface for the 429 path (quota status

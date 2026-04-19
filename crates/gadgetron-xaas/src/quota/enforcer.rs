@@ -59,6 +59,56 @@ impl QuotaEnforcer for InMemoryQuotaEnforcer {
     }
 }
 
+/// Composite enforcer that runs a per-tenant rate-limit check
+/// BEFORE delegating the cost-based snapshot check to an inner
+/// enforcer (ISSUE 11 TASK 11.2).
+///
+/// Rate-limit rejections surface as `GadgetronError::QuotaExceeded`
+/// today — the gateway's `ApiError::into_response` (TASK 11.1)
+/// already adds the `Retry-After` header + `retry_after_seconds`
+/// body field to every 429, so clients get a usable back-off hint
+/// without threading the limiter's exact refill time through the
+/// error type. A future TASK can widen `GadgetronError` with a
+/// dedicated variant carrying `retry_after_seconds` from the
+/// limiter's `RateLimitedError`.
+pub struct RateLimitedQuotaEnforcer {
+    inner: std::sync::Arc<dyn QuotaEnforcer>,
+    limiter: std::sync::Arc<crate::quota::rate_limit::TokenBucketRateLimiter>,
+}
+
+impl RateLimitedQuotaEnforcer {
+    pub fn new(
+        inner: std::sync::Arc<dyn QuotaEnforcer>,
+        limiter: std::sync::Arc<crate::quota::rate_limit::TokenBucketRateLimiter>,
+    ) -> Self {
+        Self { inner, limiter }
+    }
+}
+
+#[async_trait]
+impl QuotaEnforcer for RateLimitedQuotaEnforcer {
+    async fn check_pre(
+        &self,
+        tenant_id: Uuid,
+        snapshot: &QuotaSnapshot,
+    ) -> Result<QuotaToken, GadgetronError> {
+        if let Err(rl) = self.limiter.consume(tenant_id) {
+            tracing::info!(
+                target: "quota.rate_limit",
+                tenant_id = %tenant_id,
+                retry_after_seconds = rl.retry_after_seconds,
+                "tenant exceeded per-minute rate limit"
+            );
+            return Err(GadgetronError::QuotaExceeded { tenant_id });
+        }
+        self.inner.check_pre(tenant_id, snapshot).await
+    }
+
+    async fn record_post(&self, token: &QuotaToken, actual_cost_cents: i64) {
+        self.inner.record_post(token, actual_cost_cents).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
