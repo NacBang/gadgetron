@@ -113,10 +113,25 @@ fn rewrite_api_base_in_index(api_base: &str) -> Bytes {
 async fn serve_asset(req_path: String, index_fallback: Bytes) -> Response {
     match crate::path::validate_and_decode(&req_path) {
         Err(_) => (StatusCode::BAD_REQUEST, "invalid path").into_response(),
-        Ok(decoded) => match WEB_DIST.get_file(&decoded) {
-            Some(file) => render_file(&decoded, file.contents()),
-            None => render_html(index_fallback),
-        },
+        Ok(decoded) => {
+            // Try the exact path first (e.g. `_next/static/chunks/xxx.js`).
+            // Then try `<path>.html` so Next.js's static-export route
+            // convention works: `/web/wiki` → `wiki.html`, `/web/about`
+            // → `about.html`, etc. Only fall back to index.html when
+            // neither is on disk (client-side routing / 404 UX).
+            if let Some(file) = WEB_DIST.get_file(&decoded) {
+                return render_file(&decoded, file.contents());
+            }
+            let html_path = if decoded.ends_with('/') {
+                format!("{decoded}index.html")
+            } else {
+                format!("{decoded}.html")
+            };
+            if let Some(file) = WEB_DIST.get_file(&html_path) {
+                return render_file(&html_path, file.contents());
+            }
+            render_html(index_fallback)
+        }
     }
 }
 
