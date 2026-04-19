@@ -945,6 +945,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 8b — audit trail for non-streaming happy path
+# ---------------------------------------------------------------------------
+#
+# Gate 9b asserts the streaming Err-arm audit line. This is the
+# symmetric assertion for the non-streaming Ok arm: after Gate 8
+# succeeds there MUST be at least one `audit ... status="ok"
+# input_tokens=5 output_tokens=7` line on disk — the drift-fix PR 5
+# event_id + PR 7 real tenant_id identity chain ends up here, and a
+# regression that drops the audit emission (or flips the token
+# counts) leaves a silent correctness gap only this gate catches.
+#
+# Tolerance: we check for AT LEAST one matching row; other Ok
+# audit lines (from Gate 7h.1 action invocation etc) are allowed.
+
+log "=== Gate 8b: audit trail for non-streaming happy path ==="
+sleep 0.3  # audit writer is async; let the entry land
+AUDIT_OK_LINE="$(sed "$STRIP_ANSI" "$GAD_LOG" \
+  | grep -E 'audit .* status="ok" input_tokens=5 output_tokens=7' \
+  | head -1 || true)"
+if [ -n "$AUDIT_OK_LINE" ]; then
+  pass "non-streaming chat audit line: status=\"ok\" input=5 output=7"
+else
+  fail "non-streaming audit line missing (Ok arm observability regression)" \
+    "grep for 'audit.*status=\"ok\" input_tokens=5 output_tokens=7' found nothing"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 9 — streaming chat completion
 # ---------------------------------------------------------------------------
 
