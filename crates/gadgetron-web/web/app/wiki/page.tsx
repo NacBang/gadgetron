@@ -36,9 +36,9 @@ type ActionResponse = {
   result?: {
     status?: string;
     payload?: {
-      // wiki.list → {"pages": [{"name": "...", ...}, ...]} (or bare array,
-      // depending on KnowledgeGadgetProvider — we defensively accept both)
-      pages?: Array<{ name: string; [k: string]: unknown }>;
+      // wiki.list (service.list returns Vec<String>) → {"pages": ["name1", ...]}.
+      // Defensively accept `[{name}]` shape too for future-proofing.
+      pages?: Array<string | { name?: string }>;
       // wiki.get → {"name", "content"}
       name?: string;
       content?: string;
@@ -116,10 +116,13 @@ export default function WikiWorkbenchPage() {
     try {
       const resp = await invokeAction(apiKey, "wiki-list", {});
       const payload = resp.result?.payload;
-      // wiki.list content shape per gadget.rs:494 is
-      // `{ "pages": [{"name": "foo", ...}, ...] }` — extract names.
+      // wiki.list (KnowledgeService.list → Vec<String>) returns
+      // `{pages: ["name1", "name2"]}`. Fall back to {name} shape if a
+      // future provider wraps it — this keeps the client forward-compatible.
       const names: string[] = Array.isArray(payload?.pages)
-        ? payload!.pages!.map((p) => p.name).filter((n): n is string => !!n)
+        ? payload!.pages!
+            .map((p) => (typeof p === "string" ? p : p?.name))
+            .filter((n): n is string => !!n)
         : [];
       names.sort();
       setPages(names);
