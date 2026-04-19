@@ -153,7 +153,7 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     covers the 90% case with no extra deps or background thread.
 
 ### In-flight ISSUE (9)
-- **ISSUE 9 — real bundle manifests** (in-flight; 0.4.6 ships TASK 9.1)
+- **ISSUE 9 — real bundle manifests** (in-flight; 0.4.6 / 0.4.7 ship TASK 9.1 / 9.2 respectively)
   - TASK 9.1 ✅ — `BundleMetadata { id, version }` attaches to
     `DescriptorCatalog` via an optional `[bundle]` table in the TOML
     source (0.4.5 → 0.4.6). Reload response gains a `bundle` field
