@@ -90,6 +90,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
             actions: None,
             approval_store: None,
             descriptor_catalog: None,
+            catalog_path: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,

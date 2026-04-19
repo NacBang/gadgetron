@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.3** (post-ISSUE 8 TASK 8.3 CatalogSnapshot)
+**Current version: 0.4.4** (post-ISSUE 8 TASK 8.4 file-based catalog)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -133,10 +133,18 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     `DescriptorCatalog::into_snapshot()`; eliminates the window where
     a reload could land a new catalog against stale validators. Admin
     reload endpoint now rebuilds validators as part of the swap.
-  - TASK 8.4 — file-based catalog source + fs-watcher triggering
-    auto-reload.
-  - TASK 8.5 — SIGHUP handler for operator-triggered reload without
-    HTTP surface.
+  - TASK 8.4 ✅ — file-based catalog source (0.4.3 → 0.4.4).
+    `[web] catalog_path = "..."` in `gadgetron.toml` points the
+    reload handler at a TOML file. On reload, the file is parsed via
+    `DescriptorCatalog::from_toml_file()`; success atomically swaps
+    in the new snapshot; parse failures surface as 500 with the
+    error message so the running snapshot isn't replaced by
+    garbage. Unit tests cover the round-trip, parse errors, and
+    missing-file paths. Response gains a `source_path` field that
+    identifies the file when `source == "config_file"`.
+  - TASK 8.5 — fs-watcher (inotify/kqueue) on `catalog_path` to
+    auto-reload on edit + SIGHUP handler for operator-triggered
+    reload without HTTP surface.
 
 ### Planned ISSUEs
 - **ISSUE 9 — real bundle manifests**: `[[actions]]` schema, `seed_p2b`

@@ -118,6 +118,7 @@ fn make_state_with_coordinator(
             actions: Some(action_svc),
             approval_store: None,
             descriptor_catalog: Some(catalog),
+            catalog_path: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,
