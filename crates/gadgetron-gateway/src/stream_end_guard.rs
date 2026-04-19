@@ -218,6 +218,24 @@ impl Drop for StreamEndGuard {
             AuditStatus::Ok
         };
 
+        // ISSUE 4 TASK 4.2: compute cost_cents at amendment time from
+        // the output-token count observed on-stream. `input_tokens`
+        // is still 0 for streaming (providers don't re-report prompt
+        // size on the delta stream) — see `StreamEndState`. The
+        // input contribution is therefore excluded; chat rollups
+        // will slightly underestimate cost for streaming requests
+        // until the router is reworked to surface prompt_tokens
+        // upstream. A worked-through follow-on note lives in
+        // `docs/design/gateway/streaming-cost-attribution.md`
+        // (future TASK).
+        let pricing = gadgetron_core::pricing::default_pricing_table();
+        let cost_cents = gadgetron_core::pricing::compute_cost_cents(
+            &self.model,
+            0,
+            snapshot.completion_tokens_observed.into(),
+            &pricing,
+        );
+
         // Amendment AuditEntry — fresh event_id, same request_id.
         // input_tokens is 0 for streaming; see `StreamEndState` doc comment.
         self.audit_writer.send(AuditEntry {
@@ -230,7 +248,7 @@ impl Drop for StreamEndGuard {
             status,
             input_tokens: 0,
             output_tokens: snapshot.completion_tokens_observed as i32,
-            cost_cents: 0,
+            cost_cents,
             latency_ms,
         });
 

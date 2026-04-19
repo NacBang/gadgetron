@@ -16,6 +16,7 @@ pub mod knowledge;
 pub mod message;
 pub mod model;
 pub mod node;
+pub mod pricing;
 pub mod provider;
 pub mod routing;
 pub mod secret;

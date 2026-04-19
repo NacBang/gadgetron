@@ -148,7 +148,17 @@ async fn handle_non_streaming(
     match router.chat(req.clone()).await {
         Ok(response) => {
             let latency_ms = ctx.started_at.elapsed().as_millis() as i32;
-            let cost_cents = 0i64;
+            // ISSUE 4 TASK 4.2: compute real cost from token counts +
+            // the model's entry in the pricing table. Unknown models
+            // fall through to 0 cents so a brand-new model never bills
+            // a phantom amount — see `gadgetron_core::pricing`.
+            let pricing = gadgetron_core::pricing::default_pricing_table();
+            let cost_cents = gadgetron_core::pricing::compute_cost_cents(
+                &req.model,
+                response.usage.prompt_tokens as u64,
+                response.usage.completion_tokens as u64,
+                &pricing,
+            );
             // Drift-fix PR 5 (D-20260418-24): generate the audit correlation
             // key ONCE per outcome so both the audit row and the capture
             // event share an unambiguous identity.
