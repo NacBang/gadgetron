@@ -1,7 +1,7 @@
 # Graph Report - /Users/junghopark/dev/gadgetron-plan  (2026-04-20)
 
 ## Corpus Check
-- 224 files · ~1,034,303 words
+- 224 files · ~1,034,927 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -997,12 +997,12 @@ Nodes (1): Phase2 Overview Design Doc
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `GadgetronError` connect `Community 26` to `Community 0`?**
-  _High betweenness centrality (0.021) - this node is a cross-community bridge._
-- **Why does `chunk_page()` connect `Community 6` to `Community 0`, `Community 9`, `Community 11`, `Community 16`?**
+- **Why does `is_empty()` connect `Community 6` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 16`, `Community 17`, `Community 19`, `Community 22`, `Community 23`, `Community 25`, `Community 30`, `Community 32`?**
+  _High betweenness centrality (0.024) - this node is a cross-community bridge._
+- **Why does `parse_links()` connect `Community 16` to `Community 0`?**
   _High betweenness centrality (0.018) - this node is a cross-community bridge._
-- **Why does `ensure_tool_name_allowed()` connect `Community 7` to `Community 1`, `Community 22`?**
-  _High betweenness centrality (0.016) - this node is a cross-community bridge._
+- **Why does `build_router()` connect `Community 15` to `Community 0`, `Community 3`, `Community 11`, `Community 12`, `Community 23`?**
+  _High betweenness centrality (0.017) - this node is a cross-community bridge._
 - **Are the 79 inferred relationships involving `is_empty()` (e.g. with `to_anthropic_request()` and `from_anthropic_response()`) actually correct?**
   _`is_empty()` has 79 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 19 inferred relationships involving `build_router()` (e.g. with `build_http_app()` and `psl_1d_successful_non_streaming_chat_completions_captures_one_event()`) actually correct?**
