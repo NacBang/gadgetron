@@ -1259,8 +1259,10 @@ fn build_workbench(
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
     >,
     penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
     use gadgetron_core::agent::tools::GadgetDispatcher;
+    use gadgetron_core::audit::{ActionAuditSink, NoopActionAuditSink};
     use gadgetron_gateway::web::{
         action_service::InProcessWorkbenchActionService,
         catalog::DescriptorCatalog,
@@ -1280,12 +1282,33 @@ fn build_workbench(
     let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> =
         penny_registry.map(|r| r as Arc<dyn GadgetDispatcher>);
 
+    // ISSUE 3 / TASK 3.2: wire Postgres-backed action audit sink when a
+    // pool is available; otherwise fall back to Noop. Unit / no-db
+    // flows keep the Noop path so they don't accidentally depend on a
+    // live database.
+    let audit_sink: Arc<dyn ActionAuditSink> = if let Some(pool) = pg_pool {
+        use gadgetron_xaas::audit::action_event::{
+            run_action_audit_writer, ActionAuditEventWriter,
+        };
+        let (writer, rx) = ActionAuditEventWriter::new(4_096);
+        tokio::spawn(run_action_audit_writer(rx, pool));
+        tracing::info!(
+            target: "action_audit",
+            "ActionAuditEventWriter wired — workbench direct-action events \
+             will persist to action_audit_events"
+        );
+        Arc::new(writer)
+    } else {
+        Arc::new(NoopActionAuditSink)
+    };
+
     let action_svc: Arc<dyn WorkbenchActionService> =
-        Arc::new(InProcessWorkbenchActionService::new_with_dispatcher(
+        Arc::new(InProcessWorkbenchActionService::new_full(
             catalog,
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             candidate_coordinator,
             gadget_dispatcher,
+            audit_sink,
         ));
 
     Some(Arc::new(GatewayWorkbenchService {
@@ -1494,6 +1517,7 @@ async fn init_serve_runtime(
         knowledge_service.clone(),
         candidate_coordinator.clone(),
         penny_registry.clone(),
+        pg_pool.clone(),
     );
 
     let agent_config = Arc::new(config.agent.clone());
@@ -3507,6 +3531,7 @@ wiki_max_page_bytes = 1048576
             Some(knowledge_service.clone()),
             Some(candidate_coordinator.clone()),
             None,
+            None,
         );
         assert!(
             workbench.is_some(),
@@ -3602,9 +3627,9 @@ wiki_max_page_bytes = 1048576
             "knowledge_service must be None"
         );
 
-        // build_workbench(None, None, None) → Some (degraded-mode projection —
+        // build_workbench(None, None, None, None) → Some (degraded-mode projection —
         // always wired so the endpoint returns a degraded bootstrap rather than 404).
-        let workbench = build_workbench(None, None, None);
+        let workbench = build_workbench(None, None, None, None);
         assert!(
             workbench.is_some(),
             "workbench is always Some (degraded mode) even without knowledge service"
