@@ -780,6 +780,24 @@ else
     "first:  $(echo "$ACTION_RESP" | head -c 200) | second: $(echo "$ACTION_RESP2" | head -c 200)"
 fi
 
+log "=== Gate 7h.3: JSON-schema validation on action args ==="
+# knowledge-search's input_schema declares `query` as `{type: string,
+# minLength: 1, maxLength: 500}`. POSTing `query: 42` (integer) must
+# fail validation and surface as 400 — `WorkbenchHttpError::
+# ActionInvalidArgs` maps to 400 per axum IntoResponse. A regression
+# that skips the validator (or swaps it out for a pass-through)
+# would let the bad payload reach the synthetic-result path and
+# return 200; this gate catches it.
+INVALID_ARGS_CODE="$(http_post_code "$TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/actions/knowledge-search" \
+  '{"args":{"query":42},"client_invocation_id":null}')"
+if [ "$INVALID_ARGS_CODE" = "400" ]; then
+  pass "POST /actions/knowledge-search with non-string query → 400"
+else
+  fail "invalid args: expected 400, got $INVALID_ARGS_CODE" \
+    "(200 = validator skipped; 422 = handler returned wrong error code)"
+fi
+
 log "=== Gate 7h: action 404 on unknown id ==="
 ACTION_404_CODE="$(http_post_code "$TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/actions/does-not-exist" \
