@@ -26,6 +26,15 @@ type = "vllm"
 endpoint = "@MOCK_URL@"
 api_key = ""
 
+# Second mock instance — runs on `@MOCK_ERROR_URL@` with
+# `MOCK_ERROR_MODE=stream_fail` so SSE requests yield chunks then
+# abruptly close. Used by Gate 8b in run.sh to exercise the
+# streaming Drop-guard's Err arm (drift-fix PR 6).
+[providers.mock_error]
+type = "vllm"
+endpoint = "@MOCK_ERROR_URL@"
+api_key = ""
+
 [knowledge]
 wiki_path = "@WIKI_DIR@"
 wiki_autocommit = false

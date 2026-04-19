@@ -176,9 +176,21 @@ class MockHandler(BaseHTTPRequestHandler):
         try:
             for idx, piece in enumerate(pieces):
                 if ERROR_MODE == "stream_fail" and idx == 2:
-                    # Close the connection abruptly without sending [DONE]
-                    # so the Gadgetron SSE pipeline surfaces a terminal
-                    # error. Exercises drift-fix PR 6 StreamInterrupted.
+                    # Emit a deliberately malformed SSE data frame — vLLM
+                    # adapter's `serde_json::from_str::<ChatChunk>(data)`
+                    # will fail and yield `GadgetronError::Provider` (see
+                    # `crates/gadgetron-provider/src/vllm.rs:128-138`).
+                    # Gadgetron's SSE pipeline turns that into
+                    # `event: error`, and the streaming Drop-guard fires
+                    # with `saw_error = true` (PR 6 Err arm).
+                    #
+                    # Connection:close with premature EOF is NOT enough —
+                    # reqwest treats EOF under Connection:close as a
+                    # normal body end, not an error. A malformed JSON
+                    # payload is the only path that reliably surfaces a
+                    # terminal Err at the adapter.
+                    self.wfile.write(b'data: {"this":"is","not":"a valid ChatChunk",\n\n')
+                    self.wfile.flush()
                     return
                 self.wfile.write(stream_chunk(model, piece, None).encode("utf-8"))
                 self.wfile.flush()
