@@ -842,9 +842,48 @@ if echo "$DISPATCH_RESP" | jq -e \
      >/dev/null 2>&1; then
   HIT_COUNT="$(echo "$DISPATCH_RESP" | jq -r '.result.payload.hits | length')"
   pass "real Gadget dispatch: payload.hits is array (len=$HIT_COUNT)"
+  DISPATCH_AUDIT_EVENT_ID="$(echo "$DISPATCH_RESP" | jq -r '.result.audit_event_id // ""')"
 else
   fail "real Gadget dispatch regression: payload missing or wrong shape" \
     "$(echo "$DISPATCH_RESP" | jq -c '.result | {status, payload}' | head -c 400)"
+  DISPATCH_AUDIT_EVENT_ID=""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7h.1c — direct action success → billing_events (ISSUE 12 TASK 12.2)
+# ---------------------------------------------------------------------------
+#
+# A successful action dispatch lands a billing_events row with
+# event_kind='action' and source_event_id matching the response's
+# audit_event_id. Fire-and-forget insert → short grace sleep.
+log "=== Gate 7h.1c: direct action success → billing_events (ISSUE 12 TASK 12.2) ==="
+sleep 1
+BILLING_ACTION_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/billing/events?limit=10" 2>&1 || true)"
+BILLING_ACTION_COUNT="$(echo "$BILLING_ACTION_RESP" \
+  | jq '[.events[] | select(.event_kind == "action")] | length' 2>/dev/null || echo -1)"
+if [ "${BILLING_ACTION_COUNT:-0}" -ge 1 ]; then
+  # Tighten: the row should carry source_event_id = DISPATCH_AUDIT_EVENT_ID
+  # (action_service threads the pre-generated audit UUID into billing).
+  if [ -n "$DISPATCH_AUDIT_EVENT_ID" ]; then
+    MATCHING_SRC="$(echo "$BILLING_ACTION_RESP" \
+      | jq --arg sid "$DISPATCH_AUDIT_EVENT_ID" \
+        '[.events[] | select(.event_kind == "action" and .source_event_id == $sid)] | length' \
+      2>/dev/null || echo 0)"
+    if [ "${MATCHING_SRC:-0}" -ge 1 ]; then
+      pass "billing_events action row joins to audit_event_id (count=$BILLING_ACTION_COUNT)"
+    else
+      # Looser pass — action row exists but source_event_id linkage diverged.
+      # Flag loudly instead of silent pass.
+      fail "billing_events has action row(s) but none match audit_event_id=$DISPATCH_AUDIT_EVENT_ID" \
+        "$(echo "$BILLING_ACTION_RESP" | head -c 500)"
+    fi
+  else
+    pass "billing_events has action rows (count=$BILLING_ACTION_COUNT; no audit UUID to join)"
+  fi
+else
+  fail "no billing_events row with event_kind=action after successful action dispatch" \
+    "$(echo "$BILLING_ACTION_RESP" | head -c 500)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1268,6 +1307,29 @@ if [ "${OWNER_ID_PRESENT:-0}" -ge 1 ]; then
 else
   fail "no tool_audit_events row for wiki.list with owner_id after /v1/tools invoke" \
     "$(echo "$TOOL_AUDIT_RESP" | head -c 500)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7i.5 — /v1/tools invoke → billing_events (ISSUE 12 TASK 12.2)
+# ---------------------------------------------------------------------------
+#
+# Gate 7i.3/7i.4 already fired successful wiki.list invokes. Each
+# successful invoke is supposed to land a billing_events row with
+# event_kind='tool' (cost_cents=0 today; invoice materializer applies
+# per-kind pricing at query time). Query the admin/billing/events
+# endpoint and assert at least one tool-kind row exists. The insert
+# is fire-and-forget (tokio::spawn) so grace window matches 7k.6.
+log "=== Gate 7i.5: /v1/tools invoke → billing_events (ISSUE 12 TASK 12.2) ==="
+sleep 1
+BILLING_TOOL_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/billing/events?limit=10" 2>&1 || true)"
+BILLING_TOOL_COUNT="$(echo "$BILLING_TOOL_RESP" \
+  | jq '[.events[] | select(.event_kind == "tool")] | length' 2>/dev/null || echo -1)"
+if [ "${BILLING_TOOL_COUNT:-0}" -ge 1 ]; then
+  pass "admin/billing/events surfaces tool ledger rows (count=$BILLING_TOOL_COUNT)"
+else
+  fail "no billing_events row with event_kind=tool after /v1/tools invoke" \
+    "$(echo "$BILLING_TOOL_RESP" | head -c 500)"
 fi
 
 # ---------------------------------------------------------------------------

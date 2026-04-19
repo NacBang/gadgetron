@@ -604,6 +604,16 @@ pub async fn invoke_tool_handler(
     // callers. Fire-and-forget: the sink is a bounded channel writer when
     // Postgres is wired, and a Noop otherwise — handler latency is
     // unaffected either way.
+    // ISSUE 12 TASK 12.2 — billing ledger for tool calls. Only successful
+    // calls land a billing row; error outcomes still emit an audit but no
+    // billing event. `cost_cents=0` today (dispatcher doesn't surface cost);
+    // invoice materializer (TASK 12.3) applies per-kind base fees at query
+    // time. `source_event_id=None` — `tool_audit_events.id` is BIGSERIAL,
+    // not a UUID, so TASK 12.4 reconciles by (tenant, gadget, timestamp).
+    // Fire-and-forget to match the audit sink's non-blocking contract.
+    let billing_tenant = ctx.tenant_id;
+    let billing_gadget = name.clone();
+    let billing_is_success = matches!(outcome, GadgetCallOutcome::Success);
     state
         .tool_audit_sink
         .send(GadgetAuditEvent::GadgetCallCompleted {
@@ -617,6 +627,31 @@ pub async fn invoke_tool_handler(
             owner_id: Some(ctx.api_key_id.to_string()),
             tenant_id: Some(ctx.tenant_id.to_string()),
         });
+    if billing_is_success {
+        if let Some(pool) = state.pg_pool.clone() {
+            tokio::spawn(async move {
+                if let Err(e) = gadgetron_xaas::billing::insert_billing_event(
+                    &pool,
+                    billing_tenant,
+                    gadgetron_xaas::billing::BillingEventKind::Tool,
+                    0,
+                    None,
+                    Some(&billing_gadget),
+                    None,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        target: "billing",
+                        tenant_id = %billing_tenant,
+                        gadget = %billing_gadget,
+                        error = %e,
+                        "failed to persist tool billing_events row"
+                    );
+                }
+            });
+        }
+    }
 
     response
 }

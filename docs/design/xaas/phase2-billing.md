@@ -225,10 +225,115 @@ Response 200:
 
 ## 8. 남은 TASKs (로드맵)
 
-- **TASK 12.2 — tool/action 이벤트 확장**: `QuotaEnforcer` trait에 context(`EventContext { kind, source_event_id, model, provider }`) 추가; tool_audit_events / action_audit_events 경로에서도 발행
-- **TASK 12.3 — 인보이스 materialization**: `invoices` + `invoice_lines` 테이블; 월말 요약 뷰
-- **TASK 12.4 — reconciliation cron + 자동 보정**
-- **TASK 12.5 — Stripe webhook ingest** (외부 결제 성공/환불 이벤트를 ledger에 반영)
+### TASK 12.2 — tool/action 이벤트 확장 (IN-FLIGHT, this cycle)
+
+**설계 결정 (12.1 design에서 수정):** `QuotaEnforcer` trait 시그니처는 건드리지
+않는다. 이유는 두 가지다.
+
+1. chat 경로는 이미 `record_post`를 통해 발행하고 있고, 이 지점에 `kind/model/
+   provider`를 threading 하려면 `QuotaToken`까지 건드려야 해서 wire-change가
+   커진다.
+2. tool / action 경로는 quota 파이프라인을 거치지 않는다 (tool은 MCP 권한,
+   action은 워크벤치 approval 게이트). 거기에 quota trait를 끼워 넣는 건 잘못된
+   추상화.
+
+**대신 — 각 성공 경로에서 `insert_billing_event`를 직접 호출한다.**
+동일한 fire-and-forget 원칙 (audit sink 패턴과 동치).
+
+#### 시그니처 및 호출 지점
+
+```rust
+// 변경 없음 — 12.1에 이미 들어있음:
+pub async fn insert_billing_event(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    kind: BillingEventKind,
+    cost_cents: i64,
+    source_event_id: Option<Uuid>,
+    model: Option<&str>,
+    provider: Option<&str>,
+) -> Result<(), sqlx::Error>;
+```
+
+**Tool (MCP /v1/tools/{name}/invoke)** — `crates/gadgetron-gateway/src/handlers.rs`
+의 `invoke_tool_handler` 끝부분. `GadgetCallOutcome::Success`일 때만 발행:
+```rust
+if matches!(outcome, GadgetCallOutcome::Success) {
+    if let Some(pool) = state.pg_pool.clone() {
+        let tenant_id = ctx.tenant_id;
+        let model = name.clone();
+        tokio::spawn(async move {
+            let _ = gadgetron_xaas::billing::insert_billing_event(
+                &pool, tenant_id, BillingEventKind::Tool,
+                0, None, Some(&model), None,
+            ).await;
+        });
+    }
+}
+```
+
+source_event_id는 현재 None — `tool_audit_events.id`가 UUID가 아니라 BIGSERIAL.
+12.4 reconciliation 에서 tenant+gadget+timestamp로 조인하는 편법 사용. 깨끗한
+UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건.
+
+**Action (workbench direct-action)** — `crates/gadgetron-gateway/src/web/action_service.rs`
+의 두 성공 경로 (직접 dispatch success @ line 447, approved dispatch success @ line 541).
+여기서 `audit_event_id: Uuid`가 이미 생성돼 있으므로 **source_event_id에 그대로
+사용 가능 (clean join!)**. action_service에 `pg_pool: Option<Arc<PgPool>>` 필드
+추가하고 `new_full` 생성자에 파라미터로 받는다. CLI 초기화에서 wire.
+
+```rust
+// action_service.rs — direct success @ ~line 447 이후:
+if let Some(pool) = self.pg_pool.as_ref() {
+    let pool = pool.clone();
+    let tenant_id = actor_tenant_id;
+    let model = descriptor.gadget_name.clone();
+    let source_event_id = Some(audit_event_id);
+    tokio::spawn(async move {
+        let _ = gadgetron_xaas::billing::insert_billing_event(
+            &pool, tenant_id, BillingEventKind::Action,
+            0, source_event_id, model.as_deref(), None,
+        ).await;
+    });
+}
+```
+
+**cost_cents = 0 for tool/action in this TASK**: 현재 dispatcher 반환값에 cost가
+없다. 0으로 기록하는 것은 "이벤트는 있었으나 금전 비용은 미할당" 상태로 유효.
+원가 모델(per-call base fee, or token-count forward) 은 TASK 12.3 invoice
+materialization 시점에 이벤트 테이블을 업데이트하지 않고 invoice line
+materializer에서 조회 시 규정표를 적용하도록 계획.
+
+#### Harness gates
+
+- **Gate 7i.5 — tool billing emission**: Gate 7i.3에서 이미 성공하는
+  `/v1/tools/wiki.list/invoke` 호출 이후, `sleep 1` → `/admin/billing/events`
+  조회 → `.events[] | select(.event_kind == "tool") | length >= 1` 검증.
+- **Gate 7h.X — action billing emission**: workbench 액션 실행 성공 gate
+  직후 (harness에서 현재 `capture_action` 등 성공 경로가 있다면) billing에
+  action-kind 행이 있는지 확인.
+
+#### 버전
+
+**이번 cycle에서 workspace 버전은 올리지 않는다** — ISSUE 12 close 시점의 단일 PR
+에서 한 번에 0.5.5 → 0.5.6으로 bump. (feedback memory: PR granularity is ISSUE)
+
+### TASK 12.3 — 인보이스 materialization
+
+`invoices` + `invoice_lines` 테이블; 월말 요약 뷰. billing_events를 invoice_lines로
+집계하는 쿼리는 per-kind 기본료 + 변수 비용 (chat은 cost_cents 합, tool은 건당
+base fee, action은 operator 정책).
+
+### TASK 12.4 — reconciliation cron + 자동 보정
+
+- 일 1회 chat billing sum vs quota_configs.daily_used_cents 비교
+- drift >0 이면 보정 이벤트 (model='__reconciliation__') INSERT
+- tool/action의 source_event_id 누락 문제는 여기서 (tenant, gadget, timestamp)
+  lookup으로 보완
+
+### TASK 12.5 — Stripe webhook ingest
+
+외부 결제 성공/환불 이벤트를 ledger에 반영 (음수 cost_cents for refund).
 
 ---
 
