@@ -153,7 +153,7 @@ Demo started.
   DB: postgresql:///gadgetron_demo
 ```
 
-The `URL:` line points at the `/web` chat shell. The same origin also serves the browser wiki workbench at `<URL>/wiki` (standalone) or as the "Wiki" left-rail tab inside the chat shell (ISSUE A.2, 0.2.3+). See [web.md §/web/wiki](web.md#web-wiki--브라우저-워크벤치-wiki-crud) for the full CRUD UI.
+The `URL:` line points at the `/web` chat shell. The same origin also serves (a) the browser wiki workbench at `<URL>/wiki` — "Wiki" left-rail tab inside the chat shell (ISSUE A.2, 0.2.3+), and (b) the operator dashboard at `<URL>/dashboard` — "Dashboard" left-rail tab (ISSUE 4, 0.2.7+). See [web.md §/web/wiki](web.md#web-wiki--브라우저-워크벤치-wiki-crud) and [web.md §`/web/dashboard`](web.md#webdashboard--operator-observability-issue-4--v027) for the full UIs.
 
 **`./demo.sh start` — macOS / launchctl path** (no PID line — supervised by `launchd`):
 
