@@ -344,9 +344,19 @@ Client
   │   PostgreSQL INSERT INTO billing_events
   │       (tenant_id, event_kind, source_event_id, cost_cents, model, provider)
   │       VALUES ($1, 'chat', NULL, $2, NULL, NULL)
-  │     — event_kind 은 TASK 12.1 에서 'chat' 고정 (DB CHECK 제약).
-  │       TASK 12.2 가 'tool' + 'action' emitter 추가 + trait
-  │       시그니처 확장으로 source_event_id/model/provider 도 threading.
+  │     — event_kind 은 chat-path 에서 'chat' 고정 (DB CHECK 제약).
+  │       TASK 12.2 (PR #241 / v0.5.6) 가 `/v1/tools/{name}/invoke`
+  │       + workbench direct-action + approved-action 경로에
+  │       각각 emitter 를 추가함 — `QuotaEnforcer::record_post`
+  │       trait 시그니처는 의도적으로 확장하지 않고 handler-level
+  │       에서 directly emit (tool/action 은 quota 경로를 타지
+  │       않기 때문; 설계 근거는 `docs/design/xaas/phase2-billing.md`
+  │       §8). Action rows 는 `source_event_id = audit_event_id`
+  │       로 threading 되어 audit↔ledger join 가능. `model` /
+  │       `provider` 는 v0.5.6 기준 여전히 NULL — trait 경계 밖
+  │       emission 으로 두 값을 threading 하는 건 미완; 향후
+  │       invoice materialization (TASK 12.3, DEFERRED 상태) 에서
+  │       joined view 로 해결 예정.
   │     — source_event_id FK 없음 — Stripe-style writer-independence,
   │       원장 writer 가 source event DB persist 완료를 기다리지 않음.
   │     — Fire-and-forget — INSERT 실패해도 quota_configs UPDATE 는
@@ -3404,7 +3414,7 @@ Every stateful entity in Gadgetron Phase 1, with its owning tier, durability, an
 | Quota configs (hot) | `moka::future::Cache<Uuid, Arc<QuotaConfig>>` | `gadgetron-xaas` | moka LRU | Ephemeral (10min TTL) | Cold: PG re-query |
 | Audit entries (pending) | `mpsc::Sender<AuditEntry>` channel buffer, cap 4096 | `gadgetron-xaas` | tokio mpsc | Ephemeral (lost on kill) | Not recovered; Phase 2 WAL fallback |
 | Audit entries (committed) | `audit_log` rows | `gadgetron-xaas` | PostgreSQL | Durable | PG query |
-| Billing events (ledger) | `billing_events` rows | `gadgetron-xaas` | PostgreSQL | Durable | PG query on demand — append-only, never UPDATE/DELETE. Written fire-and-forget from `PgQuotaEnforcer::record_post` alongside the `quota_configs` counter UPDATE (TASK 12.1 / PR #236 / v0.5.5). Counter-vs-ledger reconciliation is TASK 12.4 scope. |
+| Billing events (ledger) | `billing_events` rows | `gadgetron-xaas` | PostgreSQL | Durable | PG query on demand — append-only, never UPDATE/DELETE. Chat rows written fire-and-forget from `PgQuotaEnforcer::record_post` alongside the `quota_configs` counter UPDATE (TASK 12.1 / PR #236 / v0.5.5). Tool + action rows written fire-and-forget at the `/v1/tools/{name}/invoke` success path + workbench direct-action / approved-action terminals — NOT through `QuotaEnforcer` (tool/action don't transit the quota path); action rows carry `source_event_id = audit_event_id` for clean audit↔ledger joins (TASK 12.2 / PR #241 / v0.5.6). Counter-vs-ledger reconciliation is TASK 12.4 scope (DEFERRED per 2026-04-20 commercialization-layer direction). |
 | Node registry | `DashMap<Uuid, NodeInfo>` | `gadgetron-scheduler` | DashMap | Ephemeral | NodeAgent re-registers on restart (§2.D.7, G-1) |
 | Model deployments | `DashMap<Uuid, ModelDeployment>` | `gadgetron-scheduler` | DashMap | Ephemeral | NodeAgent push after re-register |
 | VRAM state (per GPU) | `DashMap<Uuid, Vec<GpuInfo>>` | `gadgetron-scheduler` | DashMap | Ephemeral | Heartbeat within 10s or pull at deploy |

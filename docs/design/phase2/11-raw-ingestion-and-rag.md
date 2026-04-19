@@ -8,8 +8,10 @@
 > **Sibling**: [`08-identity-and-users.md`](08-identity-and-users.md), [`09-knowledge-acl.md`](09-knowledge-acl.md), [`10-penny-permission-inheritance.md`](10-penny-permission-inheritance.md)
 > **Parent (semantic infra)**: `docs/adr/ADR-P2A-07-semantic-wiki-pgvector.md`, `docs/design/phase2/05-knowledge-semantic.md`
 > **Drives**: P2B 구현 — RAW → wiki → index → RAG 전 경로
-> **관련 크레이트**: `gadgetron-core` (ingest traits), `gadgetron-knowledge` (pipeline + chunking + MCP tools), `gadgetron-xaas` (schema), `plugins/plugin-document-formats/` (신설), `plugins/plugin-web-scrape/` (신설)
+> **관련 크레이트**: `gadgetron-core` (ingest traits), `gadgetron-knowledge` (pipeline + chunking + MCP tools), `gadgetron-xaas` (schema), `bundles/document-formats/` (신설, `bundle.toml` manifest), `bundles/web-scrape/` (신설, `bundle.toml` manifest)
 > **Phase**: [P2B]
+>
+> **⚠ Terminology drift (2026-04-20 note)**: This doc was authored 2026-04-18 using the pre-ADR-P2A-10 vocabulary (`BackendPlugin` trait, `PluginContext`, `plugins/plugin-*/` directory naming). [ADR-P2A-10](../../adr/ADR-P2A-10-bundle-plug-gadget-terminology.md) (same day, approved ACCEPTED + Amendment) renamed the stack: `BackendPlugin` → `Bundle`, `PluginContext` → `BundleContext`, `PluginRegistry` → `BundleRegistry`, `plugins/plugin-X/` → `bundles/X/` with a `bundle.toml` manifest, and split the Rust trait surface from Penny-facing `GadgetProvider` MCP tools. When reading this doc, mentally translate Plugin→Bundle at each occurrence. The P2B implementation (EPIC 3 / v0.5.0, closed 2026-04-20) followed the ADR-P2A-10 names — see [`docs/architecture/glossary.md`](../../architecture/glossary.md) for the canonical mapping. A full terminology rewrite of this doc is tracked as a refactor-stage cycle target (stage ② in the 3-stage doc cycle, `feedback_three_stage_cycle.md`); drift-stage fixes only add this translation note.
 
 ---
 
