@@ -1147,6 +1147,51 @@ Tenant-scoped read over `action_audit_events` — the rows the `ActionAuditSink`
 
 E2E Gate 7h.8 verifies an unfiltered GET returns the rows from prior gates and that `?action_id=wiki-write` narrows server-side (not client-side).
 
+**Common queries (operator recipes).**
+
+Find every action this tenant ran in the last hour:
+```sh
+SINCE=$(date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ')
+curl -s -H "Authorization: Bearer gad_live_…" \
+  "http://localhost:8080/api/v1/web/workbench/audit/events?since=${SINCE}&limit=500" | jq '.events'
+```
+
+Only failures (useful for triage):
+```sh
+curl -s -H "Authorization: Bearer gad_live_…" \
+  "http://localhost:8080/api/v1/web/workbench/audit/events?limit=200" \
+  | jq '.events | map(select(.outcome == "error"))'
+```
+Server-side filtering on `outcome` is not supported today (no wildcard / `outcome=` param) — the `jq` filter runs client-side over the 200-row window. For large windows fetch with a tighter `since` before piping to `jq`.
+
+Only destructive / approval-gated actions:
+```sh
+curl -s -H "Authorization: Bearer gad_live_…" \
+  "http://localhost:8080/api/v1/web/workbench/audit/events?action_id=wiki-delete&limit=100" | jq '.events'
+```
+
+Approve-then-dispatch trace for a specific approval (two rows — one `pending_approval` at step 6, one `success` at post-approve dispatch):
+```sh
+APPROVAL=...; curl -s -H "Authorization: Bearer gad_live_…" \
+  "http://localhost:8080/api/v1/web/workbench/audit/events?action_id=wiki-delete&limit=500" \
+  | jq --arg a "$APPROVAL" '.events | map(select(.gadget_name == "wiki.delete"))'
+```
+Note: the `approval_id` is not a column on `action_audit_events` in v0.2.6; use `gadget_name` + timestamp bracketing to reconstruct the pair for now. A dedicated `approval_id` column is tracked as a follow-up under ADR-P2A-06 item 9 (`args_digest` + `rationale_digest` + approval correlation in audit schema).
+
+Tail on a rolling window (ops dashboard):
+```sh
+# Every 30 seconds, print anything newer than the last flush.
+LAST="2026-04-19T00:00:00Z"
+while sleep 30; do
+  EVENTS=$(curl -s -H "Authorization: Bearer gad_live_…" \
+    "http://localhost:8080/api/v1/web/workbench/audit/events?since=${LAST}&limit=500")
+  echo "$EVENTS" | jq -c '.events[]'
+  NEWEST=$(echo "$EVENTS" | jq -r '.events[0].created_at // empty')
+  [ -n "$NEWEST" ] && LAST="$NEWEST"
+done
+```
+This is a pull-model fallback; the live-feed ISSUE (`ROADMAP.md §ISSUE 4 operator observability`) wires a WebSocket push for the same surface.
+
 ---
 
 ## Admin endpoints (not yet implemented)
