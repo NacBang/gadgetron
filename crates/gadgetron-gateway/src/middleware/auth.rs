@@ -188,6 +188,8 @@ fn emit_auth_failure_audit(state: &AppState) {
         event_id: Uuid::new_v4(),
         tenant_id: Uuid::nil(),
         api_key_id: Uuid::nil(),
+        actor_user_id: None,
+        actor_api_key_id: None,
         request_id: Uuid::new_v4(),
         model: None,
         provider: None,

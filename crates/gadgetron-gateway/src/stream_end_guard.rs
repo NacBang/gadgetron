@@ -275,6 +275,8 @@ impl Drop for StreamEndGuard {
             event_id: amendment_event_id,
             tenant_id: self.tenant_id,
             api_key_id: self.api_key_id,
+            actor_user_id: None,
+            actor_api_key_id: None,
             request_id: self.request_id,
             model: Some(self.model.clone()),
             provider: None,
