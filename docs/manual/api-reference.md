@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.7",
+  "gateway_version": "0.4.8",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.7"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.8"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,23 +1317,23 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.4.7"
+    "version": "0.4.8"
   }
 }
 ```
 
 When `[web] catalog_path` points at a legacy anonymous TOML (no `[bundle]` table) OR the fallback `seed_p2b()` path, the `bundle` field is omitted from the JSON (serde `skip_serializing_if = "Option::is_none"`).
 
-When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<subdir>/bundle.toml` merges successfully (ISSUE 9 TASK 9.2 / v0.4.7):
+When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<subdir>/bundle.toml` merges successfully (ISSUE 9 TASK 9.2 / v0.4.7 + TASK 9.3 / v0.4.8):
 ```json
 {
   "reloaded": true,
   "action_count": 7,
   "view_count": 4,
-  "source": "config_file",
+  "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.4.7"},
+    {"id": "gadgetron-core", "version": "0.4.8"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1343,8 +1343,8 @@ The `bundles` field lists **every contributing bundle** in the merged catalog. W
 
 - `reloaded` — always `true` on 200. Clients key observability on this wire field rather than on the HTTP status so a structured audit log can quote the exact flag.
 - `action_count` / `view_count` — counts in the catalog **after** the swap, computed with all three scopes (`OpenAiCompat`, `Management`, `XaasAdmin`) in the visibility filter so the totals reflect every descriptor the fresh catalog carries.
-- `source` — wire-stable enum. `"seed_p2b"` when neither `bundles_dir` nor `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback). `"config_file"` when `catalog_path` OR `bundles_dir` is configured and parsed successfully (the same enum value covers both file paths — distinguish them via the presence of `bundles` vs `bundle` in the response). Future sources will widen this further (`"bundle_manifest"` when TASK 9.3 lands).
-- `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"` + `catalog_path`; the absolute path of the bundles directory when `source == "config_file"` + `bundles_dir`. Admin tooling uses this to confirm which on-disk artifact produced the live catalog.
+- `source` — wire-stable enum. Three values on trunk: `"seed_p2b"` when neither `bundles_dir` nor `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback); `"config_file"` when `catalog_path` is configured and the single TOML file parsed successfully (flat-file loader, TASK 8.4); `"bundles_dir"` when `bundles_dir` is configured and its subdirectories merged successfully (multi-bundle loader, TASK 9.2). The E2E harness boots against `source == "bundles_dir"` as of PR #222 (TASK 9.3 / v0.4.8) — the shipped `bundles/gadgetron-core/` subtree is the canonical default. Gate 7q.1 pins this end-to-end.
+- `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"` (TASK 8.4); the absolute path of the bundles directory when `source == "bundles_dir"` (TASK 9.2 / TASK 9.3). Admin tooling uses this to confirm which on-disk artifact produced the live catalog.
 - `bundle` — optional `{id, version}` struct (ISSUE 9 TASK 9.1 / v0.4.6 / PR #219). Populated when the loaded TOML carries a top-level `[bundle]` table with `id` and `version` fields (single-bundle / flat-file path only). Operators use this to identify **which catalog they loaded** without out-of-band tracking. `seed_p2b()`, anonymous flat TOMLs, and multi-bundle aggregation paths all produce `None` here — the multi-bundle case populates `bundles` (below) instead. The first-party bundle file at `bundles/gadgetron-core/bundle.toml` carries `{id: "gadgetron-core", version: <workspace version>}` — a drift test asserts this bundle file and `seed_p2b()` produce the same action id set so the two sources stay in lockstep until TASK 9.3 retires `seed_p2b()`.
 - `bundles` — `Vec<BundleMetadata>` (ISSUE 9 TASK 9.2 / v0.4.7 / PR #220). Populated with **every contributing bundle** when the loaded catalog came from a bundle directory (`[web] bundles_dir`). The handler scans every immediate subdirectory of `bundles_dir` for a `bundle.toml`, merges matching manifests in alphabetical path order so reloads are idempotent, and records each contributor's metadata here. Subdirectories without `bundle.toml` are silently skipped (operator workspace dirs, hidden dirs). Empty in every other case (seed_p2b / flat-file path / anonymous TOML). Single-bundle callers should read `bundle`; multi-bundle admin tooling should read `bundles` and distinguish "1 bundle" from "N bundles" without a special flag.
 
