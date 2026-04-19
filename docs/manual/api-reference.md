@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.11",
+  "gateway_version": "0.4.12",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.11"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.12"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.4.11"
+    "version": "0.4.12"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.4.11"},
+    {"id": "gadgetron-core", "version": "0.4.12"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1391,7 +1391,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
   "count": 2,
   "bundles": [
     {
-      "bundle": {"id": "gadgetron-core", "version": "0.4.11"},
+      "bundle": {"id": "gadgetron-core", "version": "0.4.12"},
       "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
       "action_count": 5,
       "view_count": 3
@@ -1437,11 +1437,26 @@ Install a new bundle manifest into the configured `[web] bundles_dir`. Landed in
 **Request body:**
 ```json
 {
-  "bundle_toml": "[bundle]\nid = \"acme-ops\"\nversion = \"1.2.0\"\n\n[[actions]]\n..."
+  "bundle_toml": "[bundle]\nid = \"acme-ops\"\nversion = \"1.2.0\"\n\n[[actions]]\n...",
+  "signature_hex": "9a3f…ed25519 signature over the bundle_toml string, hex-encoded"
 }
 ```
 
 - `bundle_toml` — a complete manifest as a single string (not a filesystem reference). The handler parses it to verify schema + extract the id, then writes the string verbatim to disk.
+- `signature_hex` (optional, ISSUE 10 TASK 10.4 / v0.4.12 / PR #227) — hex-encoded Ed25519 signature over the raw `bundle_toml` string. Verified against `[web.bundle_signing].public_keys_hex` trust anchors BEFORE the TOML is parsed, so a signed-malformed manifest takes the same error path as an unsigned-malformed one (no "which signer did you claim?" leak via error text). Required when `[web.bundle_signing].require_signature = true`; otherwise unsigned installs still work for backwards compatibility with TASK 10.2 deployments that haven't rotated to signed bundles yet.
+
+**Signature policy matrix (TASK 10.4).** `verify_bundle_signature` runs before TOML parse and enforces all six branches:
+
+| Config | Request | Outcome |
+|--------|---------|---------|
+| `require_signature = false`, no trust anchors | no `signature_hex` | accept (backwards-compat with TASK 10.2) |
+| `require_signature = true`, any config | no `signature_hex` | reject 4xx `Config` — "signature required" |
+| trust anchors present | valid sig matching one of the anchors | accept |
+| trust anchors present | sig value tampered (verification fails against every anchor) | reject 4xx `Config` — "signature invalid" |
+| trust anchors present | sig formatted correctly but from a pubkey not in anchors | reject 4xx `Config` — "signature from unknown signer" |
+| no trust anchors, `signature_hex` present | (trust set is empty so nothing to verify against) | reject 4xx `Config` — "signature provided but no trust anchors configured" |
+
+The last branch is loud-fail by design — silently accepting a signed request when trust anchors are missing would let a misconfigured deployment trust any signer. Operators who want unsigned installs should leave `signature_hex` empty AND keep `require_signature = false`; operators who want signed installs MUST configure trust anchors.
 
 **Response (HTTP 200):**
 ```json
