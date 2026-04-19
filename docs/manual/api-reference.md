@@ -507,13 +507,13 @@ data: {"id":"chatcmpl-xyz","object":"chat.completion.chunk","created":1700000000
 
 | Field | Value | Gate 9 assertion |
 |-------|-------|-----------------|
-| `id` | non-empty string. In practice starts with `chatcmpl-` (runtime convention, same id across all chunks of one request), but the harness only asserts type + length. | `(.id | type == "string" and length > 0)` |
+| `id` | non-empty string. Same `id` across **every** chunk in one stream (OpenAI correlation contract — the Python SDK, LangChain streaming handlers, etc. group chunks by id). In practice starts with `chatcmpl-`, though the shape gate only asserts type + length. | Shape: `(.id | type == "string" and length > 0)`. Cross-chunk consistency: separate assertion that `jq -r '.id'` over all frames returns exactly one unique value. |
 | `object` | `"chat.completion.chunk"` literal (distinguishes streaming frames from the non-streaming shape) | `.object == "chat.completion.chunk"` |
 | `choices` | non-empty array; each entry has `index`, `delta`, `finish_reason` | `(.choices | length >= 1)` |
 | `choices[].delta` | object — the **incremental** update for this chunk. First chunk typically carries `role: "assistant"`; subsequent chunks carry only `content` (or `reasoning_content`). | — |
 | `choices[].finish_reason` | `null` on all chunks except the final one; final chunk emits `"stop"` / `"length"` / etc. | — |
 
-E2E Gate 9 (`scripts/e2e-harness/run.sh:1063-1065`) asserts the shape on the first non-`[DONE]` frame of every streaming request. A regression that flips `object` to `chat.completion` (non-streaming shape) on a streaming response would break SDK parsers even though the raw text is readable.
+E2E Gate 9 asserts the per-chunk shape on the first non-`[DONE]` frame (`scripts/e2e-harness/run.sh:1063-1065`); a companion gate asserts that every chunk in the stream shares the same `.id` — a regression that rotated ids mid-stream would break client SDKs that group chunks by id even though each individual chunk still parses. A regression that flips `object` to `chat.completion` (non-streaming shape) on a streaming response would break SDK parsers even though the raw text is readable.
 
 **Streaming error frame:**
 
@@ -677,7 +677,24 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 }
 ```
 
-`active_plugs[].role` is one of `"canonical"`, `"search"`, `"relation"`, `"extractor"`. `degraded_reasons` is non-empty when the bootstrap ran but one or more subsystems are unhealthy.
+**Field contract.** Sourced from the Rust structs `WorkbenchBootstrapResponse`, `PlugHealth`, and `WorkbenchKnowledgeSummary` at `crates/gadgetron-core/src/workbench/mod.rs:23-50`. E2E Gate 7 asserts the inner shape on every healthy boot (`scripts/e2e-harness/run.sh`).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.0"`. |
+| `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured — clients MUST handle both shapes. |
+| `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
+| `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
+| `active_plugs[].role` | `"canonical"` \| `"search"` \| `"relation"` \| `"extractor"` | Which port the plug fills. The /web UI groups plugs by role. |
+| `active_plugs[].healthy` | boolean | Gate 7's shape check asserts this is strictly boolean, not coerced from string or int. |
+| `active_plugs[].note` | string or `null` | Free-text human-readable note when the plug is degraded, e.g. `"stale index >30s"`. |
+| `degraded_reasons` | array of strings | Non-empty when the bootstrap ran but one or more subsystems are unhealthy. Each string is operator-facing. |
+| `knowledge.canonical_ready` | boolean | Canonical wiki store is accepting reads + writes. |
+| `knowledge.search_ready` | boolean | Keyword / embedding index is queryable. False when an index rebuild is in flight. |
+| `knowledge.relation_ready` | boolean | Relation plug is queryable (P2C+). |
+| `knowledge.last_ingest_at` | RFC 3339 timestamp or `null` | Null before the first ingest after startup. |
+
+The three `*_ready` booleans are the observable contract gate 7 pins down (`(.knowledge.canonical_ready | type == "boolean")` etc); a regression that replaces `false` with `"false"` (stringified) would break the /web UI's knowledge-status indicator silently. The shell renders the knowledge panel based on `canonical_ready` alone; `search_ready` / `relation_ready` degrade individual UI features without hiding the panel.
 
 ---
 
