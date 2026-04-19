@@ -34,8 +34,21 @@ pub async fn auth_middleware(
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.to_string());
 
+    // WebSocket clients from the browser can't set the Authorization
+    // header (spec gap), so they pass the token as `?token=…` on the
+    // upgrade URL. We only accept the query-string fallback on the
+    // `/events/ws` path — other endpoints MUST use the header so
+    // tokens don't leak to access logs for every request. The `ws`
+    // path is the single exception.
     let token = match auth_header {
         Some(t) => t,
+        None if req.uri().path().ends_with("/events/ws") => match token_from_query(req.uri()) {
+            Some(t) => t,
+            None => {
+                emit_auth_failure_audit(&state);
+                return ApiError(GadgetronError::TenantNotFound).into_response();
+            }
+        },
         None => {
             // SEC-M4: audit 401 — missing Authorization header. SOC2 CC6.7.
             emit_auth_failure_audit(&state);
@@ -67,6 +80,26 @@ pub async fn auth_middleware(
 
 /// Sends an audit entry recording an authentication failure.
 ///
+/// Extract `?token=...` from a URI's query string. Returns `None`
+/// when the query is absent, malformed, or the `token` key is not
+/// present. Used ONLY by the WebSocket upgrade path — see the
+/// auth_middleware comment for why.
+fn token_from_query(uri: &axum::http::Uri) -> Option<String> {
+    let q = uri.query()?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "token" {
+                return Some(
+                    percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Tenant and key IDs are `Uuid::nil()` because the caller is unauthenticated —
 /// no ValidatedKey is available to supply real UUIDs.
 fn emit_auth_failure_audit(state: &AppState) {
@@ -83,4 +116,35 @@ fn emit_auth_failure_audit(state: &AppState) {
         cost_cents: 0,
         latency_ms: 0,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_from_query_extracts_bare_token() {
+        let uri: axum::http::Uri = "/events/ws?token=gad_live_deadbeef".parse().unwrap();
+        assert_eq!(token_from_query(&uri).as_deref(), Some("gad_live_deadbeef"));
+    }
+
+    #[test]
+    fn token_from_query_url_decodes() {
+        let uri: axum::http::Uri = "/events/ws?token=gad%5Flive%5Ffoo".parse().unwrap();
+        assert_eq!(token_from_query(&uri).as_deref(), Some("gad_live_foo"));
+    }
+
+    #[test]
+    fn token_from_query_handles_multiple_params() {
+        let uri: axum::http::Uri = "/events/ws?other=x&token=T&trailing=y".parse().unwrap();
+        assert_eq!(token_from_query(&uri).as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn token_from_query_returns_none_when_missing() {
+        let uri: axum::http::Uri = "/events/ws?other=x".parse().unwrap();
+        assert!(token_from_query(&uri).is_none());
+        let uri: axum::http::Uri = "/events/ws".parse().unwrap();
+        assert!(token_from_query(&uri).is_none());
+    }
 }

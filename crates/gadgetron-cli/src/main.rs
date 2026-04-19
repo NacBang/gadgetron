@@ -59,6 +59,7 @@ struct AppStateParts {
         Option<Arc<dyn gadgetron_core::knowledge::candidate::ActivityCaptureStore>>,
     candidate_coordinator:
         Option<Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>>,
+    activity_bus: gadgetron_core::activity_bus::ActivityBus,
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,6 +1428,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         agent_config,
         activity_capture_store,
         candidate_coordinator,
+        activity_bus,
     } = parts;
 
     AppState {
@@ -1444,6 +1446,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         agent_config,
         activity_capture_store,
         candidate_coordinator,
+        activity_bus,
     }
 }
 
@@ -1564,6 +1567,7 @@ async fn init_serve_runtime(
         agent_config,
         activity_capture_store,
         candidate_coordinator,
+        activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
     });
     let tui_thread = spawn_tui_thread(tui_tx.as_ref());
     let app = build_http_app(state, &config.web);
@@ -3593,6 +3597,7 @@ wiki_max_page_bytes = 1048576
             agent_config: Arc::new(agent_cfg),
             activity_capture_store: Some(activity_store),
             candidate_coordinator: Some(candidate_coordinator),
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         });
 
         // PSL-1c field-presence assertions (spec §5).

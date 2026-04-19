@@ -89,6 +89,7 @@ pub struct StreamEndGuard {
     state: Arc<Mutex<StreamEndState>>,
     audit_writer: Arc<AuditWriter>,
     coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+    activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
     tenant_id: Uuid,
     api_key_id: Uuid,
     request_id: Uuid,
@@ -114,10 +115,37 @@ impl StreamEndGuard {
         model: String,
         started_at: Instant,
     ) -> Self {
+        Self::new_with_activity_bus(
+            audit_writer,
+            coordinator,
+            None,
+            tenant_id,
+            api_key_id,
+            request_id,
+            model,
+            started_at,
+        )
+    }
+
+    /// Build the guard with an optional `ActivityBus` handle. When
+    /// wired, the amendment path also publishes a `ChatCompleted`
+    /// event so the /events/ws subscribers see the streaming-chat
+    /// completion in real time (ISSUE 4 TASK 4.4).
+    pub fn new_with_activity_bus(
+        audit_writer: Arc<AuditWriter>,
+        coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+        activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
+        tenant_id: Uuid,
+        api_key_id: Uuid,
+        request_id: Uuid,
+        model: String,
+        started_at: Instant,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(StreamEndState::default())),
             audit_writer,
             coordinator,
+            activity_bus,
             tenant_id,
             api_key_id,
             request_id,
@@ -218,8 +246,30 @@ impl Drop for StreamEndGuard {
             AuditStatus::Ok
         };
 
+        // ISSUE 4 TASK 4.2: compute cost_cents at amendment time from
+        // the output-token count observed on-stream. `input_tokens`
+        // is still 0 for streaming (providers don't re-report prompt
+        // size on the delta stream) — see `StreamEndState`. The
+        // input contribution is therefore excluded; chat rollups
+        // will slightly underestimate cost for streaming requests
+        // until the router is reworked to surface prompt_tokens
+        // upstream. A worked-through follow-on note lives in
+        // `docs/design/gateway/streaming-cost-attribution.md`
+        // (future TASK).
+        let pricing = gadgetron_core::pricing::default_pricing_table();
+        let cost_cents = gadgetron_core::pricing::compute_cost_cents(
+            &self.model,
+            0,
+            snapshot.completion_tokens_observed.into(),
+            &pricing,
+        );
+
         // Amendment AuditEntry — fresh event_id, same request_id.
         // input_tokens is 0 for streaming; see `StreamEndState` doc comment.
+        // Capture the stringified status BEFORE the send() move so
+        // both the audit row and the activity event agree. The
+        // schema stores the same literal.
+        let status_str: String = status.as_str().into();
         self.audit_writer.send(AuditEntry {
             event_id: amendment_event_id,
             tenant_id: self.tenant_id,
@@ -230,9 +280,25 @@ impl Drop for StreamEndGuard {
             status,
             input_tokens: 0,
             output_tokens: snapshot.completion_tokens_observed as i32,
-            cost_cents: 0,
+            cost_cents,
             latency_ms,
         });
+
+        // ISSUE 4 TASK 4.4: mirror the audit emission onto the live
+        // activity bus so /events/ws subscribers see the streaming
+        // completion in real time.
+        if let Some(bus) = self.activity_bus.as_ref() {
+            bus.publish(gadgetron_core::activity_bus::ActivityEvent::ChatCompleted {
+                tenant_id: self.tenant_id,
+                request_id: self.request_id,
+                model: self.model.clone(),
+                status: status_str,
+                input_tokens: 0,
+                output_tokens: snapshot.completion_tokens_observed as i64,
+                cost_cents,
+                latency_ms: latency_ms as i64,
+            });
+        }
 
         // Mirror the non-streaming arms: RuntimeObservation on error,
         // GadgetToolCall on success. Fire-and-forget via tokio::spawn.

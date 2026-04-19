@@ -7,6 +7,7 @@ import {
   Package,
   PanelLeft,
   FileText,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,12 @@ import { Button } from "@/components/ui/button";
 // Types
 // ---------------------------------------------------------------------------
 
-export type LeftRailTab = "chat" | "wiki" | "knowledge" | "bundles";
+export type LeftRailTab =
+  | "chat"
+  | "wiki"
+  | "dashboard"
+  | "knowledge"
+  | "bundles";
 
 interface NavItem {
   id: LeftRailTab;
@@ -41,6 +47,13 @@ const NAV_ITEMS: NavItem[] = [
     icon: <FileText className="size-4" aria-hidden />,
     functional: true,
     href: "/wiki",
+  },
+  {
+    id: "dashboard",
+    label: "Dashboard",
+    icon: <Activity className="size-4" aria-hidden />,
+    functional: true,
+    href: "/dashboard",
   },
   {
     id: "knowledge",
@@ -155,7 +168,8 @@ export function LeftRail({
       {/* P2B notice for non-functional tabs when collapsed */}
       {!collapsed &&
         activeTab !== "chat" &&
-        activeTab !== "wiki" && (
+        activeTab !== "wiki" &&
+        activeTab !== "dashboard" && (
           <div
             className="mx-2 mt-4 rounded border border-zinc-800 bg-zinc-900/50 p-3"
             data-testid="p2b-not-wired"

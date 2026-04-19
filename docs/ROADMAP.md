@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.6** (post-ISSUE 3 production safety)
+**Current version: 0.2.7** (post-ISSUE 4 operator observability)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -42,12 +42,16 @@ Expected duration: ~1-2 months. Close → tag `v0.3.0`.
   added to seed_p2b as the canonical approval-gated action,
   `GET /api/v1/web/workbench/audit/events` query endpoint.
   Harness gates 7h.7 (lifecycle) + 7h.8 (audit query).
+- **ISSUE 4 — operator observability** (0.2.6 → 0.2.7)
+  `GET /usage/summary` tri-plane rollup, model pricing table
+  (`gadgetron_core::pricing`) populating real `cost_cents`,
+  in-process `ActivityBus` + `GET /events/ws` WebSocket feed,
+  `/web/dashboard` page with live tiles + WS feed + LeftRail
+  entry, auth middleware query-token fallback scoped to
+  `/events/ws`. Harness gates 7k.3 (usage shape) + 11f
+  (dashboard page).
 
-### Planned ISSUEs
-
-- **ISSUE 4 — operator observability (~4-6 days, NEXT)**
-  Usage summary endpoint + /web dashboard page, cost tracking endpoint,
-  WebSocket live activity feed (operators see actions as they happen).
+### Planned ISSUEs (next)
 
 ### EPIC 1 close criteria
 

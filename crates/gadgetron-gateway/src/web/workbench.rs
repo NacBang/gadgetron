@@ -472,9 +472,23 @@ pub async fn approve_action(
         .mark_approved(approval_id, &actor)
         .await
         .map_err(approval_error_to_http)?;
+    // Publish the approval resolution on the live feed BEFORE
+    // dispatching — operators see the decision immediately even if
+    // the subsequent dispatch takes a while.
+    state.activity_bus.publish(
+        gadgetron_core::activity_bus::ActivityEvent::ApprovalResolved {
+            tenant_id: actor.tenant_id,
+            approval_id: approved.id,
+            action_id: approved.action_id.clone(),
+            state: approved.state.as_str().to_string(),
+            resolved_by_user_id: approved.resolved_by_user_id.unwrap_or(actor.user_id),
+        },
+    );
+    let action_id = approved.action_id.clone();
     let resp = action_svc
         .resume_approval(&actor, &ctx.scopes, approved)
         .await?;
+    publish_action_activity(&state, &actor, &action_id, &resp);
     Ok(Json(resp))
 }
 
@@ -503,6 +517,15 @@ pub async fn deny_action(
         .mark_denied(approval_id, &actor, body.reason)
         .await
         .map_err(approval_error_to_http)?;
+    state.activity_bus.publish(
+        gadgetron_core::activity_bus::ActivityEvent::ApprovalResolved {
+            tenant_id: actor.tenant_id,
+            approval_id: denied.id,
+            action_id: denied.action_id.clone(),
+            state: denied.state.as_str().to_string(),
+            resolved_by_user_id: denied.resolved_by_user_id.unwrap_or(actor.user_id),
+        },
+    );
     Ok(Json(DenyApprovalResponse {
         id: denied.id,
         state: denied.state.as_str().to_string(),
@@ -544,6 +567,176 @@ fn approval_error_to_http(err: gadgetron_core::workbench::ApprovalError) -> Work
             "approval store error: {msg}"
         ))),
     }
+}
+
+/// Query parameters for `GET /usage/summary`.
+#[derive(Debug, Deserialize, Default)]
+pub struct UsageSummaryQuery {
+    /// Hours of history to aggregate over. Default 24, max 168 (one week).
+    pub window_hours: Option<i32>,
+}
+
+/// Response shape for `GET /usage/summary` — per-tenant rollup over
+/// a sliding time window across the three audit planes:
+/// `audit_log` (chat), `action_audit_events` (workbench direct actions),
+/// `tool_audit_events` (Penny tool calls).
+#[derive(Debug, serde::Serialize)]
+pub struct UsageSummaryResponse {
+    pub window_hours: i32,
+    pub chat: UsageChatStats,
+    pub actions: UsageActionStats,
+    pub tools: UsageToolStats,
+}
+
+#[derive(Debug, serde::Serialize, Default)]
+pub struct UsageChatStats {
+    pub requests: i64,
+    pub errors: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_cost_cents: i64,
+    pub avg_latency_ms: f64,
+}
+
+#[derive(Debug, serde::Serialize, Default)]
+pub struct UsageActionStats {
+    pub total: i64,
+    pub success: i64,
+    pub error: i64,
+    pub pending_approval: i64,
+    pub avg_elapsed_ms: f64,
+}
+
+#[derive(Debug, serde::Serialize, Default)]
+pub struct UsageToolStats {
+    pub total: i64,
+    pub errors: i64,
+}
+
+/// `GET /usage/summary` — tenant-scoped operations rollup.
+///
+/// Aggregates over the past `window_hours` (default 24, clamped
+/// `[1, 168]`) for the authenticated actor's tenant. Runs three
+/// aggregate queries against the three audit tables in parallel
+/// and folds the results into a single response shape. The tenant
+/// boundary is PINNED by the handler — callers cannot read another
+/// tenant's usage regardless of query params.
+///
+/// Returns 503-shape when `pg_pool` isn't configured.
+pub async fn get_usage_summary(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<UsageSummaryQuery>,
+) -> Result<Json<UsageSummaryResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "usage summary requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let window_hours = query.window_hours.unwrap_or(24).clamp(1, 168);
+    let since = chrono::Utc::now() - chrono::Duration::hours(window_hours as i64);
+    let tenant_id_text = ctx.tenant_id.to_string();
+
+    // `audit_log` stores `tenant_id` as UUID; the two newer audit
+    // tables store it as TEXT. We pass both so the queries bind
+    // correctly.
+    let (chat_row, action_row, tool_row) = tokio::join!(
+        sqlx::query_as::<_, ChatRollup>(
+            r#"SELECT COUNT(*)::bigint AS requests,
+                      COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0)::bigint AS errors,
+                      COALESCE(SUM(input_tokens), 0)::bigint AS total_input_tokens,
+                      COALESCE(SUM(output_tokens), 0)::bigint AS total_output_tokens,
+                      COALESCE(SUM(cost_cents), 0)::bigint AS total_cost_cents,
+                      COALESCE(AVG(latency_ms)::float8, 0.0) AS avg_latency_ms
+               FROM audit_log
+               WHERE tenant_id = $1 AND timestamp >= $2"#,
+        )
+        .bind(ctx.tenant_id)
+        .bind(since)
+        .fetch_one(pool),
+        sqlx::query_as::<_, ActionRollup>(
+            r#"SELECT COUNT(*)::bigint AS total,
+                      COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0)::bigint AS success,
+                      COALESCE(SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END), 0)::bigint AS error,
+                      COALESCE(SUM(CASE WHEN outcome = 'pending_approval' THEN 1 ELSE 0 END), 0)::bigint AS pending_approval,
+                      COALESCE(AVG(elapsed_ms)::float8, 0.0) AS avg_elapsed_ms
+               FROM action_audit_events
+               WHERE tenant_id = $1 AND created_at >= $2"#,
+        )
+        .bind(&tenant_id_text)
+        .bind(since)
+        .fetch_one(pool),
+        sqlx::query_as::<_, ToolRollup>(
+            r#"SELECT COUNT(*)::bigint AS total,
+                      COALESCE(SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END), 0)::bigint AS errors
+               FROM tool_audit_events
+               WHERE tenant_id = $1 AND created_at >= $2"#,
+        )
+        .bind(&tenant_id_text)
+        .bind(since)
+        .fetch_one(pool),
+    );
+
+    let chat = chat_row.map_err(usage_sql_err)?;
+    let actions = action_row.map_err(usage_sql_err)?;
+    let tools = tool_row.map_err(usage_sql_err)?;
+
+    Ok(Json(UsageSummaryResponse {
+        window_hours,
+        chat: UsageChatStats {
+            requests: chat.requests,
+            errors: chat.errors,
+            total_input_tokens: chat.total_input_tokens,
+            total_output_tokens: chat.total_output_tokens,
+            total_cost_cents: chat.total_cost_cents,
+            avg_latency_ms: chat.avg_latency_ms,
+        },
+        actions: UsageActionStats {
+            total: actions.total,
+            success: actions.success,
+            error: actions.error,
+            pending_approval: actions.pending_approval,
+            avg_elapsed_ms: actions.avg_elapsed_ms,
+        },
+        tools: UsageToolStats {
+            total: tools.total,
+            errors: tools.errors,
+        },
+    }))
+}
+
+/// Tight rollup structs — not exposed publicly. Serialize path
+/// goes through `UsageSummaryResponse` which lives in the response
+/// shape above.
+#[derive(sqlx::FromRow)]
+struct ChatRollup {
+    requests: i64,
+    errors: i64,
+    total_input_tokens: i64,
+    total_output_tokens: i64,
+    total_cost_cents: i64,
+    avg_latency_ms: f64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ActionRollup {
+    total: i64,
+    success: i64,
+    error: i64,
+    pending_approval: i64,
+    avg_elapsed_ms: f64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ToolRollup {
+    total: i64,
+    errors: i64,
+}
+
+fn usage_sql_err(e: sqlx::Error) -> WorkbenchHttpError {
+    WorkbenchHttpError::Core(GadgetronError::Config(format!(
+        "usage summary query failed: {e}"
+    )))
 }
 
 /// Query parameters for `GET /audit/events`.
@@ -626,7 +819,39 @@ pub async fn invoke_action(
     let resp = action_svc
         .invoke(&actor, &ctx.scopes, &action_id, request)
         .await?;
+    publish_action_activity(&state, &actor, &action_id, &resp);
     Ok(Json(resp))
+}
+
+/// Fan-out to the live-feed WebSocket after an action completes.
+/// Reads the response envelope and fires a matching
+/// `ActivityEvent::ActionCompleted` with the outcome as the client
+/// will see it. Fire-and-forget.
+fn publish_action_activity(
+    state: &AppState,
+    actor: &AuthenticatedContext,
+    action_id: &str,
+    resp: &InvokeWorkbenchActionResponse,
+) {
+    let Some(audit_event_id) = resp.result.audit_event_id else {
+        return;
+    };
+    let outcome = match resp.result.status.as_str() {
+        "ok" => "success",
+        "pending_approval" => "pending_approval",
+        _ => "error",
+    };
+    state.activity_bus.publish(
+        gadgetron_core::activity_bus::ActivityEvent::ActionCompleted {
+            tenant_id: actor.tenant_id,
+            audit_event_id,
+            action_id: action_id.to_string(),
+            gadget_name: None,
+            outcome: outcome.to_string(),
+            error_code: None,
+            elapsed_ms: 0,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +882,83 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/approvals/{approval_id}/deny", post(deny_action))
         // ISSUE 3 TASK 3.4 — tenant-scoped audit event query.
         .route("/audit/events", get(list_audit_events))
+        // ISSUE 4 TASK 4.1 — operator usage summary rollup.
+        .route("/usage/summary", get(get_usage_summary))
+        // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
+        .route("/events/ws", get(events_ws_handler))
+}
+
+/// `GET /events/ws` — WebSocket upgrade + tenant-filtered activity
+/// feed. Subscribers receive `ActivityEvent` JSON messages in real
+/// time; non-matching tenants are filtered out handler-side.
+///
+/// Protocol is a simple stream of JSON text frames, one event per
+/// frame. The client SHOULD close the socket when it no longer
+/// needs updates; the server closes when the broadcast channel
+/// lags (client will see an `Lagged` frame and must reconnect /
+/// re-sync via `/usage/summary`).
+pub async fn events_ws_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let bus = state.activity_bus.clone();
+    let tenant_id = ctx.tenant_id;
+    ws.on_upgrade(move |socket| events_ws_session(socket, bus, tenant_id))
+}
+
+async fn events_ws_session(
+    mut socket: axum::extract::ws::WebSocket,
+    bus: gadgetron_core::activity_bus::ActivityBus,
+    tenant_id: Uuid,
+) {
+    use axum::extract::ws::Message;
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = bus.subscribe();
+    loop {
+        tokio::select! {
+            recv = rx.recv() => {
+                match recv {
+                    Ok(event) => {
+                        if event.tenant_id() != tenant_id {
+                            continue;
+                        }
+                        let Ok(text) = serde_json::to_string(&event) else {
+                            continue;
+                        };
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        // Send a structured lag notice + close so the
+                        // client knows to reconnect. Silent drop
+                        // would hide a real problem.
+                        let notice = serde_json::json!({
+                            "type": "lag",
+                            "missed": n,
+                            "message": "subscriber lagged; reconnect to resume",
+                        });
+                        let _ = socket
+                            .send(Message::Text(notice.to_string().into()))
+                            .await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            // Drain client frames — mostly keepalives / a client
+            // close. We don't interpret client messages today but
+            // reading them keeps the socket healthy.
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +1049,7 @@ mod tests {
             agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         }
     }
 
