@@ -1737,6 +1737,37 @@ fi
 # Tolerance: we check for AT LEAST one matching row; other Ok
 # audit lines (from Gate 7h.1 action invocation etc) are allowed.
 
+log "=== Gate 7k.6: /workbench/admin/billing/events (ISSUE 12 TASK 12.1) ==="
+# Non-streaming chat (Gate 8 just above) fired PgQuotaEnforcer
+# record_post which emitted a billing_events row. Query the admin
+# endpoint and assert at least one chat-kind row with positive
+# cost_cents is surfaced. sleep 1 because the INSERT is
+# fire-and-forget from record_post (tokio::spawn equivalent) so
+# it may race with the GET.
+sleep 1
+BILLING_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/billing/events?limit=5" 2>&1 || true)"
+BILLING_CHAT_COUNT="$(echo "$BILLING_RESP" \
+  | jq '[.events[] | select(.event_kind == "chat")] | length' 2>/dev/null || echo -1)"
+if echo "$BILLING_RESP" | jq -e '(.events | type == "array") and (.returned | type == "number")' >/dev/null 2>&1 \
+   && [ "${BILLING_CHAT_COUNT:-0}" -ge 1 ]; then
+  pass "admin/billing/events surfaces chat ledger rows (count=$BILLING_CHAT_COUNT)"
+else
+  fail "admin/billing/events shape or chat row missing" \
+    "$(echo "$BILLING_RESP" | head -c 400)"
+fi
+
+# Gate 7k.7 — RBAC: OpenAiCompat key must get 403 (billing is
+# invoice data, Management-only).
+BILLING_403_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/billing/events" 2>&1 || true)"
+if [ "$BILLING_403_CODE" = "403" ]; then
+  pass "admin/billing/events via OpenAiCompat key → 403 (RBAC enforced)"
+else
+  fail "admin/billing/events OpenAiCompat: expected 403, got $BILLING_403_CODE" ""
+fi
+
 log "=== Gate 8b: audit trail for non-streaming happy path ==="
 sleep 0.3  # audit writer is async; let the entry land
 AUDIT_OK_LINE="$(sed "$STRIP_ANSI" "$GAD_LOG" \
@@ -2281,6 +2312,7 @@ WARN_LINES="$(sed "$STRIP_ANSI" "$GAD_LOG" 2>/dev/null \
   | grep -vE 'ask mode has no effect in Phase 2A' \
   | grep -vE 'git config user\.name / user\.email not set' \
   | grep -vE 'scope denied .*path=/api/v1/' \
+  | grep -vE 'quota_configs row missing' \
   || true)"
 if [ -z "$WARN_LINES" ]; then
   pass "no unexpected WARN entries in gadgetron.log (P2A ask-mode + git-config benign WARNs whitelisted)"

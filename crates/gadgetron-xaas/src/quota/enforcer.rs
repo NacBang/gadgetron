@@ -154,6 +154,35 @@ impl QuotaEnforcer for PgQuotaEnforcer {
                 );
             }
         }
+
+        // ISSUE 12 TASK 12.1 — integer-cent billing ledger. Every
+        // chat completion that reaches `record_post` is a billable
+        // event; persist one `billing_events` row so the invoice
+        // query path has the raw data. We don't skip zero-cost
+        // rows (mock / free-tier models) — the ledger is the
+        // append-only record of activity, not just paid activity.
+        // Failures log but don't propagate — the request already
+        // succeeded, and the operator sees the failure in tracing.
+        // Tool / action events get hooked up in later TASKs through
+        // their own audit sinks.
+        let ins = crate::billing::insert_billing_event(
+            &self.pool,
+            token.tenant_id,
+            crate::billing::BillingEventKind::Chat,
+            actual_cost_cents,
+            None, // source_event_id threaded through in a follow-up
+            None,
+            None,
+        )
+        .await;
+        if let Err(e) = ins {
+            tracing::warn!(
+                target: "billing",
+                tenant_id = %token.tenant_id,
+                error = %e,
+                "failed to persist billing_events row — counter ahead of ledger until reconciled"
+            );
+        }
     }
 }
 

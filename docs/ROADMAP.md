@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.4** (post-ISSUE 11 TASK 11.4 — quota status endpoint, ISSUE 11 closed)
+**Current version: 0.5.5** (post-ISSUE 12 TASK 12.1 — integer-cent billing ledger)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -282,8 +282,18 @@ increment (11.3). Rejections carry structured 429 +
 Retry-After (11.1). Tenants introspect usage via /quota/status
 (11.4). EPIC 4 still has ISSUEs 12 (billing), 13 (HF catalog),
 14 (tenant self-service) before close + `v1.0.0`.
-- **ISSUE 12 — integer-cent billing**: metering pipeline, usage → invoice
-  materialization, Postgres-backed ledger.
+### In-flight ISSUE (12)
+- **ISSUE 12 — integer-cent billing** (in-flight; 0.5.5 ships TASK 12.1)
+  - TASK 12.1 ✅ — billing ledger writer + query endpoint (0.5.4 →
+    0.5.5). Migration adds `billing_events` table (BIGSERIAL,
+    integer cents per ADR-D-8, CHECK constraint on `event_kind`).
+    `PgQuotaEnforcer.record_post` now also inserts one
+    `billing_events` row per chat completion with positive cost.
+    `GET /api/v1/web/workbench/admin/billing/events?since&limit`
+    (Management scope) queries the tenant's ledger newest-first,
+    500-row cap. Harness gates 7k.6 (chat row present post-dispatch)
+    and 7k.7 (RBAC 403 for non-Management). TASKs 12.2+ extend
+    `event_kind` to tool + action and add invoice materialization.
 - **ISSUE 13 — HuggingFace model catalog**: discovery, pinning, per-model
   cost attribution.
 - **ISSUE 14 — tenant self-service**: sign-up, key rotation, org/team

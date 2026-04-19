@@ -732,6 +732,57 @@ pub async fn get_quota_status(
     }))
 }
 
+/// Query parameters for `GET /admin/billing/events`.
+#[derive(Debug, Deserialize, Default)]
+pub struct BillingEventsQuery {
+    /// ISO-8601 timestamp. Only events with `created_at >= since`
+    /// are returned. Absent = no lower bound.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Result cap (default 100, clamped `[1, 500]`).
+    pub limit: Option<i64>,
+}
+
+/// Response shape for `GET /admin/billing/events`.
+#[derive(Debug, serde::Serialize)]
+pub struct BillingEventsResponse {
+    pub events: Vec<gadgetron_xaas::billing::BillingEventRow>,
+    pub returned: usize,
+}
+
+/// `GET /api/v1/web/workbench/admin/billing/events` — tenant-scoped
+/// billing ledger query (ISSUE 12 TASK 12.1). **Management scope**
+/// because this is invoice / billing data. Tenant boundary is
+/// pinned by the handler — callers cannot read another tenant's
+/// ledger regardless of query params.
+///
+/// Returns newest-first. Each row is one billable event.
+pub async fn list_billing_events(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<BillingEventsQuery>,
+) -> Result<Json<BillingEventsResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "billing events query requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let events = gadgetron_xaas::billing::events::query_billing_events(
+        pool,
+        ctx.tenant_id,
+        query.since,
+        limit,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "billing events query failed: {e}"
+        )))
+    })?;
+    let returned = events.len();
+    Ok(Json(BillingEventsResponse { events, returned }))
+}
+
 /// `GET /usage/summary` — tenant-scoped operations rollup.
 ///
 /// Aggregates over the past `window_hours` (default 24, clamped
@@ -1057,6 +1108,8 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/usage/summary", get(get_usage_summary))
         // ISSUE 11 TASK 11.4 — quota status (current tenant).
         .route("/quota/status", get(get_quota_status))
+        // ISSUE 12 TASK 12.1 — billing events ledger query.
+        .route("/admin/billing/events", get(list_billing_events))
         // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
         .route("/events/ws", get(events_ws_handler))
         // ISSUE 8 TASK 8.2 — admin catalog hot-reload.
