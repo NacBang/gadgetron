@@ -3,12 +3,17 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use gadgetron_core::context::Scope;
 use gadgetron_xaas::audit::writer::{AuditEntry, AuditStatus};
+use gadgetron_xaas::auth::validator::ValidatedKey;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{error::ApiError, server::AppState};
 use gadgetron_core::error::GadgetronError;
 use gadgetron_xaas::auth::key::ApiKey;
+
+const SESSION_COOKIE_NAME: &str = "gadgetron_session";
 
 /// Validates the `Authorization: Bearer <token>` header.
 ///
@@ -50,7 +55,28 @@ pub async fn auth_middleware(
             }
         },
         None => {
-            // SEC-M4: audit 401 — missing Authorization header. SOC2 CC6.7.
+            // ISSUE 16 TASK 16.1 — when no Bearer header present, try
+            // the session cookie before giving up. This lets the
+            // existing /api/v1/* admin surface serve browser clients
+            // that logged in via POST /api/v1/auth/login without
+            // exposing a second set of "cookie-gated" handlers.
+            // Bearer path stays primary — cookie is only consulted
+            // when header is absent.
+            if let Some(token) = session_cookie_token(req.headers()) {
+                if let Some(pool) = state.pg_pool.as_ref() {
+                    match validate_session_and_build_key(pool, &token).await {
+                        Ok(validated_key) => {
+                            req.extensions_mut().insert(validated_key);
+                            return next.run(req).await;
+                        }
+                        Err(_) => {
+                            emit_auth_failure_audit(&state);
+                            return ApiError(GadgetronError::TenantNotFound).into_response();
+                        }
+                    }
+                }
+            }
+            // SEC-M4: audit 401 — no Bearer header AND no valid session cookie. SOC2 CC6.7.
             emit_auth_failure_audit(&state);
             return ApiError(GadgetronError::TenantNotFound).into_response();
         }
@@ -76,6 +102,60 @@ pub async fn auth_middleware(
             ApiError(GadgetronError::TenantNotFound).into_response()
         }
     }
+}
+
+/// Extract `gadgetron_session=...` from the `Cookie` header, if present.
+fn session_cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            s.split(';')
+                .map(str::trim)
+                .filter_map(|kv| kv.split_once('='))
+                .find(|(k, _)| *k == SESSION_COOKIE_NAME)
+                .map(|(_, v)| v.to_string())
+        })
+}
+
+/// Validate a session cookie against the DB, then look up the user's
+/// role and synthesize a `ValidatedKey` with role-derived scopes. Used
+/// only when no Bearer header is present (Bearer path wins).
+///
+/// Scope mapping:
+/// - admin → OpenAiCompat + Management (XaasAdmin still requires explicit key grant)
+/// - member → OpenAiCompat only
+///
+/// `api_key_id` is set to `Uuid::nil()` for cookie sessions — downstream
+/// audit can detect this sentinel and attribute to `user_id` via a
+/// follow-up TASK when audit rows gain an `actor_user_id` plumbing.
+async fn validate_session_and_build_key(
+    pool: &sqlx::PgPool,
+    cookie_token: &str,
+) -> Result<Arc<ValidatedKey>, GadgetronError> {
+    let session = gadgetron_xaas::sessions::validate_session(pool, cookie_token)
+        .await
+        .map_err(|_| GadgetronError::TenantNotFound)?;
+
+    let role: String = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
+        .bind(session.user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| GadgetronError::TenantNotFound)?;
+
+    let scopes = match role.as_str() {
+        "admin" => vec![Scope::OpenAiCompat, Scope::Management],
+        "member" => vec![Scope::OpenAiCompat],
+        // Service role shouldn't reach here (login blocks it) but
+        // fail closed if it somehow does.
+        _ => return Err(GadgetronError::TenantNotFound),
+    };
+
+    Ok(Arc::new(ValidatedKey {
+        api_key_id: Uuid::nil(),
+        tenant_id: session.tenant_id,
+        scopes,
+    }))
 }
 
 /// Sends an audit entry recording an authentication failure.
