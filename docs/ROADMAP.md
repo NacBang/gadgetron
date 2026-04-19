@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.0** (EPIC 3 closed — tag `v0.5.0`)
+**Current version: 0.5.1** (post-ISSUE 11 TASK 11.1 — structured 429 + Retry-After)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -233,15 +233,29 @@ discovery (10.1) → install/uninstall (10.2) → scope isolation
 
 Close → tag `v0.5.0`.
 
-## EPIC 4 — Multi-tenant business ops / XaaS (2-3 months)
+## EPIC 4 — Multi-tenant business ops / XaaS (ACTIVE)
 
 Goal: XaaS mode shippable — integer-cent billing (ADR-D-8), HuggingFace
 catalog, tenant self-service, quotas + SLA enforcement. Turns Gadgetron
 from "self-host" to "accounts you sell."
 
-### Planned ISSUEs
-- **ISSUE 11 — quotas + rate limits**: per-tenant enforcement replacing
-  `InMemoryQuotaEnforcer`, UI 429 UX, structured 429 responses.
+### In-flight ISSUE (11)
+- **ISSUE 11 — quotas + rate limits** (in-flight; 0.5.1 ships TASK 11.1)
+  - TASK 11.1 ✅ — structured 429 + `Retry-After` header (0.5.0 →
+    0.5.1). Every `ApiError` response with status 429 now sets the
+    `Retry-After: 60` HTTP header AND adds `retry_after_seconds:
+    60` to the JSON body so SDK clients can back off
+    deterministically instead of retrying in a tight loop. Two
+    unit tests pin the shape (429 carries both + non-429 omits
+    both). Retry-After constant is conservative today; TASK 11.2's
+    token-bucket enforcer will thread the real refill time through.
+  - TASK 11.2 — token-bucket rate limiter (requests-per-minute +
+    burst per tenant) replacing the always-allow
+    `InMemoryQuotaEnforcer` check.
+  - TASK 11.3 — Postgres-backed daily/monthly spend tracking that
+    actually increments on `record_post`.
+  - TASK 11.4 — `/web` UI surface for the 429 path (quota status
+    banner, retry countdown).
 - **ISSUE 12 — integer-cent billing**: metering pipeline, usage → invoice
   materialization, Postgres-backed ledger.
 - **ISSUE 13 — HuggingFace model catalog**: discovery, pinning, per-model
