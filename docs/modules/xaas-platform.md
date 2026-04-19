@@ -103,10 +103,21 @@ crates/gadgetron-xaas/
     ├── tenant/                      # [P1]
     │   ├── model.rs                 # Tenant, TenantContext (request-scoped)
     │   └── registry.rs              # TenantRegistry trait + PgTenantRegistry
-    ├── quota/                       # [P1]
+    ├── quota/                       # [P1] + [EPIC 4] rate limit + pg spend tracking
     │   ├── config.rs                # QuotaConfig (RPM/TPM/concurrent_max)
-    │   ├── enforcer.rs              # QuotaEnforcer (pre-check/post-record)
-    │   └── bucket.rs                # TokenBucket (RPM + TPM refill)
+    │   ├── enforcer.rs              # QuotaEnforcer trait, InMemoryQuotaEnforcer (P1),
+    │   │                             # [EPIC 4 ISSUE 11] PgQuotaEnforcer (TASK 11.3 / PR #232 —
+    │   │                             #   Postgres-backed daily + monthly spend via CASE-
+    │   │                             #   expression rollover UPDATE on `quota_configs`,
+    │   │                             #   fire-and-forget on failure), RateLimitedQuotaEnforcer
+    │   │                             #   (TASK 11.2 / PR #231 — composite wrapping an inner
+    │   │                             #   QuotaEnforcer with a per-tenant TokenBucketRateLimiter,
+    │   │                             #   check_pre runs rate check FIRST for fail-fast)
+    │   ├── bucket.rs                # TokenBucket (RPM + TPM refill) — P1 cost token bucket
+    │   └── rate_limit.rs            # [EPIC 4 ISSUE 11 TASK 11.2 / PR #231]
+    │                                #   TokenBucketRateLimiter — DashMap-sharded per-tenant
+    │                                #   buckets, lazy refill at consume() time, monotonic
+    │                                #   Instant clock (skew-proof), fractional tokens
     ├── audit/                       # [P1] chat-side + [P2B] direct-action side + [EPIC 2] Penny tool-call side
     │   ├── entry.rs                 # AuditEntry struct (chat audit)
     │   ├── writer.rs                # AuditWriter (mpsc channel -> batch insert, chat audit)
@@ -119,7 +130,17 @@ crates/gadgetron-xaas/
     │       ├── 20260411000003_quotas.sql
     │       ├── 20260411000004_audit_log.sql           # chat audit (P1)
     │       ├── 20260416000001_tool_audit_events.sql   # Penny tool-call audit TABLE (P2A / ADR-P2A-06 addendum) — rows started landing with ISSUE 5 / PR #199 when the Noop sink was replaced by `run_gadget_audit_writer`
-    │       └── 20260419000001_action_audit_events.sql # direct-action audit (P2B / ISSUE 3 / PR #188)
+    │       ├── 20260419000001_action_audit_events.sql # direct-action audit (P2B / ISSUE 3 / PR #188)
+    │       └── 20260420000001_quota_usage_day.sql     # [EPIC 4 ISSUE 11 TASK 11.3 / PR #232]
+    │                                                  # adds `usage_day DATE DEFAULT CURRENT_DATE`
+    │                                                  # column to quota_configs so PgQuotaEnforcer's
+    │                                                  # CASE-expression rollover (daily zeros at UTC
+    │                                                  # midnight, monthly at first-of-month) can
+    │                                                  # compare against a DB-stored date. Default
+    │                                                  # today for existing rows so first post-
+    │                                                  # migration request doesn't spuriously zero
+    │                                                  # monthly usage. Partial index for operator
+    │                                                  # spend reports.
     │
     ├── billing/                     # [P2] — 추가 예정 모듈
     │   ├── ledger.rs                # LedgerEntry (i64 cents)
