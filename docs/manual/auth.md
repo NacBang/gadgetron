@@ -74,7 +74,7 @@ inbound request
 [1b] RequestBodyLimitLayer (4 MiB)    — SEC-M2; emits 413 with plain-text body (rewritten by 1a)
 [2]  TraceLayer                        — tower-http distributed tracing spans
 [3]  request_id_middleware             — UUID → extensions + `x-request-id` response header
-[4]  auth_middleware                   — Bearer → Arc<ValidatedKey>; 401 on parse/lookup failure
+[4]  auth_middleware                   — Bearer OR cookie → Arc<ValidatedKey>; 401 on parse/lookup failure
 [5]  tenant_context_middleware         — ValidatedKey → TenantContext (tenant_id, scopes, request_id)
 [6]  scope_guard_middleware            — per-route scope check; 403 on mismatch (audited, SEC-M4)
 [7]  metrics_middleware                — RequestLog broadcast (innermost, runs after handler)
@@ -91,7 +91,7 @@ route handler
 | 1a / 1b | **HTTP 413** `request_too_large` (OpenAI-shape body after 1a rewrites 1b's raw text) | Request body exceeded 4 MiB (`MAX_BODY_BYTES`). E2E Gate 12 pattern `error.code=request_too_large` is NOT emitted by the tracing sink — 413 bypasses it. |
 | 2 | no failures directly; wraps everything else in a tracing span | Look for the span name in `RUST_LOG=gadgetron=debug` output. |
 | 3 | no failures directly | Every response has an `x-request-id` header; if absent, something before this layer failed. |
-| 4 | **HTTP 401** `invalid_api_key` | Missing/malformed `Authorization: Bearer ...`, unknown key, or revoked key. Audited via SEC-M7. |
+| 4 | **HTTP 401** `invalid_api_key` | Bearer path: missing/malformed `Authorization: Bearer ...`, unknown key, or revoked key. Cookie path (v0.5.9+): missing `gadgetron_session` cookie, expired session, session referencing deleted/inactive user, or service-role user. Audited via SEC-M7 for both paths. |
 | 5 | **HTTP 401** on a defensive `TenantNotFound` path (`middleware/tenant_context.rs:27-35`) if `ValidatedKey` is absent from request extensions. The code comment notes this branch "should never happen when layer order is correct" — it's defensive for test-isolation. In production layer 4 will have already returned 401 in that scenario. | If this 401 fires without layer 4 firing first, a layer-ordering regression is the cause. |
 | 6 | **HTTP 403** `forbidden` | Valid key but scope doesn't match route. Emits `scope denied` WARN with `tenant_id` + `required_scope` + `path` fields (whitelisted in E2E Gate 12 since it's expected on Management-route hits from OpenAiCompat keys). |
 | 7 | no failures directly; emits `RequestLog` broadcast after handler | Failure in the handler itself (500 / 502 / 503) still triggers this layer — the broadcast captures status regardless. |
@@ -225,7 +225,7 @@ Revocation sets `revoked_at = NOW()` for the key. The validator checks `revoked_
 
 ---
 
-## Cookie-session auth (ISSUE 15 TASK 15.1 / v0.5.8)
+## Cookie-session auth (ISSUE 15 TASK 15.1 / v0.5.8 + ISSUE 16 TASK 16.1 / v0.5.9)
 
 In addition to the Bearer-token API key flow above, Gadgetron v0.5.8+ ships a parallel cookie-session surface for browser clients. Three public endpoints:
 
@@ -237,8 +237,10 @@ GET  /api/v1/auth/whoami   (cookie)            → {session_id, user_id, tenant_
 
 **Relationship to Bearer auth**:
 
-- **Parallel, not layered**: the three routes mount on `public_routes` — they bypass the standard Bearer `AuthLayer` chain. Cookie sessions and Bearer keys do not share a middleware gate.
-- **As of v0.5.8, a route uses EXACTLY ONE of the two**: workbench / chat / admin endpoints still require Bearer (`OpenAiCompat` / `Management` scope via the middleware in §"Middleware stack order" above); the three `/auth/*` endpoints use cookie self-authentication. A unified middleware that accepts Bearer OR cookie on the same route is deferred to ISSUE 16.
+- **`/auth/*` endpoints bypass Bearer**: the three `/auth/*` routes mount on `public_routes` — they use cookie self-authentication only. Bearer keys do not share a middleware gate with them.
+- **As of v0.5.9, all other protected routes accept EITHER Bearer OR cookie** (ISSUE 16 TASK 16.1 / PR #259). The `auth_middleware` in `crates/gadgetron-gateway/src/middleware/auth.rs` checks the `Authorization` header first — if a Bearer token is present, the existing API-key validation path runs unchanged. If the header is absent AND a `gadgetron_session` cookie is present, the middleware falls back to `validate_session_and_build_key(pool, token)` which looks up the session, resolves `role` from `users`, and synthesizes a `ValidatedKey` with role-derived scopes (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`; service rejected — shouldn't reach here because login blocks it). This means `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*` now all work for browser cookie clients; no separate middleware variant per surface.
+- **No-db mode silently skips the cookie path** — without a pg pool there's no `user_sessions` table to validate against. `--no-db` deployments are effectively Bearer-only.
+- **Audit attribution for cookie-auth requests**: `api_key_id = Uuid::nil()` sentinel distinguishes cookie sessions from Bearer API keys in audit rows. Downstream audit writers branch on `key_id == Uuid::nil()` to emit `actor_user_id` (from the session row) instead of `actor_api_key_id` when the `audit_log.actor_user_id` column plumbing (TASK 14.1 migration) is fully threaded through the audit writer.
 - **Service-role users cannot log in by password** — `SessionError::ServiceRole` pre-empts the password verify. Service accounts must use Bearer API keys (created via `gadgetron key create` or the user self-service `POST /api/v1/web/workbench/keys`).
 
 **Password hashing**: argon2id via the `argon2` crate (v0.5). PHC-string format stored in `users.password_hash` (set by the `[auth.bootstrap]` first-admin flow per ISSUE 14 TASK 14.2, or by `POST /api/v1/web/workbench/admin/users` per ISSUE 14 TASK 14.3). No bcrypt / PBKDF2. Pre-login inactive-user check avoids timing leaks.
@@ -280,11 +282,17 @@ curl -sS -b /tmp/gad-cookies.txt \
   http://localhost:8080/api/v1/auth/whoami
 ```
 
-**Deferred to ISSUE 16**:
+**Shipped in ISSUE 16 (v0.5.9 / PR #259)**:
 
-- React + Tailwind login form in `gadgetron-web` that consumes these three endpoints.
-- Unified middleware that accepts Bearer OR cookie on the same path (today's Bearer-only `AuthLayer` still governs `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*`).
-- Google OAuth social-login flow (per the multi-user direction `project_multiuser_login_google` — will stack on top of the same `user_sessions` table + cookie shape).
+- Unified middleware that accepts Bearer OR cookie on the same path — `auth_middleware` now covers `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*` for both authentication surfaces. See the "Relationship to Bearer auth" bullet above for the full fallback chain.
+
+**Deferred to ISSUE 17**:
+
+- React + Tailwind login form in `gadgetron-web` that consumes the three `/auth/*` endpoints.
+
+**Post-ISSUE-17 roadmap** (tracked separately on `project_multiuser_login_google`):
+
+- Google OAuth social-login flow — will stack on top of the same `user_sessions` table + cookie shape, so the middleware from ISSUE 16 continues to apply unchanged.
 
 ---
 

@@ -1668,6 +1668,8 @@ Revoke a key owned by the caller. Idempotent (re-revoke returns 200).
 
 Landed by PR #248. Mounted on **public** routes (no Bearer auth); each handler self-authenticates. Spec: [`docs/design/phase2/08-identity-and-users.md`](../design/phase2/08-identity-and-users.md) §2.2.4.
 
+**Related (ISSUE 16 — v0.5.9 / PR #259)**: the three endpoints below are the only **public** cookie routes. As of v0.5.9 the `auth_middleware` on every OTHER protected route (`/v1/*`, `/api/v1/web/workbench/*`, `/api/v1/xaas/*`) also accepts the `gadgetron_session` cookie as a fallback when no `Authorization: Bearer` header is present — scope is synthesized from the user's `role` (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`). See [auth.md §Cookie-session auth](auth.md#cookie-session-auth-issue-15-task-151--v058--issue-16-task-161--v059) for the full fallback chain.
+
 #### POST /api/v1/auth/login
 
 Body: `{ email, password }`. On success returns 200 + `Set-Cookie: gadgetron_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` + body `{ session_id, user_id, tenant_id, expires_at }`. On invalid credentials returns 401 `{ error: { code: "invalid_credentials" } }`. Service-role users are rejected.
