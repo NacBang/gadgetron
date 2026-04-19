@@ -127,9 +127,47 @@ Key routing rules:
 
 ## graphify
 
-This project has a graphify knowledge graph at graphify-out/.
+This project maintains a graphify-generated knowledge graph at
+`graphify-out/` (community detection + god nodes across 281+
+files). It is the fastest way to orient in a codebase this size —
+one `GRAPH_REPORT.md` read beats three rounds of speculative grep.
 
-Rules:
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
-- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
+**Hard rules — main agent AND all subagents (Agent-tool spawns
+included):**
+
+1. **Before searching for files or referencing a symbol**, open
+   `graphify-out/GRAPH_REPORT.md`. Identify the relevant
+   *community hub* (e.g. "Auth & Server Core", "Knowledge
+   Curation") and *god node* (high-degree symbol inside that
+   community). Narrow file lookups to the community's member
+   list rather than repo-wide grep.
+2. When delegating to a subagent via the `Agent` tool, include in
+   the prompt: *"Read `graphify-out/GRAPH_REPORT.md` first to
+   find the relevant community + god node, THEN read specific
+   files."* This keeps exploration scoped and avoids re-reading
+   the corpus.
+3. After modifying Rust code in a session, run `graphify
+   update .` — the AST fast path keeps the graph current without
+   LLM cost. Doc / markdown changes need `/graphify --update`
+   (LLM cost).
+4. If `graphify-out/wiki/index.md` exists, navigate that instead
+   of raw files — the wiki is a curated agent-crawlable surface.
+
+**Hook discipline** — git hooks auto-refresh the graph so
+`GRAPH_REPORT.md` stays fresh:
+
+- `post-commit` — AST refresh after each commit (installed by
+  `graphify hook install`)
+- `post-checkout` — refresh on branch switch
+- `post-merge` — refresh on `git pull` / merge (our own hook;
+  source at `.githooks/post-merge`)
+
+Contributors who clone fresh should run
+`./scripts/install-git-hooks.sh` once. The installer is
+idempotent and safe to re-run.
+
+**Fallback** — if the `graphify` CLI is not installed
+(`pipx install graphifyy` or `pip install --user graphifyy`),
+the hooks and `graphify update` commands silently no-op — never
+blocking commits, merges, or pulls. `GRAPH_REPORT.md` is plain
+markdown and readable without tooling even when slightly stale.

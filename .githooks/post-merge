@@ -1,0 +1,20 @@
+#!/bin/sh
+# post-merge: runs after `git pull` / `git merge`. Updates the graphify
+# AST so the knowledge graph reflects the new code state.
+# Only the AST path (code-only, free) runs — no LLM cost. Doc/image
+# changes need a manual `/graphify --update`.
+
+# Only run if graphify-out/ exists (graph has been built before).
+if [ ! -d "graphify-out" ]; then
+    exit 0
+fi
+
+# Only run if graphify is on PATH.
+command -v graphify >/dev/null 2>&1 || exit 0
+
+# AST update is deterministic and doesn't need the LLM. Graphify's own
+# `update` subcommand handles the code-only fast path. Swallow errors
+# silently — a broken graph update must never block a merge.
+graphify update . >/dev/null 2>&1 || true
+
+exit 0
