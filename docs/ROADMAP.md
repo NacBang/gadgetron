@@ -188,7 +188,7 @@ action ids across bundles.
     bundle file must keep matching its action id set).
 
 ### In-flight ISSUE (10)
-- **ISSUE 10 — bundle marketplace** (in-flight; 0.4.9 ships TASK 10.1)
+- **ISSUE 10 — bundle marketplace** (in-flight; 0.4.9 / 0.4.10 / 0.4.11 ship TASK 10.1 / 10.2 / 10.3 respectively; TASK 10.4 signed manifests remaining)
   - TASK 10.1 ✅ — bundle discovery endpoint (0.4.8 → 0.4.9).
     `GET /api/v1/web/workbench/admin/bundles` (Management-scoped)
     enumerates every bundle under `[web] bundles_dir` without
