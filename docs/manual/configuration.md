@@ -397,6 +397,44 @@ burst = 120
 
 ---
 
+### `[auth.bootstrap]`
+
+First-admin creation at `gadgetron serve` startup. Landed in **ISSUE 14 TASK 14.2 / v0.5.7 / PR #246** as the only supported path to get an initial admin user into a fresh deployment without hand-crafting SQL. Rust surface: `gadgetron-core::config::BootstrapConfig` (mirror struct that the xaas crate converts to `gadgetron_xaas::auth::bootstrap::BootstrapConfig` before calling `bootstrap_admin_if_needed`).
+
+**Startup behavior matrix**:
+
+| `users` table state | `[auth.bootstrap]` set? | Result |
+|---------------------|-------------------------|--------|
+| non-empty | any | config ignored, `tracing::warn!` noting the bootstrap was skipped because users already exist |
+| empty | set + env var present | admin row created (argon2id PHC of the env-var value) and attached to the default tenant; startup proceeds |
+| empty | set + env var missing / empty | startup fails with explicit error: "bootstrap requires `$ADMIN_PASSWORD_ENV` to be set" |
+| empty | unset | startup fails loudly — the only paths to a populated auth surface are this block or direct SQL |
+
+**Fields**:
+
+```toml
+[auth.bootstrap]
+admin_email         = "admin@example.com"   # required. Unique per-tenant; duplicate → config error at startup.
+admin_display_name  = "Admin"               # required. Free-form display string stored on the users row.
+admin_password_env  = "GADGETRON_ADMIN_PW"  # required. NAME of the env var holding the plaintext password.
+                                            # Plaintext passwords in config are intentionally NOT supported — the
+                                            # password arrives via the environment so it never lands on disk in
+                                            # `gadgetron.toml`, git history, or backups of the config tree.
+```
+
+**Password handling**:
+
+- At startup the CLI reads `std::env::var(admin_password_env)` → argon2id hash via the `argon2` crate (v0.5, PHC-string format) → stored in `users.password_hash`.
+- `admin_password_env` **must** name an env var that exists AND is non-empty. An empty value is treated the same as unset (fail-loud).
+- Cookie-session login (`POST /api/v1/auth/login`, ISSUE 15 TASK 15.1) verifies plaintext-from-wire against the stored argon2id PHC; see [auth.md §Cookie-session auth](auth.md).
+- Rotating the admin password is a direct `UPDATE users SET password_hash = '...'` — the `[auth.bootstrap]` block only runs on empty-users state.
+
+**Interaction with `[auth.bootstrap]` + `--no-db` mode**: bootstrap is a Postgres-backed flow (writes to `users` table). `gadgetron serve --no-db` skips the bootstrap path entirely; no-db deployments use the legacy `gadgetron key create` in-memory key surface instead.
+
+**Security note**: the default tenant that receives the bootstrapped admin is UUID-keyed per the `20260420000004_users_teams_sessions.sql` migration — an explicit `tenants` row is upserted with a hardcoded UUID so the schema's FK constraints resolve before the admin user insert. Subsequent tenants land via `gadgetron tenant create`.
+
+---
+
 ### `[agent]`
 
 Penny subprocess runtime의 상위 설정입니다.
@@ -647,6 +685,51 @@ knowledge_writeback = "ops/knowledge/{date}/{topic}"
   - `{date}` → 이벤트 `created_at`의 UTC `YYYY-MM-DD`
   - `{topic}` → snake_case `ActivityKind` 레이블 (예: `direct_action`)
   - `{author}` → actor UUID (bare, 하이픈 포함)
+
+---
+
+### `[bundles.<name>]`
+
+Per-Bundle runtime overrides that the **operator** can apply on top of the manifest the Bundle itself shipped with. Landed in the ADR-P2A-10 Bundle / Plug / Gadget surface and extended by ADDENDUM-01 §1 (per-Plug + per-Gadget RBAC) + §5 (runtime limits + egress ceilings). Rust types: `gadgetron-core::config::{BundleOverride, PlugOverride, GadgetOverride, BundleRuntimeOverride}`.
+
+The section is keyed by Bundle id — e.g. `[bundles.ai-infra]` for the `ai-infra` Bundle. An absent `[bundles.<name>]` section is equivalent to `enabled = true` with no per-Plug or per-Gadget modifications — operators only need to declare this block if they want to **tighten** something the Bundle manifest already permits, or to **disable** the Bundle entirely.
+
+**Fields**:
+
+```toml
+[bundles.ai-infra]
+enabled = true                                # default true (opt-out). false = no Plugs / Gadgets from this Bundle register
+
+# Per-Plug overrides (keyed by PlugId string)
+[bundles.ai-infra.plugs.nvidia-scheduler]
+enabled = true                                # default true. false = Plug doesn't register even if Bundle is enabled.
+
+# Per-Gadget overrides (keyed by Gadget name)
+[bundles.ai-infra.gadgets."wiki.search"]
+tier = "Read"                                 # optional: GadgetTier enum string. Narrower than manifest's tier if set.
+mode = "Auto"                                 # optional: GadgetMode enum string ("Auto" | "Never"). "Ask" is reserved (P2B / ADR-P2A-06 deferred).
+
+# Runtime ceiling / egress overrides (ADDENDUM-01 §5, floors 6 + 7)
+[bundles.ai-infra.runtime.limits]
+cpu_ms_per_call         = 5000                # narrower than manifest's declared cap — operator can tighten, not loosen
+memory_mb_peak          = 512
+wall_clock_ms_per_call  = 10000
+
+[bundles.ai-infra.runtime.egress]
+# shape mirrors bundle.toml [bundle.runtime.egress] — see ADR-P2A-10 for the egress policy schema
+```
+
+**Behavior**:
+
+- **Opt-out, not opt-in**: a Bundle installed under `[web] bundles_dir` is enabled by default. The operator only declares `[bundles.<name>] enabled = false` to disable it.
+- **Narrower-wins policy**: per-Plug + per-Gadget overrides can only *tighten* what the manifest allows. Attempting to loosen (e.g. operator setting `tier = "Write"` on a Gadget the manifest declared as `Read`) fails `AppConfig::load()` with an explicit error.
+- **Runtime limits**: operators can tighten the manifest's declared `cpu_ms_per_call` / `memory_mb_peak` / `wall_clock_ms_per_call` via `[bundles.<name>.runtime.limits]`. The narrower of (manifest, config) is used. In P2B, these fields are **parsed but not enforced** by the Bundle trait install path — enforcement arrives with the external-runtime dispatcher (ADDENDUM-01 §5, deferred to P2C). Operators can declare them today as forward-compat.
+- **Egress policy**: same parsed-but-not-enforced status as limits in P2B.
+- **`tenant_overrides` stanzas**: reserved. See [`[features]`](#features) for the `tenant_plug_overrides_accepted_as_reserved` gate that's required before `AppConfig::load()` accepts a non-empty `[bundles.<bundle>.plugs.<plug>.tenant_overrides]` stanza — prevents operators from silently shipping broken policy expectations. P2B parses these stanzas; P2C wires enforcement.
+
+**Interaction with the bundle-marketplace surface**: the HTTP `POST /api/v1/web/workbench/admin/bundles` install path writes a new Bundle directory under `[web] bundles_dir`; the next `gadgetron serve` restart (or `POST /admin/reload-catalog`) picks up the new Bundle. Overrides in `[bundles.<name>]` apply to the **next** Bundle with that id — operators install then configure, not the reverse.
+
+**Cross-reference**: [`ADR-P2A-10`](../adr/ADR-P2A-10-bundle-plug-gadget-terminology.md) for the canonical Bundle / Plug / Gadget vocabulary, [`ADR-P2A-10-ADDENDUM-01`](../adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md) for the 3-axis RBAC + runtime-ceiling design, and `docs/design/phase2/12-external-gadget-runtime.md` for the P2C runtime enforcement path.
 
 ---
 

@@ -286,11 +286,22 @@ DEFERRED per 2026-04-20 commercialization-layer direction).
 ISSUE 14 closed via PR #246 / v0.5.7 — multi-user-foundation
 infrastructure, not commercialization; reclassified OUT of the
 original "12/13/14 deferred" bucket. ISSUE 15 TASK 15.1 closed
-via PR #248 / v0.5.8 (cookie-session login API). EPIC 4
-remaining before `v1.0.0`: ISSUE 13 (HF catalog — DEFERRED as
-commercialization layer) + ISSUE 16 (web UI login form +
-unified Bearer-or-cookie middleware + Google OAuth social
-login, non-commercialization multi-user completion).
+via PR #248 / v0.5.8 (cookie-session login API). ISSUE 16 TASK
+16.1 closed via PR #259 / v0.5.9 (unified Bearer-or-cookie
+auth middleware — `auth_middleware` cookie fallback with role-
+derived scope synthesis). ISSUE 17 TASK 17.1 closed via PR #260
+/ v0.5.10 (ValidatedKey.user_id plumbing — both auth paths now
+carry the owning user id for downstream audit/billing
+attribution without extra DB round-trips). EPIC 4 remaining
+before `v1.0.0`: ISSUE 13 (HF catalog — DEFERRED as
+commercialization layer) + **ISSUE 18** (web UI login form in
+`gadgetron-web` — React/Tailwind consuming the `/auth/*`
+endpoints; see the ISSUE 18 entry below for task breakdown) +
+**ISSUE 19** (audit_log.actor_user_id plumbing — wire the
+ISSUE-17 `ValidatedKey.user_id` through chat + direct-action +
+tool-invoke audit writers; may ship in parallel with ISSUE 18).
+Google OAuth social login tracked separately post-ISSUE-18 on
+`project_multiuser_login_google`.
 - **ISSUE 12 — billing event telemetry** ✅ closed at telemetry scope
   (invoicing deferred per user directive 2026-04-19 "과금과 같은 상업화는
   뒤로 미뤄도 된다")
@@ -322,12 +333,19 @@ login, non-commercialization multi-user completion).
   - TASK 14.6 (web UI session login) deferred to ISSUE 15 — out of this ISSUE's scope
 - **ISSUE 15 ✅ cookie-session login API** (v0.5.8, closed 2026-04-19)
   - TASK 15.1 ✅ — `POST /api/v1/auth/login` (email/password → SHA-256-hashed session cookie), `POST /auth/logout`, `GET /auth/whoami`. argon2id verify; 24h TTL + idle `last_active_at`; HttpOnly + SameSite=Lax cookie (Secure via proxy). Harness gate 7v.5 (6 assertions: login, whoami, wrong-password 401, logout, whoami-after-logout 401).
-  - Web UI login FORM (React/Tailwind) + unified middleware (Bearer OR cookie) deferred to ISSUE 16.
+  - At ISSUE 15 close, both Web UI login FORM (React/Tailwind) and unified middleware (Bearer OR cookie) were tagged for ISSUE 16. **Post-landing split**: the middleware shipped via PR #259 / ISSUE 16 TASK 16.1 / v0.5.9 (see ISSUE 16 entry below); the login FORM splits out to **ISSUE 18** (was re-numbered after PR #260 took ISSUE 17 for `ValidatedKey.user_id` plumbing).
 - **ISSUE 16 ✅ unified Bearer-or-cookie auth middleware** (v0.5.9, closed 2026-04-19)
   - TASK 16.1 ✅ — `auth_middleware` falls back to session cookie when no Bearer header. Session → user_id → role → synthesized `ValidatedKey` with role-derived scopes (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`; service blocked). `api_key_id = Uuid::nil()` sentinel for cookie sessions — audit attribution via user_id follows when `audit_log.actor_user_id` plumbing completes. Harness gate 7v.6 (cookie → admin endpoint + cookie → OpenAiCompat endpoint + no-auth 401).
-  - Web UI login FORM (React/Tailwind in gadgetron-web) splits to ISSUE 18.
+  - Web UI login FORM (React/Tailwind in gadgetron-web) splits to **ISSUE 18** (see below).
 - **ISSUE 17 ✅ ValidatedKey.user_id plumbing** (v0.5.10, closed 2026-04-19)
   - TASK 17.1 ✅ — `ValidatedKey` gains `user_id: Option<Uuid>`. `PgKeyValidator::validate` SELECTs `api_keys.user_id`. Cookie-session middleware populates from `session.user_id`. Downstream audit/billing/telemetry can now read the owning user without an extra DB round-trip. Follow-up plumbing into `AuditWriter` / action + tool audit sinks is ISSUE 19 (post-backfill). No new harness gates — behavior-preserving data-flow change (48 unit tests + 129 harness gates confirm).
+- **ISSUE 18 ⏳ web UI login form** (planned, post-v0.5.10, closes multi-user EPIC 4 scope before `v1.0.0`)
+  - TASK 18.1 (planned) — React/Tailwind login page in `gadgetron-web` that POSTs to `/api/v1/auth/login`, stores the cookie jar browser-side (HttpOnly set by gateway — JS only observes cookie presence via whoami round-trips), redirects to the original `/web/*` path on success. Error states: 401 → inline form error with `role="alert"`; network failure → retry banner. Should NOT duplicate server-side session validation (trust `/auth/whoami` 401 as the sole "are you logged in?" signal).
+  - TASK 18.2 (planned) — `/web` + `/web/wiki` + `/web/dashboard` entry-point gating: pre-auth gate checks `/auth/whoami`; 401 → render login form instead of the workbench shell; 200 → proceed as today. Playwright E2E gate 7v.7 drives the full login → shell render → logout → back-to-form loop.
+  - Google OAuth social login tracked separately post-ISSUE-18 on `project_multiuser_login_google` — will stack on top of the same `user_sessions` table + cookie shape so the ISSUE 16 middleware + ISSUE 17 `user_id` plumbing continue to apply unchanged.
+- **ISSUE 19 ⏳ audit_log.actor_user_id plumbing** (planned, post-ISSUE-18; may overlap in parallel)
+  - TASK 19.1 (planned) — thread `ValidatedKey.user_id` (populated by ISSUE 17) through `AuditWriter` + `ActionAuditEventWriter` + `run_gadget_audit_writer` so audit rows carry `actor_user_id` alongside `actor_api_key_id`. Schema column was added in ISSUE 14 TASK 14.1 migration and has been unused until now. Enables user-granular audit queries (`WHERE actor_user_id = $uuid`) across chat + direct-action + tool-invoke surfaces.
+  - TASK 19.2 (planned) — analogous plumbing in `billing_events` (TASK 12.1 table) so the ledger can join to user rows for per-user spend reports. Harness gate extension pins `actor_user_id` non-NULL for cookie-auth and Bearer-with-backfilled-user-id paths; NULL tolerance preserved for pre-ISSUE-14-backfill legacy keys.
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).
