@@ -1325,7 +1325,14 @@ fn build_workbench(
         workbench::{GatewayWorkbenchService, WorkbenchActionService, WorkbenchProjectionService},
     };
 
-    let catalog = DescriptorCatalog::seed_p2b();
+    // ISSUE 8 TASK 8.1: the descriptor catalog is now shared via
+    // `Arc<ArcSwap<DescriptorCatalog>>` between projection + action
+    // service. Both views observe the same snapshot; a future reload
+    // handler (TASK 8.2) swaps the Arc atomically and every future
+    // request reads the new catalog with no restart.
+    let catalog = Arc::new(arc_swap::ArcSwap::from_pointee(
+        DescriptorCatalog::seed_p2b(),
+    ));
 
     let projection: Arc<dyn WorkbenchProjectionService> = Arc::new(InProcessWorkbenchProjection {
         knowledge: knowledge_service,
@@ -1369,7 +1376,7 @@ fn build_workbench(
 
     let action_svc: Arc<dyn WorkbenchActionService> =
         Arc::new(InProcessWorkbenchActionService::new_full(
-            catalog,
+            catalog.clone(),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             candidate_coordinator,
             gadget_dispatcher,

@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.0** (EPIC 2 closed — tag `v0.4.0`)
+**Current version: 0.4.1** (post-ISSUE 8 TASK 8.1 ArcSwap plumbing)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -108,15 +108,28 @@ populations without any client-side ceremony.
 **Release:** `v0.4.0` — first Gadgetron release with a working
 external-agent MCP surface end-to-end.
 
-## EPIC 3 — Plugin platform (1-2 months)
+## EPIC 3 — Plugin platform (ACTIVE)
 
 Goal: third-party bundles ship their own actions, providers, and UI
 panels without patching Gadgetron source. Hot-reload lets operators
 install/remove capabilities without restart. Substrate for the ecosystem.
 
+### In-flight ISSUE
+- **ISSUE 8 — DescriptorCatalog hot-reload** (in-flight; 0.4.0 ships TASK 8.1)
+  - TASK 8.1 ✅ — `Arc<ArcSwap<DescriptorCatalog>>` plumbing (0.4.0 → 0.4.1).
+    Projection + action service share the same atomic handle; every
+    read loads a snapshot so in-flight requests finish against their
+    catalog while a future reload atomically swaps the pointer. No
+    user-visible change yet — this is the substrate for the reload
+    endpoint (TASK 8.2) and fs-watcher (TASK 8.3).
+  - TASK 8.2 — reload endpoint (`POST /api/v1/web/workbench/admin/reload-catalog`,
+    Management-scoped) + validator rebuild on swap.
+  - TASK 8.3 — fs-watcher (inotify/kqueue) on the catalog source file
+    triggering an automatic reload.
+  - TASK 8.4 — SIGHUP handler for operator-triggered reload without
+    HTTP surface.
+
 ### Planned ISSUEs
-- **ISSUE 8 — DescriptorCatalog hot-reload**: BundleRegistry + fs-watcher
-  + SIGHUP + atomic `Arc<DescriptorCatalog>` swap.
 - **ISSUE 9 — real bundle manifests**: `[[actions]]` schema, `seed_p2b`
   moves into first-party bundle.
 - **ISSUE 10 — bundle marketplace**: discovery + install/uninstall API,

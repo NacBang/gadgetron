@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use gadgetron_core::{
     agent::tools::GadgetDispatcher,
@@ -42,7 +43,15 @@ use crate::web::{
 /// this PR — the ok path returns a synthetic result and optionally captures
 /// an activity event via the coordinator.
 pub struct InProcessWorkbenchActionService {
-    pub descriptor_catalog: DescriptorCatalog,
+    /// Shared descriptor snapshot — atomically swappable via ISSUE 8
+    /// TASK 8.1. Every `invoke` loads the current `Arc<DescriptorCatalog>`
+    /// so in-flight requests finish against their snapshot while a
+    /// reload (TASK 8.2+) atomically points future requests at the
+    /// new one. `schema_validators` below are pre-compiled from the
+    /// catalog at construction time; any reload that changes schemas
+    /// must also rebuild the service (a no-op swap of seed_p2b is
+    /// safe because schemas are identical).
+    pub descriptor_catalog: Arc<ArcSwap<DescriptorCatalog>>,
     pub replay_cache: Arc<InMemoryReplayCache>,
     pub coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
     /// Pre-compiled JSON-Schema validator, keyed by action id.
@@ -82,7 +91,7 @@ impl InProcessWorkbenchActionService {
     /// (warn-log emitted). This is intentional: misconfigured schema is an
     /// operator problem, not a reason to crash at startup.
     pub fn new(
-        descriptor_catalog: DescriptorCatalog,
+        descriptor_catalog: Arc<ArcSwap<DescriptorCatalog>>,
         replay_cache: InMemoryReplayCache,
         coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
     ) -> Self {
@@ -95,7 +104,7 @@ impl InProcessWorkbenchActionService {
     /// `gadget_name: Some(...)`, step 7 performs a real Gadget dispatch
     /// and the result lands in `WorkbenchActionResult.payload`.
     pub fn new_with_dispatcher(
-        descriptor_catalog: DescriptorCatalog,
+        descriptor_catalog: Arc<ArcSwap<DescriptorCatalog>>,
         replay_cache: InMemoryReplayCache,
         coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
         gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>>,
@@ -115,7 +124,7 @@ impl InProcessWorkbenchActionService {
     /// convenience wrappers above default the sink to
     /// `NoopActionAuditSink` and the approval store to `None`.
     pub fn new_full(
-        descriptor_catalog: DescriptorCatalog,
+        descriptor_catalog: Arc<ArcSwap<DescriptorCatalog>>,
         replay_cache: InMemoryReplayCache,
         coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
         gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>>,
@@ -132,7 +141,9 @@ impl InProcessWorkbenchActionService {
         // only and never leaks descriptors to actors.
         use gadgetron_core::context::Scope;
         let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
-        let all_actions = descriptor_catalog.visible_actions(&all_scopes);
+        let catalog_guard = descriptor_catalog.load();
+        let all_actions = catalog_guard.visible_actions(&all_scopes);
+        drop(catalog_guard);
 
         let mut validators = std::collections::HashMap::new();
         for action in &all_actions {
@@ -175,13 +186,18 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // ---------------------------------------------------------------
         // Step 1: Actor resolved (handled by auth middleware upstream).
         // Step 2: Descriptor lookup — 404 if not found.
+        //
+        // Load the catalog snapshot once at the top so the rest of the
+        // 10-step flow reads a consistent view; a concurrent reload
+        // (ISSUE 8 TASK 8.2) cannot half-swap underneath us.
         // ---------------------------------------------------------------
-        let descriptor = self
-            .descriptor_catalog
-            .find_action(action_id)
-            .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
-                action_id: action_id.to_string(),
-            })?;
+        let catalog = self.descriptor_catalog.load();
+        let descriptor =
+            catalog
+                .find_action(action_id)
+                .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
+                    action_id: action_id.to_string(),
+                })?;
 
         // ---------------------------------------------------------------
         // Step 3: required_scope + disabled_reason check.
@@ -203,7 +219,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         }
 
         // Check instance-level policy (allow_direct_actions=false).
-        if !self.descriptor_catalog.allow_direct_actions() {
+        if !catalog.allow_direct_actions() {
             return Err(WorkbenchHttpError::DirectActionsDisabled);
         }
 
@@ -507,12 +523,12 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         _actor_scopes: &[gadgetron_core::context::Scope],
         approval: ApprovalRequest,
     ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError> {
-        let descriptor = self
-            .descriptor_catalog
-            .find_action(&approval.action_id)
-            .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
+        let catalog = self.descriptor_catalog.load();
+        let descriptor = catalog.find_action(&approval.action_id).ok_or_else(|| {
+            WorkbenchHttpError::ActionNotFound {
                 action_id: approval.action_id.clone(),
-            })?;
+            }
+        })?;
         let start_instant = std::time::Instant::now();
         let audit_event_id = Uuid::new_v4();
         let mut payload: Option<serde_json::Value> = None;
@@ -588,7 +604,7 @@ mod tests {
 
     fn make_service(catalog: DescriptorCatalog) -> InProcessWorkbenchActionService {
         InProcessWorkbenchActionService::new(
-            catalog,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog)),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
         )
@@ -818,7 +834,9 @@ mod tests {
             Arc::new(InProcessCandidateCoordinator::new(store.clone(), 8));
 
         let svc = InProcessWorkbenchActionService::new(
-            DescriptorCatalog::seed_p2b(),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b(),
+            )),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             Some(coordinator),
         );
@@ -893,7 +911,9 @@ mod tests {
             }),
         });
         let svc = InProcessWorkbenchActionService::new_with_dispatcher(
-            DescriptorCatalog::seed_p2b(),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b(),
+            )),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             Some(dispatcher.clone()),
@@ -958,7 +978,9 @@ mod tests {
             }
         }
         let svc = InProcessWorkbenchActionService::new_with_dispatcher(
-            DescriptorCatalog::seed_p2b(),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b(),
+            )),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             Some(Arc::new(FailingDispatcher)),
@@ -1013,7 +1035,9 @@ mod tests {
     async fn invoke_ok_path_emits_audit_event_matching_response_id() {
         let sink = Arc::new(CapturingAuditSink::default());
         let svc = InProcessWorkbenchActionService::new_full(
-            DescriptorCatalog::seed_p2b(),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b(),
+            )),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             None,
@@ -1080,7 +1104,7 @@ mod tests {
         });
         let sink = Arc::new(CapturingAuditSink::default());
         let svc = InProcessWorkbenchActionService::new_full(
-            catalog,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog)),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             None,
@@ -1139,7 +1163,9 @@ mod tests {
         }
         let sink = Arc::new(CapturingAuditSink::default());
         let svc = InProcessWorkbenchActionService::new_full(
-            DescriptorCatalog::seed_p2b(),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b(),
+            )),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             Some(Arc::new(FailingDispatcher)),
@@ -1201,7 +1227,7 @@ mod tests {
         });
         let store: Arc<dyn ApprovalStore> = Arc::new(InMemoryApprovalStore::new());
         let svc = InProcessWorkbenchActionService::new_full(
-            catalog,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog)),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             None,
@@ -1269,7 +1295,7 @@ mod tests {
         });
         let store: Arc<dyn ApprovalStore> = Arc::new(InMemoryApprovalStore::new());
         let svc = InProcessWorkbenchActionService::new_full(
-            catalog,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog)),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             None,
             Some(Arc::new(EchoDispatcher)),
