@@ -704,7 +704,9 @@ All eight routes are always mounted on trunk; the CLI's `build_workbench(knowled
 - `activity.entries` — always `[]` (see §/activity).
 - `request_evidence` — always 404 (see §/evidence).
 - `refresh_view_ids` — always `[]` on every action response (see §POST /actions).
-- `audit_event_id` — always `null`. Direct-action dispatch bypasses Penny's `GadgetAuditEventSink` by design (tracked as `TODO(audit-direct-action)` in `GadgetDispatcher`'s doc comment).
+
+**Shipped since this overview was first written** (historically listed as stubbed):
+- `audit_event_id` — **populated on every terminal path** (ok / pending_approval / dispatch-error) by `ActionAuditSink` wired at server startup. Landed in ISSUE 3 / v0.2.6 (PR #188). See §POST /actions §Audit and §GET /audit/events below.
 
 The `config_error` 400 path exists in `require_workbench(&state)` for the case where `state.workbench` is `None`, but no production build path on trunk produces that state — it is a defensive guard for test harness configurations.
 
