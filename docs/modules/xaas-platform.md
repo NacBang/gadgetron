@@ -142,10 +142,18 @@ crates/gadgetron-xaas/
     │                                                  # monthly usage. Partial index for operator
     │                                                  # spend reports.
     │
-    ├── billing/                     # [P2] — 추가 예정 모듈
-    │   ├── ledger.rs                # LedgerEntry (i64 cents)
-    │   ├── calculator.rs            # CostCalculator (tokens/gpu/vram)
-    │   └── invoice.rs               # Invoice aggregation
+    ├── billing/                     # [P2] — ISSUE 12 telemetry landed (PR #236/#241)
+    │   ├── events.rs                # ✅ insert_billing_event + query_billing_events
+    │   │                            #   (append-only ledger; ON DELETE CASCADE via tenant_id)
+    │   ├── ledger.rs                # (future) LedgerEntry (i64 cents) — materialization
+    │   ├── calculator.rs            # (future) CostCalculator (tokens/gpu/vram) — DEFERRED
+    │   └── invoice.rs               # (future) Invoice aggregation — DEFERRED (TASK 12.3)
+    ├── identity.rs                  # ✅ ISSUE 14 (PR #246) — user CRUD + Role enum
+    │                                #   + single-admin guard + api_keys.user_id backfill
+    ├── identity_keys.rs             # ✅ ISSUE 14 — user self-service API keys
+    ├── teams.rs                     # ✅ ISSUE 14 — teams + team_members CRUD
+    ├── sessions.rs                  # ✅ ISSUE 15 (PR #248) — cookie session create/
+    │                                #   validate/revoke (SHA-256 cookie hash, 24h TTL)
     ├── agent/                       # [P2]
     │   ├── lifecycle.rs             # CREATED -> CONFIGURED -> RUNNING -> PAUSED -> DESTROYED
     │   ├── memory.rs                # short-term (PG) + long-term (pgvector/Qdrant)
@@ -159,7 +167,7 @@ crates/gadgetron-xaas/
         └── reservation.rs           # priority queue + iCalendar RRULE
 ```
 
-**중요**: Phase 2 확장 시 **크레이트 경계 변경 없음**. `billing/` · `agent/` · `catalog/` · `gpuaas/` 디렉토리를 `gadgetron-xaas/src/` 에 **추가**만 하면 됩니다. D-12 크레이트 경계표에 `gadgetron-xaas` 한 행만 추가되었습니다 (D-20260411-03).
+**중요**: Phase 2 확장 시 **크레이트 경계 변경 없음**. `billing/` (ISSUE 12 shipped) + `identity.rs` / `identity_keys.rs` / `teams.rs` / `sessions.rs` (ISSUE 14 + 15 shipped) + `agent/` · `catalog/` · `gpuaas/` (future) 모듈을 `gadgetron-xaas/src/` 에 **추가**만 했습니다. D-12 크레이트 경계표에 `gadgetron-xaas` 한 행만 추가되었습니다 (D-20260411-03).
 
 ### 2.2 의존 방향 (D-12 준수)
 
