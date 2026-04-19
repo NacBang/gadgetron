@@ -153,6 +153,8 @@ Demo started.
   DB: postgresql:///gadgetron_demo
 ```
 
+The `URL:` line points at the `/web` chat shell. The same origin also serves the browser wiki workbench at `<URL>/wiki` (standalone) or as the "Wiki" left-rail tab inside the chat shell (ISSUE A.2, 0.2.3+). See [web.md §/web/wiki](web.md#web-wiki--브라우저-워크벤치-wiki-crud) for the full CRUD UI.
+
 **`./demo.sh start` — macOS / launchctl path** (no PID line — supervised by `launchd`):
 
 ```
