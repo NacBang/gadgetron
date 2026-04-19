@@ -82,14 +82,32 @@ pub trait WorkbenchProjectionService: Send + Sync {
         &self,
     ) -> Result<WorkbenchKnowledgeStatusResponse, WorkbenchHttpError>;
 
-    /// Actor-visible registered views.
-    async fn views(&self) -> Result<WorkbenchRegisteredViewsResponse, WorkbenchHttpError>;
+    /// Actor-visible registered views. `actor_scopes` drives the
+    /// descriptor-visibility filter — only views whose
+    /// `required_scope` is `None` OR satisfied by the supplied scopes
+    /// are surfaced. The handler threads `ctx.scopes` from the
+    /// auth middleware straight through.
+    async fn views(
+        &self,
+        actor_scopes: &[gadgetron_core::context::Scope],
+    ) -> Result<WorkbenchRegisteredViewsResponse, WorkbenchHttpError>;
 
-    /// View payload for a single registered view.
-    async fn view_data(&self, view_id: &str) -> Result<WorkbenchViewData, WorkbenchHttpError>;
+    /// View payload for a single registered view. `actor_scopes` is
+    /// consulted to reject requests for views the caller cannot see
+    /// (returns `ViewNotFound` — 404 — to avoid leaking existence of
+    /// scope-gated views per doc §2.4.1).
+    async fn view_data(
+        &self,
+        actor_scopes: &[gadgetron_core::context::Scope],
+        view_id: &str,
+    ) -> Result<WorkbenchViewData, WorkbenchHttpError>;
 
-    /// Actor-visible registered actions.
-    async fn actions(&self) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError>;
+    /// Actor-visible registered actions. Same scope-filter semantics
+    /// as `views`.
+    async fn actions(
+        &self,
+        actor_scopes: &[gadgetron_core::context::Scope],
+    ) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,9 +119,15 @@ pub trait WorkbenchProjectionService: Send + Sync {
 pub trait WorkbenchActionService: Send + Sync {
     /// Execute a direct action: validates args, checks replay cache, fans out
     /// to audit/activity/candidate capture, returns the result envelope.
+    ///
+    /// `actor_scopes` drives the step-3 scope check against
+    /// `ActionDescriptor.required_scope`. The handler threads
+    /// `TenantContext.scopes` straight through from the auth middleware —
+    /// no more placeholder `[Scope::OpenAiCompat]` hardcoding.
     async fn invoke(
         &self,
         actor: &AuthenticatedContext,
+        actor_scopes: &[gadgetron_core::context::Scope],
         action_id: &str,
         request: InvokeWorkbenchActionRequest,
     ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError>;
@@ -315,28 +339,31 @@ pub async fn get_knowledge_status(
 /// `GET /views` — actor-visible registered views.
 pub async fn list_views(
     State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
 ) -> Result<Json<WorkbenchRegisteredViewsResponse>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
-    let resp = svc.projection.views().await?;
+    let resp = svc.projection.views(&ctx.scopes).await?;
     Ok(Json(resp))
 }
 
 /// `GET /views/:view_id/data` — payload for a single registered view.
 pub async fn load_view_data(
     State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Path(view_id): Path<String>,
 ) -> Result<Json<WorkbenchViewData>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
-    let resp = svc.projection.view_data(&view_id).await?;
+    let resp = svc.projection.view_data(&ctx.scopes, &view_id).await?;
     Ok(Json(resp))
 }
 
 /// `GET /actions` — actor-visible registered actions.
 pub async fn list_actions(
     State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
 ) -> Result<Json<WorkbenchRegisteredActionsResponse>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
-    let resp = svc.projection.actions().await?;
+    let resp = svc.projection.actions(&ctx.scopes).await?;
     Ok(Json(resp))
 }
 
@@ -346,6 +373,7 @@ pub async fn list_actions(
 /// Returns `501 Not Implemented` when the action service is absent.
 pub async fn invoke_action(
     State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Path(action_id): Path<String>,
     Json(request): Json<InvokeWorkbenchActionRequest>,
 ) -> Result<Json<InvokeWorkbenchActionResponse>, WorkbenchHttpError> {
@@ -355,8 +383,17 @@ pub async fn invoke_action(
             "action service is not wired in this build".into(),
         ))
     })?;
-    let actor = AuthenticatedContext::system();
-    let resp = action_svc.invoke(&actor, &action_id, request).await?;
+    // Drift-fix follow-up to PR 7: build a real AuthenticatedContext
+    // from the authenticated request instead of the old system sentinel.
+    // `actor.user_id = api_key_id` is the placeholder identity until a
+    // real user table lands; `actor.tenant_id` is the real tenant.
+    let actor = AuthenticatedContext {
+        user_id: ctx.api_key_id,
+        tenant_id: ctx.tenant_id,
+    };
+    let resp = action_svc
+        .invoke(&actor, &ctx.scopes, &action_id, request)
+        .await?;
     Ok(Json(resp))
 }
 
