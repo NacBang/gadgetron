@@ -47,6 +47,7 @@ impl MockKeyValidator {
                 api_key_id: Uuid::new_v4(),
                 tenant_id: Uuid::new_v4(),
                 scopes,
+                user_id: None,
             }),
         }
     }

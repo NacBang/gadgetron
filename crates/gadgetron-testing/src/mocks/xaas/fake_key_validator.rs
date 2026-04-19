@@ -65,6 +65,7 @@ impl KeyValidator for FakePgKeyValidator {
             api_key_id,
             tenant_id,
             scopes,
+            user_id: None,
         }))
     }
 

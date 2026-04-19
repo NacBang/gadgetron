@@ -45,6 +45,7 @@ impl AllowAllValidator {
                 api_key_id: Uuid::nil(),
                 tenant_id: Uuid::nil(),
                 scopes: vec![Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin],
+                user_id: None,
             }),
         }
     }
