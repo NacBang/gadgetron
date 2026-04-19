@@ -1736,6 +1736,54 @@ fi
 rm -f "$COOKIE_JAR"
 
 # ---------------------------------------------------------------------------
+# Gate 7v.6 — unified Bearer-or-cookie auth middleware (ISSUE 16 TASK 16.1)
+# ---------------------------------------------------------------------------
+#
+# Fresh login → use the session cookie (NO Bearer header) against an
+# admin-scoped endpoint (/admin/users). Previously /admin/* required
+# Bearer with Management scope; now the cookie-session surface can
+# reach it too because the bootstrap admin is role=admin which maps
+# to [OpenAiCompat, Management] scopes in the middleware.
+log "=== Gate 7v.6: unified Bearer-or-cookie middleware (ISSUE 16 TASK 16.1) ==="
+COOKIE_JAR2="$ART_DIR/session-cookie-unified.jar"
+rm -f "$COOKIE_JAR2"
+curl -fsS -c "$COOKIE_JAR2" -X POST \
+  -H "Content-Type: application/json" \
+  -d "$(jq -cn --arg email "harness-admin@example.com" \
+                --arg pw "$GADGETRON_BOOTSTRAP_ADMIN_PASSWORD" \
+        '{email: $email, password: $pw}')" \
+  "$GAD_BASE/api/v1/auth/login" > /dev/null 2>&1
+
+# Management-scoped endpoint via cookie (no Bearer header).
+COOKIE_ADMIN_RESP="$(curl -fsS -b "$COOKIE_JAR2" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+if echo "$COOKIE_ADMIN_RESP" | jq -e '.users | type == "array"' >/dev/null 2>&1; then
+  pass "cookie-session reaches /admin/users with admin-role-mapped scopes"
+else
+  fail "unified middleware regressed: /admin/users via cookie missing users array" \
+    "$(echo "$COOKIE_ADMIN_RESP" | head -c 400)"
+fi
+
+# OpenAiCompat-scoped endpoint via cookie (tenant-scoped quota status).
+COOKIE_QUOTA_CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR2" \
+  "$GAD_BASE/api/v1/web/workbench/quota/status" 2>&1 || true)"
+if [ "$COOKIE_QUOTA_CODE" = "200" ]; then
+  pass "cookie-session reaches /quota/status (OpenAiCompat scope)"
+else
+  fail "unified middleware regressed: /quota/status via cookie got $COOKIE_QUOTA_CODE" ""
+fi
+
+# No Bearer + no cookie → 401.
+NO_AUTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+if [ "$NO_AUTH_CODE" = "401" ]; then
+  pass "no auth → 401 (unified middleware falls through)"
+else
+  fail "unified middleware regressed: no auth expected 401, got $NO_AUTH_CODE" ""
+fi
+rm -f "$COOKIE_JAR2"
+
+# ---------------------------------------------------------------------------
 # Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
 # ---------------------------------------------------------------------------
 #

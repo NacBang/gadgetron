@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.8** (post-ISSUE 15 close — cookie-session login/logout/whoami API)
+**Current version: 0.5.9** (post-ISSUE 16 close — unified Bearer-or-cookie auth middleware)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -323,6 +323,9 @@ login, non-commercialization multi-user completion).
 - **ISSUE 15 ✅ cookie-session login API** (v0.5.8, closed 2026-04-19)
   - TASK 15.1 ✅ — `POST /api/v1/auth/login` (email/password → SHA-256-hashed session cookie), `POST /auth/logout`, `GET /auth/whoami`. argon2id verify; 24h TTL + idle `last_active_at`; HttpOnly + SameSite=Lax cookie (Secure via proxy). Harness gate 7v.5 (6 assertions: login, whoami, wrong-password 401, logout, whoami-after-logout 401).
   - Web UI login FORM (React/Tailwind) + unified middleware (Bearer OR cookie) deferred to ISSUE 16.
+- **ISSUE 16 ✅ unified Bearer-or-cookie auth middleware** (v0.5.9, closed 2026-04-19)
+  - TASK 16.1 ✅ — `auth_middleware` falls back to session cookie when no Bearer header. Session → user_id → role → synthesized `ValidatedKey` with role-derived scopes (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`; service blocked). `api_key_id = Uuid::nil()` sentinel for cookie sessions — audit attribution via user_id follows when `audit_log.actor_user_id` plumbing completes. Harness gate 7v.6 (cookie → admin endpoint + cookie → OpenAiCompat endpoint + no-auth 401).
+  - Web UI login FORM (React/Tailwind in gadgetron-web) splits to **ISSUE 17**.
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).
