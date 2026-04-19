@@ -56,8 +56,8 @@ Foundational error codes emitted by the request pipeline — auth, scoping, rout
 | `provider_error` | 502 | `api_error` | Upstream LLM provider returned an error |
 | `stream_interrupted` | 502 | `api_error` | SSE stream was interrupted mid-response |
 | `billing_error` | 500 | `api_error` | Internal billing calculation error |
-| `download_failed` | 500 | `api_error` | Model download failed (node subsystem, Sprint 4+) |
-| `hotswap_failed` | 500 | `api_error` | Model hot-swap failed (node subsystem, Sprint 4+) |
+| `download_failed` | 500 | `api_error` | Model download failed — error variant exists in `gadgetron-core::error` but the node-subsystem path that emits it is scheduled for EPIC 5 (cluster platform, post-1.0 per ROADMAP v2). The "Sprint 4+" label from Phase 1 planning did not carry into ROADMAP v2. |
+| `hotswap_failed` | 500 | `api_error` | Model hot-swap failed — same contract as `download_failed`: variant exists, emission path is EPIC 5 scope (post-1.0). |
 | `db_pool_timeout` | 503 | `server_error` | PostgreSQL connection pool exhausted |
 | `db_row_not_found` | 404 | `server_error` | Requested database record does not exist |
 | `knowledge_backend_not_registered` | 500 | `server_error` | No knowledge plug is registered for the requested backend (operator misconfiguration) |

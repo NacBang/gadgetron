@@ -48,7 +48,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - Bearer token authentication backed by PostgreSQL
 - Per-tenant scope enforcement (`OpenAiCompat`, `Management`, `XaasAdmin`)
 - In-memory quota enforcement (daily ceiling check)
-- Structured audit log (written to tracing; PostgreSQL batch-insert is Sprint 2+); streaming requests emit two correlated entries — dispatch-time + stream-end amendment with actual token counts and status
+- Structured audit log (written to tracing stdout; a general `audit_log` PostgreSQL table batch-insert is NOT implemented — the "Sprint 2+" label from Phase 1 era never got scheduled in ROADMAP v2). Two narrower audit surfaces DO persist to Postgres today: `action_audit_events` (ISSUE 3 / v0.2.6 / PR #188 — direct-action terminals) and `tool_audit_events` (ISSUE 5 / v0.2.8 / PR #199 — Penny tool calls + external MCP invocations). Streaming chat requests emit two correlated tracing entries — dispatch-time + stream-end amendment with actual token counts and status.
 - Automatic PostgreSQL schema migrations on startup
 - Gemini provider — request/response adaptation implemented
 - vLLM provider — tested end-to-end against a live vLLM instance
