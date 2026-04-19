@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — integer-cent billing ledger (ISSUE 12)
 
 > **담당**: @xaas-platform-lead
-> **상태**: TASK 12.1 Implementation landed (0.5.5); TASKs 12.2+ designed, unbuilt
+> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
 > **작성일**: 2026-04-19
 > **관련 크레이트**: `gadgetron-xaas` (새 `billing` 모듈), `gadgetron-gateway`, `gadgetron-cli`
 > **Phase**: [P2] — extends Phase 1 quota infrastructure (`phase1.md`)
