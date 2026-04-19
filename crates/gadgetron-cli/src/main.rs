@@ -1574,6 +1574,21 @@ async fn init_serve_runtime(
         {
             return Err(anyhow::anyhow!("bootstrap admin: {e}"));
         }
+        // ISSUE 14 TASK 14.3 — backfill api_keys.user_id for rows
+        // predating ISSUE 14. Idempotent; only touches NULL rows.
+        match gadgetron_xaas::identity::backfill_api_keys_user_id(pool).await {
+            Ok(n) if n > 0 => tracing::info!(
+                target: "identity.backfill",
+                rows = n,
+                "api_keys.user_id backfilled to first admin"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                target: "identity.backfill",
+                error = %e,
+                "api_keys.user_id backfill failed"
+            ),
+        }
     }
 
     let base_enforcer: SharedQuotaEnforcer = if let Some(pool) = pg_pool.clone() {

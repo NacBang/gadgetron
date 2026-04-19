@@ -783,6 +783,108 @@ pub async fn list_billing_events(
     Ok(Json(BillingEventsResponse { events, returned }))
 }
 
+// ---------------------------------------------------------------------------
+// ISSUE 14 TASK 14.3 — admin user CRUD
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct ListUsersQuery {
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListUsersResponse {
+    pub users: Vec<gadgetron_xaas::identity::UserRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateUserRequest {
+    pub email: String,
+    pub display_name: String,
+    pub role: gadgetron_xaas::identity::Role,
+    /// Plaintext password. Required for `member` + `admin`; MUST be
+    /// absent for `service` (400 otherwise).
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DeleteUserResponse {
+    pub deleted: bool,
+    pub user_id: uuid::Uuid,
+}
+
+/// `GET /api/v1/web/workbench/admin/users` — list users in the caller's tenant.
+/// Management scope. Tenant boundary pinned by handler.
+pub async fn list_users_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<ListUsersQuery>,
+) -> Result<Json<ListUsersResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "user listing requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let users = gadgetron_xaas::identity::list_users(pool, ctx.tenant_id, limit)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("list_users failed: {e}")))
+        })?;
+    let returned = users.len();
+    Ok(Json(ListUsersResponse { users, returned }))
+}
+
+/// `POST /api/v1/web/workbench/admin/users` — admin creates a user in
+/// the caller's tenant.
+pub async fn create_user_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<Json<gadgetron_xaas::identity::UserRow>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "user creation requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let row = gadgetron_xaas::identity::create_user(
+        pool,
+        ctx.tenant_id,
+        &body.email,
+        &body.display_name,
+        body.role,
+        body.password.as_deref(),
+    )
+    .await
+    .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("create_user: {e}"))))?;
+    Ok(Json(row))
+}
+
+/// `DELETE /api/v1/web/workbench/admin/users/{user_id}` — with the
+/// single-admin guard.
+pub async fn delete_user_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<DeleteUserResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "user deletion requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    gadgetron_xaas::identity::delete_user(pool, ctx.tenant_id, user_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("delete_user: {e}")))
+        })?;
+    Ok(Json(DeleteUserResponse {
+        deleted: true,
+        user_id,
+    }))
+}
+
 /// `GET /usage/summary` — tenant-scoped operations rollup.
 ///
 /// Aggregates over the past `window_hours` (default 24, clamped
@@ -1122,6 +1224,13 @@ pub fn workbench_routes() -> Router<AppState> {
         .route(
             "/admin/bundles/{bundle_id}",
             axum::routing::delete(uninstall_bundle_handler),
+        )
+        // ISSUE 14 TASK 14.3 — admin user CRUD.
+        .route("/admin/users", get(list_users_handler))
+        .route("/admin/users", post(create_user_handler))
+        .route(
+            "/admin/users/{user_id}",
+            axum::routing::delete(delete_user_handler),
         )
 }
 

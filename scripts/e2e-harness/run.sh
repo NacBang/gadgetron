@@ -1339,6 +1339,89 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7v.1 — admin user CRUD (ISSUE 14 TASK 14.3)
+# ---------------------------------------------------------------------------
+#
+# The harness creates a fresh test tenant for the API keys; the
+# bootstrap admin lives in the hardcoded DEFAULT tenant
+# (00000000-0000-0000-0000-000000000001), so it's invisible here.
+# Starting from an empty users table in the test tenant, exercise
+# the full CRUD + single-admin guard + RBAC.
+log "=== Gate 7v.1: admin user CRUD (ISSUE 14 TASK 14.3) ==="
+
+# Initial list — test tenant is fresh, expect zero users.
+USERS_LIST_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+INITIAL_COUNT="$(echo "$USERS_LIST_RESP" | jq '.users | length' 2>/dev/null || echo -1)"
+if [ "${INITIAL_COUNT:-0}" -eq 0 ]; then
+  pass "admin/users initial list is empty in fresh test tenant"
+else
+  fail "admin/users initial list regressed — expected 0, got $INITIAL_COUNT" \
+    "$(echo "$USERS_LIST_RESP" | head -c 400)"
+fi
+
+# POST a member user.
+MEMBER_BODY='{"email":"harness-member@example.com","display_name":"Harness Member","role":"member","password":"correct horse"}'
+MEMBER_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$MEMBER_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+MEMBER_ID="$(echo "$MEMBER_RESP" | jq -r '.id // ""' 2>/dev/null)"
+MEMBER_ROLE="$(echo "$MEMBER_RESP" | jq -r '.role // ""' 2>/dev/null)"
+if [ -n "$MEMBER_ID" ] && [ "$MEMBER_ROLE" = "member" ]; then
+  pass "admin/users POST created member (id=$MEMBER_ID)"
+else
+  fail "admin/users POST shape regressed" "$(echo "$MEMBER_RESP" | head -c 400)"
+fi
+
+# POST a test admin — this becomes the single active admin in this tenant.
+ADMIN_BODY='{"email":"harness-admin2@example.com","display_name":"Harness Tenant Admin","role":"admin","password":"correct horse 2"}'
+ADMIN_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ADMIN_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+ADMIN_ID="$(echo "$ADMIN_RESP" | jq -r '.id // ""' 2>/dev/null)"
+if [ -n "$ADMIN_ID" ]; then
+  pass "admin/users POST created admin (id=$ADMIN_ID)"
+else
+  fail "admin/users POST admin regressed" "$(echo "$ADMIN_RESP" | head -c 400)"
+fi
+
+# Single-admin guard — this is the only active admin, delete must refuse.
+DELETE_ADMIN_CODE="$(curl -s -o /tmp/del_admin.json -w '%{http_code}' -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users/$ADMIN_ID" 2>&1 || true)"
+if [ "$DELETE_ADMIN_CODE" != "200" ]; then
+  pass "single-admin guard refused last-admin delete (status=$DELETE_ADMIN_CODE)"
+else
+  fail "single-admin guard failed — last admin deleted" \
+    "$(cat /tmp/del_admin.json | head -c 400)"
+fi
+rm -f /tmp/del_admin.json
+
+# Happy-path delete of member.
+DELETE_MEMBER_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users/$MEMBER_ID" 2>&1 || true)"
+if echo "$DELETE_MEMBER_RESP" | jq -e '.deleted == true' >/dev/null 2>&1; then
+  pass "admin/users DELETE removed member (id=$MEMBER_ID)"
+else
+  fail "admin/users DELETE member regressed" "$(echo "$DELETE_MEMBER_RESP" | head -c 400)"
+fi
+
+# RBAC — OpenAiCompat caller must get 403 on /admin/users.
+USERS_RBAC_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+if [ "$USERS_RBAC_CODE" = "403" ]; then
+  pass "admin/users RBAC — OpenAiCompat key → 403"
+else
+  fail "admin/users RBAC regressed — expected 403, got $USERS_RBAC_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
 # ---------------------------------------------------------------------------
 #
