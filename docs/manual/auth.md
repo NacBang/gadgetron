@@ -286,13 +286,21 @@ curl -sS -b /tmp/gad-cookies.txt \
 
 - Unified middleware that accepts Bearer OR cookie on the same path — `auth_middleware` now covers `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*` for both authentication surfaces. See the "Relationship to Bearer auth" bullet above for the full fallback chain.
 
-**Deferred to ISSUE 17**:
+**Shipped in ISSUE 17 (v0.5.10 / PR #260)**:
+
+- `ValidatedKey.user_id: Option<Uuid>` populated by both auth paths. `PgKeyValidator::validate` SELECTs `api_keys.user_id` alongside the existing `(id, tenant_id, scopes)` tuple. Cookie-session path populates from `session.user_id`. Legacy API keys predating the ISSUE 14 TASK 14.1 `api_keys.user_id` backfill surface as `user_id = None`. Downstream audit/billing/telemetry can now attribute activity to users without an extra DB round-trip — the wiring into audit writers themselves is **ISSUE 19**.
+
+**Deferred to ISSUE 18**:
 
 - React + Tailwind login form in `gadgetron-web` that consumes the three `/auth/*` endpoints.
 
-**Post-ISSUE-17 roadmap** (tracked separately on `project_multiuser_login_google`):
+**Deferred to ISSUE 19**:
 
-- Google OAuth social-login flow — will stack on top of the same `user_sessions` table + cookie shape, so the middleware from ISSUE 16 continues to apply unchanged.
+- Thread `ValidatedKey.user_id` into `AuditWriter` + `ActionAuditEventWriter` + `run_gadget_audit_writer` so `audit_log.actor_user_id` (schema already in place via ISSUE 14 TASK 14.1 migration) actually gets populated. Same treatment for `billing_events` rows. Harness gate extension to pin `actor_user_id` non-NULL for cookie-auth + backfilled-user-id paths.
+
+**Post-ISSUE-18 roadmap** (tracked separately on `project_multiuser_login_google`):
+
+- Google OAuth social-login flow — will stack on top of the same `user_sessions` table + cookie shape, so the middleware from ISSUE 16 + user-id plumbing from ISSUE 17 continue to apply unchanged.
 
 ---
 

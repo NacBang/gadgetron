@@ -1,13 +1,13 @@
 # 08 — Identity, Users, Teams, Admin (D1 / D2 / D7 / D8)
 
 > **담당**: PM (Claude)
-> **상태**: Approved → **IMPLEMENTED on trunk** (post-PR-#246 / v0.5.7 closes ISSUE 14 — users/teams/team_members/user_sessions schema shipped via TASK 14.1, argon2id first-admin bootstrap via TASK 14.2, admin user CRUD via TASK 14.3, user self-service keys via TASK 14.4, team + member CRUD via TASK 14.5, `gadgetron user` + `gadgetron team` CLI via TASK 14.7. HTTP cookie-session login API shipped via PR #248 / ISSUE 15 TASK 15.1 / v0.5.8 — `POST /api/v1/auth/login` + `/logout` + `GET /whoami`. **Unified Bearer-or-cookie auth middleware shipped via PR #259 / ISSUE 16 TASK 16.1 / v0.5.9** — `auth_middleware` falls back to the `gadgetron_session` cookie when no Bearer header is present, covering `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*` for both auth surfaces. **Web UI login form (React/Tailwind in `gadgetron-web`)** split to **ISSUE 17**. **Google OAuth social login** tracked separately post-ISSUE-17 on `project_multiuser_login_google`.)
+> **상태**: Approved → **IMPLEMENTED on trunk** (post-PR-#246 / v0.5.7 closes ISSUE 14 — users/teams/team_members/user_sessions schema shipped via TASK 14.1, argon2id first-admin bootstrap via TASK 14.2, admin user CRUD via TASK 14.3, user self-service keys via TASK 14.4, team + member CRUD via TASK 14.5, `gadgetron user` + `gadgetron team` CLI via TASK 14.7. HTTP cookie-session login API shipped via PR #248 / ISSUE 15 TASK 15.1 / v0.5.8 — `POST /api/v1/auth/login` + `/logout` + `GET /whoami`. **Unified Bearer-or-cookie auth middleware shipped via PR #259 / ISSUE 16 TASK 16.1 / v0.5.9** — `auth_middleware` falls back to the `gadgetron_session` cookie when no Bearer header is present, covering `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*` for both auth surfaces. **`ValidatedKey.user_id` plumbing shipped via PR #260 / ISSUE 17 TASK 17.1 / v0.5.10** — both auth paths populate the owning user id so downstream audit/billing can attribute activity to users without extra DB round-trips. **Web UI login form (React/Tailwind in `gadgetron-web`)** split to **ISSUE 18**. **Audit-writer `actor_user_id` wiring** (threading ISSUE-17 `user_id` into `audit_log` + `billing_events` rows) split to **ISSUE 19**. **Google OAuth social login** tracked separately post-ISSUE-18 on `project_multiuser_login_google`.)
 > **작성일**: 2026-04-18
-> **최종 업데이트**: 2026-04-18 (design) · 2026-04-20 (implementation landed: PR #246 + PR #248 + PR #259)
+> **최종 업데이트**: 2026-04-18 (design) · 2026-04-20 (implementation landed: PR #246 + PR #248 + PR #259 + PR #260)
 > **Parent**: `docs/adr/ADR-P2A-08-multi-user-foundation.md`, `docs/process/04-decision-log.md` D-20260418-02
 > **Sibling**: [`09-knowledge-acl.md`](09-knowledge-acl.md), [`10-penny-permission-inheritance.md`](10-penny-permission-inheritance.md)
-> **Drives**: P2B 구현 — `users` / `teams` / `team_members` 스키마 ✅ shipped, user session ✅ shipped, admin bootstrap ✅ shipped, CLI/REST ✅ shipped, unified Bearer/cookie middleware ✅ shipped, web UI 로그인 폼 ⏳ ISSUE 17
-> **관련 크레이트**: `gadgetron-xaas` (스키마 + 인증 로직) ✅, `gadgetron-core` (타입) ✅, `gadgetron-gateway` (session middleware + unified auth_middleware) ✅, `gadgetron-cli` (user/team 서브커맨드) ✅, `gadgetron-web` (로그인 UI) ⏳ ISSUE 17
+> **Drives**: P2B 구현 — `users` / `teams` / `team_members` 스키마 ✅ shipped, user session ✅ shipped, admin bootstrap ✅ shipped, CLI/REST ✅ shipped, unified Bearer/cookie middleware ✅ shipped, `ValidatedKey.user_id` plumbing ✅ shipped, web UI 로그인 폼 ⏳ ISSUE 18, audit-writer actor_user_id wiring ⏳ ISSUE 19
+> **관련 크레이트**: `gadgetron-xaas` (스키마 + 인증 로직 + `ValidatedKey.user_id`) ✅, `gadgetron-core` (타입) ✅, `gadgetron-gateway` (session middleware + unified auth_middleware + cookie-path user_id populate) ✅, `gadgetron-cli` (user/team 서브커맨드) ✅, `gadgetron-web` (로그인 UI) ⏳ ISSUE 18
 > **Phase**: [P2B]
 
 ---
@@ -780,7 +780,7 @@ gadgetron migrate v2b-multiuser \
 - [x] `gadgetron-xaas::AuthContext` + API key → user 해소 로직 — `api_keys.user_id` backfill in `init_serve_runtime` (TASK 14.3 / PR #246).
 - [x] `gadgetron-gateway::auth_middleware` (web session + API key 통합) — **TASK 16.1 / PR #259 / v0.5.9**. Bearer path unchanged; cookie fallback via `validate_session_and_build_key` when no Bearer header, role → scope synthesis (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`).
 - [x] `gadgetron-cli::user`, `cli::team` 서브커맨드 (TASK 14.7 / PR #246) — `cli::auth` subcommand still **not shipped** (would wrap the `/auth/login` endpoint for shell-driven session flows); deferred to post-v1.0.0.
-- [ ] `gadgetron-web`: 로그인 페이지 (**ISSUE 17**) + session 관리 ✅ (cookie-session API shipped TASK 15.1) + admin 콘솔 (users/teams CRUD UI — post-v1.0.0).
+- [ ] `gadgetron-web`: 로그인 페이지 (**ISSUE 18**) + session 관리 ✅ (cookie-session API shipped TASK 15.1) + admin 콘솔 (users/teams CRUD UI — post-v1.0.0).
 - [x] Bootstrap admin 로직 (`gadgetron-cli::main` + `gadgetron-xaas::auth::bootstrap::bootstrap_admin_if_needed`) — TASK 14.2 / PR #246.
 - [ ] Migration 스크립트 (`gadgetron migrate v2b-multiuser`) — **not shipped**; current path uses `gadgetron serve` to auto-apply sqlx migrations.
 - [x] Manual: `docs/manual/auth.md` rewritten with cookie-session + unified middleware coverage; `docs/manual/admin-operations.md` NOT created (content merged into `auth.md` + `api-reference.md` instead).
