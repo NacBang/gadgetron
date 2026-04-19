@@ -392,7 +392,10 @@ mod tests {
             args: serde_json::json!({"query": "hello", "max_results": 5}),
             client_invocation_id: None,
         };
-        let resp = svc.invoke(&actor(), &actor_scopes_default(), "knowledge-search", req).await.unwrap();
+        let resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
+            .await
+            .unwrap();
         assert_eq!(resp.result.status, "ok");
     }
 
@@ -516,7 +519,10 @@ mod tests {
             args: serde_json::json!({"query": "test knowledge"}),
             client_invocation_id: None,
         };
-        let resp = svc.invoke(&actor(), &actor_scopes_default(), "knowledge-search", req).await.unwrap();
+        let resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
+            .await
+            .unwrap();
         assert_eq!(resp.result.status, "ok");
         assert!(resp.result.approval_id.is_none());
         assert!(resp.result.audit_event_id.is_none());
@@ -548,7 +554,10 @@ mod tests {
             client_invocation_id: None,
         };
 
-        let resp = svc.invoke(&actor(), &actor_scopes_default(), "knowledge-search", req).await.unwrap();
+        let resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
+            .await
+            .unwrap();
 
         // Status must be "ok"
         assert_eq!(resp.result.status, "ok", "status must be ok");
