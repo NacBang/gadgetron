@@ -87,17 +87,19 @@ fn make_state_with_coordinator(
     >,
 ) -> AppState {
     let (audit_writer, _rx) = AuditWriter::new(AUDIT_CAPACITY);
-    let catalog = DescriptorCatalog::seed_p2b();
+    let catalog = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        DescriptorCatalog::seed_p2b(),
+    ));
 
     let projection = Arc::new(InProcessWorkbenchProjection {
         knowledge: None,
         gateway_version: "0.0.0-test",
-        descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog.clone())),
+        descriptor_catalog: catalog.clone(),
     });
 
     let action_svc: Arc<dyn WorkbenchActionService> =
         Arc::new(InProcessWorkbenchActionService::new(
-            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog)),
+            catalog.clone(),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             coordinator,
         ));
@@ -115,6 +117,7 @@ fn make_state_with_coordinator(
             projection,
             actions: Some(action_svc),
             approval_store: None,
+            descriptor_catalog: Some(catalog),
         })),
         penny_shared_surface: None,
         penny_assembler: None,

@@ -1264,6 +1264,49 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
+# ---------------------------------------------------------------------------
+#
+# `POST /api/v1/web/workbench/admin/reload-catalog` atomically swaps a
+# fresh `DescriptorCatalog` behind the ArcSwap. The response shape is
+# `{reloaded:true, action_count, view_count, source}`. We do BOTH the
+# shape assertion AND a sanity check that the action count matches
+# what `/workbench/actions` reports right after — if they diverge,
+# the swap happened but the read path is still pointing at the old
+# pointer (plumbing regression).
+
+log "=== Gate 7q.1: admin/reload-catalog (Management scope) ==="
+RELOAD_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  "$GAD_BASE/api/v1/web/workbench/admin/reload-catalog" 2>&1 || true)"
+if echo "$RELOAD_RESP" | jq -e '.reloaded == true and .source == "seed_p2b" and (.action_count | type == "number") and (.view_count | type == "number")' >/dev/null 2>&1; then
+  RELOAD_ACTIONS="$(echo "$RELOAD_RESP" | jq '.action_count')"
+  # Cross-check: /workbench/actions count matches post-reload count.
+  ACTIONS_LIVE="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+    "$GAD_BASE/api/v1/web/workbench/actions" 2>&1 \
+    | jq '.actions | length' 2>/dev/null || echo -1)"
+  if [ "$RELOAD_ACTIONS" = "$ACTIONS_LIVE" ]; then
+    pass "admin/reload-catalog swaps atomically (actions=$RELOAD_ACTIONS)"
+  else
+    fail "post-reload action count drift: reload=$RELOAD_ACTIONS, /actions=$ACTIONS_LIVE" ""
+  fi
+else
+  fail "admin/reload-catalog shape regressed" "$(echo "$RELOAD_RESP" | head -c 400)"
+fi
+
+# Gate 7q.2 — OpenAiCompat-scoped caller MUST get 403 (admin surface).
+RELOAD_403_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  "$GAD_BASE/api/v1/web/workbench/admin/reload-catalog" 2>&1 || true)"
+if [ "$RELOAD_403_CODE" = "403" ]; then
+  pass "admin/reload-catalog via OpenAiCompat key → 403 (RBAC enforced)"
+else
+  fail "OpenAiCompat on admin surface: expected 403, got $RELOAD_403_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7j — /favicon.ico served (public route, no auth)
 # ---------------------------------------------------------------------------
 #

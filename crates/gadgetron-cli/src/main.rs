@@ -1388,6 +1388,7 @@ fn build_workbench(
         projection,
         actions: Some(action_svc),
         approval_store: Some(approval_store),
+        descriptor_catalog: Some(catalog),
     }))
 }
 

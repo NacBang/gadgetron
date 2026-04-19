@@ -89,6 +89,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
             projection,
             actions: None,
             approval_store: None,
+            descriptor_catalog: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,
