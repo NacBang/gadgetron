@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.5.3",
+  "gateway_version": "0.5.4",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.3"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.5.4"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.5.3"
+    "version": "0.5.4"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.5.3"},
+    {"id": "gadgetron-core", "version": "0.5.4"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1391,7 +1391,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
   "count": 2,
   "bundles": [
     {
-      "bundle": {"id": "gadgetron-core", "version": "0.5.3"},
+      "bundle": {"id": "gadgetron-core", "version": "0.5.4"},
       "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
       "action_count": 5,
       "view_count": 3
@@ -1768,6 +1768,51 @@ while sleep 30; do
 done
 ```
 This is a pull-model fallback; the live-feed ISSUE (`ROADMAP.md §ISSUE 4 operator observability`) wires a WebSocket push for the same surface.
+
+---
+
+### GET /api/v1/web/workbench/quota/status
+
+Tenant-scoped quota introspection. Landed in ISSUE 11 TASK 11.4 / v0.5.4 (PR #234) — the ISSUE 11 close. Users check their own daily + monthly spend without needing Management rights; the UI uses this to render the /web quota banner + retry countdown on 429s. Handler: `crates/gadgetron-gateway/src/web/workbench.rs::get_quota_status`.
+
+**Auth:** `OpenAiCompat` — the same scope that owns `/v1/chat/completions`. Tenants reading their own numbers don't need Management scope (that would force an XaaS operator to surface a per-tenant view for end users).
+
+**Query parameters:** none. The handler reads the caller's `tenant_id` out of `TenantContext` — cross-tenant reads aren't reachable from this endpoint by design.
+
+**Response (HTTP 200):**
+```json
+{
+  "usage_day": "2026-04-20",
+  "daily": {
+    "used_cents": 342,
+    "limit_cents": 1000000,
+    "remaining_cents": 999658
+  },
+  "monthly": {
+    "used_cents": 15240,
+    "limit_cents": 10000000,
+    "remaining_cents": 9984760
+  }
+}
+```
+
+- `usage_day` — ISO 8601 `YYYY-MM-DD` representing the UTC day the numbers apply to. Because the SQL does the CASE-expression rollover inline (daily zeros at UTC midnight, monthly at first-of-month), `usage_day` is always CURRENT_DATE in UTC. If the tenant hasn't made a chargeable request since the last boundary crossing, the server's `quota_configs.usage_day` column may still carry the previous day — the SQL projects the rolled-over values into the response anyway so the reader sees up-to-date numbers.
+- `daily.used_cents` — integer cents consumed today. Writes happen in `PgQuotaEnforcer::record_post` (ISSUE 11 TASK 11.3 / PR #232) — see [§2.C.2 flow diagram](../architecture/platform-architecture.md) in the architecture doc.
+- `daily.limit_cents` — configured daily ceiling from `quota_configs.daily_limit_cents`.
+- `daily.remaining_cents` — computed `max(limit_cents - used_cents, 0)`. Clients watching for throttling should drive retry timing off `remaining_cents == 0` rather than a 429 response; the response is cheap and safe to poll.
+- `monthly.*` — same shape as daily, indexed on the `monthly_used_cents` + `monthly_limit_cents` columns.
+
+**Bootstrap-gap fallback (v0.5.4 behavior).** When the tenant has no row in `quota_configs` (tenant was just created and nothing has populated the row yet), the handler does NOT 404. Instead it returns the schema defaults: `limit_cents = 1_000_000` (daily, i.e. $10k), `limit_cents = 10_000_000` (monthly, i.e. $100k), `used_cents = 0`, `remaining_cents = limit_cents`, `usage_day = <today UTC>`. Rationale: the UI renders "fresh tenant, full quota" while tenant provisioning catches up, instead of a 400/404 that confuses new users. Gate 7k.5 specifically exercises this fallback path — the harness test config doesn't populate `quota_configs` so the gate asserts the fallback produces the expected shape + numbers.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `invalid_api_key` | 401 | Missing, malformed, or revoked Bearer token. Standard auth-layer response. |
+| `forbidden` | 403 | Caller is authenticated but not `OpenAiCompat` scope. Should be rare in practice since any key issued to a chat-using tenant has `OpenAiCompat`. |
+| `config_error` | 503 | `pg_pool` is not wired — `PgQuotaEnforcer` is unavailable, so there's no snapshot to read. Returned by the `require_pg_quota_enforcer` defensive guard. |
+
+E2E Gate 7k.5 covers the happy path (shape assertion + `daily.limit_cents > 0` + `daily.remaining_cents + daily.used_cents == daily.limit_cents`) against a tenant that has no `quota_configs` row, so it pins the fallback behavior. See [§`[quota_rate_limit]`](configuration.md#quota_rate_limit) in the configuration manual and [§5.6 EPIC 4 ISSUE 11 enforcement stack](../modules/xaas-platform.md#56-epic-4-issue-11-enforcement-stack--landed-on-trunk-today) in the xaas module doc for the rest of the ISSUE 11 pipeline.
 
 ---
 
