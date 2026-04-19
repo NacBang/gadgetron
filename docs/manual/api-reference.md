@@ -693,7 +693,7 @@ curl -s http://localhost:8080/ready
 
 The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
 
-All eight routes are always mounted on trunk; the CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry)` helper at `crates/gadgetron-cli/src/main.rs:1256-1298` returns `Some(...)` even when all three arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops).
+All eight routes are always mounted on trunk; the CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
