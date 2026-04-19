@@ -72,7 +72,8 @@ modules/*.md           (per-domain detailed spec — lead owner 별)
 | **라우팅 전략 (6종)** | [`modules/gateway-routing.md`](modules/gateway-routing.md) | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis B |
 | **프로바이더 어댑터 (6종)** | [`modules/model-serving.md`](modules/model-serving.md) | [`design/provider/`](design/) (비어있음, archive 참조) |
 | **VRAM 스케줄링 / Eviction** | [`modules/gpu-resource-manager.md`](modules/gpu-resource-manager.md) | [`modules/model-serving.md`](modules/model-serving.md) |
-| **Multi-tenancy / quota / audit** | [`modules/xaas-platform.md`](modules/xaas-platform.md), [`design/xaas/phase1.md`](design/xaas/phase1.md) | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis B |
+| **Multi-tenancy / quota / audit (chat-side)** | [`modules/xaas-platform.md`](modules/xaas-platform.md), [`design/xaas/phase1.md`](design/xaas/phase1.md) | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis B |
+| **워크벤치 승인 흐름 / 직접 액션 감사 (0.2.6+)** | [`manual/api-reference.md`](manual/api-reference.md) §Approvals + §GET /audit/events, [`manual/web.md`](manual/web.md) §승인 흐름 | [`adr/ADR-P2A-06`](adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md) (Penny-side 는 여전히 deferred) |
 | **Docker / K8s / Helm 배포** | [`modules/deployment-operations.md`](modules/deployment-operations.md) | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis C |
 | **장애 모드 / 복구 절차** | [`architecture/platform-architecture.md`](architecture/platform-architecture.md) Axis F | [`manual/troubleshooting.md`](manual/troubleshooting.md) |
 | **Phase 2 Knowledge / Penny / Web / MCP** | [`design/phase2/`](design/phase2/) | [`manual/penny.md`](manual/penny.md), [`manual/web.md`](manual/web.md) |

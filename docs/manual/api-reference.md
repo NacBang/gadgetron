@@ -228,12 +228,12 @@ These bodies surface from the Penny subprocess boundary (`gadgetron-penny`) and 
 }
 ```
 
-`penny_tool_approval_timeout` (HTTP 504, `server_error`) — approval flow timed out waiting for user decision. Reserved for P2B; in P2A this indicates a misconfiguration (no approval UI exists yet):
+`penny_tool_approval_timeout` (HTTP 504, `server_error`) — Penny-side approval path timed out waiting for a decision. This error code targets the Penny-stream approval surface (MCP grandchild approval bridge, SEC-MCP-B1) which is still deferred beyond ISSUE 3. The direct-action workbench approval flow (`/api/v1/web/workbench/actions/{id}` → `pending_approval` → `/approvals/:id/approve`) shipped with ISSUE 3 / v0.2.6 and surfaces resolved outcomes through the dedicated `/approvals/:id` endpoints below, not through this error:
 
 ```json
 {
   "error": {
-    "message": "A tool call required user approval but none arrived within 300 seconds. (Approval flow is not functional in Phase 2A — this error indicates a misconfiguration or a forward-compat P2B path.)",
+    "message": "A tool call required user approval but none arrived within 300 seconds. (The Penny-side approval bridge is reserved for a later ROADMAP ISSUE; this code surfaces only on forward-compat paths.)",
     "type": "server_error",
     "code": "penny_tool_approval_timeout"
   }
@@ -704,7 +704,9 @@ All eight routes are always mounted on trunk; the CLI's `build_workbench(knowled
 - `activity.entries` — always `[]` (see §/activity).
 - `request_evidence` — always 404 (see §/evidence).
 - `refresh_view_ids` — always `[]` on every action response (see §POST /actions).
-- `audit_event_id` — always `null`. Direct-action dispatch bypasses Penny's `GadgetAuditEventSink` by design (tracked as `TODO(audit-direct-action)` in `GadgetDispatcher`'s doc comment).
+
+**Shipped since this overview was first written** (historically listed as stubbed):
+- `audit_event_id` — **populated on every terminal path** (ok / pending_approval / dispatch-error) by `ActionAuditSink` wired at server startup. Landed in ISSUE 3 / v0.2.6 (PR #188). See §POST /actions §Audit and §GET /audit/events below.
 
 The `config_error` 400 path exists in `require_workbench(&state)` for the case where `state.workbench` is `None`, but no production build path on trunk produces that state — it is a defensive guard for test harness configurations.
 
@@ -733,7 +735,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.2.5",
+  "gateway_version": "0.2.6",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -752,7 +754,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.5"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.6"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -937,7 +939,8 @@ The `seed_p2b` catalog registers **four** actions on trunk, all backed by the wi
 | `knowledge-search` | `wiki.search` | `query` | `["query"]` | Full-text search across wiki pages. Extra input: optional `max_results` (1–20). |
 | `wiki-list` | `wiki.list` | `query` | `[]` | List all pages. No args. |
 | `wiki-read` | `wiki.get` | `query` | `["name"]` | Fetch a page by name. |
-| `wiki-write` | `wiki.write` | `mutation` | `["name", "content"]` | Create or overwrite a page. `destructive: false`, `requires_approval: false` — the approval flow is stubbed in P2B, so the write lands synchronously. |
+| `wiki-write` | `wiki.write` | `mutation` | `["name", "content"]` | Create or overwrite a page. `destructive: false`, `requires_approval: false` — dispatches synchronously. |
+| `wiki-delete` | `wiki.delete` | `dangerous` | `["name"]` | Soft-delete a page. `destructive: true` — `POST /actions/wiki-delete` returns `status=pending_approval` + `approval_id`; dispatch happens on `POST /approvals/{approval_id}/approve` (see §Approvals below). Landed in ISSUE 3 / v0.2.6. |
 
 Example response (`knowledge-search` shown; the other three follow the same descriptor shape):
 
@@ -973,7 +976,7 @@ Example response (`knowledge-search` shown; the other three follow the same desc
 }
 ```
 
-`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`. `input_schema` is a JSON Schema fragment; arg validation on `POST /actions/{action_id}` runs against it (additionalProperties=false rejects unknown keys). E2E Gate 7f asserts the catalog surfaces all four ids.
+`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`. `input_schema` is a JSON Schema fragment; arg validation on `POST /actions/{action_id}` runs against it (additionalProperties=false rejects unknown keys). E2E Gate 7f asserts the catalog surfaces all five ids (the 2026-04-19 `wiki-delete` addition widened the assertion from `>= 4` to `>= 5`).
 
 ---
 
@@ -1004,7 +1007,7 @@ Invoke a registered direct action.
     "status": "ok",
     "approval_id": null,
     "activity_event_id": "uuid",
-    "audit_event_id": null,
+    "audit_event_id": "uuid",
     "refresh_view_ids": [],
     "knowledge_candidates": [],
     "payload": null
@@ -1020,11 +1023,13 @@ Invoke a registered direct action.
 
 When no `GadgetDispatcher` is wired (degraded mode — see §Workbench overview above) `payload` stays `null` and no side effect occurs. A dispatch error (unknown gadget, gadget-internal failure) surfaces as HTTP 500 with the `GadgetError` converted into the OpenAI envelope; the response body never sets `payload` in that case.
 
-`result.status`: `"ok"` | `"pending_approval"` (when `requires_approval = true` on the descriptor). All four `seed_p2b` actions have `requires_approval = false` today, so you will always see `"ok"` through the current catalog. When `pending_approval`, `approval_id` is set and dispatch is deferred until the approval flow decides — stubbed in P2B.
+`result.status`: `"ok"` | `"pending_approval"` (when the descriptor has `destructive = true` — either flag alone routes the invoke through step 6 of the action service). In the `seed_p2b` catalog, `wiki-delete` is the canonical approval-gated action; the other four return `"ok"` directly. When `pending_approval`, `approval_id` is set and dispatch is deferred until `POST /api/v1/web/workbench/approvals/{approval_id}/approve` resolves the record — at which point `resume_approval` re-enters the dispatch path with the persisted args and returns the final `ok` / error response. `POST /approvals/{approval_id}/deny` terminates without dispatch. See §Approvals (below) for the full lifecycle. E2E Gate 7h.7 exercises invoke → approve → re-invoke → `ok`; second approve of the same id returns 409.
 
 `refresh_view_ids` is typed as `Vec<String>` on the wire (non-null, possibly empty). On trunk today both paths return an empty array (`action_service.rs:207-215,284-292`) — reserved for future per-action policy. Web UI shells should loop over the array (handling zero gracefully); do not pin to specific view ids.
 
-**Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`. `audit_event_id` stays `null` on this path by design — direct-action dispatch deliberately bypasses Penny's `GadgetAuditEventSink` (tracked as `TODO(audit-direct-action)` in the `GadgetDispatcher` trait doc). A parallel direct-action audit sink is future work.
+**Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`.
+
+**Audit:** `audit_event_id` is populated on every terminal path (ok / pending_approval / dispatch-error) by the `ActionAuditSink` wired at server startup (ISSUE 3 / v0.2.6). The same UUID the sink receives is returned in the response, and when Postgres is configured an `action_audit_events` row is persisted under that id within a few milliseconds. Use `GET /api/v1/web/workbench/audit/events` (below) to read rows back; each row carries `event_id`, `action_id`, `gadget_name`, `actor_user_id`, `tenant_id`, `outcome` (`success` | `error` | `pending_approval`), optional `error_code`, `elapsed_ms`, and `created_at`.
 
 **Errors:**
 
@@ -1034,6 +1039,113 @@ When no `GadgetDispatcher` is wired (degraded mode — see §Workbench overview 
 | `workbench_action_invalid_args` | 400 | `args` fails the descriptor's `input_schema` validation |
 | `forbidden` | 403 | This instance has disabled direct actions (`DirectActionsDisabled` policy) |
 | `config_error` | 400 | Workbench service not wired (no `[knowledge]` configured), or action service not wired in this build |
+
+---
+
+### POST /api/v1/web/workbench/approvals/{approval_id}/approve
+
+Resolve a `pending_approval` record into an `ok` dispatch. Introduced in ISSUE 3 / v0.2.6 (`crates/gadgetron-gateway/src/web/workbench.rs::approve_action`).
+
+**Auth:** `OpenAiCompat` (same as `/actions/{id}`).
+
+**Path parameters:** `approval_id` — the UUID returned from the originating invoke response (`result.approval_id`).
+
+**Request body:** empty `{}`.
+
+**Response:** `InvokeWorkbenchActionResponse` — identical shape to `POST /actions/{id}`. On success the server marks the approval `Approved` with the calling actor as resolver and then runs `resume_approval`, which re-enters the dispatch path with the originally-persisted args; the returned `result.status` is `"ok"` with `result.payload` carrying the gadget output. `result.approval_id` is set to the resolved id and `result.audit_event_id` is populated for the dispatch event.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `workbench_approval_not_found` | 404 | `approval_id` is unknown to the store |
+| `workbench_approval_already_resolved` | 409 | The record is already `approved` / `denied` — message carries the current state |
+| `forbidden` | 403 | Cross-tenant: the approval belongs to a different tenant than the authenticated actor |
+| `config_error` | 400 | `approval_store` or action service is not wired in this build (serving without Postgres or without a `GadgetDispatcher`) |
+
+E2E Gate 7h.7 covers the happy path + the double-approve conflict (second approve on the same id → 409).
+
+---
+
+### POST /api/v1/web/workbench/approvals/{approval_id}/deny
+
+Refuse a `pending_approval` record. No dispatch occurs.
+
+**Auth:** `OpenAiCompat`.
+
+**Path parameters:** `approval_id` — UUID.
+
+**Request body** (all fields optional):
+```json
+{ "reason": "policy violation" }
+```
+
+`reason` is a free-form string (≤ ~256 chars practical; no hard server limit enforced today) and is persisted on the approval row. Omit the body (or send `{}`) to deny without a reason.
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "state": "denied",
+  "resolved_at": "2026-04-19T05:15:30Z",
+  "resolved_by_user_id": "uuid",
+  "reason": "policy violation"
+}
+```
+
+**Errors:** same shape as `approve` (404 / 409 / 403 / 400). Cross-tenant deny returns `forbidden`.
+
+---
+
+### GET /api/v1/web/workbench/audit/events
+
+Tenant-scoped read over `action_audit_events` — the rows the `ActionAuditSink` persisted at each action-service terminal. Landed in ISSUE 3 / v0.2.6 (`crates/gadgetron-gateway/src/web/workbench.rs::list_audit_events`, backed by `crates/gadgetron-xaas/src/audit/action_event.rs::query_action_audit_events`).
+
+**Auth:** `OpenAiCompat`.
+
+**Query parameters** (all optional):
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `action_id` | string | — | Exact-match filter (e.g. `wiki-write`). No wildcard / prefix matching. |
+| `since` | RFC3339 timestamp | — | Inclusive lower bound on `created_at` (e.g. `2026-04-19T00:00:00Z`). |
+| `limit` | integer | 100 | Clamped to `[1, 500]`. Out-of-range values are silently clamped, not rejected. |
+
+**Tenant boundary:** the handler ALWAYS pins the query to the authenticated actor's `tenant_id` — there is no query parameter to read another tenant's rows. Cross-tenant audit access is not reachable from this HTTP surface regardless of what the caller sends.
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "event_id": "uuid",
+      "action_id": "wiki-write",
+      "gadget_name": "wiki.write",
+      "actor_user_id": "uuid-or-tenant-key-id",
+      "tenant_id": "uuid",
+      "outcome": "success",
+      "error_code": null,
+      "elapsed_ms": 42,
+      "created_at": "2026-04-19T05:15:30.123Z"
+    }
+  ],
+  "returned": 1
+}
+```
+
+- Rows are ordered `created_at DESC` (newest first).
+- `outcome` ∈ `"success"` | `"error"` | `"pending_approval"`. The approve-then-dispatch-ok path emits two rows: one `pending_approval` at step 6, one `success` at the post-approve dispatch.
+- `error_code` is non-null only when `outcome == "error"`.
+- `returned` mirrors `events.len()` — convenience so clients don't re-count.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `config_error` | 400 | `pg_pool` is not configured on this server (in-memory / demo mode). The endpoint requires Postgres. |
+| `config_error` | 400 | Underlying SQL query failed — message includes the sqlx error. |
+
+E2E Gate 7h.8 verifies an unfiltered GET returns the rows from prior gates and that `?action_id=wiki-write` narrows server-side (not client-side).
 
 ---
 

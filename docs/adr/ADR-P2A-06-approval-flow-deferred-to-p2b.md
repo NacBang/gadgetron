@@ -13,7 +13,29 @@
 
 **Canonical terminology note**: this ADR predates the Bundle/Plug/Gadget rename. Current code and canonical docs use `GadgetProvider`, `GadgetRegistry`, and `KnowledgeGadgetProvider`. Historical references below to `McpToolProvider`, `McpToolRegistry`, and `KnowledgeToolProvider` are legacy names.
 
-**Reframing note (2026-04-19, post-[ROADMAP v2](../ROADMAP.md) / PR #186)**: The discrete "Phase 2B" block framing this ADR uses is rehomed. The first slice of the approval work is now scheduled as **ISSUE 3 — production safety** inside EPIC 1 (Workbench MVP), targeting version `0.2.6` NEXT per [`docs/ROADMAP.md` §ISSUE 3](../ROADMAP.md). **ISSUE 3 covers only a subset** of this ADR's §"Phase 2B (reopened scope)" list — specifically item 2 (`ApprovalRegistry` / now named `ApprovalStore` + `POST /approvals/:id/approve` + resume-on-approve lifecycle), plus new audit-sink work (`ActionAuditEventSink` trait + Postgres impl + `/api/v1/audit/events` query endpoint) that isn't in the original ADR list. Items 1, 3–7, and the subsequent items 8–13 of the §"Phase 2B" list below (cross-process bridge design, ADR-P2A-01 Part 3 behavioral test, `Scope::AgentApproval` middleware, SSE approval events, `<ApprovalCard>` React UI, rate limiter, `sanitize_args`, digest fields, namespace hardening, DX polish) remain future work beyond ISSUE 3 and will land in later ROADMAP ISSUEs as they are scheduled. The 13-item list itself is unchanged — only the framing (a discrete "Phase 2B" block vs. a series of tracked ISSUEs) was updated by ROADMAP v2.
+**Reframing note (2026-04-19, post-[ROADMAP v2](../ROADMAP.md) / PR #186)**: The discrete "Phase 2B" block framing this ADR uses is rehomed. Approval work is scheduled as individual EPIC 1 (Workbench MVP) ROADMAP ISSUEs instead of a single block.
+
+**Status update (2026-04-19, post-PR #188 / v0.2.6)**: **ISSUE 3 — production safety** shipped and has moved to "Completed ISSUEs" in [`docs/ROADMAP.md`](../ROADMAP.md). PR #188 landed the following against this ADR's §"Phase 2B (reopened scope)" list:
+
+- **Item 2** (`ApprovalRegistry`, now named `ApprovalStore`, + `POST /approvals/:id/approve` + resume-on-approve lifecycle) — **DONE**. `core::workbench::approval::ApprovalStore` trait + `InMemoryApprovalStore` impl + `approve_action` / `deny_action` handlers + `resume_approval` entry point on `InProcessWorkbenchActionService`.
+- **New audit-sink work** (not in the original ADR list) — **DONE**. `core::audit::ActionAuditSink` trait + `ActionAuditEvent::DirectActionCompleted` + `xaas::audit::ActionAuditEventWriter` (Postgres-backed, mpsc + drop-count) + migration `20260419000001_action_audit_events.sql` + `GET /api/v1/web/workbench/audit/events` query handler + harness gates 7h.7 / 7h.8.
+
+Items 1, 3–7, and 8–13 of §"Phase 2B" remain future work and will land in later ROADMAP ISSUEs:
+
+- Item 1 (SEC-MCP-B1 cross-process bridge — `gadgetron gadget serve` grandchild → gateway)
+- Item 3 (ADR-P2A-01 Part 3 behavioral test)
+- Item 4 (`Scope::AgentApproval` middleware)
+- Item 5 (SSE `gadgetron.approval_required` event emission)
+- Item 6 (`<ApprovalCard>` React UI + "Allow always" localStorage)
+- Item 7 (per-key + per-tenant rate limiter)
+- Item 8 (`sanitize_args` contract)
+- Item 9 (`args_digest` / `rationale_digest` in audit schema — the v0.2.6 schema omits digest columns; adding them later needs a forward-compat migration)
+- Item 10 (SEC-MCP-B3 NFKC normalization follow-up)
+- Item 11 (DX polish — rationale trust banner, denial reason enum, CLI pending-approvals surface)
+- Item 12 (CA-MCP-B6 `ChatRequestGuard::cancel_for_request`)
+- Item 13 (ADR-P2A-01 Part 3 60s heartbeat verification — cross-doc)
+
+The 13-item list text itself (§"Phase 2B (reopened scope)" below) is preserved for historical fidelity.
 
 ## Context
 
@@ -150,25 +172,25 @@ This is acceptable for the stated P2A user persona: a single-user personal assis
 - `p2a_rejects_gadgetron_local_mode_at_startup` test
 - `ask` mode startup warning emitter
 
-### Phase 2B (reopened scope) — partially rehomed to ROADMAP ISSUE 3 (v0.2.6)
+### Phase 2B (reopened scope) — item 2 shipped in ROADMAP ISSUE 3 (v0.2.6)
 
-> Per the Reframing note in the ADR header: the "Phase 2B" framing here is preserved for historical fidelity. The live home of item 2 (`ApprovalStore` + approve endpoint + resume-on-approve lifecycle) is [`docs/ROADMAP.md` §ISSUE 3 — production safety](../ROADMAP.md), which also adds new audit-sink work (`ActionAuditEventSink` + Postgres + `/api/v1/audit/events`). Items 1, 3–13 below remain future work beyond ISSUE 3 and will be folded into later ROADMAP ISSUEs as they are scheduled.
+> Per the Reframing note in the ADR header: the "Phase 2B" framing here is preserved for historical fidelity. Item 2 (`ApprovalStore` + approve endpoint + resume-on-approve lifecycle) shipped with [`docs/ROADMAP.md` §ISSUE 3 — production safety](../ROADMAP.md) (PR #188), alongside new audit-sink work (`ActionAuditSink` + Postgres + `GET /audit/events`) that wasn't in the original list. Items 1, 3–11 below remain future work and will be folded into later ROADMAP ISSUEs as they are scheduled.
 
 P2B adds the approval flow on top of the P2A scaffold. Concrete work items:
 
 1. Design doc for cross-process approval bridge (SEC-MCP-B1): pick between loopback HTTP + startup token, UDS + peercred, or reverse-direction stdio MCP. Threat model each; pick one; spec transport/auth/wire/fail-closed.
-2. Race-free `ApprovalRegistry` with `Notify + Mutex<Option<Decision>>` or `watch::Sender<State>`. Test with `tokio::time::pause()` + `advance()`.
+2. ~~Race-free `ApprovalRegistry`~~ — **DONE in ISSUE 3 / PR #188 as `ApprovalStore`** (trait in `core::workbench::approval`, `InMemoryApprovalStore` in `gateway::web::approval_store`, resume path on `InProcessWorkbenchActionService::resume_approval`). The v0.2.6 impl uses `Mutex<HashMap<...>>` with strict terminal-state invariants rather than the originally-scoped `Notify + Mutex<Option<Decision>>` / `watch::Sender<State>` primitive — the in-memory workbench single-waiter pattern does not require cross-task wake-up. A `Notify`-based variant is still the right shape when SSE / cross-process approvals (items 1 + 5) land.
 3. ADR-P2A-01 Part 3 behavioral test for slow MCP tool response (60s with heartbeat).
 4. `Scope::AgentApproval` variant + scope middleware refactor at `middleware/scope.rs:31-42`.
 5. SSE event emission with proper ordering (enqueue before emit, cleanup on SSE drop via `ChatRequestGuard`).
 6. `<ApprovalCard>` React component + "Allow always" localStorage + Settings page revoke.
 7. Rate limiter: per-key 30/min + per-tenant 120/min + 404 brute-force 429-after-10.
 8. `sanitize_args` contract: credential patterns, 256-char cap, 4-level depth cap.
-9. `args_digest` + `rationale_digest` in audit schema; `retention_class` tag per tier.
+9. `args_digest` + `rationale_digest` in audit schema; `retention_class` tag per tier. (The v0.2.6 `action_audit_events` table does NOT carry digest columns — they land via a forward-compat migration in the ISSUE that takes this item.)
 10. NFKC normalization + ASCII-only proptest for reserved namespace (SEC-MCP-B3 follow-up).
 11. DX polish: rationale trust banner, denial reason enum, CLI surface for pending approvals (DX-MCP-N5).
 
-Each item gets a fresh design draft + Round 1.5/2/3 review.
+Each remaining item gets a fresh design draft + Round 1.5/2/3 review.
 
 ### Phase 2C (unchanged)
 

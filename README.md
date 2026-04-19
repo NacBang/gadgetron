@@ -2,7 +2,7 @@
 
 Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes), **Penny** drives it on the user's behalf, and capabilities expand through **Bundles** that expose core-facing **Plugs** and Penny-facing **Gadgets**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
 
-**Version**: `0.2.5` — EPIC 1 (Workbench MVP) in progress. `POST /v1/chat/completions` + Penny runtime + embedded Web UI + browser-driven wiki CRUD (`/web/wiki`) all ship on trunk. Interactive approval flow is deferred to ISSUE 3 (production safety) per [ADR-P2A-06](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md). Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Version**: `0.2.6` — EPIC 1 (Workbench MVP) in progress. `POST /v1/chat/completions` + Penny runtime + embedded Web UI + browser-driven wiki CRUD (`/web/wiki`) all ship on trunk. Direct-action audit sink + `ApprovalStore` + `POST /approvals/:id/approve|deny` + `GET /audit/events` shipped in ISSUE 3 (production safety, PR #188); see [`docs/adr/ADR-P2A-06`](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md) for the remaining Phase 2B items that will land in later ISSUEs. Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## How it works
 
@@ -221,7 +221,7 @@ The authoritative ADR index lives in [`docs/adr/README.md`](docs/adr/README.md).
 
 ## Roadmap
 
-Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tree, versioning policy, and tag schedule. Summary of what's shipped today on trunk (0.2.5):
+Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tree, versioning policy, and tag schedule. Summary of what's shipped today on trunk (0.2.6):
 
 ### Completed ISSUEs (EPIC 1 — Workbench MVP)
 
@@ -230,10 +230,10 @@ Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tre
 | `0.2.0` | **ISSUE 1** — OpenAI-compat gateway + browser-driven wiki CRUD | #175 real `GadgetDispatcher`, #176 4-action `seed_p2b` catalog, #177 `/web/wiki` UI, #179 Gate 11d interactive Playwright E2E |
 | `0.2.1`–`0.2.4` | **ISSUE 2** — workbench UX polish + workflow bootstrap | #180 ROADMAP, #181 markdown render, #182 left-rail Wiki tab, #184 save/error toasts |
 | `0.2.5` | **ISSUE 2b** — ROADMAP v2 recalibration | #186 (EPIC/ISSUE/TASK terminology + versioning policy) |
+| `0.2.6` | **ISSUE 3** — production safety | #188 `ActionAuditSink` + Postgres writer + `ApprovalStore` + approve/deny/audit-events endpoints + `wiki-delete` seed + harness gates 7h.7 / 7h.8 |
 
 ### Next in EPIC 1
-- **ISSUE 3 (NEXT)** — production safety: `ActionAuditEventSink` trait + Postgres impl, `ApprovalStore`, `/api/v1/audit/events` query endpoint, harness gates for audit + approval lifecycle. Bumps to `0.2.6` on merge.
-- **ISSUE 4** — operator observability: usage summary endpoint + `/web` dashboard, cost tracking, live activity feed.
+- **ISSUE 4 (NEXT)** — operator observability: usage summary endpoint + `/web` dashboard, cost tracking, live activity feed.
 
 EPIC 1 closure tags `v0.3.0`. Subsequent EPICs (Agent autonomy → `v0.4.0`, Plugin platform → `v0.5.0`, Multi-tenant → `v1.0.0`, Cluster platform → `v2.0.0`) are planned in `docs/ROADMAP.md`.
 

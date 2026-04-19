@@ -106,7 +106,7 @@ curl -fsSL -D - http://localhost:8080/web/ -o /dev/null | grep -iE 'content-secu
 
 ### 기능 (구현 완료)
 
-페이지는 네 개의 워크벤치 direct-action 을 `POST /api/v1/web/workbench/actions/{id}` 로 호출합니다 (api-reference.md §POST /actions 참조). 각 버튼이 어떤 action 을 호출하는지:
+페이지는 다섯 개의 워크벤치 direct-action 을 `POST /api/v1/web/workbench/actions/{id}` 로 호출합니다 (api-reference.md §POST /actions 참조). 각 버튼이 어떤 action 을 호출하는지:
 
 | UI 조작 | Action id | Gadget | 결과 |
 |---|---|---|---|
@@ -114,8 +114,26 @@ curl -fsSL -D - http://localhost:8080/web/ -o /dev/null | grep -iE 'content-secu
 | 페이지 로드 시 자동, 또는 "Refresh" 버튼 | `wiki-list` | `wiki.list` | 왼쪽 패널의 모든 페이지 이름 목록 |
 | 왼쪽 목록의 페이지 이름 클릭 | `wiki-read` | `wiki.get` | 선택한 페이지의 markdown 렌더 (`<pre>` fallback 포함) |
 | "+ New page" 또는 기존 페이지 편집 → "Save" 버튼 | `wiki-write` | `wiki.write` | 새 페이지 생성 또는 덮어쓰기 |
+| 페이지 컨텍스트 메뉴 "Delete" (→ 승인 흐름) | `wiki-delete` | `wiki.delete` | ISSUE 3 / v0.2.6 에 추가된 승인 게이트 액션. `pending_approval` 응답 → 승인 후 소프트 삭제. §승인 흐름 참조. |
 
 Markdown 렌더는 `react-markdown` + `remark-gfm` (GitHub-flavoured) 입니다. 파싱이 실패하면 `<pre>` raw 블록으로 fallback — 사용자는 내용을 여전히 읽을 수 있습니다.
+
+### 승인 흐름 (destructive action lifecycle, ISSUE 3 / v0.2.6)
+
+`wiki-delete` 는 현재 카탈로그에서 유일한 approval-gated action 입니다 (`destructive: true`). `POST /actions/wiki-delete` 는 dispatch 하지 않고 다음 shape 을 반환합니다:
+
+```json
+{ "result": { "status": "pending_approval", "approval_id": "<uuid>", "audit_event_id": "<uuid>", ... } }
+```
+
+승인 / 거부는 전용 엔드포인트 두 개로 처리합니다 (api-reference.md §Approvals):
+
+- **승인 → 자동 dispatch**: `POST /api/v1/web/workbench/approvals/{approval_id}/approve` (body `{}`) → 서버가 approval 을 `Approved` 로 마킹하고 저장된 args 로 `resume_approval` 진입 → 최종 `status: "ok"` + gadget payload 를 반환.
+- **거부**: `POST /api/v1/web/workbench/approvals/{approval_id}/deny` (body `{"reason": "..."}` 또는 `{}`) → dispatch 하지 않고 `state: "denied"` 응답.
+- 같은 `approval_id` 로 두 번째 approve/deny → HTTP 409 `workbench_approval_already_resolved`.
+- 다른 tenant 의 key 로 시도 → HTTP 403 `forbidden` (원본 레코드는 변경되지 않음).
+
+모든 terminal 경로는 `action_audit_events` 에 로그되며 `GET /api/v1/web/workbench/audit/events` 로 조회 가능합니다. E2E Gate 7h.7 이 invoke → approve → ok → 이중-approve 409 를 검증하고, Gate 7h.8 이 audit rows 를 조회합니다 (`scripts/e2e-harness/run.sh`).
 
 **Save / error 토스트** (ISSUE 2, 0.2.4 via PR #184 — `sonner` 라이브러리): 저장에 성공하면 우측 하단에 "Saved <page>" 토스트가, 실패하면 "Save failed" 에러 토스트가 설명과 함께 표시됩니다. 페이지 열기 실패(`wiki.get` 오류) 시에도 "Failed to open <page>" 에러 토스트가 나타납니다. DOM 의 `<section data-sonner-toaster>` 엘리먼트로 확인 가능하며, Gate 11d Playwright E2E 에서 이 DOM 을 assert 해 회귀를 막습니다.
 
