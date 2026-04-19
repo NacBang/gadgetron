@@ -59,6 +59,47 @@ After successful authentication, `tenant_context_middleware` constructs a `Tenan
 
 ---
 
+## Middleware stack order
+
+`auth_middleware` and `scope_guard_middleware` are two layers inside a longer chain wrapping every authenticated route. Understanding the full order lets an operator look at a failed request's status code and immediately tell which layer produced it.
+
+Stack order from outermost (first to run on inbound requests) to innermost (closest to the handler), reconstructed from the actual `.layer()` call sequence at `crates/gadgetron-gateway/src/server.rs:268-294` (inline comments at `:260-265` describe the same order). The top-of-function rustdoc at `:220-238` is a simplified view — it omits `map_response(openai_shape_413)` and `metrics_middleware`; the code site is authoritative.
+
+```
+inbound request
+    ↓
+[1a] map_response(openai_shape_413)   — rewrites raw 413 body to OpenAI JSON envelope
+[1b] RequestBodyLimitLayer (4 MiB)    — SEC-M2; emits 413 with plain-text body (rewritten by 1a)
+[2]  TraceLayer                        — tower-http distributed tracing spans
+[3]  request_id_middleware             — UUID → extensions + `x-request-id` response header
+[4]  auth_middleware                   — Bearer → Arc<ValidatedKey>; 401 on parse/lookup failure
+[5]  tenant_context_middleware         — ValidatedKey → TenantContext (tenant_id, scopes, request_id)
+[6]  scope_guard_middleware            — per-route scope check; 403 on mismatch (audited, SEC-M4)
+[7]  metrics_middleware                — RequestLog broadcast (innermost, runs after handler)
+    ↓
+route handler
+```
+
+(The `.layer()` calls in `server.rs:268-294` are written innermost-to-outermost because each `.layer()` invocation wraps all previously applied layers. The numbering above flips them back to outermost-to-innermost for reading.)
+
+### Failure mode lookup
+
+| Layer | Produces | Observable signals |
+|---|---|---|
+| 1a / 1b | **HTTP 413** `request_too_large` (OpenAI-shape body after 1a rewrites 1b's raw text) | Request body exceeded 4 MiB (`MAX_BODY_BYTES`). E2E Gate 12 pattern `error.code=request_too_large` is NOT emitted by the tracing sink — 413 bypasses it. |
+| 2 | no failures directly; wraps everything else in a tracing span | Look for the span name in `RUST_LOG=gadgetron=debug` output. |
+| 3 | no failures directly | Every response has an `x-request-id` header; if absent, something before this layer failed. |
+| 4 | **HTTP 401** `invalid_api_key` | Missing/malformed `Authorization: Bearer ...`, unknown key, or revoked key. Audited via SEC-M7. |
+| 5 | **HTTP 401** on a defensive `TenantNotFound` path (`middleware/tenant_context.rs:27-35`) if `ValidatedKey` is absent from request extensions. The code comment notes this branch "should never happen when layer order is correct" — it's defensive for test-isolation. In production layer 4 will have already returned 401 in that scenario. | If this 401 fires without layer 4 firing first, a layer-ordering regression is the cause. |
+| 6 | **HTTP 403** `forbidden` | Valid key but scope doesn't match route. Emits `scope denied` WARN with `tenant_id` + `required_scope` + `path` fields (whitelisted in E2E Gate 12 since it's expected on Management-route hits from OpenAiCompat keys). |
+| 7 | no failures directly; emits `RequestLog` broadcast after handler | Failure in the handler itself (500 / 502 / 503) still triggers this layer — the broadcast captures status regardless. |
+
+The route guard tables in [Scope system](#scope-system) below are the per-route policy that layer 6 enforces.
+
+**What is NOT in the stack:** `CorsLayer::permissive()` is deliberately absent (D-6 — no permissive CORS). Host validation is not a separate layer; TCP bind + reverse-proxy are expected to enforce host allowlisting externally.
+
+---
+
 ## Scope system
 
 Each API key holds a list of scopes. A scope is a coarse-grained permission. The three defined scopes are:
@@ -71,7 +112,7 @@ Each API key holds a list of scopes. A scope is a coarse-grained permission. The
 
 A key can hold multiple scopes. The `api_keys.scopes` column is a `TEXT[]` (PostgreSQL array). The default when inserting a new key without specifying scopes is `ARRAY['OpenAiCompat']`.
 
-**Scope enforcement** is performed by `scope_guard_middleware` (layer 6, innermost of the auth stack):
+**Scope enforcement** is performed by `scope_guard_middleware` (layer 6 of the stack — see [Middleware stack order](#middleware-stack-order) above):
 
 | Path prefix | Required scope | Note |
 |-------------|----------------|------|

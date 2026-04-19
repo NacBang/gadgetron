@@ -959,12 +959,14 @@ The following routes are defined in the router but return HTTP 501 (not yet impl
 | `GET` | `/api/v1/usage` | Tenant usage report |
 | `GET` | `/api/v1/costs` | Tenant cost report |
 
-Sending a request to any of these endpoints with a valid `Management`-scoped key returns HTTP 501:
+Sending a request to any of these endpoints with a valid `Management`-scoped key returns HTTP 501 today:
 
 ```sh
 curl -s http://localhost:8080/api/v1/nodes \
   -H "Authorization: Bearer gad_live_your_management_key_here"
 # HTTP 501 (no body)
 ```
+
+E2E Gates 7k and 7k.2 assert the **RBAC positive path** — any status except 401/403 is acceptable for a Management key on these routes (currently 501; will be 200 once each aggregator lands, or 503 during PostgreSQL pool outages). Your monitoring should treat 501 as "feature not shipped" and 401/403 as real auth regressions.
 
 Sending with an `OpenAiCompat`-scoped key returns HTTP 403 (scope guard fires before the stub handler).
