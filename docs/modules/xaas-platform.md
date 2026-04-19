@@ -579,6 +579,64 @@ SELECT
 
 **Operator workflow**. `/web` dashboard 에 quota banner 를 그릴 때 이 엔드포인트를 polling — response 가 cheap 하고 ArcSwap 같은 shared mutable state 를 건드리지 않으므로 높은 빈도 polling 이 safe. SDK client 는 429 받기 전에 `remaining_cents == 0` 을 미리 감지해 backoff 시작할 수 있음 (429 발생 후 Retry-After 를 보는 것보다 UX 가 더 부드러움).
 
+### 5.8 경량 원장 `billing_events` (TASK 12.1 / PR #236 / v0.5.5)
+
+`PgQuotaEnforcer::record_post` 는 §5.6 의 `quota_configs` counter UPDATE 직후 한 번의 `insert_billing_event` INSERT 를 append-only `billing_events` 테이블에 발행한다. Counter 는 빠른 "현재 잔량" 이고, 원장은 **사실상의 지출 기록** 이다. 두 표현이 모두 있어야 (a) hot path 에서 enforcement 가 여전히 단일 UPDATE 로 동작하고, (b) 감사 / 인보이스 / 리컨실리에이션이 삭제·덮어쓰기 불가능한 원장 위에서 구성될 수 있다.
+
+**스키마** (`migrations/20260420000002_billing_events.sql`):
+
+```sql
+CREATE TABLE IF NOT EXISTS billing_events (
+    id                BIGSERIAL PRIMARY KEY,
+    tenant_id         UUID         NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    event_kind        TEXT         NOT NULL CHECK (event_kind IN ('chat', 'tool', 'action')),
+    source_event_id   UUID,
+    cost_cents        BIGINT       NOT NULL,
+    model             TEXT,
+    provider          TEXT,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS billing_events_tenant_created_idx
+    ON billing_events (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS billing_events_kind_created_idx
+    ON billing_events (event_kind, created_at DESC);
+```
+
+**설계 결정**:
+
+- `BIGSERIAL` primary key — tenant 당 초당 1만건 기준 i64 로 ~29만년치 용량. `(tenant_id, created_at DESC)` 인덱스 위에서 cursor paging.
+- `event_kind` 는 DB CHECK 로 `chat | tool | action` 3종 잠금. 신규 종류는 migration 으로 — 이 경계가 "feature, not bug". TASK 12.1 은 `chat` 만 emit (enforcer 의 chat-completion 경로). TASK 12.2 가 `tool` + `action` emitter 를 추가.
+- `source_event_id` 는 **FK 없음** — Stripe-style writer-independence. 원장 writer 는 source event 의 DB persist 완료 여부를 기다리지 않음. TASK 12.2 에서 chat audit UUID 를 threading 해서 invoice query 시 `action_audit_events` / `tool_audit_events` 와 JOIN 가능.
+- `ON DELETE CASCADE` — tenant 삭제 시 원장 동반. 컴플라이언스 요구에 따라 `RESTRICT` 로 바꿀 여지는 ADR 로 분리 검토.
+- `cost_cents` 는 enforcer 가 `quota_configs.daily_used_cents` 에 기록한 값과 동일한 i64. 두 숫자가 divergent 하면 §5.6 write 또는 §5.8 INSERT 중 하나가 실패한 상황 — TASK 12.4 reconciliation scope.
+- `model` / `provider` 는 TASK 12.1 에서 `null` — `QuotaEnforcer::record_post` trait 시그니처가 아직 두 값을 받지 않음. TASK 12.2 가 trait 시그니처를 확장하면서 세 필드 (source_event_id, model, provider) 를 한 wire change 로 threading.
+
+**Hot-path 통합** (`crates/gadgetron-xaas/src/quota/enforcer.rs`):
+
+```rust
+// PgQuotaEnforcer::record_post (after quota_configs UPDATE)
+let ins = crate::billing::insert_billing_event(
+    &self.pool,
+    token.tenant_id,
+    crate::billing::BillingEventKind::Chat,
+    actual_cost_cents,
+    None, None, None, // source_event_id / model / provider — TASK 12.2
+).await;
+if let Err(e) = ins {
+    tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
+        "failed to persist billing_events row — counter ahead of ledger until reconciled");
+}
+```
+
+**Fire-and-forget semantics**. `record_post` 는 이미 HTTP response 가 client 에게 나간 이후 background path. INSERT 실패는 fail-closed 가 아니라 `tracing::warn!(target: "billing")` 로 기록만 하고 진행 — request 자체는 성공했으므로 여기서 retry 를 뿌려 hot path 를 지연시킬 필요 없음. TASK 12.4 가 주기적 reconciliation (scan `quota_configs` vs `SUM(cost_cents) GROUP BY tenant_id, usage_day`) 으로 gap 을 메움.
+
+**Public read endpoint**. `GET /api/v1/web/workbench/admin/billing/events` — Management scope (OpenAiCompat → 403 via `scope_guard_middleware`). 핸들러 `list_billing_events` 가 `ctx.tenant_id` 로 WHERE 를 고정하고, query param 은 `since` (ISO-8601 lower bound) + `limit` (1..=500, default 100) 만 받음. `event_kind` 필터는 TASK 12.2 에서 추가 예정. Cross-tenant read 는 설계상 불가능 — query param 으로 `tenant_id` 오버라이드 못함. Response shape 과 운영 레시피는 [`manual/api-reference.md §GET /api/v1/web/workbench/admin/billing/events`](../manual/api-reference.md) 를 authoritative 로 참고.
+
+**Harness 커버리지**. Gate 7k.6: 비-스트리밍 chat 직후 짧은 sleep 후 `/admin/billing/events?limit=5` 를 poll 해서 `.events[] | select(.event_kind == "chat") | length >= 1` 을 assert. `record_post` → `insert_billing_event` write path 가 harness 의 기본 `PgQuotaEnforcer` 설정에서 실제로 persist 되는지 end-to-end 증명.
+
+**Design reference**. STRIDE threat model, SQL 스키마, trait 시그니처, reconciliation 계획: [`docs/design/xaas/phase2-billing.md`](../design/xaas/phase2-billing.md).
+
 ---
 
 ## 6. 감사 로깅 `[P1]`
@@ -759,7 +817,9 @@ Phase 1 HTTP status 매핑 전체 테이블은 `docs/design/xaas/phase1.md §2.4
 
 ## 8. 과금 엔진 `[P2]`
 
-> **Phase 1 에서는 `cost_cents` 를 `audit_log` 에 기록만 했습니다** (항상 0). **P2B / ISSUE 4 PR #194** 가 `gadgetron_core::pricing` 모듈을 추가하여 모델별 pricing 테이블을 기반으로 chat audit 경로에서 실 값을 계산·기록하기 시작했습니다. `/api/v1/web/workbench/usage/summary` 의 `chat.total_cost_cents` 가 이 값을 윈도 sum 으로 노출합니다. 본 §8 아래의 LedgerEntry / 과금 파이프라인은 여전히 EPIC 4 (ISSUE 12) 스코프로 별도 ISSUE 입니다.
+> **Phase 1 에서는 `cost_cents` 를 `audit_log` 에 기록만 했습니다** (항상 0). **P2B / ISSUE 4 PR #194** 가 `gadgetron_core::pricing` 모듈을 추가하여 모델별 pricing 테이블을 기반으로 chat audit 경로에서 실 값을 계산·기록하기 시작했습니다. `/api/v1/web/workbench/usage/summary` 의 `chat.total_cost_cents` 가 이 값을 윈도 sum 으로 노출합니다.
+>
+> **EPIC 4 ISSUE 12 TASK 12.1 / PR #236 / v0.5.5** 가 §8 의 full `LedgerEntry` schema 를 구현하기 전의 **경량 원장 (`billing_events`)** 을 먼저 배포했습니다 — `id BIGSERIAL`, `tenant_id`, `event_kind ∈ {chat, tool, action}` (DB CHECK), `source_event_id UUID` (FK 없음 — Stripe-style writer-independence), `cost_cents BIGINT`, `model`, `provider`, `created_at`. `PgQuotaEnforcer::record_post` 가 매 chat completion 마다 `quota_configs` counter UPDATE 옆에 `insert_billing_event` 를 동시 fire-and-forget 으로 발행하고, `GET /api/v1/web/workbench/admin/billing/events` 로 Management-scope 에서 조회 가능 (§5.8 참조). 본 §8.1–8.3 의 richer `LedgerEntry` (per-cost-type 분리: input/output tokens, GPU compute, VRAM, QoS / MIG 서차지) + `billing_ledger` 스키마는 여전히 ISSUE 12 의 **남은 TASKs** (12.2 tool/action kinds, 12.3 invoice materialization, 12.4 reconciliation, 12.5 Stripe ingest) 에서 materialize 될 invoice 레이어로, `billing_events` 위에 SUM / GROUP BY 뷰 로 composabe 하게 구현될 예정입니다.
 
 ### 8.1 LedgerEntry 모델 (D-8)
 

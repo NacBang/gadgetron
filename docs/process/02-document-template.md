@@ -75,6 +75,7 @@ TOML 섹션 예시 + 기본값 + 검증 규칙.
 - 데이터 흐름 다이어그램 (ASCII)
 - 타 서브에이전트 도메인과의 인터페이스 계약
 - `docs/reviews/pm-decisions.md` **D-12 크레이트 경계표** 준수 여부
+- **그래프 검증 (필수)**: `graphify-out/GRAPH_REPORT.md` 에서 이 모듈의 community + god node 를 확인하고, `graphify query "<이 모듈의 주요 심볼>"`, `graphify explain "<god node>"`, `graphify path "<A>" "<B>"` 로 claimed dependency 와 실제 edges 가 일치하는지 확인한 결과를 이 섹션에 인용한다. 상위/하위 의존 크레이트 나열이 speculative 하지 않고 그래프로 검증되었음을 reviewer 가 확인할 수 있어야 한다. 자세한 규칙은 `docs/process/05-development-process.md §6` 참조.
 
 ## 4. 단위 테스트 계획 (Verify)
 
@@ -153,5 +154,6 @@ TOML 섹션 예시 + 기본값 + 검증 규칙.
 
 - 5대 섹션(철학/구현/연결/단위테스트/통합테스트) 중 하나라도 비어있으면 리뷰 진입 불가.
 - 실행 경로를 바꾸는 문서는 `2.6 서비스 기동 / 제공 경로` 와 `5.4 운영 검증` 이 비어 있으면 리뷰 진입 불가.
+- **§3 전체 모듈 연결 구도** 는 `graphify query/explain/path` 결과 인용이 없으면 리뷰 진입 불가 — claimed dependency 가 실제 edges 와 맞는지 그래프로 검증한 증거가 있어야 한다 (자세한 규칙은 `docs/process/05-development-process.md §6`).
 - "오픈 이슈" 표는 비어있어도 해당 섹션 자체는 유지.
 - 리뷰 로그는 절대 덮어쓰지 않는다 (append-only).

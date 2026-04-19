@@ -9,6 +9,10 @@
 
 ```
 ① 조사 (서브에이전트 병렬)
+   └→ **graphify 먼저** (§6 참조): `graphify-out/GRAPH_REPORT.md`
+       에서 관련 community hub + god node 파악 → 탐색을 해당 커뮤니티
+       멤버로 좁힘. `graphify query/explain/path` 로 연결 관계 검증.
+       조사 프롬프트를 서브에이전트에 위임할 때 같은 지시를 포함.
    └→ 기존 코드/문서 gap 분석
    └→ 구현에 필요한 정보 수집
 
@@ -100,3 +104,45 @@
 ```
 조사 보고서 → 설계 문서 (Approved) → TDD 코드 → 테스트 결과 → 리팩토링 → PR → Merge
 ```
+
+---
+
+## 6. 그래프 기반 탐색 (graphify) 규칙
+
+본 리포지토리는 `graphify` 로 생성된 지식 그래프 (`graphify-out/`, 281+ 파일에 대한 community detection + god nodes) 를 **탐색의 1차 진입점**으로 사용한다. 이 규모의 코드베이스에서 `GRAPH_REPORT.md` 를 먼저 읽는 것이 세 번의 speculative grep 보다 빠르다.
+
+### 6.1 강제 규칙 — 메인 에이전트 + 모든 서브에이전트 (Agent-tool spawns 포함)
+
+1. **파일을 찾거나 심볼을 참조하기 전에** `graphify-out/GRAPH_REPORT.md` 를 먼저 연다. 관련 *community hub* (예: "Auth & Server Core", "Knowledge Curation") 와 *god node* (해당 community 안의 high-degree symbol) 를 식별한다. 파일 검색을 community member list 로 좁히고 repo-wide grep 을 피한다.
+
+2. **`Agent` 도구로 서브에이전트를 dispatch 할 때** 프롬프트에 다음을 포함한다: *"먼저 `graphify-out/GRAPH_REPORT.md` 를 읽어 관련 community + god node 를 찾고, 그 뒤에 구체 파일을 읽어라."* 탐색 범위를 scoped 로 유지해 corpus 재읽기를 방지한다.
+
+3. **GRAPH_REPORT 읽기만으로 부족하면** `graphify query "<question>" [--dfs]`, `graphify path "<A>" "<B>"`, `graphify explain "<node>"` 로 연결 관계 / call site / decoupling 을 직접 검증한다. 설계 문서의 §Connections 섹션 작성 시 필수.
+
+4. **Rust 코드 수정 후** `graphify update .` 를 실행한다 (AST fast path 로 LLM 비용 없음). 문서/markdown 변경은 `/graphify --update` 가 필요 (LLM 비용 발생).
+
+5. **`graphify-out/wiki/index.md` 가 존재하면** raw 파일이 아니라 이 위키를 탐색 entry 로 사용한다 — curated agent-crawlable surface 다.
+
+### 6.2 Hook discipline (자동 갱신)
+
+Git hook 이 그래프를 자동 새로고침해 `GRAPH_REPORT.md` 가 fresh 하게 유지된다.
+
+- `post-commit` — 커밋마다 AST refresh (`graphify hook install` 이 설치)
+- `post-checkout` — branch 전환 시 refresh
+- `post-merge` — `git pull` / merge 시 refresh (저장소 내 `.githooks/post-merge`)
+
+신규 clone 후 `./scripts/install-git-hooks.sh` 한 번 실행. Idempotent — 재실행 안전.
+
+### 6.3 Fallback
+
+`graphify` CLI 미설치 시 (`pipx install graphifyy` 또는 `pip install --user graphifyy`), hook + `graphify update` 명령은 silent no-op — 커밋·머지·pull 을 절대 block 하지 않는다. `GRAPH_REPORT.md` 는 plain markdown 이라 도구 없어도 (stale 하더라도) 읽을 수 있다.
+
+### 6.4 스프린트 사이클 내 위치
+
+| 사이클 단계 | graphify 사용법 |
+|---|---|
+| ① 조사 | GRAPH_REPORT 로 관련 community + god node 파악 → member list 로 읽기 범위 축소. 서브에이전트 프롬프트에도 같은 지시 포함. |
+| ② 문서화 | 설계 문서 §Connections 섹션에 `graphify query/explain/path` 결과 인용. "이 모듈이 무엇에 의존하는가 / 무엇이 이 모듈에 의존하는가" 를 그래프로 검증. |
+| ③ 크로스 리뷰 | Reviewer 가 "이 설계는 실제 코드 경계와 맞는가" 를 `graphify path` 로 검증. 설계 문서의 claimed dependency 와 실제 graph edges 불일치 시 flag. |
+| ⑤ TDD 구현 | 구현 도중 `graphify explain <node>` 로 변경 영향 범위 확인. 매 commit 후 hook 이 AST refresh. |
+| ⑥ 리팩토링 | `graphify query "<refactor target>"` 으로 참조 call site 완전 열거. dead code 식별. |
