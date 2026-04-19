@@ -1422,6 +1422,77 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7v.2 — user self-service API keys (ISSUE 14 TASK 14.4)
+# ---------------------------------------------------------------------------
+#
+# The harness's TEST_API_KEY and MGMT_API_KEY both have user_id=NULL
+# (legacy equivalence class). Using TEST_API_KEY (OpenAiCompat) to
+# exercise the self-service surface:
+#   1. GET /keys → list includes TEST + MGMT keys (both NULL-owner).
+#   2. POST /keys creates a new key scoped to OpenAiCompat only,
+#      returns raw_key once, SHA-256 hash stored server-side.
+#   3. DELETE /keys/{new_id} revokes, idempotent on re-call.
+#   4. Scope escalation: POST with scopes=[management] using an
+#      OpenAiCompat caller → rejected (handler enforces narrowing).
+log "=== Gate 7v.2: user self-service API keys (ISSUE 14 TASK 14.4) ==="
+
+MY_KEYS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/keys" 2>&1 || true)"
+MY_KEYS_COUNT="$(echo "$MY_KEYS_RESP" | jq '.keys | length' 2>/dev/null || echo -1)"
+if [ "${MY_KEYS_COUNT:-0}" -ge 2 ]; then
+  pass "/workbench/keys lists legacy-equivalence-class keys (count=$MY_KEYS_COUNT)"
+else
+  fail "/workbench/keys initial list regressed" "$(echo "$MY_KEYS_RESP" | head -c 400)"
+fi
+
+NEW_KEY_BODY='{"label":"harness-rotation-test","scopes":["openai_compat"]}'
+NEW_KEY_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$NEW_KEY_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/keys" 2>&1 || true)"
+NEW_KEY_ID="$(echo "$NEW_KEY_RESP" | jq -r '.id // ""' 2>/dev/null)"
+NEW_KEY_RAW="$(echo "$NEW_KEY_RESP" | jq -r '.raw_key // ""' 2>/dev/null)"
+if [ -n "$NEW_KEY_ID" ] && [[ "$NEW_KEY_RAW" == gad_live_* ]]; then
+  pass "POST /workbench/keys returned raw_key once (id=$NEW_KEY_ID)"
+else
+  fail "/workbench/keys POST shape regressed" "$(echo "$NEW_KEY_RESP" | head -c 400)"
+fi
+
+# Scope escalation — OpenAiCompat caller asking for Management → 400.
+ESCALATE_BODY='{"label":"escalation-attempt","scopes":["management"]}'
+ESCALATE_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ESCALATE_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/keys" 2>&1 || true)"
+if [ "$ESCALATE_CODE" != "200" ]; then
+  pass "scope escalation refused (status=$ESCALATE_CODE)"
+else
+  fail "scope escalation accepted — caller got management scope on OpenAiCompat key" ""
+fi
+
+# Revoke the new key.
+REVOKE_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/keys/$NEW_KEY_ID" 2>&1 || true)"
+if echo "$REVOKE_RESP" | jq -e '.revoked == true' >/dev/null 2>&1; then
+  pass "DELETE /workbench/keys/{id} revoked the new key"
+else
+  fail "DELETE /workbench/keys regressed" "$(echo "$REVOKE_RESP" | head -c 400)"
+fi
+
+# Idempotent re-revoke — should still succeed.
+REVOKE2_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/keys/$NEW_KEY_ID" 2>&1 || true)"
+if [ "$REVOKE2_CODE" = "200" ]; then
+  pass "DELETE /workbench/keys/{id} idempotent on re-revoke"
+else
+  fail "re-revoke non-idempotent — got $REVOKE2_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
 # ---------------------------------------------------------------------------
 #

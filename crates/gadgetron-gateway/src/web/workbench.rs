@@ -885,6 +885,149 @@ pub async fn delete_user_handler(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// ISSUE 14 TASK 14.4 — user self-service API keys
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListKeysResponse {
+    pub keys: Vec<gadgetron_xaas::identity_keys::KeyRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateKeyRequest {
+    /// Human-readable label (e.g. "ci-deploy", "alice-laptop").
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Requested scopes. MUST be a subset of the caller's own scopes.
+    /// Empty defaults to `["openai_compat"]`.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// "live" or "test" — matches api_keys.kind CHECK constraint.
+    /// Defaults to "live".
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RevokeKeyResponse {
+    pub revoked: bool,
+    pub key_id: uuid::Uuid,
+}
+
+/// `GET /api/v1/web/workbench/keys` — list keys owned by the calling
+/// user (matched by caller's api_key.user_id). Tenant-bounded.
+pub async fn list_my_keys_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<ListKeysResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "key listing requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let owner = gadgetron_xaas::identity_keys::caller_user_id(pool, ctx.api_key_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "caller_user_id lookup: {e}"
+            )))
+        })?;
+    let keys = gadgetron_xaas::identity_keys::list_keys(pool, ctx.tenant_id, owner)
+        .await
+        .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("list_keys: {e}"))))?;
+    let returned = keys.len();
+    Ok(Json(ListKeysResponse { keys, returned }))
+}
+
+/// `POST /api/v1/web/workbench/keys` — create a new key for the caller.
+/// Raw key is returned EXACTLY ONCE. Scope narrowing: requested scopes
+/// must be a subset of the caller's effective scopes.
+pub async fn create_my_key_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreateKeyRequest>,
+) -> Result<Json<gadgetron_xaas::identity_keys::NewKeyResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "key creation requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let kind = body.kind.as_deref().unwrap_or("live");
+    if !matches!(kind, "live" | "test") {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "kind must be live or test, got '{kind}'"
+        ))));
+    }
+    let requested_scopes: Vec<String> = if body.scopes.is_empty() {
+        vec!["openai_compat".into()]
+    } else {
+        body.scopes.clone()
+    };
+    // Scope-narrowing check: caller's scopes (as Display strings) must
+    // be a superset of requested_scopes.
+    let caller_scope_strs: std::collections::HashSet<String> =
+        ctx.scopes.iter().map(|s| s.as_str().to_string()).collect();
+    for s in &requested_scopes {
+        if !caller_scope_strs.contains(s) {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "requested scope '{s}' exceeds caller's own scopes"
+            ))));
+        }
+    }
+
+    let owner = gadgetron_xaas::identity_keys::caller_user_id(pool, ctx.api_key_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "caller_user_id lookup: {e}"
+            )))
+        })?;
+
+    let resp = gadgetron_xaas::identity_keys::create_key(
+        pool,
+        ctx.tenant_id,
+        owner,
+        body.label.as_deref(),
+        &requested_scopes,
+        kind,
+    )
+    .await
+    .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("create_key: {e}"))))?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /api/v1/web/workbench/keys/{key_id}` — revoke a key that
+/// the caller owns. Idempotent (re-revoke → 200).
+pub async fn revoke_my_key_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(key_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<RevokeKeyResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "key revoke requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let owner = gadgetron_xaas::identity_keys::caller_user_id(pool, ctx.api_key_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "caller_user_id lookup: {e}"
+            )))
+        })?;
+    gadgetron_xaas::identity_keys::revoke_key(pool, ctx.tenant_id, owner, key_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("revoke_key: {e}")))
+        })?;
+    Ok(Json(RevokeKeyResponse {
+        revoked: true,
+        key_id,
+    }))
+}
+
 /// `GET /usage/summary` — tenant-scoped operations rollup.
 ///
 /// Aggregates over the past `window_hours` (default 24, clamped
@@ -1231,6 +1374,13 @@ pub fn workbench_routes() -> Router<AppState> {
         .route(
             "/admin/users/{user_id}",
             axum::routing::delete(delete_user_handler),
+        )
+        // ISSUE 14 TASK 14.4 — user self-service API keys.
+        .route("/keys", get(list_my_keys_handler))
+        .route("/keys", post(create_my_key_handler))
+        .route(
+            "/keys/{key_id}",
+            axum::routing::delete(revoke_my_key_handler),
         )
 }
 

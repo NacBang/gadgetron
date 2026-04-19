@@ -3,4 +3,5 @@ pub mod auth;
 pub mod billing;
 pub mod error;
 pub mod identity;
+pub mod identity_keys;
 pub mod quota;
