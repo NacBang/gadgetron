@@ -184,6 +184,12 @@ pub struct GatewayWorkbenchService {
     /// back to `DescriptorCatalog::seed_p2b()`. Cloned from
     /// `WebConfig.catalog_path` at startup.
     pub catalog_path: Option<String>,
+    /// Optional bundles directory for multi-bundle aggregation
+    /// (ISSUE 9 TASK 9.2). When set, reload scans every
+    /// `<dir>/<bundle>/bundle.toml` and merges them into one
+    /// catalog — winning over `catalog_path` if both are
+    /// configured. Cloned from `WebConfig.bundles_dir` at startup.
+    pub bundles_dir: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -986,6 +992,13 @@ pub struct ReloadCatalogResponse {
     /// table; absent for `seed_p2b` and anonymous flat catalogs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<crate::web::catalog::BundleMetadata>,
+    /// Contributing bundles when the catalog came from a bundle
+    /// directory (ISSUE 9 TASK 9.2). Empty in every other case so
+    /// the admin UI can distinguish "single bundle loaded" from "N
+    /// bundles aggregated" without a special flag.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub bundles: Vec<crate::web::catalog::BundleMetadata>,
 }
 
 /// Atomically swap the in-memory `DescriptorCatalog` for a fresh one.
@@ -1033,28 +1046,31 @@ pub fn perform_catalog_reload(
         ))
     })?;
 
-    // TASK 8.4: prefer the configured file source when present.
-    // Parse failures surface as 500 with the error message so the
-    // operator knows the file was malformed — the old snapshot stays
-    // live on disk, so a bad edit can't take the workbench down.
-    // `into_snapshot()` compiles the JSON-Schema validators so the
-    // swap is atomic across catalog + validators.
+    // Source precedence: `bundles_dir` (ISSUE 9 TASK 9.2) wins over
+    // `catalog_path` (ISSUE 8 TASK 8.4) wins over the hardcoded
+    // `seed_p2b()` fallback. Parse / IO failures surface as 500
+    // with the error message — the old snapshot stays live so a
+    // bad edit can't take the workbench down.
+    let bundles_dir_cfg = svc.bundles_dir.as_deref();
     let catalog_path_cfg = svc.catalog_path.as_deref();
-    let (fresh_catalog, source_label, source_path) = match catalog_path_cfg {
-        Some(p) => {
-            let path = std::path::Path::new(p);
-            match crate::web::catalog::DescriptorCatalog::from_toml_file(path) {
-                Ok(c) => (c, "config_file", Some(p.to_string())),
-                Err(e) => {
-                    return Err(WorkbenchHttpError::Core(e));
-                }
-            }
+    let (fresh_catalog, source_label, source_path) = if let Some(dir) = bundles_dir_cfg {
+        let path = std::path::Path::new(dir);
+        match crate::web::catalog::DescriptorCatalog::from_bundle_dir(path) {
+            Ok(c) => (c, "bundles_dir", Some(dir.to_string())),
+            Err(e) => return Err(WorkbenchHttpError::Core(e)),
         }
-        None => (
+    } else if let Some(p) = catalog_path_cfg {
+        let path = std::path::Path::new(p);
+        match crate::web::catalog::DescriptorCatalog::from_toml_file(path) {
+            Ok(c) => (c, "config_file", Some(p.to_string())),
+            Err(e) => return Err(WorkbenchHttpError::Core(e)),
+        }
+    } else {
+        (
             crate::web::catalog::DescriptorCatalog::seed_p2b(),
             "seed_p2b",
             None,
-        ),
+        )
     };
     let fresh = fresh_catalog.into_snapshot();
 
@@ -1066,6 +1082,7 @@ pub fn perform_catalog_reload(
     let action_count = fresh.catalog.visible_actions(&all_scopes).len();
     let view_count = fresh.catalog.visible_views(&all_scopes).len();
     let bundle = fresh.catalog.bundle().cloned();
+    let bundles: Vec<_> = fresh.catalog.contributing_bundles().to_vec();
 
     catalog_handle.store(Arc::new(fresh));
 
@@ -1087,6 +1104,7 @@ pub fn perform_catalog_reload(
         source: source_label,
         source_path,
         bundle,
+        bundles,
     })
 }
 
@@ -1312,6 +1330,7 @@ mod tests {
                 approval_store: None,
                 descriptor_catalog: None,
                 catalog_path: None,
+                bundles_dir: None,
             })),
             penny_shared_surface: None,
             penny_assembler: None,

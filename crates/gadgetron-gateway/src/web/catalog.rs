@@ -110,6 +110,12 @@ pub struct DescriptorCatalog {
     /// catalog and for anonymous flat-TOML files that didn't declare
     /// a `[bundle]` table.
     pub(crate) bundle: Option<BundleMetadata>,
+    /// Bundles that contributed to this catalog when built via
+    /// [`Self::from_bundle_dir`] (ISSUE 9 TASK 9.2). Empty in all
+    /// other constructors. A merged catalog has `bundle = None` AND
+    /// `bundles = [...]`; a single-bundle catalog has
+    /// `bundle = Some(meta)` AND `bundles = []`.
+    pub(crate) bundles: Vec<BundleMetadata>,
 }
 
 impl DescriptorCatalog {
@@ -124,6 +130,7 @@ impl DescriptorCatalog {
             actions: vec![],
             allow_direct_actions: true,
             bundle: None,
+            bundles: Vec::new(),
         }
     }
 
@@ -295,6 +302,7 @@ impl DescriptorCatalog {
             actions,
             allow_direct_actions: true,
             bundle: None,
+            bundles: Vec::new(),
         }
     }
 
@@ -388,7 +396,126 @@ impl DescriptorCatalog {
             actions: file.actions,
             allow_direct_actions: file.allow_direct_actions.unwrap_or(true),
             bundle: file.bundle,
+            bundles: Vec::new(),
         })
+    }
+
+    /// Aggregate every `<dir>/<bundle>/bundle.toml` into one catalog
+    /// (ISSUE 9 TASK 9.2). Each immediate subdirectory that contains
+    /// a `bundle.toml` contributes its views + actions; the merged
+    /// `DescriptorCatalog.bundles` field (accessed via
+    /// [`Self::contributing_bundles`]) lists every bundle whose
+    /// manifest was read, in directory-sort order so the merge is
+    /// deterministic across runs.
+    ///
+    /// Collision policy: duplicate action or view ids across bundles
+    /// surface as a hard `Config` error naming the id + the two
+    /// bundle ids that declared it. Operators must rename or remove
+    /// one before reload succeeds — we never silently pick a winner.
+    ///
+    /// `allow_direct_actions` is OR-folded across bundles: if ANY
+    /// manifest opts in, the merged catalog opts in. This matches
+    /// the per-descriptor `disabled_reason` semantics (§2.2.2) where
+    /// the instance policy is a floor, not a ceiling.
+    ///
+    /// Missing / non-directory paths return `Config` errors so a
+    /// typo in `bundles_dir` fails loudly rather than silently
+    /// loading an empty catalog.
+    pub fn from_bundle_dir(dir: &std::path::Path) -> gadgetron_core::error::Result<Self> {
+        let md = std::fs::metadata(dir).map_err(|e| {
+            gadgetron_core::error::GadgetronError::Config(format!(
+                "bundles dir: cannot stat {dir:?}: {e}",
+            ))
+        })?;
+        if !md.is_dir() {
+            return Err(gadgetron_core::error::GadgetronError::Config(format!(
+                "bundles dir: {dir:?} is not a directory",
+            )));
+        }
+
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| {
+                gadgetron_core::error::GadgetronError::Config(format!(
+                    "bundles dir: cannot read {dir:?}: {e}",
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        entries.sort();
+
+        let mut merged_views: Vec<WorkbenchViewDescriptor> = Vec::new();
+        let mut merged_actions: Vec<WorkbenchActionDescriptor> = Vec::new();
+        let mut merged_bundles: Vec<BundleMetadata> = Vec::new();
+        let mut allow_direct = false;
+        // action_id → owning bundle id, for collision diagnostics.
+        let mut action_owner: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut view_owner: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        for subdir in entries {
+            let manifest = subdir.join("bundle.toml");
+            if !manifest.exists() {
+                tracing::debug!(
+                    bundle_dir = %subdir.display(),
+                    "skipping subdirectory without bundle.toml"
+                );
+                continue;
+            }
+            let c = Self::from_toml_file(&manifest)?;
+            let bundle_id = c.bundle().map(|b| b.id.clone()).unwrap_or_else(|| {
+                subdir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("anonymous")
+                    .to_string()
+            });
+            for v in c.views {
+                if let Some(other) = view_owner.get(&v.id) {
+                    return Err(gadgetron_core::error::GadgetronError::Config(format!(
+                        "bundles dir: duplicate view id {:?} in bundles {:?} and {:?}",
+                        v.id, other, bundle_id
+                    )));
+                }
+                view_owner.insert(v.id.clone(), bundle_id.clone());
+                merged_views.push(v);
+            }
+            for a in c.actions {
+                if let Some(other) = action_owner.get(&a.id) {
+                    return Err(gadgetron_core::error::GadgetronError::Config(format!(
+                        "bundles dir: duplicate action id {:?} in bundles {:?} and {:?}",
+                        a.id, other, bundle_id
+                    )));
+                }
+                action_owner.insert(a.id.clone(), bundle_id.clone());
+                merged_actions.push(a);
+            }
+            allow_direct = allow_direct || c.allow_direct_actions;
+            if let Some(meta) = c.bundle {
+                merged_bundles.push(meta);
+            }
+        }
+
+        Ok(Self {
+            views: merged_views,
+            actions: merged_actions,
+            allow_direct_actions: allow_direct,
+            // The merged catalog is NOT a single bundle — leave
+            // `bundle` None so `/admin/reload-catalog` reports the
+            // multi-bundle set via `bundles: Vec<BundleMetadata>`
+            // instead (see `contributing_bundles`).
+            bundle: None,
+            bundles: merged_bundles,
+        })
+    }
+
+    /// Bundles that contributed to this catalog. Populated only by
+    /// [`Self::from_bundle_dir`]; other constructors leave it empty
+    /// so the single-bundle case keeps using `self.bundle()`.
+    pub fn contributing_bundles(&self) -> &[BundleMetadata] {
+        &self.bundles
     }
 
     // -----------------------------------------------------------------------
@@ -662,6 +789,153 @@ input_schema = { type = "object" }
         );
         // Snapshot must compile: validates schemas round-trip through TOML.
         let _ = catalog.into_snapshot();
+    }
+
+    #[test]
+    fn from_bundle_dir_merges_multiple_bundles() {
+        // ISSUE 9 TASK 9.2 — two bundle subdirectories, each with its
+        // own `bundle.toml`, merge into one catalog.
+        let root =
+            std::env::temp_dir().join(format!("gadgetron-bundles-merge-{}", std::process::id()));
+        let b1 = root.join("b1");
+        let b2 = root.join("b2");
+        std::fs::create_dir_all(&b1).unwrap();
+        std::fs::create_dir_all(&b2).unwrap();
+        std::fs::write(
+            b1.join("bundle.toml"),
+            r#"
+[bundle]
+id = "bundle-one"
+version = "1.0.0"
+
+[[actions]]
+id = "b1-action"
+title = "b1"
+owner_bundle = "bundle-one"
+source_kind = "gadget"
+source_id = "b1.do"
+gadget_name = "b1.do"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "t"
+input_schema = { type = "object" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            b2.join("bundle.toml"),
+            r#"
+[bundle]
+id = "bundle-two"
+version = "2.0.0"
+
+[[actions]]
+id = "b2-action"
+title = "b2"
+owner_bundle = "bundle-two"
+source_kind = "gadget"
+source_id = "b2.do"
+gadget_name = "b2.do"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "t"
+input_schema = { type = "object" }
+"#,
+        )
+        .unwrap();
+
+        let merged = DescriptorCatalog::from_bundle_dir(&root).expect("merge ok");
+        let ids: std::collections::BTreeSet<_> =
+            merged.actions.iter().map(|a| a.id.clone()).collect();
+        assert!(ids.contains("b1-action"));
+        assert!(ids.contains("b2-action"));
+        // Merged catalogs expose contributing bundles, not a single bundle.
+        assert!(merged.bundle().is_none());
+        let contribs: std::collections::BTreeSet<_> = merged
+            .contributing_bundles()
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+        assert_eq!(
+            contribs,
+            ["bundle-one".to_string(), "bundle-two".to_string()]
+                .into_iter()
+                .collect(),
+            "both bundle ids must appear in contributing_bundles"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn from_bundle_dir_rejects_duplicate_action_ids() {
+        let root =
+            std::env::temp_dir().join(format!("gadgetron-bundles-dup-{}", std::process::id()));
+        let b1 = root.join("a1");
+        let b2 = root.join("a2");
+        std::fs::create_dir_all(&b1).unwrap();
+        std::fs::create_dir_all(&b2).unwrap();
+        let shared_action = r#"
+[[actions]]
+id = "duplicate-id"
+title = "x"
+owner_bundle = "x"
+source_kind = "gadget"
+source_id = "x.x"
+gadget_name = "x.x"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "t"
+input_schema = { type = "object" }
+"#;
+        std::fs::write(
+            b1.join("bundle.toml"),
+            format!(
+                r#"[bundle]
+id = "bundle-alpha"
+version = "1"
+{shared_action}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            b2.join("bundle.toml"),
+            format!(
+                r#"[bundle]
+id = "bundle-beta"
+version = "1"
+{shared_action}"#
+            ),
+        )
+        .unwrap();
+
+        let err =
+            DescriptorCatalog::from_bundle_dir(&root).expect_err("collision must surface as error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("duplicate action id"),
+            "error must name the collision; got {msg:?}"
+        );
+        assert!(
+            msg.contains("duplicate-id"),
+            "error must name the colliding id; got {msg:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn from_bundle_dir_rejects_non_directory() {
+        let path = std::env::temp_dir().join("gadgetron-bundles-nonexistent-xyz");
+        let _ = std::fs::remove_dir_all(&path);
+        let err = DescriptorCatalog::from_bundle_dir(&path).expect_err("missing dir must error");
+        assert!(format!("{err}").contains("cannot stat"));
     }
 
     #[test]
