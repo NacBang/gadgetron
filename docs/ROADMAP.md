@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.10** (post-ISSUE 10 TASK 10.2 — bundle install/uninstall)
+**Current version: 0.4.11** (post-ISSUE 10 TASK 10.3 — bundle scope isolation)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -198,8 +198,13 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     re-installing an existing id. Harness gates 7q.6 (install +
     discovery round-trip), 7q.7 (path-traversal rejected), 7q.8
     (uninstall + discovery round-trip).
-  - TASK 10.3 — per-bundle scope isolation (bundles declare
-    `required_scope`, aggregator filters by actor).
+  - TASK 10.3 ✅ — per-bundle scope isolation (0.4.10 → 0.4.11).
+    `[bundle] required_scope = "Management"` in the manifest sets
+    a scope floor — every view/action without its own
+    `required_scope` inherits the bundle's. Actors without the
+    scope see NONE of the bundle's descriptors. Zero-overhead for
+    bundles that don't declare a scope. Unit test pins the
+    inheritance semantics.
   - TASK 10.4 — signed manifests (Ed25519 signature check on
     install).
 

@@ -53,6 +53,17 @@ pub struct BundleMetadata {
     /// enforced today). Surfaced in the reload response so operators
     /// can tell "did my edit actually land?" at a glance.
     pub version: String,
+    /// Bundle-level scope floor (ISSUE 10 TASK 10.3). When set,
+    /// every view and action the bundle ships inherits this as
+    /// their minimum required scope — actors without the scope see
+    /// NONE of the bundle's descriptors. Overrides per-descriptor
+    /// `required_scope = None` (descriptors with their own stricter
+    /// scope keep that stricter scope). Typical use: a bundle that
+    /// only makes sense for operators sets
+    /// `required_scope = "Management"` once instead of repeating
+    /// the scope on every descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_scope: Option<gadgetron_core::context::Scope>,
 }
 
 /// On-disk catalog file shape consumed by
@@ -391,9 +402,28 @@ impl DescriptorCatalog {
                 "workbench catalog: TOML parse failed for {path:?}: {e}",
             ))
         })?;
+        // ISSUE 10 TASK 10.3 — bundle-level scope floor. If the
+        // bundle declares `required_scope`, every descriptor that
+        // didn't set its own scope inherits the bundle's. Descriptors
+        // with their own scope keep theirs (treated as narrower or
+        // equivalent to the bundle floor — we don't try to compare).
+        let mut views = file.views;
+        let mut actions = file.actions;
+        if let Some(bundle_scope) = file.bundle.as_ref().and_then(|b| b.required_scope) {
+            for v in views.iter_mut() {
+                if v.required_scope.is_none() {
+                    v.required_scope = Some(bundle_scope);
+                }
+            }
+            for a in actions.iter_mut() {
+                if a.required_scope.is_none() {
+                    a.required_scope = Some(bundle_scope);
+                }
+            }
+        }
         Ok(Self {
-            views: file.views,
-            actions: file.actions,
+            views,
+            actions,
             allow_direct_actions: file.allow_direct_actions.unwrap_or(true),
             bundle: file.bundle,
             bundles: Vec::new(),
@@ -749,6 +779,72 @@ input_schema = { type = "object" }
         let meta = catalog.bundle().expect("bundle metadata must round-trip");
         assert_eq!(meta.id, "test-bundle");
         assert_eq!(meta.version, "9.9.9");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bundle_required_scope_floors_descriptors_without_their_own() {
+        // ISSUE 10 TASK 10.3 — a bundle that declares
+        // `required_scope = "Management"` must push that floor down
+        // to every descriptor that didn't set one, so OpenAiCompat
+        // actors see NONE of the bundle's descriptors.
+        let dir =
+            std::env::temp_dir().join(format!("gadgetron-bundle-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bundle.toml");
+        std::fs::write(
+            &path,
+            r#"
+[bundle]
+id = "ops-bundle"
+version = "1.0.0"
+required_scope = "Management"
+
+[[actions]]
+id = "ops-action"
+title = "ops"
+owner_bundle = "ops-bundle"
+source_kind = "gadget"
+source_id = "ops.ping"
+gadget_name = "ops.ping"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "t"
+input_schema = { type = "object" }
+"#,
+        )
+        .unwrap();
+
+        let catalog = DescriptorCatalog::from_toml_file(&path).expect("parse ok");
+
+        // OpenAiCompat actor does NOT see the Management-floored
+        // descriptor.
+        let openai_visible = catalog.visible_actions(&openai_scopes());
+        assert!(
+            openai_visible.iter().all(|a| a.id != "ops-action"),
+            "ops-action must be hidden from OpenAiCompat after bundle scope floor"
+        );
+
+        // Management actor DOES see it.
+        let mgmt_visible = catalog.visible_actions(&mgmt_scopes());
+        assert!(
+            mgmt_visible.iter().any(|a| a.id == "ops-action"),
+            "ops-action must be visible to Management actor"
+        );
+
+        // Per-descriptor scope is now populated on the underlying
+        // catalog entry too — downstream audit/log can introspect
+        // the effective scope without re-reading the bundle.
+        assert_eq!(
+            catalog
+                .find_action("ops-action")
+                .and_then(|a| a.required_scope),
+            Some(Scope::Management),
+            "descriptor must have inherited Management from the bundle floor"
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 
