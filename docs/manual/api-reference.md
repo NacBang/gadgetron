@@ -1535,6 +1535,80 @@ E2E Gate 7q.8 uninstalls a previously-installed bundle and verifies it no longer
 
 ---
 
+### GET /api/v1/web/workbench/admin/billing/events
+
+Operator-scoped read over the append-only `billing_events` ledger written by `PgQuotaEnforcer::record_post` alongside the `quota_configs` counter UPDATE. Landed in **ISSUE 12 TASK 12.1 / v0.5.5 (PR #236)** as the first half of the integer-cent billing pipeline (remaining TASKs materialize invoices, reconcile counter-vs-ledger drift, and wire Stripe ingest). Handler: `crates/gadgetron-gateway/src/web/workbench.rs::list_billing_events`; query: `crates/gadgetron-xaas/src/billing/events.rs::query_billing_events`; migration: `crates/gadgetron-xaas/migrations/20260420000002_billing_events.sql`.
+
+**Scope:** `Management`. `OpenAiCompat` keys get `403 scope_required` via `scope_guard_middleware` — tenants do **not** read their own billing rows through this endpoint (use `GET /quota/status` for tenant-facing usage introspection, which is OpenAiCompat-scoped).
+
+**Tenant boundary.** The handler WHERE-pins `tenant_id` to `ctx.tenant_id` before SQL dispatch. There is no `tenant_id` query parameter; cross-tenant reads are impossible regardless of what the caller sends. A Management key for tenant A reading this endpoint sees only tenant A's ledger rows.
+
+**Query parameters** (all optional):
+
+| Name | Type | Default | Meaning |
+|------|------|---------|---------|
+| `since` | ISO-8601 timestamp | unbounded | Lower bound on `created_at`. Strict `>` comparison (supply the last row's `created_at` to page forward without re-reading it). |
+| `limit` | integer | `100` | Clamped to `1..=500` at the handler. Values outside this range silently clip to the nearest bound. |
+
+Rows are returned newest-first (`ORDER BY created_at DESC, id DESC`), so the natural "tail of the ledger" cursor is the last-returned `created_at`.
+
+**Example:**
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "http://localhost:8080/api/v1/web/workbench/admin/billing/events?limit=5"
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "events": [
+    {
+      "id": 42,
+      "tenant_id": "018fa1a2-…-uuid",
+      "event_kind": "chat",
+      "source_event_id": null,
+      "cost_cents": 17,
+      "model": null,
+      "provider": null,
+      "created_at": "2026-04-20T18:12:03.441Z"
+    }
+  ],
+  "returned": 1
+}
+```
+
+- `id` is `BIGSERIAL` — strictly increasing per-row, safe as a tie-breaker cursor when `created_at` collides.
+- `event_kind` is one of `"chat" | "tool" | "action"` (CHECK constraint at the DB layer; new kinds require a migration — TASK 12.2 will add `tool` + `action` emitters). TASK 12.1 only emits `"chat"` from `PgQuotaEnforcer::record_post`.
+- `source_event_id` is `null` today; TASK 12.2 threads the originating chat-audit UUID so invoice queries can join against `action_audit_events` / `tool_audit_events` for line-item explanations. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted yet.
+- `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents`; integer cents end-to-end per ADR-D-8.
+- `model` / `provider` are `null` today for the same reason as `source_event_id` — TASK 12.2 widens the `QuotaEnforcer::record_post` trait signature to thread these three fields in one wire change.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management`. Emitted by `scope_guard_middleware` before the handler runs. |
+| `config_error` | 503 | `pg_pool` is not wired (`--no-db` or missing `database_url`). The ledger has no storage layer to read from. |
+| `internal` | 500 | Underlying SQL error (connection exhaustion, migration not applied, etc.). Error body shape follows the OpenAI-compat `{error: {message, type, code}}` contract. |
+
+Malformed `since` (non-ISO-8601) surfaces as an axum 400 from the query deserializer before hitting the handler.
+
+**Reconciliation model.** The ledger is the authoritative spend record; `quota_configs.daily_used_cents` is a fast counter. If an INSERT fails (write amplification, pool saturation) the counter is already incremented and the warn log is the only trace:
+
+```
+WARN billing tenant_id=... error=...
+  failed to persist billing_events row — counter ahead of ledger until reconciled
+```
+
+TASK 12.4 will land the reconciliation pass (scan `quota_configs` vs `SUM(cost_cents) GROUP BY tenant_id, usage_day` and emit either corrective INSERTs or operator-visible drift alerts). Until then, operator-visible divergence between `/quota/status` remaining-cents and `/admin/billing/events` sum-of-cost-cents is expected when the ledger falls behind.
+
+**Harness coverage.** Gate 7k.6 runs a non-streaming chat completion, waits briefly, then polls `/admin/billing/events?limit=5` and asserts `.events[] | select(.event_kind == "chat") | length >= 1` — proving the `record_post` → `insert_billing_event` write path actually persists under the harness's default `PgQuotaEnforcer` configuration.
+
+**Design reference.** Full STRIDE threat model, SQL schema, trait signatures, and reconciliation plan for TASK 12.4: [`docs/design/xaas/phase2-billing.md`](../design/xaas/phase2-billing.md).
+
+---
+
 ### GET /api/v1/web/workbench/audit/events
 
 Tenant-scoped read over `action_audit_events` — the rows the `ActionAuditSink` persisted at each action-service terminal. Landed in ISSUE 3 / v0.2.6 (`crates/gadgetron-gateway/src/web/workbench.rs::list_audit_events`, backed by `crates/gadgetron-xaas/src/audit/action_event.rs::query_action_audit_events`).
