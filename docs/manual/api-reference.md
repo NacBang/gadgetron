@@ -23,7 +23,7 @@ Replace `api_key` with the key you created in [quickstart.md](quickstart.md) Ste
 
 ## Error response format
 
-All errors return a JSON body in the following shape, matching the OpenAI error format:
+Errors that route through `GadgetronError::IntoResponse` return a JSON body in the following shape, matching the OpenAI error format. Two exceptions: (1) the admin-stub endpoints (`/api/v1/nodes`, `/api/v1/models/deploy`, etc.) return bare HTTP 501 with **no body** (see §Admin endpoints below); (2) HTTP 204 from `/favicon.ico` also has no body. The `map_response(openai_shape_413)` outermost Tower layer additionally rewrites the raw plain-text 413 from `RequestBodyLimitLayer` into the JSON shape below.
 
 ```json
 {
@@ -43,7 +43,7 @@ All errors return a JSON body in the following shape, matching the OpenAI error 
 
 ## Error codes
 
-All error codes, their HTTP status, and the type they map to:
+Foundational error codes emitted by the request pipeline — auth, scoping, routing, database, and knowledge failures. Penny / Wiki / workbench error codes are listed inline under their respective endpoint sections (`penny_*` / `wiki_*` in §Penny / Wiki error bodies below; `workbench_*` in each §Workbench endpoint's Errors row).
 
 | `code` | HTTP status | `type` | When it occurs |
 |--------|-------------|--------|----------------|
@@ -382,7 +382,7 @@ All bodies are emitted with the standard `x-request-id` header; include that UUI
 
 Requires scope: `OpenAiCompat`
 
-Submit a chat completion request. Compatible with OpenAI's `/v1/chat/completions` API. Existing OpenAI clients can point at Gadgetron without code changes by changing the base URL.
+Submit a chat completion request to Gadgetron's `/v1/chat/completions` endpoint. The Python `openai` SDK is the canonical tested client — point it at Gadgetron by setting `base_url="http://<host>:<port>/v1"`. E2E Gate 9c exercises this path end-to-end; the SDK examples below are directly derived from that gate. No other SDK is formally verified here; use others at your own risk against the raw wire-shape contract below.
 
 **Request body:**
 
@@ -402,7 +402,7 @@ Submit a chat completion request. Compatible with OpenAI's `/v1/chat/completions
 | `messages` | array | yes | Array of `{"role": "user"|"assistant"|"system", "content": "..."}` objects |
 | `stream` | boolean | no | `false` (default) for a single JSON response; `true` for SSE streaming |
 
-Additional OpenAI request fields (`temperature`, `max_tokens`, `top_p`, etc.) are forwarded to the upstream provider as-is. Gadgetron does not validate them beyond JSON parsing.
+Gadgetron deserializes request bodies into a closed Rust `ChatRequest` struct (`crates/gadgetron-core/src/provider.rs`). Only fields explicitly modeled there — `model`, `messages`, `stream`, and the per-provider typed parameters — are carried through to the upstream provider. Unknown JSON fields are **silently dropped** at deserialization time. If you need a field that Gadgetron doesn't yet model (e.g. `seed`, `response_format`, tool-calling params), the doc for that field's support is gated on the gateway adding it to `ChatRequest` — sending it today is a no-op.
 
 Maximum request body size: **4 MiB** (enforced by the gateway before authentication). Oversized requests return HTTP 413 with `error.code = "request_too_large"` and an OpenAI-shaped JSON body.
 
@@ -434,11 +434,11 @@ HTTP 200
 }
 ```
 
-**OpenAI wire-contract fields.** The fields below are the minimum contract the Python `openai` SDK and ecosystem clients (LangChain, LlamaIndex, etc.) rely on. E2E Gate 8 (`scripts/e2e-harness/run.sh:985-997`) formally asserts each one on every non-streaming response; a regression that drops or re-types any of these breaks every downstream SDK even though the raw content would still be readable.
+**Gadgetron wire-shape contract.** The table below is the non-streaming wire-shape contract formally asserted by E2E Gate 8 (`scripts/e2e-harness/run.sh:985-997`). The Python `openai` SDK's `ChatCompletion` model defines matching typed fields (`id`, `object`, `created`, `model`, `choices`, `usage`), but strict response validation is **disabled by default** in the SDK (`_strict_response_validation=False`), so a type mismatch will typically surface as a silent coercion rather than a raised exception. Treat Gate 8 as the load-bearing contract; SDK consumers get downstream-of-the-gate safety, not a guaranteed pre-flight `ValidationError`.
 
 | Field | Type | Gate 8 assertion | Purpose |
 |-------|------|-----------------|---------|
-| `id` | string starting with `chatcmpl-` | `(.id | type == "string" and startswith("chatcmpl-"))` | Deduplication + log correlation on the client side. OpenAI reserves the prefix. |
+| `id` | non-empty string; shape depends on provider | `(.id | type == "string" and startswith("chatcmpl-"))` — Gate 8 pins the `chatcmpl-` prefix because the mock + OpenAI-compatible upstreams (OpenAI, vLLM, SGLang, Ollama) emit it. Non-OpenAI-shape adapters emit different prefixes: Gemini synthesizes `gemini-<uuid>` (`gadgetron-provider/src/gemini.rs`), Anthropic forwards its own upstream id verbatim (`gadgetron-provider/src/anthropic.rs`). Client code that pins on `chatcmpl-` will break on those providers. | Deduplication + log correlation on the client side. |
 | `object` | `"chat.completion"` literal | `.object == "chat.completion"` | Distinguishes the non-streaming response shape from `chat.completion.chunk` streaming frames. |
 | `created` | integer (unix seconds) | not in Gate 8 but emitted | Response time, useful for client-side latency breakdowns. |
 | `model` | non-empty string | `(.model | type == "string" and length > 0)` | Identifies which provider-routed model served the request. For Gadgetron this may be the upstream model ID (e.g. `gpt-4o-mini`), not the `model` field the client sent. |
@@ -446,7 +446,7 @@ HTTP 200
 | `choices[].finish_reason` | string (`stop` / `length` / `tool_calls` / etc.) | `(.choices[0].finish_reason | type == "string")` | Must be a string on terminal response. Streaming chunks emit `null` until the final chunk. |
 | `usage.total_tokens` | number | `(.usage.total_tokens | type == "number")` | `prompt_tokens + completion_tokens`. All three are emitted for provider-returned usage; Gadgetron does not re-compute or estimate. |
 
-Additional OpenAI fields like `system_fingerprint` are forwarded as-is when the upstream provider emits them; Gadgetron does not synthesize them. Absent fields remain absent — clients MUST tolerate missing optional fields rather than assuming empty-string defaults.
+Gadgetron's `ChatResponse` struct is closed and does not carry a generic passthrough bag — fields the OpenAI spec defines that Gadgetron does not model (e.g. `system_fingerprint`, `service_tier`, logprobs scaffolding) are **dropped** by the adapter layer, even if the upstream provider sends them. If you depend on such a field, filing an issue against `gadgetron-core` is the path; there is no config toggle that re-enables the passthrough today.
 
 **`reasoning_content` field (reasoning models — SGLang GLM-5.1 and similar):**
 
@@ -507,13 +507,13 @@ data: {"id":"chatcmpl-xyz","object":"chat.completion.chunk","created":1700000000
 
 | Field | Value | Gate 9 assertion |
 |-------|-------|-----------------|
-| `id` | non-empty string. Same `id` across **every** chunk in one stream (OpenAI correlation contract — the Python SDK, LangChain streaming handlers, etc. group chunks by id). In practice starts with `chatcmpl-`, though the shape gate only asserts type + length. | Shape: `(.id | type == "string" and length > 0)`. Cross-chunk consistency: separate assertion that `jq -r '.id'` over all frames returns exactly one unique value. |
+| `id` | non-empty string. For OpenAI-shape upstreams (OpenAI, vLLM, SGLang, Ollama, the harness mock) the same `id` is reused across every chunk in one stream — the Python `openai` SDK's `ChatCompletionChunk.id` is documented as "A unique identifier for the chat completion. Each chunk has the same ID." The `GeminiProvider::chat_stream` adapter violates this: it synthesizes a fresh `gemini-chunk-<uuid>` per chunk (`gadgetron-provider/src/gemini.rs`), so client code that groups chunks by id will see one distinct id per frame for Gemini streams. Gate 9's cross-chunk consistency assertion runs against the mock (OpenAI-shape) and is therefore silent on Gemini. | Shape: `(.id | type == "string" and length > 0)`. Cross-chunk consistency: assertion `jq -r '.id'` over all frames returns exactly one unique value (OpenAI-shape path only). |
 | `object` | `"chat.completion.chunk"` literal (distinguishes streaming frames from the non-streaming shape) | `.object == "chat.completion.chunk"` |
 | `choices` | non-empty array; each entry has `index`, `delta`, `finish_reason` | `(.choices | length >= 1)` |
 | `choices[].delta` | object — the **incremental** update for this chunk. First chunk typically carries `role: "assistant"`; subsequent chunks carry only `content` (or `reasoning_content`). | — |
 | `choices[].finish_reason` | `null` on all chunks except the final one; final chunk emits `"stop"` / `"length"` / etc. | — |
 
-E2E Gate 9 asserts the per-chunk shape on the first non-`[DONE]` frame (`scripts/e2e-harness/run.sh:1063-1065`); a companion gate asserts that every chunk in the stream shares the same `.id` — a regression that rotated ids mid-stream would break client SDKs that group chunks by id even though each individual chunk still parses. A regression that flips `object` to `chat.completion` (non-streaming shape) on a streaming response would break SDK parsers even though the raw text is readable.
+E2E Gate 9 asserts the per-chunk shape on the first non-`[DONE]` frame (`scripts/e2e-harness/run.sh:1063-1065`); a companion gate asserts that every chunk in the stream shares the same `.id`. This matches the Python `openai` SDK source, which types `object` as the literal `chat.completion.chunk` and documents `ChatCompletionChunk.id` as stable across chunks. A regression that flipped `object` to `chat.completion` (non-streaming shape) on a streaming response, or rotated ids mid-stream, would break the SDK's streaming iterator and Gate 9 in lockstep.
 
 **Streaming error frame:**
 
@@ -544,6 +544,62 @@ curl -N http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer gad_live_your32chartoken00000000000000" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}],"stream":true}'
 ```
+
+**Python OpenAI SDK — non-streaming.** The intro example at the top of this page covers the minimum; the expanded form below shows the fields the SDK's `ChatCompletion` model types. Note that the SDK defaults to `_strict_response_validation=False`, so a wrong-type field would typically coerce rather than raise — the guardrail here is E2E Gate 8, not the SDK. Gate 9c's harness scenario (`scripts/e2e-harness/sdk-client.py:45-68`) exercises the same code path and also asserts harness-specific fields (exact mock-content substring, exact token counts) that don't generalize beyond the mock.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="gad_live_...")
+
+resp = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=False,
+)
+
+# Wire-shape fields Gate 8 asserts (the SDK exposes these as typed
+# attributes but does not strict-validate by default — Gate 8 is the
+# load-bearing contract, the asserts here are defensive client-side):
+assert resp.id.startswith("chatcmpl-")
+assert resp.object == "chat.completion"
+assert resp.model  # non-empty string
+assert resp.choices[0].finish_reason  # non-None on terminal response
+assert isinstance(resp.usage.total_tokens, int)
+
+print(resp.choices[0].message.content)
+```
+
+**Python OpenAI SDK — streaming.** The same SDK iterates over SSE frames transparently; `stream=True` returns an iterator of `ChatCompletionChunk` objects. Gate 9c's streaming scenario (`sdk-client.py:72-95`) formally asserts that every chunk in a single stream shares the same `id`, at least one chunk carries `finish_reason`, and the accumulated `delta.content` is non-empty:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="gad_live_...")
+
+accum = ""
+chunk_ids: set[str] = set()
+finished = False
+
+stream = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hi"}],
+    stream=True,
+)
+for chunk in stream:
+    chunk_ids.add(chunk.id)
+    if chunk.choices and chunk.choices[0].delta.content:
+        accum += chunk.choices[0].delta.content
+    if chunk.choices and chunk.choices[0].finish_reason:
+        finished = True
+
+assert finished, "no finish_reason observed — stream ended abnormally"
+assert len(chunk_ids) == 1, f"chunks must share one id, got {chunk_ids}"
+assert accum, "no content accumulated"
+print(accum)
+```
+
+The `len(chunk_ids) == 1` assertion matches the OpenAI Python SDK's own chunk contract — the installed SDK documents `ChatCompletionChunk.id` as "A unique identifier for the chat completion. Each chunk has the same ID." A regression that rotated chunk ids mid-stream would break this example and E2E Gate 9c in lockstep.
 
 ---
 
@@ -635,9 +691,11 @@ curl -s http://localhost:8080/ready
 
 ## Workbench endpoints (Phase 2A)
 
-The workbench projection API surfaces real-time activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes — and are available when `[knowledge]` is configured and the Web UI feature is enabled.
+The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
 
-All eight routes are mounted at `/api/v1/web/workbench/`. When the knowledge service is not wired (no `[knowledge]` section), they return HTTP 400 with `"code": "config_error"`.
+All eight routes are always mounted on trunk; the CLI's `build_workbench(knowledge_service, candidate_coordinator)` helper at `crates/gadgetron-cli/src/main.rs:~1250` returns `Some(...)` even when both arguments are `None` (degraded mode: bootstrap + catalog still reachable, activity capture no-ops, knowledge-backed fields show null/defaults). Several response fields — `activity.entries`, `request_evidence.*`, `refresh_view_ids` — are wired to **stub sources** on trunk and will return empty/not-found payloads regardless of runtime traffic until the real activity / evidence sources land. The endpoint subsections below call out which fields are stubbed.
+
+The `config_error` 400 path exists in `require_workbench(&state)` for the case where `state.workbench` is `None`, but no production build path on trunk produces that state — it is a defensive guard for test harness configurations.
 
 ---
 
@@ -645,7 +703,9 @@ All eight routes are mounted at `/api/v1/web/workbench/`. When the knowledge ser
 
 Gateway version, default model, active plug health, and knowledge plane readiness. Called by the Web UI shell on mount.
 
-**Server-side injection into chat completions.** On every `POST /v1/chat/completions` request the gateway wraps the same bootstrap payload (truncated to `[agent.shared_context].digest_summary_chars` per `gadgetron.toml`) inside `<gadgetron_shared_context>...</gadgetron_shared_context>` tags and prepends it to the request's system message surface via `inject_shared_context_block` (`crates/gadgetron-gateway/src/handlers.rs:411-428`). Two modes, selected by the shape of the caller's first message:
+**Server-side injection into chat completions.** Injection runs on `POST /v1/chat/completions` only when BOTH gates are satisfied (`crates/gadgetron-gateway/src/handlers.rs:70-108`): (a) `[agent.shared_context].enabled` is `true` (the default), AND (b) `state.penny_assembler` is `Some(...)` — which requires a Penny-capable build with the knowledge layer wired. When injection runs, the gateway wraps the same bootstrap payload (truncated to `[agent.shared_context].digest_summary_chars` per `gadgetron.toml`) inside `<gadgetron_shared_context>...</gadgetron_shared_context>` tags and prepends it to the request's system message surface via `inject_shared_context_block` (`handlers.rs:411-428`). When either gate fails, the chat request proceeds with the caller's original `messages` unchanged. Build failures (timeout, knowledge unavailable) also degrade gracefully without failing the chat request — a WARN is emitted on `penny_shared_context` and the original messages pass through.
+
+Two injection modes, selected by the shape of the caller's first message:
 
 | First message shape | Mode | Emitted tracing line |
 |---------------------|------|----------------------|
@@ -682,7 +742,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 | Field | Type | Notes |
 |-------|------|-------|
 | `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.0"`. |
-| `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured — clients MUST handle both shapes. |
+| `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
 | `active_plugs[].role` | `"canonical"` \| `"search"` \| `"relation"` \| `"extractor"` | Which port the plug fills. The /web UI groups plugs by role. |
@@ -700,7 +760,7 @@ The three `*_ready` booleans are the observable contract gate 7 pins down (`(.kn
 
 ### GET /api/v1/web/workbench/activity
 
-Recent workbench activity feed: Penny turns, direct actions, system events.
+Recent workbench activity feed: Penny turns, direct actions, system events. **On trunk today this is a stub** — `InProcessWorkbenchProjection::activity` at `crates/gadgetron-gateway/src/web/projection.rs:101-106` always returns `{"entries": [], "is_truncated": false}` regardless of `limit` or real traffic. The response shape documented below is the contract future activity-source wiring (PSL-1) will populate; build client code against the shape, but don't expect non-empty data until that ships. E2E Gate 7c asserts the empty-state shape.
 
 **Auth:** `OpenAiCompat`
 
@@ -735,13 +795,13 @@ Recent workbench activity feed: Penny turns, direct actions, system events.
 
 ### GET /api/v1/web/workbench/requests/{request_id}/evidence
 
-Per-request evidence: tool traces, knowledge citations, and knowledge candidates created during that request.
+Per-request evidence: tool traces, knowledge citations, and knowledge candidates created during that request. **On trunk today this is a stub** — `InProcessWorkbenchProjection::request_evidence` at `crates/gadgetron-gateway/src/web/projection.rs:109-115` unconditionally returns `RequestNotFound` (HTTP 404 `workbench_request_not_found`) for every `request_id`. The 200 body example below is the contract future evidence-source wiring (PSL-1) will populate. E2E Gate 7m relies on the uniform 404 behavior.
 
 **Auth:** `OpenAiCompat`
 
 **Path parameters:** `request_id` — UUID of the gateway request.
 
-**Response:**
+**Response (future / post-PSL-1 — today always 404):**
 
 ```json
 {
@@ -924,7 +984,7 @@ Invoke a registered direct action.
     "approval_id": null,
     "activity_event_id": "uuid",
     "audit_event_id": null,
-    "refresh_view_ids": ["knowledge-activity-recent"],
+    "refresh_view_ids": [],
     "knowledge_candidates": [],
     "payload": null
   }
@@ -932,6 +992,8 @@ Invoke a registered direct action.
 ```
 
 `result.status`: `"ok"` | `"pending_approval"` (when `requires_approval = true` on the descriptor). When `pending_approval`, `approval_id` is set.
+
+`refresh_view_ids` is typed as `Vec<String>` on the wire (non-null, possibly empty). On trunk today both the `ok` and `pending_approval` paths return an empty array (`crates/gadgetron-gateway/src/web/action_service.rs:207-215,284-292`) — the refresh-hint channel is reserved for future per-action policy (e.g. an action that should trigger the UI to refetch `knowledge-activity-recent`). Web UI shells should already loop over the array (handling zero gracefully); do not pin to specific view ids.
 
 **Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`; audit plane integration is future work, so `audit_event_id` is currently always `null` in the response regardless of identity state.
 
