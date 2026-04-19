@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.9",
+  "gateway_version": "0.4.10",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.9"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.10"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.4.9"
+    "version": "0.4.10"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.4.9"},
+    {"id": "gadgetron-core", "version": "0.4.10"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1389,7 +1389,7 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
   "count": 2,
   "bundles": [
     {
-      "bundle": {"id": "gadgetron-core", "version": "0.4.9"},
+      "bundle": {"id": "gadgetron-core", "version": "0.4.10"},
       "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
       "action_count": 5,
       "view_count": 3
@@ -1423,6 +1423,98 @@ curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
 | `config_error` | 500 | One of the `<subdir>/bundle.toml` files failed to read or parse. Same error envelope as the reload endpoint's TOML parse failure — error message embeds the file path and the serde / IO error. The endpoint is read-only, so nothing has been swapped; fix the bad TOML and retry. |
 
 E2E Gate 7q.4 pins the response shape and asserts the first-party `gadgetron-core` bundle is enumerated with `action_count == 5`. Gate 7q.5 pins the RBAC contract.
+
+---
+
+### POST /api/v1/web/workbench/admin/bundles
+
+Install a new bundle manifest into the configured `[web] bundles_dir`. Landed in ISSUE 10 TASK 10.2 / v0.4.10 (PR #224). **Does NOT swap the live catalog** — the handler writes the TOML to disk but leaves `Arc<ArcSwap<CatalogSnapshot>>` untouched. Operators activate the new bundle by triggering `POST /admin/reload-catalog` or `SIGHUP` when ready; the `reload_hint` field in the response points at the reload endpoint explicitly.
+
+**Scope:** `Management` (admin sub-tree). An OpenAiCompat key returns 403 `scope_required`.
+
+**Request body:**
+```json
+{
+  "bundle_toml": "[bundle]\nid = \"acme-ops\"\nversion = \"1.2.0\"\n\n[[actions]]\n..."
+}
+```
+
+- `bundle_toml` — a complete manifest as a single string (not a filesystem reference). The handler parses it to verify schema + extract the id, then writes the string verbatim to disk.
+
+**Response (HTTP 200):**
+```json
+{
+  "installed": true,
+  "bundle_id": "acme-ops",
+  "manifest_path": "/etc/gadgetron/bundles/acme-ops/bundle.toml",
+  "reload_hint": "POST /api/v1/web/workbench/admin/reload-catalog to activate"
+}
+```
+
+- `installed` — always `true` on 200. Clients key observability on this flag (same pattern as `reloaded` on reload-catalog).
+- `bundle_id` — echoed id extracted from the `[bundle]` table. Admin UIs use this to confirm the manifest they sent was the one the server parsed.
+- `manifest_path` — absolute path of the file the handler wrote. Typically `{bundles_dir}/{id}/bundle.toml`. Operators can `cat` this to verify contents match what they sent.
+- `reload_hint` — human-readable reminder that installing does NOT activate; caller must call the reload endpoint (or send SIGHUP) next.
+
+**Security invariant — path-traversal safe.** The `[bundle]` id must match `^[a-zA-Z0-9_-]{1,64}$`. `validate_bundle_id()` centralizes this check and every filesystem-touching path (install + uninstall) goes through it. Ids containing `..`, `/`, leading dot, or any other character outside the regex are rejected with 4xx `Config` BEFORE any disk write. Gate 7q.7 pins this: a request with `id = "../etc/passwd"` must return 4xx.
+
+**Collision policy — no silent overwrites.** Installing over an existing id is a hard `Config` error (4xx). The handler checks `{bundles_dir}/{id}/` first and bails if it exists. Operators must `DELETE /admin/bundles/{bundle_id}` before reinstalling. This matches the `from_bundle_dir` duplicate-id hard-error semantics — the marketplace never silently prefers one version over another.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management`. |
+| `config_error` | 503 | `bundles_dir` is not configured in `[web]`. |
+| `config_error` | 4xx | Request body missing `bundle_toml` / not JSON / TOML parse failure / missing `[bundle]` table / missing `id` / missing `version` / id fails the `[a-zA-Z0-9_-]{1,64}` regex / bundle id already exists under `bundles_dir`. Error message distinguishes the cause so admin UIs can present actionable feedback. |
+| `config_error` | 500 | Filesystem write failure (disk full, permission denied, parent-dir IO error). The handler does not leave partial state — if the `bundle.toml` write fails, `mkdir` is rolled back where possible. |
+
+E2E Gate 7q.6 installs a dummy bundle and verifies it appears in the next `GET /admin/bundles` call. Gate 7q.7 pins the path-traversal rejection.
+
+---
+
+### DELETE /api/v1/web/workbench/admin/bundles/{bundle_id}
+
+Remove an installed bundle. Landed in ISSUE 10 TASK 10.2 / v0.4.10 (PR #224). **Does NOT swap the live catalog** — same contract as install. Operator triggers reload to drop the removed bundle from the merged catalog.
+
+**Scope:** `Management`.
+
+**Path parameter:** `bundle_id` — must match `^[a-zA-Z0-9_-]{1,64}$` (same regex as install; rejected BEFORE any filesystem access).
+
+**Request body:** none.
+
+**Example:**
+```bash
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/bundles/acme-ops
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "uninstalled": true,
+  "bundle_id": "acme-ops",
+  "manifest_path": "/etc/gadgetron/bundles/acme-ops/bundle.toml",
+  "reload_hint": "POST /api/v1/web/workbench/admin/reload-catalog to drop from live catalog"
+}
+```
+
+`manifest_path` is the path that no longer exists (the directory was removed via `std::fs::remove_dir_all`).
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management`. |
+| `config_error` | 503 | `bundles_dir` is not configured. |
+| `config_error` | 4xx | `bundle_id` path parameter fails the id regex (path-traversal attempt / empty / too long / contains `/` or `..`). Rejected BEFORE touching disk. |
+| `config_error` | 404 | No `{bundles_dir}/{bundle_id}/` directory exists. Idempotent-friendly: a second DELETE of the same id surfaces this 404 so scripts can treat it as "already gone". |
+| `config_error` | 500 | `remove_dir_all` failure (permission denied, disk I/O error). Partial-removal state is possible on filesystem failure; a retry after fixing the underlying issue is safe because install prevents re-creating over an existing id. |
+
+E2E Gate 7q.8 uninstalls a previously-installed bundle and verifies it no longer appears in `GET /admin/bundles`.
+
+**Compose with reload.** Install + uninstall both leave the live `CatalogSnapshot` untouched. The typical operator workflow is: (1) `POST /admin/bundles` to stage, (2) `DELETE /admin/bundles/{old}` if replacing, (3) `POST /admin/reload-catalog` (or `kill -HUP <pid>`) to activate. This keeps the "snapshot swap" moment explicit — an accidental install never changes behaviour until the operator decides to reload.
 
 ---
 
