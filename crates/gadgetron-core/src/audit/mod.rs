@@ -10,8 +10,12 @@
 //! Spec: ADR-P2A-06 Implementation status addendum item 1 (and
 //! `04-gadget-registry.md §10`).
 
+mod action;
 mod event;
 
+pub use action::{
+    ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, NoopActionAuditSink,
+};
 pub use event::{
     CoreAuditEvent, CoreAuditEventSink, GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome,
     GadgetMetadata, GadgetTier, NoopCoreAuditEventSink, NoopGadgetAuditEventSink,
