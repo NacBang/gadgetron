@@ -161,7 +161,7 @@ curl -sN http://127.0.0.1:8080/v1/chat/completions \
 
 `gadgetron gadget serve`는 일반 운영자가 직접 쓰는 주 명령은 아닙니다. Claude Code가 Penny 요청마다 child process로 호출하는 stdio JSON-RPC 서버입니다. 다만 수동 진단에는 유용합니다.
 
-> **참고**: `gadgetron mcp serve`는 deprecated alias입니다 (ADR-P2A-10). v0.3–v0.4에서는 동작하지만 v0.5에서 제거될 예정입니다. 스크립트·systemd unit·MCP config에서 이 명령을 사용하고 있다면 `gadgetron gadget serve`로 업데이트하십시오.
+> **참고**: `gadgetron mcp serve`는 deprecated alias입니다 (ADR-P2A-10). v0.5.x 에서도 여전히 accepted 되지만 호출 시마다 `tracing::warn!(legacy_command = "gadgetron mcp serve", replacement = "gadgetron gadget serve", ...)` deprecation 메시지가 로그에 찍힙니다 (코드 경로: `crates/gadgetron-cli/src/main.rs` 의 `McpCmd::Serve` 분기가 동일 핸들러 `handle_gadget_serve` 로 dispatch). ADR-P2A-10 에 따라 제거는 이후 release 에서 예정. 스크립트·systemd unit·MCP config 에서 이 명령을 사용하고 있다면 deprecation 메시지가 silent-failure 로 바뀌기 전에 `gadgetron gadget serve` 로 업데이트하십시오.
 
 ```sh
 printf '%s\n' \

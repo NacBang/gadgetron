@@ -61,7 +61,7 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron key list --tenant-id <uuid>` and `gadgetron key revoke --key-id <uuid>`
 - `gadgetron init` — generate an annotated baseline `gadgetron.toml` (assistant blocks still require manual authoring on trunk)
 - `gadgetron doctor` — check configuration, database connectivity, provider reachability, and `/health`
-- `gadgetron gadget serve` — stdio MCP server used by the Penny subprocess bridge and available for manual smoke tests (`gadgetron mcp serve` is a deprecated alias removed in v0.5 — ADR-P2A-10)
+- `gadgetron gadget serve` — stdio MCP server used by the Penny subprocess bridge and available for manual smoke tests (`gadgetron mcp serve` is a deprecated alias still accepted through v0.5.x with a `tracing::warn!` deprecation message on every invocation; scheduled for removal in a later release per ADR-P2A-10 — update scripts / systemd units / MCP configs that still invoke the old verb)
 - `gadgetron gadget list` — list every Gadget Penny can see. Stubbed in P2A; prints `"gadget list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."`
 - `gadgetron bundle install <name>` — install a Bundle by name. Stubbed in P2A; prints `"bundle install {name}: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."` at runtime with the actual bundle name substituted for `{name}`. `gadgetron install <name>` is an alias for the same command per the ADR.
 - `gadgetron bundle list` — list installed Bundles. Stubbed in P2A; prints `"bundle list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."`
