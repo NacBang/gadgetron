@@ -131,6 +131,26 @@ pub trait WorkbenchActionService: Send + Sync {
         action_id: &str,
         request: InvokeWorkbenchActionRequest,
     ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError>;
+
+    /// Resume an already-approved request. Called by the approval
+    /// endpoint after `ApprovalStore::mark_approved`. Skips steps
+    /// 1-6 (actor resolution, descriptor lookup, scope check, schema
+    /// validation, replay cache, approval gate) because those already
+    /// ran at the original invoke. Jumps to step 7 (dispatch) with
+    /// the persisted args and returns the ok/error response.
+    ///
+    /// Default impl returns `NotImplemented` for services that don't
+    /// support resume.
+    async fn resume_approval(
+        &self,
+        _actor: &AuthenticatedContext,
+        _actor_scopes: &[gadgetron_core::context::Scope],
+        _approval: gadgetron_core::workbench::ApprovalRequest,
+    ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError> {
+        Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "approval resume is not supported by this action service".into(),
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +166,11 @@ pub struct GatewayWorkbenchService {
     pub projection: Arc<dyn WorkbenchProjectionService>,
     /// `None` → `POST /actions/:id` returns 501 Not Implemented.
     pub actions: Option<Arc<dyn WorkbenchActionService>>,
+    /// Approval store for persisting `pending_approval` records.
+    /// `None` → `POST /approvals/:id/*` returns 501 and the action
+    /// service skips the persistence call in step 6 (falls back to
+    /// bare `Uuid::new_v4()` so older tests keep passing).
+    pub approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +199,12 @@ pub enum WorkbenchHttpError {
     ActionInvalidArgs { detail: String },
     /// The instance policy has disabled direct action invocations.
     DirectActionsDisabled,
+    /// The requested approval id does not exist.
+    ApprovalNotFound,
+    /// The approval has already been resolved (approved or denied).
+    ApprovalAlreadyResolved { state: String },
+    /// The actor's tenant differs from the approval's tenant.
+    ApprovalForbidden,
 }
 
 impl From<GadgetronError> for WorkbenchHttpError {
@@ -259,6 +290,44 @@ impl IntoResponse for WorkbenchHttpError {
                         "message": "This instance has disabled direct actions. \
                                     Use the Penny conversation path or contact \
                                     your administrator to change the policy.",
+                        "type": "permission_error",
+                        "code": "forbidden",
+                    }
+                });
+                (StatusCode::FORBIDDEN, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ApprovalNotFound => {
+                let body = json!({
+                    "error": {
+                        "message": "Approval not found. It may have expired or \
+                                    been removed. Re-invoke the action to get \
+                                    a fresh approval id.",
+                        "type": "invalid_request_error",
+                        "code": "workbench_approval_not_found",
+                    }
+                });
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ApprovalAlreadyResolved { state } => {
+                let body = json!({
+                    "error": {
+                        "message": format!(
+                            "Approval has already been resolved (state={state}). \
+                             Approvals can only be resolved once.",
+                        ),
+                        "type": "invalid_request_error",
+                        "code": "workbench_approval_already_resolved",
+                        "state": state,
+                    }
+                });
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ApprovalForbidden => {
+                let body = json!({
+                    "error": {
+                        "message": "Approval belongs to a different tenant. \
+                                    Ask the owning tenant's administrator to \
+                                    resolve it.",
                         "type": "permission_error",
                         "code": "forbidden",
                     }
@@ -367,6 +436,169 @@ pub async fn list_actions(
     Ok(Json(resp))
 }
 
+/// `POST /approvals/:approval_id/approve` — resolve a `pending_approval`
+/// into an `ok` dispatch.
+///
+/// Looks up the approval record, marks it Approved on behalf of the
+/// calling actor, then hands it to `action_svc.resume_approval` which
+/// dispatches the stored gadget with the persisted args. Errors map
+/// to HTTP as follows:
+///
+///   - 404 when the id is unknown
+///   - 409 when the approval has already been resolved
+///   - 403 when the caller's tenant differs from the approval's tenant
+///   - 501 when the approval_store or action service isn't wired
+pub async fn approve_action(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Path(approval_id): Path<Uuid>,
+) -> Result<Json<InvokeWorkbenchActionResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let store = svc.approval_store.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "approval store is not wired in this build".into(),
+        ))
+    })?;
+    let action_svc = svc.actions.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "action service is not wired in this build".into(),
+        ))
+    })?;
+    let actor = AuthenticatedContext {
+        user_id: ctx.api_key_id,
+        tenant_id: ctx.tenant_id,
+    };
+    let approved = store
+        .mark_approved(approval_id, &actor)
+        .await
+        .map_err(approval_error_to_http)?;
+    let resp = action_svc
+        .resume_approval(&actor, &ctx.scopes, approved)
+        .await?;
+    Ok(Json(resp))
+}
+
+/// `POST /approvals/:approval_id/deny` — refuse a `pending_approval`.
+///
+/// Marks the record as Denied with an optional reason body; does NOT
+/// dispatch the gadget. Returns the resolved record so the caller can
+/// display the timestamp + reason.
+pub async fn deny_action(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Path(approval_id): Path<Uuid>,
+    Json(body): Json<DenyApprovalRequest>,
+) -> Result<Json<DenyApprovalResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let store = svc.approval_store.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "approval store is not wired in this build".into(),
+        ))
+    })?;
+    let actor = AuthenticatedContext {
+        user_id: ctx.api_key_id,
+        tenant_id: ctx.tenant_id,
+    };
+    let denied = store
+        .mark_denied(approval_id, &actor, body.reason)
+        .await
+        .map_err(approval_error_to_http)?;
+    Ok(Json(DenyApprovalResponse {
+        id: denied.id,
+        state: denied.state.as_str().to_string(),
+        resolved_at: denied.resolved_at,
+        resolved_by_user_id: denied.resolved_by_user_id,
+        reason: denied.deny_reason,
+    }))
+}
+
+/// Body payload for `POST /approvals/:id/deny`. Reason is optional —
+/// operators may deny silently.
+#[derive(Debug, Deserialize, Default)]
+pub struct DenyApprovalRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Response shape for `POST /approvals/:id/deny`.
+#[derive(Debug, serde::Serialize)]
+pub struct DenyApprovalResponse {
+    pub id: Uuid,
+    pub state: String,
+    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub resolved_by_user_id: Option<Uuid>,
+    pub reason: Option<String>,
+}
+
+/// Map `ApprovalError` → `WorkbenchHttpError` keeping the status-code
+/// contract callers rely on.
+fn approval_error_to_http(err: gadgetron_core::workbench::ApprovalError) -> WorkbenchHttpError {
+    use gadgetron_core::workbench::ApprovalError as E;
+    match err {
+        E::NotFound => WorkbenchHttpError::ApprovalNotFound,
+        E::AlreadyResolved { current_state } => WorkbenchHttpError::ApprovalAlreadyResolved {
+            state: current_state.as_str().to_string(),
+        },
+        E::CrossTenant => WorkbenchHttpError::ApprovalForbidden,
+        E::Backend(msg) => WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "approval store error: {msg}"
+        ))),
+    }
+}
+
+/// Query parameters for `GET /audit/events`.
+#[derive(Debug, Deserialize)]
+pub struct AuditEventsQuery {
+    /// Restrict to a specific action id (e.g. `wiki-write`).
+    pub action_id: Option<String>,
+    /// Only events at or after this RFC3339 timestamp.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Row cap. Defaults to 100, clamped to `[1, 500]`.
+    pub limit: Option<i64>,
+}
+
+/// Response shape for `GET /audit/events`.
+#[derive(Debug, serde::Serialize)]
+pub struct AuditEventsResponse {
+    pub events: Vec<gadgetron_xaas::audit::ActionAuditRow>,
+    pub returned: usize,
+}
+
+/// `GET /audit/events` — tenant-scoped read over `action_audit_events`.
+///
+/// Filters: `action_id` (exact match), `since` (inclusive), `limit`
+/// (default 100, max 500). The tenant boundary is ALWAYS pinned to the
+/// authenticated actor's tenant — the caller cannot read another
+/// tenant's audit trail regardless of query params.
+/// Returns 503-shape when the server has no Postgres pool.
+pub async fn list_audit_events(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<AuditEventsQuery>,
+) -> Result<Json<AuditEventsResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "audit event query requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let filter = gadgetron_xaas::audit::ActionAuditQueryFilter {
+        tenant_id: ctx.tenant_id.to_string(),
+        action_id: query.action_id,
+        since: query.since,
+        limit,
+    };
+    let events = gadgetron_xaas::audit::query_action_audit_events(pool, &filter)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "audit event query failed: {e}"
+            )))
+        })?;
+    let returned = events.len();
+    Ok(Json(AuditEventsResponse { events, returned }))
+}
+
 /// `POST /actions/:action_id` — direct action invocation.
 ///
 /// Requires the action service to be wired in `GatewayWorkbenchService`.
@@ -420,6 +652,11 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/views/{view_id}/data", get(load_view_data))
         .route("/actions", get(list_actions))
         .route("/actions/{action_id}", post(invoke_action))
+        // ISSUE 3 TASK 3.3 — real approval flow.
+        .route("/approvals/{approval_id}/approve", post(approve_action))
+        .route("/approvals/{approval_id}/deny", post(deny_action))
+        // ISSUE 3 TASK 3.4 — tenant-scoped audit event query.
+        .route("/audit/events", get(list_audit_events))
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +740,7 @@ mod tests {
             workbench: Some(Arc::new(GatewayWorkbenchService {
                 projection,
                 actions: None,
+                approval_store: None,
             })),
             penny_shared_surface: None,
             penny_assembler: None,

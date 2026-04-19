@@ -86,6 +86,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
         workbench: Some(Arc::new(GatewayWorkbenchService {
             projection,
             actions: None,
+            approval_store: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,

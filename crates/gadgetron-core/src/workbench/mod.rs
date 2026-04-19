@@ -7,6 +7,10 @@
 //! Authority doc: `docs/design/core/workbench-shared-types.md`
 //! Phase: [P2B]
 
+pub mod approval;
+
+pub use approval::{ApprovalError, ApprovalRequest, ApprovalState, ApprovalStore};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

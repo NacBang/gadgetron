@@ -64,6 +64,7 @@ impl DescriptorCatalog {
                 "wiki-list".into(),
                 "wiki-read".into(),
                 "wiki-write".into(),
+                "wiki-delete".into(),
             ],
             required_scope: None,
             disabled_reason: None,
@@ -164,6 +165,36 @@ impl DescriptorCatalog {
                 destructive: false,
                 requires_approval: false,
                 knowledge_hint: "wiki.write 가젯을 직접 호출합니다. P2B에서는 승인 흐름이 stub — 직접 기록됩니다.".into(),
+                required_scope: None,
+                disabled_reason: None,
+            },
+            WorkbenchActionDescriptor {
+                // ISSUE 3 TASK 3.5 adds this as the canonical
+                // approval-gated action. `destructive: true` funnels
+                // the invoke through step 6 `pending_approval`, which
+                // with an ApprovalStore wired (production) persists a
+                // real ApprovalRequest. Approve via the approval
+                // endpoint → `wiki.delete` dispatches against the
+                // wiki.
+                id: "wiki-delete".into(),
+                title: "위키 삭제".into(),
+                owner_bundle: "core".into(),
+                source_kind: "gadget".into(),
+                source_id: "wiki.delete".into(),
+                gadget_name: Some("wiki.delete".into()),
+                placement: WorkbenchActionPlacement::ContextMenu,
+                kind: WorkbenchActionKind::Dangerous,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1, "maxLength": 256 }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+                destructive: true,
+                requires_approval: false,
+                knowledge_hint: "wiki.delete 가젯을 소프트 삭제 흐름으로 호출합니다. 승인 후에만 실제 디스패치됩니다.".into(),
                 required_scope: None,
                 disabled_reason: None,
             },
@@ -387,8 +418,9 @@ mod tests {
     fn visible_actions_no_required_scope_visible() {
         let catalog = DescriptorCatalog::seed_p2b();
         let actions = catalog.visible_actions(&openai_scopes());
-        // seed_p2b ships 4 actions: knowledge-search, wiki-list, wiki-read, wiki-write.
-        assert_eq!(actions.len(), 4);
+        // seed_p2b ships 5 actions: knowledge-search, wiki-list,
+        // wiki-read, wiki-write, wiki-delete (approval-gated).
+        assert_eq!(actions.len(), 5);
         for a in &actions {
             assert!(
                 a.disabled_reason.is_none(),
@@ -434,7 +466,7 @@ mod tests {
         let catalog = DescriptorCatalog::seed_p2b().with_allow_direct_actions(false);
         let actions = catalog.visible_actions(&openai_scopes());
         // Actions are NOT stripped — they remain in the list, but each carries disabled_reason.
-        assert_eq!(actions.len(), 4, "action count must be unchanged");
+        assert_eq!(actions.len(), 5, "action count must be unchanged");
         for a in &actions {
             assert!(
                 a.disabled_reason.is_some(),

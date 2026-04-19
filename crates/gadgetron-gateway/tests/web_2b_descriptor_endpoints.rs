@@ -114,6 +114,7 @@ fn make_state_with_coordinator(
         workbench: Some(Arc::new(GatewayWorkbenchService {
             projection,
             actions: Some(action_svc),
+            approval_store: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,
@@ -398,10 +399,10 @@ async fn action_invoke_seeded_action_succeeds_and_captures_activity() {
         "approval_id must be absent on ok path"
     );
 
-    // audit_event_id not wired in this PR
+    // audit_event_id is populated on every ok path (ISSUE 3 TASK 3.1).
     assert!(
-        value["result"]["audit_event_id"].is_null(),
-        "audit_event_id not wired in this PR"
+        value["result"]["audit_event_id"].is_string(),
+        "audit_event_id must be set on ok (TASK 3.1)"
     );
 
     // activity_event_id parses as a valid UUID

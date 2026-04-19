@@ -701,17 +701,19 @@ fi
 log "=== Gate 7f: workbench /actions ==="
 ACTIONS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/actions" 2>&1 || true)"
-# seed_p2b ships four gadget-backed actions — the full wiki CRUD loop:
-# knowledge-search + wiki-list + wiki-read + wiki-write. Assert each by
-# id so a regression that drops or renames any of them (e.g. bundle
-# wiring breaks) fails loudly here, not just at the happy-path gates.
+# seed_p2b ships five gadget-backed actions — the full wiki CRUD loop
+# plus the approval-gated delete: knowledge-search + wiki-list +
+# wiki-read + wiki-write + wiki-delete. Assert each by id so a
+# regression that drops or renames any of them fails loudly here, not
+# just at the happy-path gates.
 if echo "$ACTIONS_RESP" | jq -e '
      (.actions | type == "array")
-     and (.actions | length >= 4)
+     and (.actions | length >= 5)
      and any(.actions[]; .id == "knowledge-search")
      and any(.actions[]; .id == "wiki-list")
      and any(.actions[]; .id == "wiki-read")
      and any(.actions[]; .id == "wiki-write")
+     and any(.actions[]; .id == "wiki-delete")
    ' >/dev/null 2>&1; then
   ACTION_IDS="$(echo "$ACTIONS_RESP" | jq -c '[.actions[].id]')"
   pass "/workbench/actions surfaces full CRUD catalog $ACTION_IDS"
@@ -945,6 +947,118 @@ if echo "$READ_RESP" | jq -e \
 else
   fail "wiki-read: content missing or marker absent" \
     "$(echo "$READ_RESP" | jq -c '.result | {status, payload}' | head -c 500)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7h.7: approval lifecycle — invoke → pending → approve → ok
+# ---------------------------------------------------------------------------
+#
+# The seed catalog ships `wiki-delete` with `destructive: true`, which
+# funnels the invoke through the approval gate. With an ApprovalStore
+# wired (production), step 6 persists an ApprovalRequest; the
+# approval endpoint loads + marks it Approved + re-dispatches via
+# resume_approval. This gate covers the full lifecycle end-to-end
+# against the real Rust server (ISSUE 3 TASK 3.3):
+#
+#   1. POST /actions/wiki-delete → 200 status=pending_approval + approval_id
+#   2. POST /approvals/:id/approve → 200 status=ok (dispatch ran)
+log "=== Gate 7h.7: approval lifecycle — pending_approval → approve → ok ==="
+# Write a page we can then ask to delete (so the dispatch doesn't
+# error on missing target).
+APPROVAL_TARGET="harness/approval-$(date +%s)"
+_ATW_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+_ATW_BODY="$(jq -cn \
+  --arg name "$APPROVAL_TARGET" \
+  --arg content "# temp\n\nWill be soft-deleted via approval gate." \
+  --arg ciid "$_ATW_CIID" \
+  '{args: {name: $name, content: $content}, client_invocation_id: $ciid}')"
+curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/wiki-write" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$_ATW_BODY" >/dev/null 2>&1 || true
+
+DEL_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DEL_BODY="$(jq -cn \
+  --arg name "$APPROVAL_TARGET" \
+  --arg ciid "$DEL_CIID" \
+  '{args: {name: $name}, client_invocation_id: $ciid}')"
+DEL_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/wiki-delete" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$DEL_BODY" 2>&1 || true)"
+APPROVAL_ID="$(echo "$DEL_RESP" | jq -r '.result.approval_id // empty')"
+if echo "$DEL_RESP" | jq -e '.result.status == "pending_approval"' >/dev/null 2>&1 \
+    && [ -n "$APPROVAL_ID" ]; then
+  pass "wiki-delete → pending_approval (approval_id=${APPROVAL_ID:0:8}...)"
+else
+  fail "wiki-delete did not yield pending_approval" \
+    "$(echo "$DEL_RESP" | jq -c '.result' | head -c 400)"
+fi
+
+APPROVE_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/approvals/$APPROVAL_ID/approve" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" 2>&1 || true)"
+if echo "$APPROVE_RESP" | jq -e '.result.status == "ok"' >/dev/null 2>&1; then
+  pass "approvals/$APPROVAL_ID/approve → 200 status=ok (dispatch ran)"
+else
+  fail "approve endpoint did not flip to ok status" \
+    "$(echo "$APPROVE_RESP" | head -c 400)"
+fi
+
+# Second approve MUST fail with 409 — the record is already resolved.
+APPROVE2_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/api/v1/web/workbench/approvals/$APPROVAL_ID/approve" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" 2>&1 || true)"
+if [ "$APPROVE2_CODE" = "409" ]; then
+  pass "re-approving a resolved record → 409 Conflict"
+else
+  fail "second approve expected 409, got $APPROVE2_CODE" \
+    "approval store must reject double-resolve"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7h.8: /audit/events query returns the action audit trail
+# ---------------------------------------------------------------------------
+#
+# After Gate 7h.6 (wiki-write) and Gate 7h.7 (wiki-delete +
+# approve), the `action_audit_events` table should hold rows for
+# both. Query the endpoint and assert the rows are visible to the
+# authenticated tenant. This proves ISSUE 3 TASK 3.2 (PG sink) +
+# TASK 3.4 (query endpoint) are both wired.
+log "=== Gate 7h.8: /audit/events returns tenant audit trail ==="
+AUDIT_RESP="$(curl -fsS \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/audit/events?limit=50" 2>&1 || true)"
+if echo "$AUDIT_RESP" | jq -e '
+     (.events | type == "array")
+     and (.returned == (.events | length))
+     and any(.events[]; .action_id == "wiki-write")
+     and any(.events[]; .action_id == "wiki-delete")
+   ' >/dev/null 2>&1; then
+  RET="$(echo "$AUDIT_RESP" | jq -r '.returned')"
+  pass "/audit/events returned=$RET rows including wiki-write + wiki-delete"
+else
+  fail "/audit/events missing expected action_id rows" \
+    "$(echo "$AUDIT_RESP" | jq -c '{returned, action_ids: [.events[].action_id]}' | head -c 500)"
+fi
+
+# action_id filter narrows.
+FILTERED_RESP="$(curl -fsS \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/audit/events?action_id=wiki-write&limit=50" 2>&1 || true)"
+if echo "$FILTERED_RESP" | jq -e '
+     (.events | type == "array")
+     and (.events | length >= 1)
+     and all(.events[]; .action_id == "wiki-write")
+   ' >/dev/null 2>&1; then
+  pass "/audit/events?action_id=wiki-write narrows to matching rows only"
+else
+  fail "/audit/events action_id filter regression" \
+    "$(echo "$FILTERED_RESP" | jq -c '{returned, action_ids: [.events[].action_id]}' | head -c 500)"
 fi
 
 log "=== Gate 7h.0: workbench routes require Bearer (401 on no-auth POST) ==="
