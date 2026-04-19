@@ -941,6 +941,22 @@ esac
 # (`{entries: []}`). This gate catches regressions where the view
 # handler returns 500 / wrong shape instead of the stub.
 
+log "=== Gate 7k.2: Management-scoped /api/v1/costs ==="
+# Sibling of Gate 7k (usage). Both routes live under the same
+# `Management` scope; asserting both ensures a regression that
+# accidentally drops one from the scope-guard list is caught.
+COSTS_CODE="$(http_get_code "$MGMT_API_KEY" "$GAD_BASE/api/v1/costs")"
+case "$COSTS_CODE" in
+  401|403)
+    fail "Management route blocked with Management key (got $COSTS_CODE)" \
+      "/api/v1/costs must accept Management scope" ;;
+  200|501|503)
+    pass "GET /api/v1/costs via Management key → $COSTS_CODE (RBAC positive path clears)" ;;
+  *)
+    fail "Management route unexpected status $COSTS_CODE" \
+      "expected 200 (live) or 501/503 (stub); got $COSTS_CODE" ;;
+esac
+
 log "=== Gate 7l: workbench /views/knowledge-activity-recent/data ==="
 VD_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/views/knowledge-activity-recent/data" 2>&1 || true)"
