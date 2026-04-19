@@ -688,6 +688,51 @@ knowledge_writeback = "ops/knowledge/{date}/{topic}"
 
 ---
 
+### `[bundles.<name>]`
+
+Per-Bundle runtime overrides that the **operator** can apply on top of the manifest the Bundle itself shipped with. Landed in the ADR-P2A-10 Bundle / Plug / Gadget surface and extended by ADDENDUM-01 §1 (per-Plug + per-Gadget RBAC) + §5 (runtime limits + egress ceilings). Rust types: `gadgetron-core::config::{BundleOverride, PlugOverride, GadgetOverride, BundleRuntimeOverride}`.
+
+The section is keyed by Bundle id — e.g. `[bundles.ai-infra]` for the `ai-infra` Bundle. An absent `[bundles.<name>]` section is equivalent to `enabled = true` with no per-Plug or per-Gadget modifications — operators only need to declare this block if they want to **tighten** something the Bundle manifest already permits, or to **disable** the Bundle entirely.
+
+**Fields**:
+
+```toml
+[bundles.ai-infra]
+enabled = true                                # default true (opt-out). false = no Plugs / Gadgets from this Bundle register
+
+# Per-Plug overrides (keyed by PlugId string)
+[bundles.ai-infra.plugs.nvidia-scheduler]
+enabled = true                                # default true. false = Plug doesn't register even if Bundle is enabled.
+
+# Per-Gadget overrides (keyed by Gadget name)
+[bundles.ai-infra.gadgets."wiki.search"]
+tier = "Read"                                 # optional: GadgetTier enum string. Narrower than manifest's tier if set.
+mode = "Auto"                                 # optional: GadgetMode enum string ("Auto" | "Never"). "Ask" is reserved (P2B / ADR-P2A-06 deferred).
+
+# Runtime ceiling / egress overrides (ADDENDUM-01 §5, floors 6 + 7)
+[bundles.ai-infra.runtime.limits]
+cpu_ms_per_call         = 5000                # narrower than manifest's declared cap — operator can tighten, not loosen
+memory_mb_peak          = 512
+wall_clock_ms_per_call  = 10000
+
+[bundles.ai-infra.runtime.egress]
+# shape mirrors bundle.toml [bundle.runtime.egress] — see ADR-P2A-10 for the egress policy schema
+```
+
+**Behavior**:
+
+- **Opt-out, not opt-in**: a Bundle installed under `[web] bundles_dir` is enabled by default. The operator only declares `[bundles.<name>] enabled = false` to disable it.
+- **Narrower-wins policy**: per-Plug + per-Gadget overrides can only *tighten* what the manifest allows. Attempting to loosen (e.g. operator setting `tier = "Write"` on a Gadget the manifest declared as `Read`) fails `AppConfig::load()` with an explicit error.
+- **Runtime limits**: operators can tighten the manifest's declared `cpu_ms_per_call` / `memory_mb_peak` / `wall_clock_ms_per_call` via `[bundles.<name>.runtime.limits]`. The narrower of (manifest, config) is used. In P2B, these fields are **parsed but not enforced** by the Bundle trait install path — enforcement arrives with the external-runtime dispatcher (ADDENDUM-01 §5, deferred to P2C). Operators can declare them today as forward-compat.
+- **Egress policy**: same parsed-but-not-enforced status as limits in P2B.
+- **`tenant_overrides` stanzas**: reserved. See [`[features]`](#features) for the `tenant_plug_overrides_accepted_as_reserved` gate that's required before `AppConfig::load()` accepts a non-empty `[bundles.<bundle>.plugs.<plug>.tenant_overrides]` stanza — prevents operators from silently shipping broken policy expectations. P2B parses these stanzas; P2C wires enforcement.
+
+**Interaction with the bundle-marketplace surface**: the HTTP `POST /api/v1/web/workbench/admin/bundles` install path writes a new Bundle directory under `[web] bundles_dir`; the next `gadgetron serve` restart (or `POST /admin/reload-catalog`) picks up the new Bundle. Overrides in `[bundles.<name>]` apply to the **next** Bundle with that id — operators install then configure, not the reverse.
+
+**Cross-reference**: [`ADR-P2A-10`](../adr/ADR-P2A-10-bundle-plug-gadget-terminology.md) for the canonical Bundle / Plug / Gadget vocabulary, [`ADR-P2A-10-ADDENDUM-01`](../adr/ADR-P2A-10-ADDENDUM-01-rbac-granularity.md) for the 3-axis RBAC + runtime-ceiling design, and `docs/design/phase2/12-external-gadget-runtime.md` for the P2C runtime enforcement path.
+
+---
+
 ### `[features]`
 
 Opt-in feature toggles. Currently one field, all P2B-alpha reserved surface.
