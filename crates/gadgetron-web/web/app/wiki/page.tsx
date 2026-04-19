@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
@@ -441,12 +443,37 @@ export default function WikiWorkbenchPage() {
               />
             )}
             {selected && !editing && (
-              <pre
-                className="h-full whitespace-pre-wrap font-mono text-[13px] leading-relaxed text-zinc-200"
+              <div
+                className="prose prose-invert prose-sm max-w-none
+                  prose-p:my-2 prose-p:leading-relaxed
+                  prose-pre:my-3 prose-pre:rounded-lg prose-pre:border
+                  prose-pre:border-zinc-800 prose-pre:bg-zinc-950/60
+                  prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
+                  prose-code:text-[13px] prose-code:bg-zinc-800/80
+                  prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+                  prose-code:before:content-none prose-code:after:content-none
+                  prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
+                  prose-headings:font-semibold prose-headings:text-zinc-100
+                  prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
+                  prose-strong:text-zinc-50
+                  prose-blockquote:border-l-blue-400/40
+                  prose-blockquote:text-zinc-400 prose-blockquote:italic
+                  prose-table:my-2 prose-th:border-zinc-700 prose-td:border-zinc-700
+                  prose-hr:border-zinc-700"
                 data-testid="wiki-content-readonly"
               >
-                {content}
-              </pre>
+                {/*
+                  react-markdown + remark-gfm renders the wiki page as
+                  real markdown. If content happens to be plain text or
+                  the parser ever throws, <ReactMarkdown> still emits a
+                  text node — readers see something either way. We keep
+                  the `data-testid` so Gate 11d / 11e still locates the
+                  read-only view.
+                */}
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {content}
+                </ReactMarkdown>
+              </div>
             )}
             {!selected && (
               <div className="flex h-full items-center justify-center text-[11px] text-zinc-600">
