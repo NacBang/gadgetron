@@ -301,6 +301,20 @@ catalog_path = "/etc/gadgetron/catalog.toml"
 
 **SIGHUP trigger (ISSUE 8 TASK 8.5 / v0.4.5 / PR #217).** In addition to the HTTP endpoint, operators can trigger the same catalog reload via the POSIX `SIGHUP` signal: `kill -HUP <pid>` on Unix. This reuses the same `perform_catalog_reload()` helper that backs the HTTP path, so the tracing log line is identical (`workbench.admin: descriptor catalog reloaded action_count=N view_count=N source="..."`) whether the trigger was a curl or a signal. Operator workflow without HTTP: `vim /etc/gadgetron/catalog.toml && kill -HUP $(pidof gadgetron)`. Parse-failure guarantee still applies — a bad edit leaves the running snapshot untouched, with the error visible on stderr (`gadgetron.log` under `demo.sh`). The signal path is wired by `spawn_sighup_reloader()` (Unix-only tokio task) at server startup; on Windows or other non-Unix platforms SIGHUP is not available — operators must use the HTTP endpoint instead (a startup hint log line points at the HTTP path when the signal handler can't install).
 
+**Bundle identity (ISSUE 9 TASK 9.1 / v0.4.6 / PR #219).** Catalog TOML files can optionally carry a top-level `[bundle]` table with `id` (string) and `version` (string) fields — when present, the reload response widens to include `bundle: {id, version}` so admin tooling can confirm which catalog version is live without out-of-band tracking. The first-party bundle file at `bundles/gadgetron-core/bundle.toml` (shipped in the repo) mirrors `seed_p2b()` exactly and carries `id = "gadgetron-core"` + the workspace version — operators can point `catalog_path` at it to load the same catalog as the hardcoded fallback but with a proper bundle identity attached. A drift test asserts the bundle file and `seed_p2b()` produce the same action id set, so the two sources stay in lockstep until TASK 9.3 retires `seed_p2b()`. Anonymous TOML files without a `[bundle]` table continue to load (backwards-compatible, no config migration) — the reload response simply omits the `bundle` field via `skip_serializing_if`.
+
+Minimal `bundles/gadgetron-core/bundle.toml` shape:
+
+```toml
+[bundle]
+id = "gadgetron-core"
+version = "0.4.6"
+
+# [[views]] and [[actions]] entries follow, one table array per descriptor.
+# Schema mirrors WorkbenchViewDescriptor / WorkbenchActionDescriptor exactly
+# because both types derive Deserialize.
+```
+
 ---
 
 ### `[agent]`
