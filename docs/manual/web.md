@@ -117,6 +117,8 @@ curl -fsSL -D - http://localhost:8080/web/ -o /dev/null | grep -iE 'content-secu
 
 Markdown 렌더는 `react-markdown` + `remark-gfm` (GitHub-flavoured) 입니다. 파싱이 실패하면 `<pre>` raw 블록으로 fallback — 사용자는 내용을 여전히 읽을 수 있습니다.
 
+**Save / error 토스트** (ISSUE 2, 0.2.4 via PR #184 — `sonner` 라이브러리): 저장에 성공하면 우측 하단에 "Saved <page>" 토스트가, 실패하면 "Save failed" 에러 토스트가 설명과 함께 표시됩니다. 페이지 열기 실패(`wiki.get` 오류) 시에도 "Failed to open <page>" 에러 토스트가 나타납니다. DOM 의 `<section data-sonner-toaster>` 엘리먼트로 확인 가능하며, Gate 11d Playwright E2E 에서 이 DOM 을 assert 해 회귀를 막습니다.
+
 ### 인증
 
 `/web/wiki` 는 `/web` 채팅 페이지와 **동일한** `localStorage` 키 슬롯을 씁니다. 채팅 페이지에서 API 키를 저장했다면 `/web/wiki` 는 별도 로그인 없이 바로 동작합니다. 반대로 `/web/wiki` 에서 키를 저장하면 `/web` 채팅도 해당 키로 동작합니다 — 같은 Origin 을 공유하기 때문입니다. 이 사실은 §Origin 격리 요구사항의 공격 모델과 정확히 같은 전제 위에서 성립합니다: 이 port 에 다른 웹 앱이 없어야 localStorage 키가 안전합니다.
