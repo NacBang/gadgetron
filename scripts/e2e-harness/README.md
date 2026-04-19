@@ -16,7 +16,7 @@ prove that the code path a real operator hits — auth → scope → handler
 ### Gates
 
 Gates fire in execution order — each one is a hard pass/fail. The
-current baseline is **39 PASS** on `--quick --no-screenshot`:
+current baseline is **53 PASS** on `--quick --no-screenshot`:
 
 | # | Gate | What it proves |
 |---|------|----------------|
@@ -26,32 +26,36 @@ current baseline is **39 PASS** on `--quick --no-screenshot`:
 | 3.5 | `gadgetron tenant create` + `key create` ×2 | CLI output contract; OpenAiCompat + Management keys materialise |
 | 4 | main + error mock providers start | python stdlib HTTP server binds on `MOCK_PORT` + `MOCK_ERROR_PORT`, both `/health` 200 |
 | 5 | config renders | `sed` substitution of `@WIKI_DIR@` / `@MOCK_URL@` / `@MOCK_ERROR_URL@` / `@GAD_PORT@` |
-| 6 | `gadgetron serve` + `/health` + `/ready` | binary boots, middleware chain OK |
-| 7 | `GET /workbench/bootstrap` | `gateway_version`, `active_plugs`, `knowledge` keys present |
+| 6 | `gadgetron serve` + `/health` body `{status:ok}` + `/ready` body `{status:ready}` | binary boots, middleware chain OK, response body shape locked |
+| 7 | `GET /workbench/bootstrap` | top-level keys + `.knowledge.*_ready` bools + `.active_plugs[].{id,role,healthy}` entries |
 | 7b | wiki seed injection | `wiki_seed: injected N ... count=N>0` in log (ANSI stripped) |
 | 7c | `/workbench/activity` | `{entries: [], is_truncated: bool}` shape |
 | 7d | `/workbench/knowledge-status` | `canonical_ready == true` + `search_ready` + `relation_ready` fields |
 | 7e | `/workbench/views` | non-empty array |
 | 7f | `/workbench/actions` | non-empty array |
-| 7g | auth + scope | no-Bearer→401, bad-Bearer→401, Mgmt route via OpenAiCompat→403 |
+| 7g | auth + scope (chat endpoint) | no-Bearer→401, bad-Bearer→401, Mgmt route via OpenAiCompat→403 |
+| 7h.0 | workbench subtree auth | workbench POST + GET without Bearer → 401 |
 | 7h.1 | happy-path POST `/actions/knowledge-search` | `.result.status ∈ {ok, pending_approval}` end-to-end |
 | 7h.2 | replay cache hit | same `client_invocation_id` returns byte-identical body (PR #131 moka) |
+| 7h.3 | JSON-schema validation | `args.query` as integer → 400 (ActionInvalidArgs) |
 | 7h | action 404 on unknown id | POST `/actions/does-not-exist` → 404 |
 | 7i | `/v1/models` listing | `{object: "list", data: [...]}` |
 | 7j | `/favicon.ico` | 200 or 204 (public, no auth) |
-| 7k | Management `/api/v1/usage` | RBAC positive path (201/501/503); FAILS on 401/403 |
+| 7k | Management `/api/v1/usage` | RBAC positive path (200/501/503); FAILS on 401/403 |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
-| 8 | non-streaming `/v1/chat/completions` | mock's canned content + token counts round-trip |
-| 9 | streaming `/v1/chat/completions` (happy) | `data: [DONE]` is the LAST data frame |
+| 8 | non-streaming `/v1/chat/completions` content+tokens + OpenAI wire contract | `id startswith chatcmpl-`, `object=chat.completion`, `model`, `finish_reason`, `total_tokens` |
+| 8b | non-streaming audit trail | `status="ok" input=5 output=7` audit line on disk (ANSI stripped) |
+| 9 | streaming `/v1/chat/completions` (happy) | `[DONE]` is LAST frame + chunk shape `object=chat.completion.chunk` + all chunks share one `.id` |
 | 9b | streaming `/v1/chat/completions` (error) | PR 6 Drop-guard Err arm: `event: error` frame + `status="error"` audit line |
-| 10 | `<gadgetron_shared_context>` injection | mock-openai.log contains the block (PSL-1b) |
+| 10 | `<gadgetron_shared_context>` injection | FIRST message is `role:system` with content starting `<gadgetron_shared_context>` |
 | — | real-vLLM reachability (optional, `--real-vllm`) | direct GET `/v1/models` + POST `/v1/chat/completions` |
 | — | Penny↔vLLM (optional, `--penny-vllm`) | `POST /v1/chat/completions { model: "penny" }` with claude-code subprocess via proxy |
 | 11 | `/web` landing + `/web/` → `/web` 30x redirect | recognizable HTML + redirect contract |
+| 11b | `/web` security headers | CSP + `X-Content-Type-Options: nosniff` + `Referrer-Policy: no-referrer` + Permissions-Policy camera=() |
 | — | `/web` screenshot (optional, unless `--no-screenshot`) | gstack `$B` OR node+playwright fallback (`screenshot.mjs`) writes `artifacts/screenshots/web-landing.png` |
-| 12 | `gadgetron.log` has no unexpected `ERROR` line | Gate 9b's intentional `sse stream error:` is whitelisted |
+| 12 | `gadgetron.log` has no unexpected `ERROR` or `WARN` lines | Gate 9b's `sse stream error:` + P2A ask-mode/git-config/scope-denied WARNs are whitelisted |
 | 13 | `cargo test --workspace` (unless `--quick`) | all non-infra tests pass (7 pre-existing pgvector `e2e_*` tolerated) |
 
 ### Artifacts
