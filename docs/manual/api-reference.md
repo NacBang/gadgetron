@@ -701,7 +701,7 @@ All thirteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, t
 - `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:50-63`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
 
 **What is stubbed on trunk today:**
-- `activity.entries` — always `[]` (see §/activity).
+- `activity.entries` — the endpoint read path still returns `[]` (see §/activity). The underlying capture flow IS live: `CapturedActivityEvent` rows land in the coordinator for both direct-action (ISSUE 3) and Penny tool calls (ISSUE 6 / PR #201). Read-side projection (PSL-1) is the remaining gap.
 - `request_evidence` — always 404 (see §/evidence).
 - `refresh_view_ids` — always `[]` on every action response (see §POST /actions).
 
@@ -773,7 +773,9 @@ The three `*_ready` booleans are the observable contract gate 7 pins down (`(.kn
 
 ### GET /api/v1/web/workbench/activity
 
-Recent workbench activity feed: Penny turns, direct actions, system events. **On trunk today this is a stub** — `InProcessWorkbenchProjection::activity` at `crates/gadgetron-gateway/src/web/projection.rs:101-106` always returns `{"entries": [], "is_truncated": false}` regardless of `limit` or real traffic. The response shape documented below is the contract future activity-source wiring (PSL-1) will populate; build client code against the shape, but don't expect non-empty data until that ships. E2E Gate 7c asserts the empty-state shape.
+Recent workbench activity feed: Penny turns, direct actions, system events. **On trunk today the HTTP endpoint is still a stub** — `InProcessWorkbenchProjection::activity` at `crates/gadgetron-gateway/src/web/projection.rs:101-106` always returns `{"entries": [], "is_truncated": false}` regardless of `limit` or real traffic. The response shape documented below is the contract future activity-source wiring (PSL-1 read path) will populate; build client code against the shape, but don't expect non-empty data from the endpoint until that ships. E2E Gate 7c asserts the empty-state shape.
+
+**Progress since ISSUE 6 / v0.2.9** (PR #201). The underlying write path is live: Penny tool calls now fan out through `GadgetAuditEventWriter.with_coordinator()` into `KnowledgeCandidateCoordinator::capture_action`, producing `CapturedActivityEvent { origin: Penny, kind: GadgetToolCall }` rows. Direct-action dispatch has been producing `CapturedActivityEvent { origin: UserDirect, kind: DirectAction }` rows since ISSUE 3. What remains for a non-empty endpoint response is the read-projection wiring — reading from the coordinator's backing store into `WorkbenchActivityResponse.entries`. Until that ships, inspect the captured rows via `tracing` logs (`target: "action_audit"` / `"penny_audit"`) or by querying the coordinator directly in tests.
 
 **Auth:** `OpenAiCompat`
 
