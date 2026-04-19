@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "../components/ui/button";
@@ -270,7 +271,14 @@ export default function WikiWorkbenchPage() {
     >
       {/* Header */}
       <header className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <Link
+            href="/"
+            data-testid="wiki-back-to-workbench"
+            className="text-[11px] text-zinc-500 transition-colors hover:text-zinc-300"
+          >
+            ← Workbench
+          </Link>
           <span className="text-xs font-semibold text-zinc-300">
             Wiki Workbench
           </span>

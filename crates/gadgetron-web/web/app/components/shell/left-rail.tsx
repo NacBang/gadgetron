@@ -1,6 +1,13 @@
 "use client";
 
-import { MessageSquare, BookOpen, Package, PanelLeft } from "lucide-react";
+import Link from "next/link";
+import {
+  MessageSquare,
+  BookOpen,
+  Package,
+  PanelLeft,
+  FileText,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -8,13 +15,17 @@ import { Button } from "@/components/ui/button";
 // Types
 // ---------------------------------------------------------------------------
 
-export type LeftRailTab = "chat" | "knowledge" | "bundles";
+export type LeftRailTab = "chat" | "wiki" | "knowledge" | "bundles";
 
 interface NavItem {
   id: LeftRailTab;
   label: string;
   icon: React.ReactNode;
   functional: boolean;
+  /** When present, clicking the tab navigates to this route instead of
+   * toggling internal state. The wiki tab uses `/wiki` so the standalone
+   * /web/wiki page is reachable from the main shell (ISSUE A.2). */
+  href?: string;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -23,6 +34,13 @@ const NAV_ITEMS: NavItem[] = [
     label: "Chat",
     icon: <MessageSquare className="size-4" aria-hidden />,
     functional: true,
+  },
+  {
+    id: "wiki",
+    label: "Wiki",
+    icon: <FileText className="size-4" aria-hidden />,
+    functional: true,
+    href: "/wiki",
   },
   {
     id: "knowledge",
@@ -82,50 +100,76 @@ export function LeftRail({
 
       {/* Navigation */}
       <nav className="flex flex-col gap-1 p-2">
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === item.id}
-            aria-label={item.label}
-            data-testid={`nav-tab-${item.id}`}
-            onClick={() => {
-              if (item.functional) onTabChange(item.id);
-            }}
-            title={
-              !item.functional
-                ? `${item.label} — P2B not yet wired`
-                : item.label
-            }
-            className={cn(
-              "flex items-center gap-2.5 rounded px-2 py-2 text-xs font-medium transition-colors",
-              activeTab === item.id
-                ? "bg-zinc-800 text-zinc-100"
-                : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300",
-              !item.functional && "cursor-default opacity-50",
-            )}
-          >
-            {item.icon}
-            {!collapsed && <span>{item.label}</span>}
-          </button>
-        ))}
+        {NAV_ITEMS.map((item) => {
+          const buttonClass = cn(
+            "flex items-center gap-2.5 rounded px-2 py-2 text-xs font-medium transition-colors",
+            activeTab === item.id
+              ? "bg-zinc-800 text-zinc-100"
+              : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300",
+            !item.functional && "cursor-default opacity-50",
+          );
+          // `href` present → route link (navigates to a standalone page).
+          // No href + functional → in-shell tab toggle.
+          // No href + not functional → stub button (no-op, styled disabled).
+          if (item.href && item.functional) {
+            return (
+              <Link
+                key={item.id}
+                href={item.href}
+                role="tab"
+                aria-label={item.label}
+                data-testid={`nav-tab-${item.id}`}
+                className={buttonClass}
+                title={item.label}
+              >
+                {item.icon}
+                {!collapsed && <span>{item.label}</span>}
+              </Link>
+            );
+          }
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === item.id}
+              aria-label={item.label}
+              data-testid={`nav-tab-${item.id}`}
+              onClick={() => {
+                if (item.functional) onTabChange(item.id);
+              }}
+              title={
+                !item.functional
+                  ? `${item.label} — P2B not yet wired`
+                  : item.label
+              }
+              className={buttonClass}
+            >
+              {item.icon}
+              {!collapsed && <span>{item.label}</span>}
+            </button>
+          );
+        })}
       </nav>
 
       {/* P2B notice for non-functional tabs when collapsed */}
-      {!collapsed && activeTab !== "chat" && (
-        <div
-          className="mx-2 mt-4 rounded border border-zinc-800 bg-zinc-900/50 p-3"
-          data-testid="p2b-not-wired"
-        >
-          <p className="text-xs text-zinc-500">
-            <span className="font-mono text-zinc-400">P2B</span> — not yet
-            wired. This panel will show{" "}
-            {activeTab === "knowledge" ? "knowledge sources" : "installed bundles"}{" "}
-            when the gateway read-model endpoints land.
-          </p>
-        </div>
-      )}
+      {!collapsed &&
+        activeTab !== "chat" &&
+        activeTab !== "wiki" && (
+          <div
+            className="mx-2 mt-4 rounded border border-zinc-800 bg-zinc-900/50 p-3"
+            data-testid="p2b-not-wired"
+          >
+            <p className="text-xs text-zinc-500">
+              <span className="font-mono text-zinc-400">P2B</span> — not yet
+              wired. This panel will show{" "}
+              {activeTab === "knowledge"
+                ? "knowledge sources"
+                : "installed bundles"}{" "}
+              when the gateway read-model endpoints land.
+            </p>
+          </div>
+        )}
     </aside>
   );
 }
