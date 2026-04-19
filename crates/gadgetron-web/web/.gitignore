@@ -4,3 +4,8 @@
 /out
 /dist
 next-env.d.ts
+
+# bun lockfile — the build pipeline (build.rs → npm ci) treats
+# package-lock.json as authoritative. Contributors using bun can
+# regenerate bun.lock locally; don't commit it.
+bun.lock

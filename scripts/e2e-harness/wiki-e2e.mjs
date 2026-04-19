@@ -157,6 +157,16 @@ try {
   await page.waitForSelector('[data-testid="wiki-content-readonly"]', {
     timeout: 10000,
   });
+
+  // ISSUE A.3 — assert a sonner success toast appeared on save. The
+  // portal-rendered `<ol data-sonner-toaster>` carries `<li>` toast
+  // entries; we wait for at least one `[data-type="success"]` (or
+  // any toast element if richColors swap the attribute naming in a
+  // future sonner version).
+  await page.waitForSelector(
+    '[data-sonner-toast], [data-sonner-toaster] li',
+    { timeout: 5000 },
+  );
   // Verify the sentinel is actually in the rendered content.
   const roundtrip = await page.textContent(
     '[data-testid="wiki-content-readonly"]',

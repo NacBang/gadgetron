@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Toaster, toast } from "sonner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
@@ -151,8 +152,10 @@ export default function WikiWorkbenchPage() {
         const resp = await invokeAction(apiKey, "wiki-read", { name });
         setContent(resp.result?.payload?.content ?? "");
       } catch (e) {
+        const msg = (e as Error).message;
         setContent("");
-        setPageError((e as Error).message);
+        setPageError(msg);
+        toast.error(`Failed to open ${name}`, { description: msg });
       }
     },
     [apiKey],
@@ -170,8 +173,13 @@ export default function WikiWorkbenchPage() {
       });
       setEditing(false);
       await refreshPages();
+      toast.success(`Saved ${selected}`, {
+        description: "Committed to the wiki. Refresh triggered.",
+      });
     } catch (e) {
-      setPageError((e as Error).message);
+      const msg = (e as Error).message;
+      setPageError(msg);
+      toast.error("Save failed", { description: msg });
     } finally {
       setSaving(false);
     }
@@ -269,6 +277,14 @@ export default function WikiWorkbenchPage() {
       className="flex h-screen flex-col bg-zinc-950 text-zinc-100"
       data-testid="wiki-workbench"
     >
+      {/*
+        Sonner toast host. `theme="dark"` matches the zinc-950 surround.
+        `richColors` + per-call description let save / error toasts
+        render with semantic fill (green/red) + secondary text. The
+        hidden `<section data-sonner-toaster>` in the DOM is what the
+        harness Gate 11f waits for after a wiki-write.
+      */}
+      <Toaster theme="dark" richColors position="bottom-right" />
       {/* Header */}
       <header className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4">
         <div className="flex items-center gap-3">
