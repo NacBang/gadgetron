@@ -15,35 +15,60 @@ prove that the code path a real operator hits — auth → scope → handler
 
 ### Gates
 
-Gates fire in execution order — each one is a hard pass/fail:
+Gates fire in execution order — each one is a hard pass/fail. The
+current baseline is **39 PASS** on `--quick --no-screenshot`:
 
-| # | Gate | Fails if |
-|---|------|----------|
-| 1 | Postgres (`pgvector/pgvector:pg16`) healthy | `docker compose up` fails, or the container's `pg_isready` probe doesn't flip to `healthy` within 60s |
-| 2 | `cargo build --bin gadgetron` | binary doesn't compile |
-| 3 | bootstrap DB schema via transient `gadgetron serve` | sqlx migrations fail (the CLI in Gate 3.5 needs the tables to exist) |
-| 3.5 | `gadgetron tenant create` + `gadgetron key create` | CLI output misses `ID:` / `Key: gad_live_…`; OpenAiCompat + Management keys are created |
-| 4 | mock OpenAI provider starts | port bind, Python import, or `GET /health` doesn't return 200 within ~9s |
-| 5 | config renders | `sed` substitution of `@WIKI_DIR@` / `@MOCK_URL@` / `@GAD_PORT@` fails |
-| 6 | `gadgetron serve` starts + `/health` + `/ready` | binary panics, bind fails, middleware chain broken |
-| 7 | `GET /api/v1/web/workbench/bootstrap` | JSON missing `gateway_version`, `active_plugs`, or `knowledge` |
-| 8 | non-streaming `POST /v1/chat/completions` | mock's canned content or usage tokens don't round-trip |
-| 9 | streaming `POST /v1/chat/completions` | SSE stream doesn't emit `data: [DONE]` |
-| 10 | provider sees `<gadgetron_shared_context>` | PSL-1b injection didn't reach the provider (checked by grepping `mock-openai.log`) |
-| — | real-vLLM reachability (optional, `--real-vllm`) | real vLLM `/v1/models` + `/v1/chat/completions` don't round-trip; skipped by default so CI has no external network dependency |
-| 11 | `/web` landing + `/web/` → `/web` 30x redirect | landing HTML missing `gadgetron`/`api key`/`<!doctype html`, or trailing-slash redirect regresses |
-| 12 | `gadgetron.log` has no `ERROR` line | any `ERROR` line is a hard fail |
-| 13 | `cargo test --workspace` (unless `--quick`) | any non-infra test fails (7 pre-existing `e2e_*` pgvector failures are tolerated) |
+| # | Gate | What it proves |
+|---|------|----------------|
+| 1 | Postgres (`pgvector/pgvector:pg16`) healthy | `docker compose up` + `pg_isready` within 60s |
+| 2 | `cargo build --bin gadgetron` | binary compiles |
+| 3 | bootstrap DB schema via transient `gadgetron serve` | sqlx migrations apply cleanly |
+| 3.5 | `gadgetron tenant create` + `key create` ×2 | CLI output contract; OpenAiCompat + Management keys materialise |
+| 4 | main + error mock providers start | python stdlib HTTP server binds on `MOCK_PORT` + `MOCK_ERROR_PORT`, both `/health` 200 |
+| 5 | config renders | `sed` substitution of `@WIKI_DIR@` / `@MOCK_URL@` / `@MOCK_ERROR_URL@` / `@GAD_PORT@` |
+| 6 | `gadgetron serve` + `/health` + `/ready` | binary boots, middleware chain OK |
+| 7 | `GET /workbench/bootstrap` | `gateway_version`, `active_plugs`, `knowledge` keys present |
+| 7b | wiki seed injection | `wiki_seed: injected N ... count=N>0` in log (ANSI stripped) |
+| 7c | `/workbench/activity` | `{entries: [], is_truncated: bool}` shape |
+| 7d | `/workbench/knowledge-status` | `canonical_ready == true` + `search_ready` + `relation_ready` fields |
+| 7e | `/workbench/views` | non-empty array |
+| 7f | `/workbench/actions` | non-empty array |
+| 7g | auth + scope | no-Bearer→401, bad-Bearer→401, Mgmt route via OpenAiCompat→403 |
+| 7h.1 | happy-path POST `/actions/knowledge-search` | `.result.status ∈ {ok, pending_approval}` end-to-end |
+| 7h.2 | replay cache hit | same `client_invocation_id` returns byte-identical body (PR #131 moka) |
+| 7h | action 404 on unknown id | POST `/actions/does-not-exist` → 404 |
+| 7i | `/v1/models` listing | `{object: "list", data: [...]}` |
+| 7j | `/favicon.ico` | 200 or 204 (public, no auth) |
+| 7k | Management `/api/v1/usage` | RBAC positive path (201/501/503); FAILS on 401/403 |
+| 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
+| 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
+| 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
+| 8 | non-streaming `/v1/chat/completions` | mock's canned content + token counts round-trip |
+| 9 | streaming `/v1/chat/completions` (happy) | `data: [DONE]` is the LAST data frame |
+| 9b | streaming `/v1/chat/completions` (error) | PR 6 Drop-guard Err arm: `event: error` frame + `status="error"` audit line |
+| 10 | `<gadgetron_shared_context>` injection | mock-openai.log contains the block (PSL-1b) |
+| — | real-vLLM reachability (optional, `--real-vllm`) | direct GET `/v1/models` + POST `/v1/chat/completions` |
+| — | Penny↔vLLM (optional, `--penny-vllm`) | `POST /v1/chat/completions { model: "penny" }` with claude-code subprocess via proxy |
+| 11 | `/web` landing + `/web/` → `/web` 30x redirect | recognizable HTML + redirect contract |
+| — | `/web` screenshot (optional, unless `--no-screenshot`) | gstack `$B` OR node+playwright fallback (`screenshot.mjs`) writes `artifacts/screenshots/web-landing.png` |
+| 12 | `gadgetron.log` has no unexpected `ERROR` line | Gate 9b's intentional `sse stream error:` is whitelisted |
+| 13 | `cargo test --workspace` (unless `--quick`) | all non-infra tests pass (7 pre-existing pgvector `e2e_*` tolerated) |
 
 ### Artifacts
 
 Every run writes to `scripts/e2e-harness/artifacts/` (gitignored):
 
 - `gadgetron.log` — full `RUST_LOG=info,gadgetron=debug` stderr
-- `mock-openai.log` — JSONL of every provider request body
+- `mock-openai.log` — JSONL of every main-provider request body
+- `mock-openai-error.log` — JSONL of every error-mock request (Gate 9b)
 - `cargo-test.log` — full `cargo test --workspace` output
-- `summary.txt` — PASS/FAIL per gate
-- `screenshots/` — `/web` captures when `$B` is on PATH
+- `summary.txt` — PASS/FAIL per gate + FAIL payloads (first ~1200 chars)
+- `screenshots/web-landing.png` — `/web` capture (gstack `$B` or node+playwright)
+- `web-landing.html.sample` — HTML body for `/web` (~first 2000 chars)
+- `penny-vllm-chat-transcript.json` — full response body when `--penny-vllm` is on
+- `real-vllm-models.json` + `real-vllm-chat.json` — when `--real-vllm` is on
+- `bootstrap.log` — transient-serve schema bootstrap output (Gate 3)
+- `key-mgmt.log` + `key-mgmt.log.stdout` — Management `key create` output
 
 ## How to run
 
