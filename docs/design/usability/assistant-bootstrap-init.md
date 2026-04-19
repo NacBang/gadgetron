@@ -441,7 +441,7 @@ Named tests:
 
 3. assistant profile with search enabled
    - generated config contains valid `[knowledge.search]`
-   - `gadgetron mcp serve` exposes `web.search`
+   - `gadgetron gadget serve` exposes `web.search` (the legacy `gadgetron mcp serve` alias also works at v0.5.x with a tracing::warn — ADR-P2A-10)
 
 ### 5.2 테스트 환경
 

@@ -4,10 +4,12 @@
 > **상태**: Approved
 > **작성일**: 2026-04-18
 > **최종 업데이트**: 2026-04-18
-> **관련 크레이트**: `gadgetron-penny`, `gadgetron-knowledge`, `gadgetron-core`, `plugins/plugin-document-formats`, `gadgetron-gateway`, `gadgetron-web`
+> **관련 크레이트**: `gadgetron-penny`, `gadgetron-knowledge`, `gadgetron-core`, `bundles/document-formats/` (ADR-P2A-10 rename of the old `plugins/plugin-document-formats`), `gadgetron-gateway`, `gadgetron-web`
 > **Phase**: [P2B] primary / [P2C] anchored evidence enrichment / [P3] rich citation renderer
 > **관련 문서**: `docs/design/phase2/02-penny-agent.md`, `docs/design/phase2/11-raw-ingestion-and-rag.md`, `docs/design/phase2/13-penny-shared-surface-loop.md`, `docs/design/gateway/workbench-projection-and-actions.md`, `docs/design/web/expert-knowledge-workbench.md`, `docs/process/04-decision-log.md` D-20260418-13
 > **보정 범위**: 현재 trunk 기준 retrieved-answer / footnote / parser / evidence surface 계약은 이 문서가 authoritative 이다. `11-raw-ingestion-and-rag.md`의 §8.3 PDF 예시와 §9.3 hyperlink footnote 예시는 ingest foundation 문맥으로 유지하되, 현재 operator-visible citation wire contract 는 본 문서가 우선한다.
+>
+> **⚠ Terminology note (2026-04-20)**: 본문 내부의 `plugins/plugin-document-formats` 경로 / 관련 코드 심볼은 ADR-P2A-10 (2026-04-18 Bundle / Plug / Gadget rename) 기준으로 `bundles/document-formats` 와 `Bundle` / `BundleContext` 로 번역해서 읽을 것. P2B 실구현 (EPIC 3 / v0.5.0) 는 ADR-P2A-10 명칭을 따랐음. 전체 리라이트는 stage ② refactor cycle 대상 — 본 drift fix 는 head note 추가 + 관련 크레이트 줄의 경로 명칭만 정정.
 
 ---
 
