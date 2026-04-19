@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.4** (post-ISSUE 8 TASK 8.4 file-based catalog)
+**Current version: 0.4.5** (post-ISSUE 8 TASK 8.5 SIGHUP reloader)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -142,9 +142,14 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     garbage. Unit tests cover the round-trip, parse errors, and
     missing-file paths. Response gains a `source_path` field that
     identifies the file when `source == "config_file"`.
-  - TASK 8.5 — fs-watcher (inotify/kqueue) on `catalog_path` to
-    auto-reload on edit + SIGHUP handler for operator-triggered
-    reload without HTTP surface.
+  - TASK 8.5 ✅ — SIGHUP reloader (0.4.4 → 0.4.5). POSIX `SIGHUP`
+    triggers the same reload code path as the HTTP endpoint. Operator
+    workflow: edit `catalog_path`, `kill -HUP <pid>`. Unix-only
+    (Windows operators keep using the HTTP endpoint). Shared
+    `perform_catalog_reload()` helper makes the `curl` path and the
+    signal path emit identical telemetry. fs-watcher is deferred to a
+    follow-up TASK 8.6 if operator feedback shows demand — SIGHUP
+    covers the 90% case with no extra deps or background thread.
 
 ### Planned ISSUEs
 - **ISSUE 9 — real bundle manifests**: `[[actions]]` schema, `seed_p2b`

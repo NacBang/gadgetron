@@ -1662,6 +1662,14 @@ async fn init_serve_runtime(
         tool_audit_sink,
     });
     let tui_thread = spawn_tui_thread(tui_tx.as_ref());
+
+    // ISSUE 8 TASK 8.5 — arm the SIGHUP reloader while we still have
+    // the workbench handle in scope. Noop on non-Unix (logged once
+    // inside the spawn helper) + noop when the workbench isn't wired.
+    if let Some(wb) = state.workbench.as_ref() {
+        gadgetron_gateway::web::workbench::spawn_sighup_reloader(wb.clone());
+    }
+
     let app = build_http_app(state, &config.web);
 
     Ok((
