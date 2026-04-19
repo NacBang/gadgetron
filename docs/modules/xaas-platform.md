@@ -107,16 +107,18 @@ crates/gadgetron-xaas/
     │   ├── config.rs                # QuotaConfig (RPM/TPM/concurrent_max)
     │   ├── enforcer.rs              # QuotaEnforcer (pre-check/post-record)
     │   └── bucket.rs                # TokenBucket (RPM + TPM refill)
-    ├── audit/                       # [P1] chat-side + [P2B] direct-action side
+    ├── audit/                       # [P1] chat-side + [P2B] direct-action side + [EPIC 2] Penny tool-call side
     │   ├── entry.rs                 # AuditEntry struct (chat audit)
     │   ├── writer.rs                # AuditWriter (mpsc channel -> batch insert, chat audit)
-    │   └── action_event.rs          # [P2B] ActionAuditEventWriter + ActionAuditRow + query_action_audit_events (direct-action audit, ISSUE 3 / 0.2.6 / PR #188) — core trait is `gadgetron_core::audit::ActionAuditSink`
+    │   ├── action_event.rs          # [P2B] ActionAuditEventWriter + ActionAuditRow + query_action_audit_events (direct-action audit, ISSUE 3 / 0.2.6 / PR #188) — core trait is `gadgetron_core::audit::ActionAuditSink`
+    │   └── tool_event.rs            # [EPIC 2] run_gadget_audit_writer + ToolAuditRow + ToolAuditQueryFilter + query_tool_audit_events (Penny tool-call audit, ISSUE 5 / 0.2.8 / PR #199) — core trait `gadgetron_core::audit::GadgetAuditEventSink` shipped in P2A; ISSUE 5 replaced the Noop sink with a Postgres consumer + query
     ├── db/
     │   └── migrations/              # sqlx PostgreSQL migrations
     │       ├── 20260411000001_tenants.sql
     │       ├── 20260411000002_api_keys.sql
     │       ├── 20260411000003_quotas.sql
-    │       ├── 20260411000004_audit_log.sql          # chat audit (P1)
+    │       ├── 20260411000004_audit_log.sql           # chat audit (P1)
+    │       ├── 20260416000001_tool_audit_events.sql   # Penny tool-call audit TABLE (P2A / ADR-P2A-06 addendum) — rows started landing with ISSUE 5 / PR #199 when the Noop sink was replaced by `run_gadget_audit_writer`
     │       └── 20260419000001_action_audit_events.sql # direct-action audit (P2B / ISSUE 3 / PR #188)
     │
     ├── billing/                     # [P2] — 추가 예정 모듈

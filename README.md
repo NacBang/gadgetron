@@ -2,7 +2,7 @@
 
 Gadgetron is a knowledge-collaboration platform. It keeps a shared **knowledge layer** (markdown wiki + web research + raw-folder ingestion + search indexes), **Penny** drives it on the user's behalf, and capabilities expand through **Bundles** that expose core-facing **Plugs** and Penny-facing **Gadgets**. Everything ships as a single Rust binary by default, with sub-millisecond P99 gateway overhead.
 
-**Version**: `0.2.7` — EPIC 1 (Workbench MVP) in progress; all four planned ISSUEs shipped. `POST /v1/chat/completions` + Penny runtime + embedded Web UI + browser-driven wiki CRUD (`/web/wiki`) + direct-action audit + approval flow (ISSUE 3, PR #188) + operator observability (`/usage/summary` + `/events/ws` WebSocket + `/web/dashboard`, ISSUE 4, PR #194) all ship on trunk. EPIC 1 is now in its close-criteria phase (external-team manual validation before `v0.3.0` tag). See [`docs/adr/ADR-P2A-06`](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md) for the Penny-side approval items that remain future work. Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Version**: `0.2.8` — EPIC 1 (Workbench MVP) in close-criteria phase; EPIC 2 (Agent autonomy) opened with its first ISSUE shipped. `POST /v1/chat/completions` + Penny runtime + embedded Web UI + browser-driven wiki CRUD (`/web/wiki`) + direct-action audit + approval flow (ISSUE 3, PR #188) + operator observability (`/usage/summary` + `/events/ws` WebSocket + `/web/dashboard`, ISSUE 4, PR #194) + Penny tool-call audit persistence + `/audit/tool-events` query endpoint + `ActivityEvent::ToolCallCompleted` fan-out (ISSUE 5, PR #199) all ship on trunk. EPIC 1 awaits external-team manual validation before the `v0.3.0` tag; EPIC 2 continues with ISSUEs 6–7. See [`docs/adr/ADR-P2A-06`](docs/adr/ADR-P2A-06-approval-flow-deferred-to-p2b.md) for the Penny-side approval items that remain future work. Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## How it works
 
@@ -221,7 +221,7 @@ The authoritative ADR index lives in [`docs/adr/README.md`](docs/adr/README.md).
 
 ## Roadmap
 
-Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tree, versioning policy, and tag schedule. Summary of what's shipped today on trunk (0.2.7):
+Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tree, versioning policy, and tag schedule. Summary of what's shipped today on trunk (0.2.8):
 
 ### Completed ISSUEs (EPIC 1 — Workbench MVP)
 
@@ -233,10 +233,14 @@ Canonical plan: [`docs/ROADMAP.md`](docs/ROADMAP.md) — EPIC / ISSUE / TASK tre
 | `0.2.6` | **ISSUE 3** — production safety | #188 `ActionAuditSink` + Postgres writer + `ApprovalStore` + approve/deny/audit-events endpoints + `wiki-delete` seed + harness gates 7h.7 / 7h.8 |
 | `0.2.7` | **ISSUE 4** — operator observability | #194 `GET /usage/summary` tri-plane rollup + `gadgetron_core::pricing` cost cents + `ActivityBus` + `GET /events/ws` WebSocket + `/web/dashboard` page + LeftRail entry + harness gates 7k.3 / 11f |
 
-### Next in EPIC 1
-EPIC 1 is now in its close-criteria phase: external-team manual validation (not just harness). Closing PR bumps to `0.3.0` and tags `v0.3.0` on main.
+### Completed ISSUEs (EPIC 2 — Agent autonomy)
 
-EPIC 1 closure tags `v0.3.0`. Subsequent EPICs (Agent autonomy → `v0.4.0`, Plugin platform → `v0.5.0`, Multi-tenant → `v1.0.0`, Cluster platform → `v2.0.0`) are planned in `docs/ROADMAP.md`.
+| Version | ISSUE | Shipped in |
+|---------|-------|------------|
+| `0.2.8` | **ISSUE 5** — Penny tool-call audit surface | #199 `run_gadget_audit_writer` persisting `tool_audit_events` to Postgres (was Noop) + `GET /api/v1/web/workbench/audit/tool-events` query + `ActivityEvent::ToolCallCompleted` bus fan-out + harness gate 7k.4 |
+
+### Next
+EPIC 1 still in close-criteria phase (external-team manual validation before `v0.3.0` tag). EPIC 2 continues with ISSUE 6 (Penny-originated writes in `/workbench/activity`) and ISSUE 7 (first-class MCP server + `/v1/tools`). EPIC 2 closure tags `v0.4.0`. Subsequent EPICs (Plugin platform → `v0.5.0`, Multi-tenant → `v1.0.0`, Cluster platform → `v2.0.0`) are planned in `docs/ROADMAP.md`.
 
 **E2E harness baseline**: 60+ gates on `./scripts/e2e-harness/run.sh --quick --no-screenshot` (see [`scripts/e2e-harness/README.md`](scripts/e2e-harness/README.md) for the gate table). Every PR must make the harness green before merge.
 
