@@ -434,6 +434,19 @@ wiki_max_page_bytes = 1048576
 - `wiki_git_author`: git commit 작성자 (`"Name <email>"` 형식). 생략 시 전역 gitconfig에서 자동 감지, 없으면 `"Penny <penny@gadgetron.local>"` 사용.
 - `wiki_max_page_bytes`: 페이지 최대 크기 (범위: 1 ~ 100 MiB)
 
+#### 시드 페이지 자동 주입
+
+`[knowledge]` 가 활성화된 상태에서 `wiki_path` 가 비어 있으면 (user-authored `.md` 파일이 하나도 없는 경우) Gadgetron 은 첫 `Wiki::open()` 시점에 내장 시드 페이지를 자동으로 주입합니다. 시드는 `crates/gadgetron-knowledge/seeds/` 에 컴파일-타임 임베드되어 있으며 일반 `wiki.write` 경로를 타므로 동일한 secret scanner · 페이지 크기 제한 · autocommit 이 적용됩니다.
+
+- 주입 조건: 첫 `open()` 호출 시 `list()` 가 비어 있을 때만. 이후에는 skip.
+- 로그: `target = "wiki_seed"`, 메시지 `injected N seed pages into fresh wiki`. 실패해도 서버 시작은 중단되지 않습니다 (non-fatal).
+- `wiki_autocommit = true` 이면 각 시드 페이지가 개별 commit 으로 히스토리에 기록됩니다.
+
+`Wiki::list()` 는 `.git` 디렉터리만 제외하고 `wiki_path` 전체를 walk 하므로, `_archived/` 아래 있는 `.md` 파일도 "존재하는 페이지" 로 카운트됩니다. 즉:
+
+- **일반 `wiki.delete` 호출로는 시드가 재주입되지 않습니다.** `wiki.delete` 는 soft-delete 로 파일을 `_archived/<YYYY-MM-DD>/` 로 rename 하므로 `list()` 가 여전히 non-empty 입니다 (`wiki_autocommit = true` 이면 rename이 git commit 으로도 기록됩니다).
+- **수동으로 `wiki_path` 아래 모든 `.md` 를 제거한 뒤 재시작하면 시드가 다시 주입됩니다** (`_archived/` 포함). 시드를 영구적으로 원치 않으면 placeholder `.md` 파일을 하나 남겨두거나, `wiki_path` 자체를 초기화하지 마십시오.
+
 ### `[knowledge.search]`
 
 ```toml
