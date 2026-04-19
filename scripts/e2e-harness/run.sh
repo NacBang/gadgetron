@@ -738,19 +738,42 @@ else
   fail "/web/ did not 30x-redirect to /web" "$REDIRECT_STATUS"
 fi
 
-# Optional: screenshot via gstack $B (alias set by gstack /browse skill).
+# Screenshot strategy (preference order):
+#   1. If --no-screenshot: skip.
+#   2. If $B is exported (gstack /browse skill warmed up): use that.
+#   3. Else if node + scripts/e2e-harness/screenshot.mjs can load
+#      playwright-core (vendored by gstack OR system-installed):
+#      use that. This is the default path on machines with gstack
+#      installed but $B not exported (the common case).
+#   4. Else skip with a clear reason.
 if [ "$SKIP_SCREENSHOT" -eq 1 ]; then
   skip "Gate 11 screenshot (--no-screenshot)"
-elif [ -z "${B:-}" ]; then
-  skip "Gate 11 screenshot (gstack \$B not set)"
-else
-  # $B is a shell alias; guard via subshell + set +e.
+elif [ -n "${B:-}" ]; then
   SHOT="$ART_DIR/screenshots/web-landing.png"
   if ( $B goto "$GAD_BASE/web" && $B snapshot --out "$SHOT" ) >/dev/null 2>&1; then
-    pass "screenshot captured at $SHOT"
+    pass "screenshot captured at $SHOT (via gstack \$B)"
   else
     fail "\$B screenshot failed (landing page may still be OK — see web-landing.html.sample)"
   fi
+elif command -v node >/dev/null 2>&1; then
+  SHOT="$ART_DIR/screenshots/web-landing.png"
+  SHOT_LOG="$ART_DIR/screenshot.log"
+  if node "$HARNESS_DIR/screenshot.mjs" "$GAD_BASE/web" "$SHOT" \
+       >"$SHOT_LOG" 2>&1; then
+    pass "screenshot captured at $SHOT (via node + playwright-core)"
+  else
+    # Distinguish "no playwright" (skippable) from "real failure" (FAIL)
+    # by inspecting the exit code the script emits (3 = playwright missing).
+    SHOT_RC=$?
+    if [ "$SHOT_RC" = "3" ] || grep -q 'playwright-core not found' "$SHOT_LOG"; then
+      skip "Gate 11 screenshot (playwright-core not available — install gstack or 'npm i -g playwright-core')"
+    else
+      fail "Gate 11 screenshot (node/playwright failed)" \
+        "$(head -c 600 "$SHOT_LOG")"
+    fi
+  fi
+else
+  skip "Gate 11 screenshot (no \$B, no node — skipping)"
 fi
 
 # ---------------------------------------------------------------------------
