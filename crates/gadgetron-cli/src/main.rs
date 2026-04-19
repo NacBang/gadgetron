@@ -1351,6 +1351,7 @@ fn build_workbench(
     // pool is available; otherwise fall back to Noop. Unit / no-db
     // flows keep the Noop path so they don't accidentally depend on a
     // live database.
+    let billing_pool = pg_pool.clone();
     let audit_sink: Arc<dyn ActionAuditSink> = if let Some(pool) = pg_pool {
         use gadgetron_xaas::audit::action_event::{
             run_action_audit_writer, ActionAuditEventWriter,
@@ -1378,15 +1379,22 @@ fn build_workbench(
     let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> =
         Arc::new(gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new());
 
-    let action_svc: Arc<dyn WorkbenchActionService> =
-        Arc::new(InProcessWorkbenchActionService::new_full(
-            catalog.clone(),
-            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
-            candidate_coordinator,
-            gadget_dispatcher,
-            audit_sink,
-            Some(approval_store.clone()),
-        ));
+    // ISSUE 12 TASK 12.2 — thread the PG pool so successful
+    // direct-action + approved-action dispatches emit a billing_events
+    // row (kind=Action, source_event_id = audit_event_id). No pool =
+    // no-op; audit still fires.
+    let action_svc_impl = InProcessWorkbenchActionService::new_full(
+        catalog.clone(),
+        InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+        candidate_coordinator,
+        gadget_dispatcher,
+        audit_sink,
+        Some(approval_store.clone()),
+    );
+    let action_svc: Arc<dyn WorkbenchActionService> = match billing_pool {
+        Some(pool) => Arc::new(action_svc_impl.with_pg_pool(pool)),
+        None => Arc::new(action_svc_impl),
+    };
 
     Some(Arc::new(GatewayWorkbenchService {
         projection,

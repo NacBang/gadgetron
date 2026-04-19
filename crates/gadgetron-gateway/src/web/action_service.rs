@@ -73,6 +73,12 @@ pub struct InProcessWorkbenchActionService {
     /// `Uuid::new_v4()` — the approve endpoint can then look up the
     /// record and resume dispatch.
     pub approval_store: Option<Arc<dyn ApprovalStore>>,
+    /// Optional Postgres pool for the ISSUE 12 billing ledger. When
+    /// present, successful direct-action + approved-action dispatches
+    /// emit a `billing_events` row (kind=Action, source_event_id =
+    /// audit_event_id). When `None` (tests, no-DB deploys), billing is
+    /// a no-op — audit still fires through `audit_sink`.
+    pub pg_pool: Option<sqlx::PgPool>,
 }
 
 impl InProcessWorkbenchActionService {
@@ -135,7 +141,15 @@ impl InProcessWorkbenchActionService {
             gadget_dispatcher,
             audit_sink,
             approval_store,
+            pg_pool: None,
         }
+    }
+
+    /// Attach a Postgres pool for billing-ledger writes (ISSUE 12 TASK 12.2).
+    /// Builder chain so existing `new_full` callers don't break.
+    pub fn with_pg_pool(mut self, pool: sqlx::PgPool) -> Self {
+        self.pg_pool = Some(pool);
+        self
     }
 }
 
@@ -454,6 +468,12 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 outcome: ActionAuditOutcome::Success,
                 elapsed_ms: start_instant.elapsed().as_millis() as u64,
             });
+        emit_action_billing(
+            self.pg_pool.as_ref(),
+            actor_tenant_id,
+            audit_event_id,
+            descriptor.gadget_name.clone(),
+        );
         let result = WorkbenchActionResult {
             status: "ok".into(),
             approval_id: None,
@@ -548,6 +568,12 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 outcome: ActionAuditOutcome::Success,
                 elapsed_ms: start_instant.elapsed().as_millis() as u64,
             });
+        emit_action_billing(
+            self.pg_pool.as_ref(),
+            actor.tenant_id,
+            audit_event_id,
+            descriptor.gadget_name.clone(),
+        );
         let result = WorkbenchActionResult {
             status: "ok".into(),
             approval_id: Some(approval.id),
@@ -559,6 +585,45 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         };
         Ok(InvokeWorkbenchActionResponse { result })
     }
+}
+
+/// Fire-and-forget billing emission for a successful action dispatch
+/// (ISSUE 12 TASK 12.2). `source_event_id` is the audit event UUID so
+/// the ledger joins cleanly to `action_audit_events`. `cost_cents=0`
+/// today — dispatcher doesn't surface cost yet; invoice materializer
+/// (TASK 12.3) applies per-kind pricing at query time. No-op when
+/// `pool` is `None` (test / no-DB deploys).
+fn emit_action_billing(
+    pool: Option<&sqlx::PgPool>,
+    tenant_id: Uuid,
+    audit_event_id: Uuid,
+    gadget_name: Option<String>,
+) {
+    let Some(pool) = pool else {
+        return;
+    };
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        if let Err(e) = gadgetron_xaas::billing::insert_billing_event(
+            &pool,
+            tenant_id,
+            gadgetron_xaas::billing::BillingEventKind::Action,
+            0,
+            Some(audit_event_id),
+            gadget_name.as_deref(),
+            None,
+        )
+        .await
+        {
+            tracing::warn!(
+                target: "billing",
+                tenant_id = %tenant_id,
+                audit_event_id = %audit_event_id,
+                error = %e,
+                "failed to persist action billing_events row"
+            );
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
