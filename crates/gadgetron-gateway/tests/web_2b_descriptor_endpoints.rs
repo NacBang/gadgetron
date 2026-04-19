@@ -92,12 +92,12 @@ fn make_state_with_coordinator(
     let projection = Arc::new(InProcessWorkbenchProjection {
         knowledge: None,
         gateway_version: "0.0.0-test",
-        descriptor_catalog: catalog.clone(),
+        descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog.clone())),
     });
 
     let action_svc: Arc<dyn WorkbenchActionService> =
         Arc::new(InProcessWorkbenchActionService::new(
-            catalog,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(catalog)),
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             coordinator,
         ));

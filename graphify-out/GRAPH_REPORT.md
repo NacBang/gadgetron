@@ -1,7 +1,7 @@
 # Graph Report - /Users/junghopark/dev/gadgetron-plan  (2026-04-19)
 
 ## Corpus Check
-- 224 files · ~1,012,630 words
+- 224 files · ~1,013,051 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -1003,11 +1003,11 @@ Nodes (1): Phase2 Overview Design Doc
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `is_empty()` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 16`, `Community 18`, `Community 20`, `Community 23`, `Community 26`, `Community 29`, `Community 30`?**
-  _High betweenness centrality (0.039) - this node is a cross-community bridge._
-- **Why does `parse_page()` connect `Community 10` to `Community 0`, `Community 1`, `Community 2`, `Community 6`, `Community 8`, `Community 18`?**
+  _High betweenness centrality (0.022) - this node is a cross-community bridge._
+- **Why does `parse_searxng_response()` connect `Community 7` to `Community 1`, `Community 3`, `Community 5`?**
   _High betweenness centrality (0.018) - this node is a cross-community bridge._
-- **Why does `GadgetronError` connect `Community 22` to `Community 0`?**
-  _High betweenness centrality (0.014) - this node is a cross-community bridge._
+- **Why does `migrate_legacy_penny()` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 7`, `Community 16`?**
+  _High betweenness centrality (0.017) - this node is a cross-community bridge._
 - **Are the 77 inferred relationships involving `is_empty()` (e.g. with `to_anthropic_request()` and `from_anthropic_response()`) actually correct?**
   _`is_empty()` has 77 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 19 inferred relationships involving `build_router()` (e.g. with `build_http_app()` and `psl_1d_successful_non_streaming_chat_completions_captures_one_event()`) actually correct?**

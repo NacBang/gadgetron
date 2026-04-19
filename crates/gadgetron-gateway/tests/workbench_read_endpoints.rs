@@ -72,7 +72,9 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
     let projection = Arc::new(InProcessWorkbenchProjection {
         knowledge: None,
         gateway_version: "0.0.0-test",
-        descriptor_catalog: DescriptorCatalog::seed_p2b(),
+        descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            DescriptorCatalog::seed_p2b(),
+        )),
     });
     AppState {
         key_validator: Arc::new(MockKeyValidator::new(scopes)),

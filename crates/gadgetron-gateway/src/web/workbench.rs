@@ -1117,7 +1117,9 @@ mod tests {
         let projection = Arc::new(InProcessWorkbenchProjection {
             knowledge: None,
             gateway_version: "0.0.0-test",
-            descriptor_catalog: DescriptorCatalog::seed_p2b(),
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b(),
+            )),
         });
         let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
 
@@ -1181,7 +1183,9 @@ mod tests {
         let proj = InProcessWorkbenchProjection {
             knowledge: None,
             gateway_version: "0.1.0",
-            descriptor_catalog: DescriptorCatalog::empty(),
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty(),
+            )),
         };
         let resp = proj.bootstrap().await.unwrap();
         assert!(resp.active_plugs.is_empty());
@@ -1301,7 +1305,9 @@ mod tests {
         let proj = InProcessWorkbenchProjection {
             knowledge: Some(svc),
             gateway_version: "0.1.0",
-            descriptor_catalog: DescriptorCatalog::empty(),
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty(),
+            )),
         };
         let resp = proj.bootstrap().await.unwrap();
         assert_eq!(resp.active_plugs.len(), 2);
@@ -1316,7 +1322,9 @@ mod tests {
         let proj = InProcessWorkbenchProjection {
             knowledge: None,
             gateway_version: "0.1.0",
-            descriptor_catalog: DescriptorCatalog::empty(),
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty(),
+            )),
         };
         let resp = proj.activity(50).await.unwrap();
         assert!(resp.entries.is_empty());
@@ -1351,7 +1359,9 @@ mod tests {
         let proj = InProcessWorkbenchProjection {
             knowledge: None,
             gateway_version: "0.1.0",
-            descriptor_catalog: DescriptorCatalog::empty(),
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty(),
+            )),
         };
         let id = Uuid::new_v4();
         let err = proj.request_evidence(id).await.unwrap_err();
