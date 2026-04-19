@@ -35,10 +35,35 @@ pub struct CatalogSnapshot {
     pub validators: std::collections::HashMap<String, std::sync::Arc<jsonschema::Validator>>,
 }
 
+/// Bundle-level metadata attached to a catalog file. Optional —
+/// `seed_p2b()` and legacy catalog files don't carry it, and the
+/// reload path treats its absence as "unnamed anonymous catalog".
+///
+/// Shipped in ISSUE 9 TASK 9.1 as the first step toward real bundle
+/// manifests. Future TASKs will layer per-bundle scope isolation,
+/// multi-bundle aggregation, and signed manifests on top of this
+/// same struct.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BundleMetadata {
+    /// Bundle identifier — matches the directory / install-slug. Like
+    /// a Cargo crate name: `snake_case`, stable across versions. Used
+    /// as a primary key when multiple bundles are installed.
+    pub id: String,
+    /// Bundle version string, free-form (semver recommended but not
+    /// enforced today). Surfaced in the reload response so operators
+    /// can tell "did my edit actually land?" at a glance.
+    pub version: String,
+}
+
 /// On-disk catalog file shape consumed by
 /// [`DescriptorCatalog::from_toml_file`] (ISSUE 8 TASK 8.4).
 ///
 /// ```toml
+/// # Optional bundle metadata (ISSUE 9 TASK 9.1). Absent = anonymous.
+/// [bundle]
+/// id = "gadgetron-core"
+/// version = "0.1.0"
+///
 /// allow_direct_actions = true  # optional, default true
 ///
 /// [[views]]
@@ -60,6 +85,8 @@ pub struct CatalogSnapshot {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct CatalogFile {
     #[serde(default)]
+    pub bundle: Option<BundleMetadata>,
+    #[serde(default)]
     pub allow_direct_actions: Option<bool>,
     #[serde(default)]
     pub views: Vec<WorkbenchViewDescriptor>,
@@ -78,6 +105,11 @@ pub struct DescriptorCatalog {
     /// When `false`, action listings add a `disabled_reason` and
     /// `POST /actions/:id` returns 403.
     allow_direct_actions: bool,
+    /// Bundle metadata when this catalog came from a bundle manifest
+    /// (ISSUE 9 TASK 9.1). `None` for the hand-coded `seed_p2b()`
+    /// catalog and for anonymous flat-TOML files that didn't declare
+    /// a `[bundle]` table.
+    pub(crate) bundle: Option<BundleMetadata>,
 }
 
 impl DescriptorCatalog {
@@ -91,7 +123,15 @@ impl DescriptorCatalog {
             views: vec![],
             actions: vec![],
             allow_direct_actions: true,
+            bundle: None,
         }
+    }
+
+    /// Read-only access to the bundle metadata carried by this
+    /// catalog. `Some` when the catalog came from a `[bundle]`-
+    /// declaring TOML file (ISSUE 9 TASK 9.1); `None` otherwise.
+    pub fn bundle(&self) -> Option<&BundleMetadata> {
+        self.bundle.as_ref()
     }
 
     /// Hand-coded seed catalog for P2B integration testing.
@@ -254,6 +294,7 @@ impl DescriptorCatalog {
             views,
             actions,
             allow_direct_actions: true,
+            bundle: None,
         }
     }
 
@@ -346,6 +387,7 @@ impl DescriptorCatalog {
             views: file.views,
             actions: file.actions,
             allow_direct_actions: file.allow_direct_actions.unwrap_or(true),
+            bundle: file.bundle,
         })
     }
 
@@ -541,6 +583,85 @@ input_schema = { type = "object", properties = { n = { type = "integer" } }, req
             "error must name the failure; got {msg:?}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_toml_file_round_trips_bundle_metadata() {
+        // ISSUE 9 TASK 9.1 — `[bundle]` table surfaces on the
+        // catalog so the admin reload response can tell the operator
+        // which bundle + version is live.
+        let dir =
+            std::env::temp_dir().join(format!("gadgetron-catalog-bundle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bundle.toml");
+        std::fs::write(
+            &path,
+            r#"
+[bundle]
+id = "test-bundle"
+version = "9.9.9"
+
+[[actions]]
+id = "a1"
+title = "a1"
+owner_bundle = "e2e"
+source_kind = "gadget"
+source_id = "t.p"
+gadget_name = "t.p"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "x"
+input_schema = { type = "object" }
+"#,
+        )
+        .unwrap();
+
+        let catalog = DescriptorCatalog::from_toml_file(&path).expect("parse ok");
+        let meta = catalog.bundle().expect("bundle metadata must round-trip");
+        assert_eq!(meta.id, "test-bundle");
+        assert_eq!(meta.version, "9.9.9");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn seed_p2b_has_no_bundle_metadata() {
+        // Hardcoded fallback must stay anonymous so admin tooling
+        // can distinguish "no bundle, default" from "loaded from a
+        // named bundle on disk".
+        assert!(DescriptorCatalog::seed_p2b().bundle().is_none());
+    }
+
+    #[test]
+    fn first_party_gadgetron_core_bundle_file_loads_cleanly() {
+        // ISSUE 9 TASK 9.1 — first-party bundle on disk that mirrors
+        // `seed_p2b()`. Operators can point `[web] catalog_path` at
+        // this file and get the same catalog as the hardcoded
+        // fallback. This test guards the file itself against drift
+        // (bad TOML, missing fields, schema-validation mismatch).
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("crate nested under workspace root")
+            .to_path_buf();
+        let bundle_path = workspace_root.join("bundles/gadgetron-core/bundle.toml");
+        let catalog = DescriptorCatalog::from_toml_file(&bundle_path)
+            .expect("first-party bundle must parse — if this fails, the bundle file drifted");
+        let meta = catalog.bundle().expect("bundle metadata must be present");
+        assert_eq!(meta.id, "gadgetron-core");
+        // Mirror parity: same action set as seed_p2b().
+        let seed = DescriptorCatalog::seed_p2b();
+        let seed_ids: std::collections::BTreeSet<_> =
+            seed.actions.iter().map(|a| a.id.clone()).collect();
+        let bundle_ids: std::collections::BTreeSet<_> =
+            catalog.actions.iter().map(|a| a.id.clone()).collect();
+        assert_eq!(
+            seed_ids, bundle_ids,
+            "first-party bundle must ship the same action ids as seed_p2b()"
+        );
+        // Snapshot must compile: validates schemas round-trip through TOML.
+        let _ = catalog.into_snapshot();
     }
 
     #[test]

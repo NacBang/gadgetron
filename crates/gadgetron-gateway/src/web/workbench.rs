@@ -981,6 +981,11 @@ pub struct ReloadCatalogResponse {
     /// at a glance where the catalog came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    /// Bundle metadata carried by the freshly loaded catalog (ISSUE
+    /// 9 TASK 9.1). `Some` when the TOML file declared a `[bundle]`
+    /// table; absent for `seed_p2b` and anonymous flat catalogs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<crate::web::catalog::BundleMetadata>,
 }
 
 /// Atomically swap the in-memory `DescriptorCatalog` for a fresh one.
@@ -1053,13 +1058,14 @@ pub fn perform_catalog_reload(
     };
     let fresh = fresh_catalog.into_snapshot();
 
-    // Pre-compute the response counts from the same snapshot we're
-    // about to publish, so the response is consistent with the swap
-    // we just performed.
+    // Pre-compute the response counts + bundle metadata from the
+    // same snapshot we're about to publish, so the response is
+    // consistent with the swap we just performed.
     use gadgetron_core::context::Scope;
     let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
     let action_count = fresh.catalog.visible_actions(&all_scopes).len();
     let view_count = fresh.catalog.visible_views(&all_scopes).len();
+    let bundle = fresh.catalog.bundle().cloned();
 
     catalog_handle.store(Arc::new(fresh));
 
@@ -1069,6 +1075,8 @@ pub fn perform_catalog_reload(
         view_count = view_count,
         source = source_label,
         source_path = source_path.as_deref().unwrap_or(""),
+        bundle_id = bundle.as_ref().map(|b| b.id.as_str()).unwrap_or(""),
+        bundle_version = bundle.as_ref().map(|b| b.version.as_str()).unwrap_or(""),
         "descriptor catalog reloaded (CatalogSnapshot = catalog + validators)"
     );
 
@@ -1078,6 +1086,7 @@ pub fn perform_catalog_reload(
         view_count,
         source: source_label,
         source_path,
+        bundle,
     })
 }
 

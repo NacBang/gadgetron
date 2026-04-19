@@ -1,12 +1,12 @@
 # Graph Report - /Users/junghopark/dev/gadgetron-plan  (2026-04-19)
 
 ## Corpus Check
-- 224 files · ~1,019,019 words
+- 224 files · ~1,021,745 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 3582 nodes · 8586 edges · 152 communities detected
-- Extraction: 67% EXTRACTED · 33% INFERRED · 0% AMBIGUOUS · INFERRED: 2800 edges (avg confidence: 0.8)
+- 3584 nodes · 8601 edges · 152 communities detected
+- Extraction: 67% EXTRACTED · 33% INFERRED · 0% AMBIGUOUS · INFERRED: 2811 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -170,22 +170,22 @@
 4. `run()` - 25 edges
 5. `parse_links()` - 24 edges
 6. `main()` - 23 edges
-7. `parse_page()` - 23 edges
-8. `handle_request()` - 22 edges
-9. `default_cfg()` - 22 edges
-10. `init_serve_runtime()` - 22 edges
+7. `init_serve_runtime()` - 23 edges
+8. `parse_page()` - 23 edges
+9. `handle_request()` - 22 edges
+10. `default_cfg()` - 22 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `query_action_audit_events()` --calls--> `list_audit_events()`  [INFERRED]
+  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/action_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-gateway/src/web/workbench.rs
+- `query_tool_audit_events()` --calls--> `list_tool_audit_events()`  [INFERRED]
+  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/tool_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-gateway/src/web/workbench.rs
 - `tokenizer_basis_is_shared_with_keyword_fallback()` --calls--> `tokenize()`  [INFERRED]
   /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/semantic.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/wiki/index.rs
 - `search_hit_payload()` --calls--> `is_empty()`  [INFERRED]
   /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/gadget.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-knowledge/src/wiki/frontmatter.rs
 - `run_action_audit_writer()` --calls--> `build_workbench()`  [INFERRED]
   /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/action_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-cli/src/main.rs
-- `query_action_audit_events()` --calls--> `list_audit_events()`  [INFERRED]
-  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/action_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-gateway/src/web/workbench.rs
-- `run_gadget_audit_writer()` --calls--> `prepare_penny_router_registration()`  [INFERRED]
-  /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-xaas/src/audit/tool_event.rs → /Users/junghopark/dev/gadgetron-plan/crates/gadgetron-cli/src/main.rs
 
 ## Hyperedges (group relationships)
 - **Knowledge Plane Trait Triad (KnowledgeStore, KnowledgeIndex, KnowledgeRelationEngine)** — knowledge_plug_arch_knowledgestore, knowledge_plug_arch_knowledgeindex, knowledge_plug_arch_knowledgerelationengine, knowledge_plug_arch_knowledgeservice [EXTRACTED 1.00]
@@ -229,51 +229,51 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
-Nodes (205): AnthropicProvider, from_anthropic_response(), to_anthropic_request(), Chunk, chunk_h1_is_ignored_as_section_boundary(), chunk_index_is_zero_based_sequential(), chunk_multiple_h2_sections_splits_correctly(), chunk_no_headings_single_chunk() (+197 more)
+Nodes (140): ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, new_arc_constructs_dyn_sink(), noop_sink_accepts_every_variant(), NoopActionAuditSink, ActivityBus, ActivityEvent (+132 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.02
-Nodes (130): query_action_audit_events(), actor(), actor_scopes_default(), CapturingAuditSink, drained_events(), FakeDispatcher, InProcessWorkbenchActionService, invoke_additional_properties_rejected() (+122 more)
+Nodes (146): dir_total_bytes(), web_dist_total_bytes_under_budget(), Chunk, chunk_h1_is_ignored_as_section_boundary(), chunk_index_is_zero_based_sequential(), chunk_multiple_h2_sections_splits_correctly(), chunk_no_headings_single_chunk(), chunk_oversize_section_splits_by_paragraph() (+138 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.01
-Nodes (162): activity_kind_round_trips(), activity_origin_round_trips(), ActivityCaptureStore, ActivityKind, ActivityOrigin, candidate_decision_kind_round_trips_snake_case(), CandidateDecision, CandidateDecisionKind (+154 more)
+Nodes (159): ApprovalError, BlobError, BlobId, BlobMetadata, BlobRef, BlobStore, activity_kind_round_trips(), activity_origin_round_trips() (+151 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.02
-Nodes (98): snake_case_label(), citation_round_trip(), CitationRef, extract_citation_refs(), extract_citation_refs_ignores_code_fences(), extract_citation_refs_named_labels(), extract_citation_refs_preserves_order(), extract_citation_refs_single_definition() (+90 more)
+Cohesion: 0.03
+Nodes (116): bundle_install_rejects_duplicate_id(), BundleRegistry, extract_panic_msg(), extractor_plug_registration_flows_through_install_all(), ExtractorBundle, fake(), FakeBehaviour, FakeBundle (+108 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.03
-Nodes (110): ActivityBus, ActivityEvent, chat(), event_serializes_with_type_tag(), publish_before_subscribe_drops(), subscribe_then_publish_roundtrips(), subscriber_count_tracks_subscribes(), tenant_id_dispatches_across_variants() (+102 more)
+Cohesion: 0.02
+Nodes (69): NodeAgent, AnthropicProvider, from_anthropic_response(), message_content_to_anthropic(), to_anthropic_request(), snake_case_label(), E2EFixture, e2e_auth_missing_401() (+61 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.03
-Nodes (112): BaseHTTPRequestHandler, SearchError, WikiError, accepts_explicit_md_suffix(), accepts_nested_name(), accepts_simple_name(), canonicalize_with_missing_tail(), percent_encoded_dotdot_is_not_decoded_by_fs_but_stays_inside_root() (+104 more)
+Cohesion: 0.02
+Nodes (90): FakeLlmProvider, FakeProjectionEmpty, generate_api_key(), generate_key_has_correct_prefix(), generate_key_hash_is_64_hex(), generate_key_suffix_is_32_hex(), generated_key_passes_api_key_parse(), two_keys_are_different() (+82 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.03
-Nodes (98): bundle_install_rejects_duplicate_id(), BundleRegistry, extract_panic_msg(), extractor_plug_registration_flows_through_install_all(), ExtractorBundle, fake(), FakeBehaviour, FakeBundle (+90 more)
+Nodes (107): BaseHTTPRequestHandler, SearchError, WikiError, accepts_explicit_md_suffix(), accepts_nested_name(), accepts_simple_name(), canonicalize_with_missing_tail(), percent_encoded_dotdot_is_not_decoded_by_fs_but_stays_inside_root() (+99 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.02
-Nodes (82): auth_middleware(), bench_auth_cache_hit(), PreWarmedCacheValidator, emit_auth_failure_audit(), token_from_query(), token_from_query_extracts_bare_token(), token_from_query_handles_multiple_params(), token_from_query_returns_none_when_missing() (+74 more)
+Cohesion: 0.04
+Nodes (94): actor(), actor_scopes_default(), CapturingAuditSink, drained_events(), FakeDispatcher, InProcessWorkbenchActionService, invoke_additional_properties_rejected(), invoke_destructive_action_returns_pending_approval() (+86 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.03
-Nodes (77): deserialize_optional_datetime(), frontmatter_absent_returns_default(), frontmatter_confidence_unknown_value_warns_not_errors(), frontmatter_crlf_line_endings_supported(), frontmatter_missing_closing_fence_errors(), frontmatter_parses_full_fields(), frontmatter_source_unknown_value_warns_not_errors(), frontmatter_unknown_fields_preserved_in_extra() (+69 more)
+Nodes (75): auth_middleware(), emit_auth_failure_audit(), token_from_query(), token_from_query_extracts_bare_token(), token_from_query_handles_multiple_params(), token_from_query_returns_none_when_missing(), token_from_query_url_decodes(), autodetect_git_author_or_fallback() (+67 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.04
-Nodes (68): capture_chat_completion(), capture_chat_completion_error(), error_class(), message_content_to_anthropic(), ApiError, ExhaustedQuotaEnforcer, AlwaysAcceptValidator, build_test_app() (+60 more)
+Cohesion: 0.03
+Nodes (75): deserialize_optional_datetime(), frontmatter_absent_returns_default(), frontmatter_confidence_unknown_value_warns_not_errors(), frontmatter_crlf_line_endings_supported(), frontmatter_missing_closing_fence_errors(), frontmatter_parses_full_fields(), frontmatter_source_unknown_value_warns_not_errors(), frontmatter_unknown_fields_preserved_in_extra() (+67 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.04
-Nodes (71): dir_total_bytes(), web_dist_total_bytes_under_budget(), add_page_twice_same_name_does_not_duplicate(), deterministic_tie_break_on_name_asc(), empty_index_search_returns_empty(), empty_query_returns_empty(), InvertedIndex, korean_query_matches_korean_content() (+63 more)
+Cohesion: 0.06
+Nodes (48): bundles_home_no_home_when_all_tiers_empty(), bundles_home_public_entry_emits_info_and_succeeds(), bundles_home_resolver_fail_closed_on_root_home(), bundles_home_tier1_config_override_wins(), bundles_home_tier2_env_var_when_config_absent(), bundles_home_tier3_data_dir_fallback(), bundles_home_tier4_home_dir_fallback(), EnvGuard (+40 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.06
-Nodes (52): actor(), create_then_get_roundtrips(), cross_tenant_resolve_is_rejected(), duplicate_create_returns_backend_error(), fresh_request(), get_unknown_returns_not_found(), InMemoryApprovalStore, mark_approved_flips_state_and_records_approver() (+44 more)
+Cohesion: 0.04
+Nodes (56): citation_round_trip(), CitationRef, extract_citation_refs(), extract_citation_refs_ignores_code_fences(), extract_citation_refs_named_labels(), extract_citation_refs_preserves_order(), extract_citation_refs_single_definition(), extract_referenced_labels() (+48 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.03
@@ -284,20 +284,20 @@ Cohesion: 0.02
 Nodes (100): BackendPlugin trait, Penny brain / ai-infra provider seam, Bundle Architecture (06 - backend plugin architecture), DisableBehavior (plugin lifecycle), EntityRef / EntityTree forest model, Knowledge vs Function separation principle, plugin-ai-infra (LLM inference + router + scheduler), PluginContext (+92 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.05
-Nodes (56): make_state_with_tui(), metrics_middleware(), metrics_middleware_emits_request_log(), metrics_middleware_noop_when_tui_disabled(), metrics_middleware_records_error_status(), MockKeyValidator, AllowAllValidator, bench_middleware_chain() (+48 more)
+Cohesion: 0.04
+Nodes (32): FakeProvider, AllErrorService, MetricsStore, failing_provider_health_returns_err(), failing_provider_immediate_fail(), failing_provider_immediate_fail_stream(), failing_provider_models_returns_list(), failing_provider_name_is_failing() (+24 more)
 
 ### Community 15 - "Community 15"
 Cohesion: 0.05
-Nodes (61): Message, getApiBase(), invokeAction(), useApiKey(), wsUrlFromHttp(), adversarial_long_input_completes_quickly(), is_idempotent(), redact_stderr() (+53 more)
+Nodes (61): add_page_twice_same_name_does_not_duplicate(), deterministic_tie_break_on_name_asc(), empty_index_search_returns_empty(), empty_query_returns_empty(), InvertedIndex, korean_query_matches_korean_content(), max_results_limits_output(), max_results_zero_returns_empty() (+53 more)
 
 ### Community 16 - "Community 16"
-Cohesion: 0.04
-Nodes (30): App, app_new_has_demo_data(), drain_updates_closed_channel_stops_app(), drain_updates_empty_channel_is_noop(), drain_updates_health_update_replaces_health(), drain_updates_model_update_replaces_model_statuses(), drain_updates_node_update_replaces_gpu_metrics(), drain_updates_request_log_overflow_keeps_100() (+22 more)
-
-### Community 17 - "Community 17"
 Cohesion: 0.03
 Nodes (88): Bundle, Gadget, Gadgetron Platform, gadgetron-core crate, GadgetronError, gadgetron-gateway crate, gadgetron-knowledge crate, gadgetron-penny crate (+80 more)
+
+### Community 17 - "Community 17"
+Cohesion: 0.06
+Nodes (50): make_state_with_tui(), metrics_middleware(), metrics_middleware_emits_request_log(), metrics_middleware_noop_when_tui_disabled(), metrics_middleware_records_error_status(), MockKeyValidator, AllowAllValidator, bench_middleware_chain() (+42 more)
 
 ### Community 18 - "Community 18"
 Cohesion: 0.06
@@ -308,92 +308,92 @@ Cohesion: 0.03
 Nodes (76): ADR-P2A-01, ADR-P2A-02, ADR-P2A-03, Chief Architect Agent, Codex Chief Advisor Agent, DevOps SRE Lead Agent, Agent Roster Document, DX Product Lead Agent (+68 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.05
-Nodes (34): BundleContext<'a>, optional_string_arg(), parse_search_limit(), MetricsStore, failing_provider_health_returns_err(), failing_provider_immediate_fail(), failing_provider_immediate_fail_stream(), failing_provider_models_returns_list() (+26 more)
+Cohesion: 0.06
+Nodes (55): adversarial_long_input_completes_quickly(), is_idempotent(), redact_stderr(), redacts_anthropic_key(), redacts_aws_access_key(), redacts_bearer_token_case_insensitive(), redacts_gadgetron_live_key(), redacts_gadgetron_test_key() (+47 more)
 
 ### Community 21 - "Community 21"
 Cohesion: 0.08
 Nodes (45): ask_mode_tools_are_excluded_from_allowed_list(), build_allowed_tools_output_is_deterministic(), build_allowed_tools_output_is_sorted_and_deduped(), build_allowed_tools_t1_always_present(), build_allowed_tools_t3_disabled_omits_all_destructive(), build_allowed_tools_t3_enabled_includes_destructive(), build_allowed_tools_wiki_write_auto_included(), build_allowed_tools_wiki_write_never_omitted() (+37 more)
 
 ### Community 22 - "Community 22"
+Cohesion: 0.07
+Nodes (40): AlwaysAcceptValidator, build_test_app(), chat_request_body(), inject_degrades_gracefully_when_assembler_errs(), inject_does_nothing_when_flag_disabled(), inject_does_nothing_when_service_none(), inject_inserts_new_system_when_first_message_is_parts_content(), inject_inserts_new_system_when_messages_empty_of_system() (+32 more)
+
+### Community 23 - "Community 23"
 Cohesion: 0.04
 Nodes (16): all_12_variants_have_valid_status(), DatabaseErrorKind, error_body_never_leaks_internal(), error_message_is_human_readable_not_same_as_code(), from_gadget_rate_limited_includes_name_and_counts(), from_gadget_unknown_maps_to_tool_unknown_kind(), GadgetronError, KnowledgeErrorKind (+8 more)
 
-### Community 23 - "Community 23"
+### Community 24 - "Community 24"
+Cohesion: 0.07
+Nodes (32): SharedContextConfig, build_predicates(), BundleContext, GadgetHandles, PlugHandles, PlugPredicates, bundle_disabled_takes_precedence_over_plug_override(), capture_subscriber() (+24 more)
+
+### Community 25 - "Community 25"
 Cohesion: 0.05
 Nodes (48): SearXNG Opt-out via searxng_url unset, [P2C-SECURITY-REOPEN] Multi-user SearXNG data segregation, Pre-merge gate: penny.md must contain disclosure text, Rationale: GDPR requires user disclosure of query routing to 3rd-party engines, SearxngClient, ADR-P2A-03: SearXNG Query Privacy Disclosure, web_search MCP Tool, ADR-P2A-05: Agent-Centric Control Plane + MCP Tool Registry (+40 more)
 
-### Community 24 - "Community 24"
+### Community 26 - "Community 26"
 Cohesion: 0.05
 Nodes (46): API Error Codes (invalid_api_key, quota_exceeded, etc.), API Reference (OpenAI-compat endpoints), API Key Format (gad_live_/gad_test_), API Key Revocation (10-min cache TTL), Auth Middleware Stack (Tower layer 4), PgKeyValidator (moka cache + PostgreSQL lookup), Rationale: Store Only SHA-256 Hash of API Key, Scope System (OpenAiCompat, Management, XaasAdmin) (+38 more)
 
-### Community 25 - "Community 25"
-Cohesion: 0.08
-Nodes (29): assistant_message_to_chunks(), AssistantMessage, build_chunk(), chunk_ids_are_unique(), ContentBlock, ContentBlockDeltaPayload, event_to_chat_chunks(), format_thinking_block() (+21 more)
-
-### Community 26 - "Community 26"
-Cohesion: 0.09
-Nodes (24): emit_rerun_triggers(), BuildEnv, BuildOutcome, copy_dir_all(), ensure_fallback_dist(), run(), scrubbed_npm(), which_npm() (+16 more)
-
 ### Community 27 - "Community 27"
-Cohesion: 0.12
-Nodes (9): NodeAgent, EnvGuard, drain_server_runtime(), port_pool_allocate_returns_port(), port_pool_exhaustion_returns_none(), port_pool_release_makes_port_available(), PortPool, managed_process_stop_kills_child() (+1 more)
+Cohesion: 0.15
+Nodes (24): actor(), kc1c_pg_store_append_candidate_unknown_event_errors(), kc1c_pg_store_audit_event_id_propagated(), kc1c_pg_store_round_trip_append_list_decide(), make_event(), pg_available(), actor(), coordinator_capture_action_clamps_to_max_candidates() (+16 more)
 
 ### Community 28 - "Community 28"
 Cohesion: 0.08
-Nodes (28): Real-time Metrics (WebSocket backend), TUI 3-Column Layout (Nodes | Models | Requests), TUI Dashboard (Ratatui), Dashboard Web UI (React 19 + Recharts), Docker Compose (Gadgetron + Ollama + vLLM + SGLang), Docker Image (multi-stage, distroless), GitHub Actions CI Pipeline, Kubernetes Helm Chart (CRDs: GadgetronModel, GadgetronNode, GadgetronRouting) (+20 more)
+Nodes (32): assistant_message_to_chunks(), AssistantMessage, build_chunk(), chunk_ids_are_unique(), ContentBlock, ContentBlockDeltaPayload, event_to_chat_chunks(), event_to_chat_chunks_ex() (+24 more)
 
 ### Community 29 - "Community 29"
+Cohesion: 0.08
+Nodes (28): Real-time Metrics (WebSocket backend), TUI 3-Column Layout (Nodes | Models | Requests), TUI Dashboard (Ratatui), Dashboard Web UI (React 19 + Recharts), Docker Compose (Gadgetron + Ollama + vLLM + SGLang), Docker Image (multi-stage, distroless), GitHub Actions CI Pipeline, Kubernetes Helm Chart (CRDs: GadgetronModel, GadgetronNode, GadgetronRouting) (+20 more)
+
+### Community 30 - "Community 30"
 Cohesion: 0.12
 Nodes (15): gadget_name_and_plug_id_are_distinct_types(), GadgetName, plug_id_accepts_valid_kebab(), plug_id_clone_is_cheap(), plug_id_rejects_double_hyphen(), plug_id_rejects_leading_hyphen(), plug_id_rejects_over_128_chars(), plug_id_rejects_trailing_hyphen() (+7 more)
 
-### Community 30 - "Community 30"
+### Community 31 - "Community 31"
+Cohesion: 0.18
+Nodes (15): App, app_new_has_demo_data(), drain_updates_closed_channel_stops_app(), drain_updates_empty_channel_is_noop(), drain_updates_health_update_replaces_health(), drain_updates_model_update_replaces_model_statuses(), drain_updates_node_update_replaces_gpu_metrics(), drain_updates_request_log_overflow_keeps_100() (+7 more)
+
+### Community 32 - "Community 32"
 Cohesion: 0.08
 Nodes (23): CitationSummary, InvokeWorkbenchActionRequest, InvokeWorkbenchActionResponse, PlugHealth, ToolTraceSummary, WorkbenchActionDescriptor, WorkbenchActionKind, WorkbenchActionPlacement (+15 more)
 
-### Community 31 - "Community 31"
-Cohesion: 0.13
-Nodes (12): gemini_models_returns_configured(), gemini_name_is_gemini(), gemini_parse_response(), gemini_request_body_format(), GeminiCandidate, GeminiContent, GeminiPart, GeminiProvider (+4 more)
-
-### Community 32 - "Community 32"
-Cohesion: 0.17
-Nodes (16): captured_actor(), CapturingCoordinator, coordinator_fan_out_captures_penny_origin_event(), drops_when_channel_full(), event_with_owner_tenant(), gadget_audit_to_activity(), gadget_audit_to_captured(), GadgetAuditEventWriter (+8 more)
-
 ### Community 33 - "Community 33"
-Cohesion: 0.12
-Nodes (11): ApprovalError, ApprovalRequest, ApprovalState, ApprovalStore, new_pending_populates_fields(), BlobError, BlobId, BlobMetadata (+3 more)
+Cohesion: 0.21
+Nodes (14): ApprovalRequest, ApprovalState, ApprovalStore, new_pending_populates_fields(), actor(), create_then_get_roundtrips(), cross_tenant_resolve_is_rejected(), duplicate_create_returns_backend_error() (+6 more)
 
 ### Community 34 - "Community 34"
+Cohesion: 0.17
+Nodes (17): captured_actor(), CapturingCoordinator, coordinator_fan_out_captures_penny_origin_event(), drops_when_channel_full(), event_with_owner_tenant(), gadget_audit_to_activity(), gadget_audit_to_captured(), GadgetAuditEventWriter (+9 more)
+
+### Community 35 - "Community 35"
+Cohesion: 0.17
+Nodes (16): emit_rerun_triggers(), BuildEnv, BuildOutcome, copy_dir_all(), ensure_fallback_dist(), run(), scrubbed_npm(), which_npm() (+8 more)
+
+### Community 36 - "Community 36"
 Cohesion: 0.13
 Nodes (15): Cross-Review Rounds (R1, R1.5, R2, R3), Development Process (9-step sprint cycle), Design Document Template (5 required sections), 5 Required Document Sections (Philosophy/Implementation/Connections/UnitTest/IntegrationTest), Hotfix Exception (Round 1 only, post-doc required), Rule: No Implementation Without Approved Design Doc, Cross-Review Rubric (Round 1/1.5/2/3 checklists), Round 1.5 Security Review Checklist (STRIDE) (+7 more)
 
-### Community 35 - "Community 35"
-Cohesion: 0.38
-Nodes (9): different_keys_do_not_collide(), get_hit_after_put(), get_miss_after_ttl_elapsed(), get_miss_on_empty_cache(), InMemoryReplayCache, make_key(), make_response(), max_capacity_bounds_working_set() (+1 more)
+### Community 37 - "Community 37"
+Cohesion: 0.25
+Nodes (10): ActionAuditEventWriter, ActionAuditQueryFilter, ActionAuditRow, drops_when_channel_full(), insert_event(), make_event(), outcome_variants_round_trip_through_channel(), query_action_audit_events() (+2 more)
 
-### Community 36 - "Community 36"
+### Community 38 - "Community 38"
 Cohesion: 0.16
 Nodes (11): fixed_time(), fixed_uuid(), penny_turn_bootstrap_serializes_with_expected_field_names(), PennyActivityDigest, PennyApprovalDigest, PennyCandidateDecisionReceipt, PennyCandidateDecisionRequest, PennyCandidateDigest (+3 more)
 
-### Community 37 - "Community 37"
-Cohesion: 0.28
-Nodes (9): ActionAuditEventWriter, ActionAuditQueryFilter, ActionAuditRow, drops_when_channel_full(), insert_event(), make_event(), outcome_variants_round_trip_through_channel(), run_action_audit_writer() (+1 more)
-
-### Community 38 - "Community 38"
+### Community 39 - "Community 39"
 Cohesion: 0.17
 Nodes (12): ADR-P2A-10: Bundle/Plug/Gadget Terminology, Bundle/Plug/Gadget Canonical Vocabulary, D-20260418-02: Terminology bundle.enable, C-1: plugin vs Bundle/Plug/Gadget Terminology Conflict, C-2: Router Ownership Ambiguity, C-3: Execution Path Inconsistency, C-4: Legacy Design Docs Not Labeled, C-5: Seed/Frontmatter Field Migration Gap (+4 more)
 
-### Community 39 - "Community 39"
+### Community 40 - "Community 40"
 Cohesion: 0.2
 Nodes (11): require_tty_for_tui() pure-function TTY check, Hotfix: --tui TTY pre-check and fail-fast, Sprint 5: E2E, Criterion Benchmarks, TUI Wiring, FakeLlmProvider + FailingProvider test doubles, GatewayHarness + PgHarness test infrastructure, AppState extension: pg_pool + tui_tx fields, Graceful shutdown audit drain (5s timeout), Criterion benchmarks: middleware_chain / auth_cache / router (+3 more)
 
-### Community 40 - "Community 40"
+### Community 41 - "Community 41"
 Cohesion: 0.18
 Nodes (11): D-20260411-08: StreamInterrupted Variant, D-20260411-09: Audit Drop Policy, D-20260411-10: Scope Enum, Review Verdict: CONDITIONAL PASS, Round 1 Week 1 Cross-Review Results, Track 1: Core Types Consolidation, Track 2: Testing Harness, Track 3: XaaS Phase 1 (+3 more)
-
-### Community 41 - "Community 41"
-Cohesion: 0.31
-Nodes (6): ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, new_arc_constructs_dyn_sink(), noop_sink_accepts_every_variant(), NoopActionAuditSink
 
 ### Community 42 - "Community 42"
 Cohesion: 0.33
@@ -425,7 +425,7 @@ Nodes (2): MarkdownText(), useTypewriterText()
 
 ### Community 49 - "Community 49"
 Cohesion: 0.5
-Nodes (0): 
+Nodes (2): Badge(), cn()
 
 ### Community 50 - "Community 50"
 Cohesion: 0.5
@@ -433,7 +433,7 @@ Nodes (0):
 
 ### Community 51 - "Community 51"
 Cohesion: 0.5
-Nodes (2): Badge(), cn()
+Nodes (0): 
 
 ### Community 52 - "Community 52"
 Cohesion: 0.5
@@ -1002,11 +1002,11 @@ Nodes (1): Phase2 Overview Design Doc
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `GadgetronError` connect `Community 22` to `Community 0`?**
-  _High betweenness centrality (0.023) - this node is a cross-community bridge._
-- **Why does `is_empty()` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 18`, `Community 20`, `Community 21`, `Community 25`, `Community 29`?**
-  _High betweenness centrality (0.020) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 26` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 14`?**
+- **Why does `is_empty()` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 14`, `Community 15`, `Community 18`, `Community 21`, `Community 27`, `Community 28`, `Community 30`?**
+  _High betweenness centrality (0.018) - this node is a cross-community bridge._
+- **Why does `parse_page()` connect `Community 9` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 18`, `Community 24`?**
+  _High betweenness centrality (0.015) - this node is a cross-community bridge._
+- **Why does `GadgetronError` connect `Community 23` to `Community 1`?**
   _High betweenness centrality (0.013) - this node is a cross-community bridge._
 - **Are the 77 inferred relationships involving `is_empty()` (e.g. with `to_anthropic_request()` and `from_anthropic_response()`) actually correct?**
   _`is_empty()` has 77 INFERRED edges - model-reasoned connections that need verification._

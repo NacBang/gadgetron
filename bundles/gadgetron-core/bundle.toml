@@ -1,0 +1,103 @@
+# gadgetron-core — first-party bundle manifest (ISSUE 9 TASK 9.1).
+#
+# Operators can point `[web] catalog_path = "bundles/gadgetron-core/bundle.toml"`
+# at this file and reload via SIGHUP or the admin endpoint to load it
+# as the live catalog. The `[bundle]` table surfaces in the reload
+# response so admin tooling can tell which bundle + version is live
+# at any given time.
+#
+# Content mirrors `DescriptorCatalog::seed_p2b()` exactly so the
+# hardcoded fallback and the bundle path produce identical catalogs —
+# this is the "seed_p2b moves into first-party bundle" milestone
+# spelled out in the roadmap. Later TASKs remove the hardcoded
+# fallback entirely.
+
+[bundle]
+id = "gadgetron-core"
+version = "0.1.0"
+
+allow_direct_actions = true
+
+[[views]]
+id = "knowledge-activity-recent"
+title = "최근 활동"
+owner_bundle = "core"
+source_kind = "activity"
+source_id = "recent"
+placement = "left_rail"
+renderer = "timeline"
+data_endpoint = "/api/v1/web/workbench/views/knowledge-activity-recent/data"
+refresh_seconds = 5
+action_ids = ["knowledge-search", "wiki-list", "wiki-read", "wiki-write", "wiki-delete"]
+
+# -- Actions ---------------------------------------------------------------
+
+[[actions]]
+id = "knowledge-search"
+title = "지식 검색"
+owner_bundle = "core"
+source_kind = "gadget"
+source_id = "wiki.search"
+gadget_name = "wiki.search"
+placement = "center_main"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "wiki.search 가젯을 직접 호출합니다."
+input_schema = { type = "object", properties = { query = { type = "string", minLength = 1, maxLength = 500 }, max_results = { type = "integer", minimum = 1, maximum = 20 } }, required = ["query"], additionalProperties = false }
+
+[[actions]]
+id = "wiki-list"
+title = "위키 목록"
+owner_bundle = "core"
+source_kind = "gadget"
+source_id = "wiki.list"
+gadget_name = "wiki.list"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "wiki.list 가젯을 직접 호출합니다."
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+
+[[actions]]
+id = "wiki-read"
+title = "위키 읽기"
+owner_bundle = "core"
+source_kind = "gadget"
+source_id = "wiki.get"
+gadget_name = "wiki.get"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "wiki.get 가젯을 직접 호출합니다."
+input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 256 } }, required = ["name"], additionalProperties = false }
+
+[[actions]]
+id = "wiki-write"
+title = "위키 쓰기"
+owner_bundle = "core"
+source_kind = "gadget"
+source_id = "wiki.write"
+gadget_name = "wiki.write"
+placement = "context_menu"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "wiki.write 가젯을 직접 호출합니다."
+input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 256 }, content = { type = "string", minLength = 0, maxLength = 65536 }, summary = { type = "string", minLength = 0, maxLength = 512 } }, required = ["name", "content"], additionalProperties = false }
+
+[[actions]]
+id = "wiki-delete"
+title = "위키 삭제"
+owner_bundle = "core"
+source_kind = "gadget"
+source_id = "wiki.delete"
+gadget_name = "wiki.delete"
+placement = "context_menu"
+kind = "dangerous"
+destructive = true
+requires_approval = true
+knowledge_hint = "wiki.delete 가젯을 직접 호출합니다. Approval 필수."
+input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 256 } }, required = ["name"], additionalProperties = false }
