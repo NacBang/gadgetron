@@ -1015,7 +1015,7 @@ Invoke a registered direct action.
 }
 ```
 
-**`result.payload` is the real gadget output.** When the descriptor has a `gadget_name` and the gateway was built with a `GadgetDispatcher` wired (i.e. a Penny `GadgetRegistry` was registered at startup — the default for any build with `[knowledge]` configured), the action service calls `dispatcher.dispatch_gadget(gadget_name, args)` and places the returned `GadgetResult.content` into `payload` (`crates/gadgetron-gateway/src/web/action_service.rs:262-292`). Callers interpret the payload per gadget:
+**`result.payload` is the real gadget output.** When the descriptor has a `gadget_name` and the gateway was built with a `GadgetDispatcher` wired (i.e. a Penny `GadgetRegistry` was registered at startup — the default for any build with `[knowledge]` configured), the action service calls `dispatcher.dispatch_gadget(gadget_name, args)` and places the returned `GadgetResult.content` into `payload` (`crates/gadgetron-gateway/src/web/action_service.rs:355-397`; PR #188 / v0.2.6 widened this block to also emit the `DirectActionCompleted` audit event on the Err arm). Callers interpret the payload per gadget:
 
 - `knowledge-search` / `wiki-list`: an array of page objects.
 - `wiki-read`: the page object (`{ "name": "...", "content": "...", "updated_at": "..." }`).
@@ -1025,7 +1025,7 @@ When no `GadgetDispatcher` is wired (degraded mode — see §Workbench overview 
 
 `result.status`: `"ok"` | `"pending_approval"` (when the descriptor has `destructive = true` — either flag alone routes the invoke through step 6 of the action service). In the `seed_p2b` catalog, `wiki-delete` is the canonical approval-gated action; the other four return `"ok"` directly. When `pending_approval`, `approval_id` is set and dispatch is deferred until `POST /api/v1/web/workbench/approvals/{approval_id}/approve` resolves the record — at which point `resume_approval` re-enters the dispatch path with the persisted args and returns the final `ok` / error response. `POST /approvals/{approval_id}/deny` terminates without dispatch. See §Approvals (below) for the full lifecycle. E2E Gate 7h.7 exercises invoke → approve → re-invoke → `ok`; second approve of the same id returns 409.
 
-`refresh_view_ids` is typed as `Vec<String>` on the wire (non-null, possibly empty). On trunk today both paths return an empty array (`action_service.rs:207-215,284-292`) — reserved for future per-action policy. Web UI shells should loop over the array (handling zero gracefully); do not pin to specific view ids.
+`refresh_view_ids` is typed as `Vec<String>` on the wire (non-null, possibly empty). On trunk today every construction site returns an empty array (`action_service.rs:324`, `:477`, `:570` — pending_approval path, ok path, and post-approve resume path respectively) — reserved for future per-action policy. Web UI shells should loop over the array (handling zero gracefully); do not pin to specific view ids.
 
 **Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`.
 
