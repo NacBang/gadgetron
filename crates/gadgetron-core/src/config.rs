@@ -40,7 +40,7 @@ pub struct AppConfig {
 /// no-op — every request passes the rate check. When positive,
 /// each tenant gets a bucket with `burst` max capacity refilling
 /// at `requests_per_minute / 60` tokens per second.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RateLimitConfig {
     /// Sustained rate in requests per minute. `0` disables.
     #[serde(default)]
@@ -50,15 +50,6 @@ pub struct RateLimitConfig {
     /// don't get surprise bursts they can't sustain.
     #[serde(default)]
     pub burst: u32,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            requests_per_minute: 0,
-            burst: 0,
-        }
-    }
 }
 
 impl RateLimitConfig {
