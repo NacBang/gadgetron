@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.2** (post-ISSUE 8 TASK 8.2 reload endpoint)
+**Current version: 0.4.3** (post-ISSUE 8 TASK 8.3 CatalogSnapshot)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -128,9 +128,14 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     Management before the wider OpenAiCompat workbench rule. Gate
     7q.1 pins the happy path; Gate 7q.2 pins the
     OpenAiCompat-is-403 contract.
-  - TASK 8.3 — file-based catalog source + fs-watcher triggering
-    auto-reload; validator rebuild on swap.
-  - TASK 8.4 — SIGHUP handler for operator-triggered reload without
+  - TASK 8.3 ✅ — `CatalogSnapshot` bundling (0.4.2 → 0.4.3). Catalog
+    + validators atomically swapped together via
+    `DescriptorCatalog::into_snapshot()`; eliminates the window where
+    a reload could land a new catalog against stale validators. Admin
+    reload endpoint now rebuilds validators as part of the swap.
+  - TASK 8.4 — file-based catalog source + fs-watcher triggering
+    auto-reload.
+  - TASK 8.5 — SIGHUP handler for operator-triggered reload without
     HTTP surface.
 
 ### Planned ISSUEs

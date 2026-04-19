@@ -171,12 +171,13 @@ pub struct GatewayWorkbenchService {
     /// service skips the persistence call in step 6 (falls back to
     /// bare `Uuid::new_v4()` so older tests keep passing).
     pub approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
-    /// Shared `Arc<ArcSwap<DescriptorCatalog>>` — the same handle both
+    /// Shared `Arc<ArcSwap<CatalogSnapshot>>` — the same handle both
     /// `projection` and `actions` hold. Exposed here so
     /// `POST /api/v1/web/workbench/admin/reload-catalog` (ISSUE 8 TASK 8.2)
-    /// can atomically swap in a fresh catalog. `None` in legacy test
-    /// fixtures that don't wire a workbench; production always sets it.
-    pub descriptor_catalog: Option<Arc<arc_swap::ArcSwap<crate::web::catalog::DescriptorCatalog>>>,
+    /// can atomically swap in a fresh snapshot (catalog + validators
+    /// together, ISSUE 8 TASK 8.3). `None` in legacy test fixtures
+    /// that don't wire a workbench; production always sets it.
+    pub descriptor_catalog: Option<Arc<arc_swap::ArcSwap<crate::web::catalog::CatalogSnapshot>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,17 +1004,18 @@ pub async fn reload_catalog_handler(
         ))
     })?;
 
-    // Today the only source is the hand-coded seed — TASK 8.3 will
-    // replace this with a file read.
-    let fresh = crate::web::catalog::DescriptorCatalog::seed_p2b();
+    // Today the only source is the hand-coded seed — TASK 8.4+ will
+    // add file-based sources. `into_snapshot()` compiles the JSON-Schema
+    // validators so the swap is atomic across catalog + validators.
+    let fresh = crate::web::catalog::DescriptorCatalog::seed_p2b().into_snapshot();
 
-    // Pre-compute the response counts from the same catalog we're
+    // Pre-compute the response counts from the same snapshot we're
     // about to publish, so the response is consistent with the swap
     // we just performed.
     use gadgetron_core::context::Scope;
     let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
-    let action_count = fresh.visible_actions(&all_scopes).len();
-    let view_count = fresh.visible_views(&all_scopes).len();
+    let action_count = fresh.catalog.visible_actions(&all_scopes).len();
+    let view_count = fresh.catalog.visible_views(&all_scopes).len();
 
     catalog_handle.store(Arc::new(fresh));
 
@@ -1022,7 +1024,7 @@ pub async fn reload_catalog_handler(
         action_count = action_count,
         view_count = view_count,
         source = "seed_p2b",
-        "descriptor catalog reloaded"
+        "descriptor catalog reloaded (CatalogSnapshot = catalog + validators)"
     );
 
     Ok(Json(ReloadCatalogResponse {
@@ -1212,7 +1214,7 @@ mod tests {
             knowledge: None,
             gateway_version: "0.0.0-test",
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                DescriptorCatalog::seed_p2b(),
+                DescriptorCatalog::seed_p2b().into_snapshot(),
             )),
         });
         let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
@@ -1278,7 +1280,7 @@ mod tests {
             knowledge: None,
             gateway_version: "0.1.0",
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                DescriptorCatalog::empty(),
+                DescriptorCatalog::empty().into_snapshot(),
             )),
         };
         let resp = proj.bootstrap().await.unwrap();
@@ -1400,7 +1402,7 @@ mod tests {
             knowledge: Some(svc),
             gateway_version: "0.1.0",
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                DescriptorCatalog::empty(),
+                DescriptorCatalog::empty().into_snapshot(),
             )),
         };
         let resp = proj.bootstrap().await.unwrap();
@@ -1417,7 +1419,7 @@ mod tests {
             knowledge: None,
             gateway_version: "0.1.0",
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                DescriptorCatalog::empty(),
+                DescriptorCatalog::empty().into_snapshot(),
             )),
         };
         let resp = proj.activity(50).await.unwrap();
@@ -1454,7 +1456,7 @@ mod tests {
             knowledge: None,
             gateway_version: "0.1.0",
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                DescriptorCatalog::empty(),
+                DescriptorCatalog::empty().into_snapshot(),
             )),
         };
         let id = Uuid::new_v4();

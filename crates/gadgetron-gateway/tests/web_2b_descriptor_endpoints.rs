@@ -88,7 +88,7 @@ fn make_state_with_coordinator(
 ) -> AppState {
     let (audit_writer, _rx) = AuditWriter::new(AUDIT_CAPACITY);
     let catalog = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-        DescriptorCatalog::seed_p2b(),
+        DescriptorCatalog::seed_p2b().into_snapshot(),
     ));
 
     let projection = Arc::new(InProcessWorkbenchProjection {

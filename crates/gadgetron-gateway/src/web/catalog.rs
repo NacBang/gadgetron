@@ -17,6 +17,24 @@ use gadgetron_core::{
     },
 };
 
+/// Bundled catalog + pre-compiled validators. The unit atomically
+/// swapped into the runtime's `Arc<ArcSwap<CatalogSnapshot>>` handle on
+/// every `POST /admin/reload-catalog` call. Building a snapshot
+/// compiles JSON-Schema validators for every action in the catalog
+/// (see [`DescriptorCatalog::into_snapshot`]). Readers access
+/// `snapshot.catalog` and `snapshot.validators` through one
+/// `ArcSwap::load` call so they can never observe catalog/validator
+/// drift.
+///
+/// Kept outside `DescriptorCatalog` because validators are a derived,
+/// cache-like artifact — the catalog itself is fine to clone / edit
+/// in memory without touching them.
+#[derive(Debug, Clone)]
+pub struct CatalogSnapshot {
+    pub catalog: DescriptorCatalog,
+    pub validators: std::collections::HashMap<String, std::sync::Arc<jsonschema::Validator>>,
+}
+
 /// Snapshot of registered workbench descriptors with actor-aware filtering.
 ///
 /// Clone is O(n) over descriptors but the catalog is expected to be small
@@ -227,6 +245,42 @@ impl DescriptorCatalog {
     pub fn with_allow_direct_actions(mut self, allow: bool) -> Self {
         self.allow_direct_actions = allow;
         self
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot construction (ISSUE 8 TASK 8.3)
+    // -----------------------------------------------------------------------
+
+    /// Build a `CatalogSnapshot` from this catalog by pre-compiling
+    /// JSON-Schema validators for every action. The snapshot is the
+    /// unit that gets atomically swapped via
+    /// `Arc<ArcSwap<CatalogSnapshot>>` so a concurrent reload replaces
+    /// BOTH the catalog and its derived validators in one step — no
+    /// reader can observe a new catalog against stale validators.
+    pub fn into_snapshot(self) -> CatalogSnapshot {
+        let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
+        let mut validators: std::collections::HashMap<
+            String,
+            std::sync::Arc<jsonschema::Validator>,
+        > = std::collections::HashMap::new();
+        for action in self.visible_actions(&all_scopes) {
+            match jsonschema::validator_for(&action.input_schema) {
+                Ok(v) => {
+                    validators.insert(action.id.clone(), std::sync::Arc::new(v));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        action_id = %action.id,
+                        error = %e,
+                        "catalog snapshot: invalid input_schema; validation skipped"
+                    );
+                }
+            }
+        }
+        CatalogSnapshot {
+            catalog: self,
+            validators,
+        }
     }
 
     // -----------------------------------------------------------------------
