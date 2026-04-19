@@ -311,7 +311,11 @@ Minimal `bundles/gadgetron-core/bundle.toml` shape:
 ```toml
 [bundle]
 id = "gadgetron-core"
-version = "0.4.7"
+version = "0.4.11"
+# Optional — bundle-level scope floor (ISSUE 10 TASK 10.3 / v0.4.11 / PR #226).
+# When set, every [[views]] / [[actions]] without its own required_scope
+# inherits this one. Explicit descriptor scopes keep theirs (narrower wins).
+# required_scope = "Management"
 
 # [[views]] and [[actions]] entries follow, one table array per descriptor.
 # Schema mirrors WorkbenchViewDescriptor / WorkbenchActionDescriptor exactly
