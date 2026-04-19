@@ -1388,7 +1388,7 @@ E2E Gate 7k.3 verifies the response shape (all three sub-objects present, fields
 
 ### GET /api/v1/web/workbench/events/ws
 
-WebSocket endpoint — tenant-filtered live activity feed. Subscribers receive `ActivityEvent` JSON frames in real time as the `ActivityBus` publishes them. Shipped publishers today: `ChatCompleted` (ISSUE 4 / PR #194), `ToolCallCompleted` (ISSUE 5 / PR #199 — Penny tool-call trail fans out from the audit writer). More publishers (Penny-originated workbench activity attribution) are planned under ISSUE 6. Landed in ISSUE 4 / v0.2.7 (`crates/gadgetron-gateway/src/web/workbench.rs::events_ws_handler`).
+WebSocket endpoint — tenant-filtered live activity feed. Subscribers receive `ActivityEvent` JSON frames in real time as the `ActivityBus` publishes them. Shipped publishers today: `ChatCompleted` (ISSUE 4 / PR #194), `ToolCallCompleted` (ISSUE 5 / PR #199 — Penny tool-call trail fans out from the audit writer). ISSUE 6 (PR #201, v0.2.9) added a SIBLING fan-out path — Penny tool calls also produce `CapturedActivityEvent { origin: Penny, kind: GadgetToolCall }` for the durable `/workbench/activity` read path — but those do NOT appear as `/events/ws` frames; they flow through the coordinator capture layer, not the broadcast bus. Landed in ISSUE 4 / v0.2.7 (`crates/gadgetron-gateway/src/web/workbench.rs::events_ws_handler`).
 
 **Auth:** `OpenAiCompat`. The standard `Authorization: Bearer …` header works for WebSocket upgrade requests issued from non-browser clients. **Browser clients** cannot set `Authorization` on WS upgrades — use the **query-token fallback** `?token=gad_live_…` scoped to this route. Middleware strips `?token=` before logging (`crates/gadgetron-gateway/src/middleware/auth.rs`).
 
