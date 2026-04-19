@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.8",
+  "gateway_version": "0.4.9",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.8"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.9"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,7 +1317,7 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.4.8"
+    "version": "0.4.9"
   }
 }
 ```
@@ -1333,7 +1333,7 @@ When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<s
   "source": "bundles_dir",
   "source_path": "/path/to/bundles",
   "bundles": [
-    {"id": "gadgetron-core", "version": "0.4.8"},
+    {"id": "gadgetron-core", "version": "0.4.9"},
     {"id": "acme-ops", "version": "1.2.0"}
   ]
 }
@@ -1364,6 +1364,65 @@ The `bundles` field lists **every contributing bundle** in the merged catalog. W
 **Signal-based equivalent (ISSUE 8 TASK 8.5 / v0.4.5 / PR #217).** The same reload code path is also reachable via POSIX `SIGHUP` — `kill -HUP <pid>`. This is the **non-HTTP alternative** for operators who prefer Unix signals or need to reload without going through auth / scope / network. On receipt, `spawn_sighup_reloader()` (Unix-only tokio task installed at server startup) calls the same shared `perform_catalog_reload()` helper as `reload_catalog_handler` above — the in-memory effect, the `ReloadCatalogResponse` struct, and the `workbench.admin` tracing telemetry are all identical to the HTTP path. The only wire-level difference: the signal path does not return a JSON body to the operator (use the HTTP endpoint if you need to inspect `action_count` / `source_path` programmatically). On Windows / non-Unix platforms the signal handler doesn't install — operators must use the HTTP endpoint instead. See [`docs/manual/configuration.md`](configuration.md#web) §`[web]` for the operator workflow recipe.
 
 E2E Gate 7q.1 verifies the swap lands (shape assertion + cross-check that `action_count` in the response equals the count `GET /workbench/actions` reports immediately after — catches the "swap happened but read path still points at the old pointer" regression). Gate 7q.2 verifies that an OpenAiCompat-scoped key gets 403 on this endpoint (RBAC enforced).
+
+---
+
+### GET /api/v1/web/workbench/admin/bundles
+
+Read-only enumeration of every bundle discoverable under the configured `[web] bundles_dir`. Landed in ISSUE 10 TASK 10.1 / v0.4.9 (PR #223) as the first step toward the bundle marketplace (install / uninstall / scope isolation / signed manifests are TASK 10.2 – 10.4). The endpoint does NOT touch the live `Arc<ArcSwap<CatalogSnapshot>>` handle — operators can safely poll it while requests are in flight.
+
+**Scope:** `Management` — same admin sub-tree rule as `POST /admin/reload-catalog`. An OpenAiCompat key returns 403 `scope_required` (Gate 7q.5 pins this).
+
+**Request:** no parameters, no body.
+
+**Example (curl):**
+```bash
+curl -fsS -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/bundles \
+  | jq .
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "bundles_dir": "/etc/gadgetron/bundles",
+  "count": 2,
+  "bundles": [
+    {
+      "bundle": {"id": "gadgetron-core", "version": "0.4.9"},
+      "source_path": "/etc/gadgetron/bundles/gadgetron-core/bundle.toml",
+      "action_count": 5,
+      "view_count": 3
+    },
+    {
+      "bundle": {"id": "acme-ops", "version": "1.2.0"},
+      "source_path": "/etc/gadgetron/bundles/acme-ops/bundle.toml",
+      "action_count": 2,
+      "view_count": 1
+    }
+  ]
+}
+```
+
+- `bundles_dir` — echoed absolute path of the configured directory, so admin tooling can confirm it's reading the same disk location it thinks it is.
+- `count` — length of the `bundles` array (convenience so clients don't re-count).
+- `bundles[].bundle` — `Option<BundleMetadata>` (same shape as the reload response `bundle` field; id + version). `null` for manifests that don't declare a top-level `[bundle]` table; admin UIs should nudge operators to add metadata to those, since TASK 10.2's install/uninstall will need the id as the identifier.
+- `bundles[].source_path` — absolute path of the specific `bundle.toml` file (not just the subdirectory).
+- `bundles[].action_count` / `bundles[].view_count` — descriptor counts from that bundle alone (pre-merge). The merged catalog's counts come from the `POST /admin/reload-catalog` response instead.
+- **Ordering** — `bundles` is sorted by subdirectory path so the sequence matches exactly what `DescriptorCatalog::from_bundle_dir()` produces for a reload. Tooling can rely on deterministic output across process restarts.
+
+**Read-only semantics.** The handler scans `bundles_dir` subdirectories, reads each `bundle.toml`, and serializes metadata + counts. It does NOT: (a) compile schema validators, (b) merge actions into a `DescriptorCatalog`, (c) call `ArcSwap::store()`, (d) emit any tracing telemetry that would conflict with `workbench.admin` reload events. Subdirectories without `bundle.toml` are silently skipped (same rule as the reload path — operator workspaces, hidden dirs).
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `scope_required` | 403 | Caller's API key scope is not `Management`. Enforced by `scope_guard_middleware`. Gate 7q.5 pins this. |
+| `config_error` | 503-class (400 on trunk wire) | `state.workbench.descriptor_catalog` is `None`. Defensive guard — only happens in headless test builds. |
+| `config_error` | 503 | `bundles_dir` is NOT configured (deployment is using `catalog_path` or the `seed_p2b` fallback — there's no directory to list). Message embeds the failure mode so the admin UI can surface "configure `[web] bundles_dir` to use this endpoint". |
+| `config_error` | 500 | One of the `<subdir>/bundle.toml` files failed to read or parse. Same error envelope as the reload endpoint's TOML parse failure — error message embeds the file path and the serde / IO error. The endpoint is read-only, so nothing has been swapped; fix the bad TOML and retry. |
+
+E2E Gate 7q.4 pins the response shape and asserts the first-party `gadgetron-core` bundle is enumerated with `action_count == 5`. Gate 7q.5 pins the RBAC contract.
 
 ---
 
