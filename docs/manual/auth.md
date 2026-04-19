@@ -67,7 +67,7 @@ Each API key holds a list of scopes. A scope is a coarse-grained permission. The
 |-------|--------------------|-----------------|
 | `OpenAiCompat` | `"OpenAiCompat"` | All `/v1/` routes (`POST /v1/chat/completions`, `GET /v1/models`) **and** all `/api/v1/web/workbench/` routes |
 | `Management` | `"Management"` | All other `/api/v1/` routes (nodes, model deploy, usage, costs) |
-| `XaasAdmin` | `"XaasAdmin"` | All `/api/v1/xaas/` routes (reserved for internal XaaS administration) |
+| `XaasAdmin` | `"XaasAdmin"` | Reserved for `/api/v1/xaas/` routes (internal XaaS administration). **No routes are mounted under this prefix on trunk yet**; keys with this scope will hit 404 until XaaS admin endpoints land in a later phase. |
 
 A key can hold multiple scopes. The `api_keys.scopes` column is a `TEXT[]` (PostgreSQL array). The default when inserting a new key without specifying scopes is `ARRAY['OpenAiCompat']`.
 

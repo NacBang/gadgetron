@@ -239,6 +239,21 @@ endpoint = "http://localhost:11434"
 
 Ollama does not require an API key. The `models` field is not used for Ollama; available models are discovered from the Ollama API at runtime.
 
+#### Gemini
+
+```toml
+[providers.gemini]
+type = "gemini"
+
+# (required) Google AI Studio API key (shell expansion via $VAR / ${VAR}).
+api_key = "${GEMINI_API_KEY}"
+
+# (required) List of model IDs this provider can serve.
+models = ["gemini-2.5-pro", "gemini-2.5-flash"]
+```
+
+Gemini uses the default Google AI Studio endpoint; there is no `endpoint` or `base_url` field on this provider type. The `api_key` is required and is adapted to Google's request/response shape internally.
+
 #### vLLM
 
 Available as of Sprint 4.
