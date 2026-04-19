@@ -171,6 +171,12 @@ pub struct GatewayWorkbenchService {
     /// service skips the persistence call in step 6 (falls back to
     /// bare `Uuid::new_v4()` so older tests keep passing).
     pub approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
+    /// Shared `Arc<ArcSwap<DescriptorCatalog>>` — the same handle both
+    /// `projection` and `actions` hold. Exposed here so
+    /// `POST /api/v1/web/workbench/admin/reload-catalog` (ISSUE 8 TASK 8.2)
+    /// can atomically swap in a fresh catalog. `None` in legacy test
+    /// fixtures that don't wire a workbench; production always sets it.
+    pub descriptor_catalog: Option<Arc<arc_swap::ArcSwap<crate::web::catalog::DescriptorCatalog>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -938,6 +944,93 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/usage/summary", get(get_usage_summary))
         // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
         .route("/events/ws", get(events_ws_handler))
+        // ISSUE 8 TASK 8.2 — admin catalog hot-reload.
+        .route("/admin/reload-catalog", post(reload_catalog_handler))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/web/workbench/admin/reload-catalog — ISSUE 8 TASK 8.2
+// ---------------------------------------------------------------------------
+
+/// Response shape for the catalog reload endpoint. Matches what the
+/// admin UI / CLI tooling needs to confirm the swap landed.
+#[derive(Debug, serde::Serialize)]
+pub struct ReloadCatalogResponse {
+    /// Always `true` on HTTP 200. Clients key observability on this
+    /// flag rather than on the HTTP status so a structured audit log
+    /// can quote the exact wire field.
+    pub reloaded: bool,
+    /// Number of actions in the catalog AFTER the swap.
+    pub action_count: usize,
+    /// Number of views in the catalog AFTER the swap.
+    pub view_count: usize,
+    /// Catalog source identifier. Today always `"seed_p2b"` — TASK 8.3
+    /// will widen this to `"config_file"` / `"bundle_manifest"` as
+    /// reload sources grow. Wire-stable enum.
+    pub source: &'static str,
+}
+
+/// Atomically swap the in-memory `DescriptorCatalog` for a fresh one.
+///
+/// Ships as part of ISSUE 8 TASK 8.2. Today the only source is the
+/// hand-coded `DescriptorCatalog::seed_p2b()` — so a "reload" produces
+/// an identical catalog. The value in the endpoint right now is
+/// proving the ArcSwap plumbing lands a fresh `Arc<DescriptorCatalog>`
+/// atomically while in-flight requests keep reading their snapshot.
+/// TASK 8.3 swaps the source to a config-file watcher.
+///
+/// Requires scope: **Management** (like `/nodes`, `/models/deploy`, etc).
+///
+/// Returns 503 `{error: {code: "catalog_unwired", message: "..."}}` when
+/// no workbench is configured (rare — only headless test builds).
+///
+/// **Known limitation (TASK 8.2):** schema validators on
+/// `InProcessWorkbenchActionService` are pre-compiled at service
+/// construction time and are NOT rebuilt by this endpoint. Because
+/// the TASK 8.2 source (`seed_p2b`) produces identical schemas,
+/// validators remain correct. When TASK 8.3 adds a file-based source
+/// with potentially changed schemas, validator rebuild must land with
+/// it — either by rebuilding the whole action service on swap, or by
+/// moving validators into the ArcSwap alongside the catalog.
+pub async fn reload_catalog_handler(
+    State(state): State<AppState>,
+) -> Result<Json<ReloadCatalogResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let catalog_handle = svc.descriptor_catalog.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "catalog reload requires a configured workbench with a descriptor catalog handle"
+                .into(),
+        ))
+    })?;
+
+    // Today the only source is the hand-coded seed — TASK 8.3 will
+    // replace this with a file read.
+    let fresh = crate::web::catalog::DescriptorCatalog::seed_p2b();
+
+    // Pre-compute the response counts from the same catalog we're
+    // about to publish, so the response is consistent with the swap
+    // we just performed.
+    use gadgetron_core::context::Scope;
+    let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
+    let action_count = fresh.visible_actions(&all_scopes).len();
+    let view_count = fresh.visible_views(&all_scopes).len();
+
+    catalog_handle.store(Arc::new(fresh));
+
+    tracing::info!(
+        target: "workbench.admin",
+        action_count = action_count,
+        view_count = view_count,
+        source = "seed_p2b",
+        "descriptor catalog reloaded"
+    );
+
+    Ok(Json(ReloadCatalogResponse {
+        reloaded: true,
+        action_count,
+        view_count,
+        source: "seed_p2b",
+    }))
 }
 
 /// `GET /events/ws` — WebSocket upgrade + tenant-filtered activity
@@ -1095,6 +1188,7 @@ mod tests {
                 projection,
                 actions: None,
                 approval_store: None,
+                descriptor_catalog: None,
             })),
             penny_shared_surface: None,
             penny_assembler: None,

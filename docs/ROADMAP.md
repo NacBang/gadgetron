@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.4.1** (post-ISSUE 8 TASK 8.1 ArcSwap plumbing)
+**Current version: 0.4.2** (post-ISSUE 8 TASK 8.2 reload endpoint)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -116,16 +116,20 @@ install/remove capabilities without restart. Substrate for the ecosystem.
 
 ### In-flight ISSUE
 - **ISSUE 8 — DescriptorCatalog hot-reload** (in-flight; 0.4.0 ships TASK 8.1)
-  - TASK 8.1 ✅ — `Arc<ArcSwap<DescriptorCatalog>>` plumbing (0.4.0 → 0.4.1).
-    Projection + action service share the same atomic handle; every
-    read loads a snapshot so in-flight requests finish against their
-    catalog while a future reload atomically swaps the pointer. No
-    user-visible change yet — this is the substrate for the reload
-    endpoint (TASK 8.2) and fs-watcher (TASK 8.3).
-  - TASK 8.2 — reload endpoint (`POST /api/v1/web/workbench/admin/reload-catalog`,
-    Management-scoped) + validator rebuild on swap.
-  - TASK 8.3 — fs-watcher (inotify/kqueue) on the catalog source file
-    triggering an automatic reload.
+  - TASK 8.1 ✅ — `Arc<ArcSwap<DescriptorCatalog>>` plumbing (PR #211).
+  - TASK 8.2 ✅ — reload endpoint (0.4.1 → 0.4.2). `POST
+    /api/v1/web/workbench/admin/reload-catalog` (Management-scoped)
+    atomically swaps in a fresh `DescriptorCatalog` and returns
+    `{reloaded, action_count, view_count, source}`. Source is
+    hardcoded `"seed_p2b"` until TASK 8.3 adds file-based loading;
+    this TASK proves the plumbing lands. Validators are NOT rebuilt
+    (seed_p2b is schema-stable); TASK 8.3 adds rebuild. Scope
+    middleware gets an `/api/v1/web/workbench/admin/` rule requiring
+    Management before the wider OpenAiCompat workbench rule. Gate
+    7q.1 pins the happy path; Gate 7q.2 pins the
+    OpenAiCompat-is-403 contract.
+  - TASK 8.3 — file-based catalog source + fs-watcher triggering
+    auto-reload; validator rebuild on swap.
   - TASK 8.4 — SIGHUP handler for operator-triggered reload without
     HTTP surface.
 

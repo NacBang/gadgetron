@@ -35,6 +35,12 @@ pub async fn scope_guard_middleware(
         Some(Scope::OpenAiCompat)
     } else if path.starts_with("/api/v1/xaas/") {
         Some(Scope::XaasAdmin)
+    } else if path.starts_with("/api/v1/web/workbench/admin/") {
+        // ISSUE 8 TASK 8.2: admin subtree (catalog reload, future
+        // bundle install/uninstall) requires Management — workbench
+        // users (OpenAiCompat) must NOT be able to reload the
+        // catalog. Must appear BEFORE the broader workbench match.
+        Some(Scope::Management)
     } else if path.starts_with("/api/v1/web/workbench/") {
         // W3-WEB-2: workbench projection lives under /api/v1/* but uses
         // OpenAiCompat base scope (same as /v1/*). Finer-grained access
