@@ -549,10 +549,25 @@ else
   exit 2
 fi
 
-if curl -fsS "$GAD_BASE/ready" >/dev/null 2>&1; then
-  pass "gadgetron /ready 200"
+# Tighter body-shape checks on /health + /ready. Previous
+# assertions only verified status=200 — a regression that returned
+# 200 with an empty body (or wrong JSON) would silently pass. These
+# checks lock in `{"status":"ok"}` / `{"status":"ready"}` from
+# server.rs:183-185 and server.rs:194-204.
+HEALTH_BODY="$(curl -fsS "$GAD_BASE/health" 2>&1 || true)"
+if echo "$HEALTH_BODY" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+  pass "/health body matches {\"status\":\"ok\"}"
 else
-  fail "/ready did not return 200" "$(curl -sS "$GAD_BASE/ready" 2>&1 | head -c 400)"
+  fail "/health body shape regressed (expected {\"status\":\"ok\"})" \
+    "$(echo "$HEALTH_BODY" | head -c 400)"
+fi
+
+READY_BODY="$(curl -fsS "$GAD_BASE/ready" 2>&1 || true)"
+if echo "$READY_BODY" | jq -e '.status == "ready"' >/dev/null 2>&1; then
+  pass "/ready body matches {\"status\":\"ready\"}"
+else
+  fail "/ready body shape regressed (expected {\"status\":\"ready\"})" \
+    "$(echo "$READY_BODY" | head -c 400)"
 fi
 
 # ---------------------------------------------------------------------------
