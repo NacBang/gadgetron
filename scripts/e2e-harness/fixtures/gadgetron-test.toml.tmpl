@@ -72,3 +72,12 @@ bootstrap_candidate_limit = 4
 bootstrap_approval_limit = 3
 digest_summary_chars = 240
 require_explicit_degraded_notice = true
+
+# ISSUE 14 TASK 14.2 — first-admin bootstrap. Harness boots against a
+# fresh Postgres where users is empty, so serve fails-fast without
+# this block. Password sourced from GADGETRON_BOOTSTRAP_ADMIN_PASSWORD
+# which run.sh exports before launching `gadgetron serve`.
+[auth.bootstrap]
+admin_email = "harness-admin@example.com"
+admin_display_name = "Harness Admin"
+admin_password_env = "GADGETRON_BOOTSTRAP_ADMIN_PASSWORD"

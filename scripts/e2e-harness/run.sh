@@ -338,6 +338,12 @@ log "=== Gate 3: bootstrap DB schema via transient serve ==="
 
 export GADGETRON_DATABASE_URL="$PG_URL"
 
+# ISSUE 14 TASK 14.2 — env var referenced by `[auth.bootstrap]` in
+# gadgetron-test.toml.tmpl. Any non-empty value works here; the
+# harness doesn't log into the web UI as admin, so the plaintext
+# password never leaves the test process.
+export GADGETRON_BOOTSTRAP_ADMIN_PASSWORD="harness-ci-password"
+
 # Render a minimal config for the bootstrap boot. Use a throwaway wiki dir
 # so we don't touch the real one before the harness test.
 BOOT_WIKI="$(mktemp -d)/boot-wiki"
@@ -1330,6 +1336,333 @@ if [ "${BILLING_TOOL_COUNT:-0}" -ge 1 ]; then
 else
   fail "no billing_events row with event_kind=tool after /v1/tools invoke" \
     "$(echo "$BILLING_TOOL_RESP" | head -c 500)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7v.1 — admin user CRUD (ISSUE 14 TASK 14.3)
+# ---------------------------------------------------------------------------
+#
+# The harness creates a fresh test tenant for the API keys; the
+# bootstrap admin lives in the hardcoded DEFAULT tenant
+# (00000000-0000-0000-0000-000000000001), so it's invisible here.
+# Starting from an empty users table in the test tenant, exercise
+# the full CRUD + single-admin guard + RBAC.
+log "=== Gate 7v.1: admin user CRUD (ISSUE 14 TASK 14.3) ==="
+
+# Initial list — test tenant is fresh, expect zero users.
+USERS_LIST_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+INITIAL_COUNT="$(echo "$USERS_LIST_RESP" | jq '.users | length' 2>/dev/null || echo -1)"
+if [ "${INITIAL_COUNT:-0}" -eq 0 ]; then
+  pass "admin/users initial list is empty in fresh test tenant"
+else
+  fail "admin/users initial list regressed — expected 0, got $INITIAL_COUNT" \
+    "$(echo "$USERS_LIST_RESP" | head -c 400)"
+fi
+
+# POST a member user.
+MEMBER_BODY='{"email":"harness-member@example.com","display_name":"Harness Member","role":"member","password":"correct horse"}'
+MEMBER_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$MEMBER_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+MEMBER_ID="$(echo "$MEMBER_RESP" | jq -r '.id // ""' 2>/dev/null)"
+MEMBER_ROLE="$(echo "$MEMBER_RESP" | jq -r '.role // ""' 2>/dev/null)"
+if [ -n "$MEMBER_ID" ] && [ "$MEMBER_ROLE" = "member" ]; then
+  pass "admin/users POST created member (id=$MEMBER_ID)"
+else
+  fail "admin/users POST shape regressed" "$(echo "$MEMBER_RESP" | head -c 400)"
+fi
+
+# POST a test admin — this becomes the single active admin in this tenant.
+ADMIN_BODY='{"email":"harness-admin2@example.com","display_name":"Harness Tenant Admin","role":"admin","password":"correct horse 2"}'
+ADMIN_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ADMIN_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+ADMIN_ID="$(echo "$ADMIN_RESP" | jq -r '.id // ""' 2>/dev/null)"
+if [ -n "$ADMIN_ID" ]; then
+  pass "admin/users POST created admin (id=$ADMIN_ID)"
+else
+  fail "admin/users POST admin regressed" "$(echo "$ADMIN_RESP" | head -c 400)"
+fi
+
+# Single-admin guard — this is the only active admin, delete must refuse.
+DELETE_ADMIN_CODE="$(curl -s -o /tmp/del_admin.json -w '%{http_code}' -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users/$ADMIN_ID" 2>&1 || true)"
+if [ "$DELETE_ADMIN_CODE" != "200" ]; then
+  pass "single-admin guard refused last-admin delete (status=$DELETE_ADMIN_CODE)"
+else
+  fail "single-admin guard failed — last admin deleted" \
+    "$(cat /tmp/del_admin.json | head -c 400)"
+fi
+rm -f /tmp/del_admin.json
+
+# Happy-path delete of member.
+DELETE_MEMBER_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users/$MEMBER_ID" 2>&1 || true)"
+if echo "$DELETE_MEMBER_RESP" | jq -e '.deleted == true' >/dev/null 2>&1; then
+  pass "admin/users DELETE removed member (id=$MEMBER_ID)"
+else
+  fail "admin/users DELETE member regressed" "$(echo "$DELETE_MEMBER_RESP" | head -c 400)"
+fi
+
+# RBAC — OpenAiCompat caller must get 403 on /admin/users.
+USERS_RBAC_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+if [ "$USERS_RBAC_CODE" = "403" ]; then
+  pass "admin/users RBAC — OpenAiCompat key → 403"
+else
+  fail "admin/users RBAC regressed — expected 403, got $USERS_RBAC_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7v.2 — user self-service API keys (ISSUE 14 TASK 14.4)
+# ---------------------------------------------------------------------------
+#
+# The harness's TEST_API_KEY and MGMT_API_KEY both have user_id=NULL
+# (legacy equivalence class). Using TEST_API_KEY (OpenAiCompat) to
+# exercise the self-service surface:
+#   1. GET /keys → list includes TEST + MGMT keys (both NULL-owner).
+#   2. POST /keys creates a new key scoped to OpenAiCompat only,
+#      returns raw_key once, SHA-256 hash stored server-side.
+#   3. DELETE /keys/{new_id} revokes, idempotent on re-call.
+#   4. Scope escalation: POST with scopes=[management] using an
+#      OpenAiCompat caller → rejected (handler enforces narrowing).
+log "=== Gate 7v.2: user self-service API keys (ISSUE 14 TASK 14.4) ==="
+
+MY_KEYS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/keys" 2>&1 || true)"
+MY_KEYS_COUNT="$(echo "$MY_KEYS_RESP" | jq '.keys | length' 2>/dev/null || echo -1)"
+if [ "${MY_KEYS_COUNT:-0}" -ge 2 ]; then
+  pass "/workbench/keys lists legacy-equivalence-class keys (count=$MY_KEYS_COUNT)"
+else
+  fail "/workbench/keys initial list regressed" "$(echo "$MY_KEYS_RESP" | head -c 400)"
+fi
+
+NEW_KEY_BODY='{"label":"harness-rotation-test","scopes":["openai_compat"]}'
+NEW_KEY_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$NEW_KEY_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/keys" 2>&1 || true)"
+NEW_KEY_ID="$(echo "$NEW_KEY_RESP" | jq -r '.id // ""' 2>/dev/null)"
+NEW_KEY_RAW="$(echo "$NEW_KEY_RESP" | jq -r '.raw_key // ""' 2>/dev/null)"
+if [ -n "$NEW_KEY_ID" ] && [[ "$NEW_KEY_RAW" == gad_live_* ]]; then
+  pass "POST /workbench/keys returned raw_key once (id=$NEW_KEY_ID)"
+else
+  fail "/workbench/keys POST shape regressed" "$(echo "$NEW_KEY_RESP" | head -c 400)"
+fi
+
+# Scope escalation — OpenAiCompat caller asking for Management → 400.
+ESCALATE_BODY='{"label":"escalation-attempt","scopes":["management"]}'
+ESCALATE_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ESCALATE_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/keys" 2>&1 || true)"
+if [ "$ESCALATE_CODE" != "200" ]; then
+  pass "scope escalation refused (status=$ESCALATE_CODE)"
+else
+  fail "scope escalation accepted — caller got management scope on OpenAiCompat key" ""
+fi
+
+# Revoke the new key.
+REVOKE_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/keys/$NEW_KEY_ID" 2>&1 || true)"
+if echo "$REVOKE_RESP" | jq -e '.revoked == true' >/dev/null 2>&1; then
+  pass "DELETE /workbench/keys/{id} revoked the new key"
+else
+  fail "DELETE /workbench/keys regressed" "$(echo "$REVOKE_RESP" | head -c 400)"
+fi
+
+# Idempotent re-revoke — should still succeed.
+REVOKE2_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/keys/$NEW_KEY_ID" 2>&1 || true)"
+if [ "$REVOKE2_CODE" = "200" ]; then
+  pass "DELETE /workbench/keys/{id} idempotent on re-revoke"
+else
+  fail "re-revoke non-idempotent — got $REVOKE2_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7v.3 — teams + members CRUD (ISSUE 14 TASK 14.5)
+# ---------------------------------------------------------------------------
+#
+# Create a team, add a member, list, remove, delete. All under
+# Management scope. Invalid id regex + 'admins' reserved + cross-tenant
+# user rejection are covered by in-module logic; gate pins the wire.
+log "=== Gate 7v.3: teams + members CRUD (ISSUE 14 TASK 14.5) ==="
+
+# Create a test user first so the team-member add has a real user.
+TUSER_BODY='{"email":"harness-team-user@example.com","display_name":"Harness Team User","role":"member","password":"correct horse 3"}'
+TUSER_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$TUSER_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/users" 2>&1 || true)"
+TUSER_ID="$(echo "$TUSER_RESP" | jq -r '.id // ""' 2>/dev/null)"
+if [ -n "$TUSER_ID" ]; then
+  pass "created member user for team-member test (id=$TUSER_ID)"
+else
+  fail "team-member test setup: could not create user" \
+    "$(echo "$TUSER_RESP" | head -c 400)"
+fi
+
+# Create team.
+TEAM_BODY='{"id":"harness-team","display_name":"Harness Team","description":"gate 7v.3 test fixture"}'
+TEAM_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$TEAM_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams" 2>&1 || true)"
+TEAM_ID="$(echo "$TEAM_RESP" | jq -r '.id // ""' 2>/dev/null)"
+if [ "$TEAM_ID" = "harness-team" ]; then
+  pass "POST /admin/teams created team (id=$TEAM_ID)"
+else
+  fail "POST /admin/teams regressed" "$(echo "$TEAM_RESP" | head -c 400)"
+fi
+
+# Invalid id — regex rejects uppercase.
+BAD_TEAM='{"id":"BadName","display_name":"X"}'
+BAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$BAD_TEAM" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams" 2>&1 || true)"
+if [ "$BAD_CODE" != "200" ]; then
+  pass "invalid team id rejected (status=$BAD_CODE)"
+else
+  fail "invalid team id accepted" ""
+fi
+
+# Add member.
+ADD_BODY="$(jq -cn --arg uid "$TUSER_ID" '{user_id: $uid, role: "member"}')"
+ADD_RESP="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ADD_BODY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team/members" 2>&1 || true)"
+ADD_USER_ID="$(echo "$ADD_RESP" | jq -r '.user_id // ""' 2>/dev/null)"
+if [ "$ADD_USER_ID" = "$TUSER_ID" ]; then
+  pass "POST /admin/teams/harness-team/members added user"
+else
+  fail "add team member regressed" "$(echo "$ADD_RESP" | head -c 400)"
+fi
+
+# List members — expect the one we just added.
+MEMBERS_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team/members" 2>&1 || true)"
+MEMBER_COUNT="$(echo "$MEMBERS_RESP" | jq '.members | length' 2>/dev/null || echo -1)"
+if [ "${MEMBER_COUNT:-0}" -eq 1 ]; then
+  pass "list team members returned count=1"
+else
+  fail "list team members regressed — expected 1, got $MEMBER_COUNT" \
+    "$(echo "$MEMBERS_RESP" | head -c 400)"
+fi
+
+# Remove member.
+REMOVE_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team/members/$TUSER_ID" 2>&1 || true)"
+if echo "$REMOVE_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+  pass "DELETE team member succeeded"
+else
+  fail "DELETE team member regressed" "$(echo "$REMOVE_RESP" | head -c 400)"
+fi
+
+# Delete team.
+DEL_TEAM_RESP="$(curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams/harness-team" 2>&1 || true)"
+if echo "$DEL_TEAM_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+  pass "DELETE /admin/teams/harness-team succeeded"
+else
+  fail "DELETE team regressed" "$(echo "$DEL_TEAM_RESP" | head -c 400)"
+fi
+
+# RBAC — OpenAiCompat caller on /admin/teams → 403.
+TEAMS_RBAC_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/teams" 2>&1 || true)"
+if [ "$TEAMS_RBAC_CODE" = "403" ]; then
+  pass "admin/teams RBAC — OpenAiCompat key → 403"
+else
+  fail "admin/teams RBAC regressed — expected 403, got $TEAMS_RBAC_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7v.4 — CLI user + team subcommands (ISSUE 14 TASK 14.7)
+# ---------------------------------------------------------------------------
+#
+# Exercise the `gadgetron user {create,list,delete}` + `gadgetron team
+# {create,list,delete}` flows against the harness's real Postgres.
+# These target the DEFAULT tenant (00000000-0000-0000-0000-000000000001)
+# where the bootstrap admin already lives. After each CLI op, parse
+# stdout and/or query the DB via `psql` (already available in the
+# harness env via docker compose postgres) to assert the effect.
+log "=== Gate 7v.4: CLI user + team subcommands (ISSUE 14 TASK 14.7) ==="
+
+# User create — use a scoped env var for the password to avoid shell expansion.
+export GAD_HARNESS_USER_PW="correct-horse-cli"
+CLI_USER_OUT="$ART_DIR/cli-user-create.log"
+if "$GAD_BIN" user create \
+    --email cli-harness@example.com \
+    --name "CLI Harness" \
+    --role member \
+    --password-env GAD_HARNESS_USER_PW \
+    >"$CLI_USER_OUT.stdout" 2>"$CLI_USER_OUT"; then
+  CLI_USER_ID="$(awk '/^User created:/ {print $3}' "$CLI_USER_OUT.stdout" | head -1)"
+  if [ -n "$CLI_USER_ID" ]; then
+    pass "gadgetron user create → $CLI_USER_ID"
+  else
+    fail "gadgetron user create: stdout missing UUID" "$(cat "$CLI_USER_OUT.stdout")"
+  fi
+else
+  fail "gadgetron user create" "$(cat "$CLI_USER_OUT")"
+fi
+
+CLI_USER_LIST="$("$GAD_BIN" user list 2>&1 || true)"
+if echo "$CLI_USER_LIST" | grep -q "cli-harness@example.com"; then
+  pass "gadgetron user list surfaces the new user"
+else
+  fail "gadgetron user list missing new user" "$(echo "$CLI_USER_LIST" | head -c 400)"
+fi
+
+if [ -n "${CLI_USER_ID:-}" ]; then
+  if "$GAD_BIN" user delete --user-id "$CLI_USER_ID" >"$ART_DIR/cli-user-delete.log" 2>&1; then
+    pass "gadgetron user delete succeeded"
+  else
+    fail "gadgetron user delete" "$(cat "$ART_DIR/cli-user-delete.log")"
+  fi
+fi
+
+# Team create
+if "$GAD_BIN" team create --id cli-harness-team --display-name "CLI Harness Team" \
+    >"$ART_DIR/cli-team-create.log" 2>&1; then
+  pass "gadgetron team create → cli-harness-team"
+else
+  fail "gadgetron team create" "$(cat "$ART_DIR/cli-team-create.log")"
+fi
+
+CLI_TEAM_LIST="$("$GAD_BIN" team list 2>&1 || true)"
+if echo "$CLI_TEAM_LIST" | grep -q "cli-harness-team"; then
+  pass "gadgetron team list surfaces the new team"
+else
+  fail "gadgetron team list missing team" "$(echo "$CLI_TEAM_LIST" | head -c 400)"
+fi
+
+if "$GAD_BIN" team delete --id cli-harness-team >"$ART_DIR/cli-team-delete.log" 2>&1; then
+  pass "gadgetron team delete succeeded"
+else
+  fail "gadgetron team delete" "$(cat "$ART_DIR/cli-team-delete.log")"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2375,6 +2708,7 @@ WARN_LINES="$(sed "$STRIP_ANSI" "$GAD_LOG" 2>/dev/null \
   | grep -vE 'git config user\.name / user\.email not set' \
   | grep -vE 'scope denied .*path=/api/v1/' \
   | grep -vE 'quota_configs row missing' \
+  | grep -vE '\[auth\.bootstrap\] is configured but users table is not empty' \
   || true)"
 if [ -z "$WARN_LINES" ]; then
   pass "no unexpected WARN entries in gadgetron.log (P2A ask-mode + git-config benign WARNs whitelisted)"

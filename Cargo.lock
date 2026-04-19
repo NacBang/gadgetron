@@ -127,6 +127,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -338,6 +350,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1235,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-bundle-document-formats"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "gadgetron-core",
@@ -1247,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-cli"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1274,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-core"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1293,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-gateway"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1328,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-knowledge"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1361,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-node"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1380,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-penny"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1404,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-provider"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1424,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-router"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1441,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-scheduler"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1456,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-testing"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1481,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-tui"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1493,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-web"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "axum",
  "axum-test",
@@ -1510,8 +1531,9 @@ dependencies = [
 
 [[package]]
 name = "gadgetron-xaas"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
+ "argon2",
  "async-trait",
  "chrono",
  "dashmap",
@@ -2574,6 +2596,17 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]

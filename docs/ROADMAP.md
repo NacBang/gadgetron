@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.6** (post-ISSUE 12 close — billing ledger telemetry; invoicing deferred)
+**Current version: 0.5.7** (post-ISSUE 14 close — tenant self-service: users + teams + CLI)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -303,8 +303,14 @@ Retry-After (11.1). Tenants introspect usage via /quota/status
   - **TASK 12.5 — Stripe webhook ingest — DEFERRED**
 - **ISSUE 13 — HuggingFace model catalog**: discovery, pinning, per-model
   cost attribution (cost-attribution portion DEFERRED with 12.3+).
-- **ISSUE 14 — tenant self-service**: sign-up, key rotation, org/team
-  hierarchy, role-scoped API keys.
+- **ISSUE 14 ✅ tenant self-service** (v0.5.7, closed 2026-04-19)
+  - TASK 14.1 ✅ migrations — users / teams / team_members / user_sessions + api_keys.{user_id,label} + audit_log actor columns
+  - TASK 14.2 ✅ bootstrap flow — `[auth.bootstrap]` + argon2id + default-tenant upsert + fail-fast on empty+no-config
+  - TASK 14.3 ✅ admin user CRUD — `/admin/users` + single-admin guard + api_keys.user_id backfill on startup
+  - TASK 14.4 ✅ user self-service keys — `/keys` GET/POST/DELETE + scope narrowing + idempotent revoke
+  - TASK 14.5 ✅ teams + members CRUD — `/admin/teams/*` + tenant-boundary guards + CASCADE delete
+  - TASK 14.7 ✅ CLI — `gadgetron {user,team} {create,list,delete}` targeting default tenant
+  - TASK 14.6 (web UI session login) deferred to ISSUE 15 — out of this ISSUE's scope
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).

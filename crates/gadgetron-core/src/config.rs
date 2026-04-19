@@ -33,6 +33,34 @@ pub struct AppConfig {
     /// per ADDENDUM-01 §2 — additional toggles land here as P2B evolves.
     #[serde(default)]
     pub features: FeaturesConfig,
+    /// First-admin bootstrap (ISSUE 14 TASK 14.2). When `[auth.bootstrap]`
+    /// is set AND the `users` table is empty at serve startup, the CLI
+    /// creates an initial admin row from this config + the env var
+    /// named in `admin_password_env`. When the users table is
+    /// non-empty, the config is ignored with a warn log. When users is
+    /// empty AND this is `None`, serve startup fails loudly — the only
+    /// path to a populated auth surface is via this block or SQL.
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub bootstrap: Option<BootstrapConfig>,
+}
+
+/// Mirror of `gadgetron_xaas::auth::bootstrap::BootstrapConfig` for
+/// TOML deserialization. Kept in `gadgetron-core` to avoid a
+/// core→xaas dep edge; the xaas crate converts when calling
+/// `bootstrap_admin_if_needed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapConfig {
+    pub admin_email: String,
+    pub admin_display_name: String,
+    /// Name of the environment variable carrying the admin password.
+    /// Plaintext passwords in config are intentionally not supported.
+    pub admin_password_env: String,
 }
 
 /// Per-tenant token-bucket rate limit (ISSUE 11 TASK 11.2). When
@@ -429,6 +457,7 @@ impl Default for AppConfig {
             bundles: BTreeMap::new(),
             quota_rate_limit: RateLimitConfig::default(),
             features: FeaturesConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }
