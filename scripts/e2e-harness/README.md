@@ -63,6 +63,11 @@ Every run writes to `scripts/e2e-harness/artifacts/` (gitignored):
 # has no external network dependency on machines without the internal vLLM.
 ./scripts/e2e-harness/run.sh --real-vllm
 REAL_VLLM_URL=http://10.100.1.5:8100 ./scripts/e2e-harness/run.sh
+
+# Optional: Penny↔vLLM round-trip via the Gadgetron chat endpoint.
+# See "Penny↔vLLM testing" below for the operator setup.
+./scripts/e2e-harness/run.sh --penny-vllm
+./scripts/e2e-harness/run.sh --penny-vllm=http://my-litellm-proxy:4000
 ```
 
 The real-vLLM gate does NOT route through gadgetron — it directly calls
@@ -71,6 +76,73 @@ is alive and speaks the OpenAI shape. Gadgetron routing stays on the
 deterministic mock so content/token assertions (Gates 7-10) don't flake.
 
 Exit code 0 = green, any other exit code = DO NOT OPEN PR.
+
+## Penny↔vLLM testing (`--penny-vllm`, opt-in)
+
+The `--penny-vllm` flag exercises the full Penny dispatch path:
+
+```
+harness curl
+  → POST /v1/chat/completions { model: "penny" }
+    → Gadgetron chat handler
+      → Penny provider (gadgetron-penny)
+        → spawns `claude` subprocess with
+          ANTHROPIC_BASE_URL=$PENNY_BRAIN_URL
+          → proxy translates Anthropic Messages ↔ OpenAI
+            → vLLM inference
+```
+
+This validates the wire-up the deterministic mock can't exercise:
+real Claude Code spawn, subprocess stdin/stdout, MCP tool allow-listing,
+`ANTHROPIC_BASE_URL` threading, and the Anthropic↔OpenAI translator in
+the proxy. It is **skipped by default** because it depends on
+infrastructure the PR gate can't ship:
+
+### Operator prerequisites
+
+1. **Claude Code CLI** — `claude` on `$PATH` (or set
+   `CLAUDE_CODE_BIN=/abs/path/to/claude`). Install:
+   https://docs.claude.com/claude/code.
+2. **Anthropic-compatible proxy in front of vLLM** — LiteLLM is the
+   reference choice:
+   ```bash
+   pipx install 'litellm[proxy]'
+   litellm --model openai/<vllm-model-id> --api_base http://10.100.1.5:8100/v1 --port 4000
+   ```
+   Substitute `<vllm-model-id>` with whatever the team's vLLM
+   exposes. LiteLLM listens on `:4000` and speaks Anthropic
+   Messages to claude-code, then forwards the translated request
+   to vLLM on `10.100.1.5:8100`.
+3. **`PENNY_BRAIN_URL`** — defaults to `http://10.100.1.5:8100`
+   (the team's internal vLLM — NOT usable without the LiteLLM
+   layer; override to your proxy URL):
+   ```bash
+   ./scripts/e2e-harness/run.sh --penny-vllm=http://127.0.0.1:4000
+   ```
+
+### What the gate asserts
+
+- `POST /v1/chat/completions { model: "penny" }` returns 200 within
+  60 s (generous to account for subprocess boot + LLM inference).
+- The response body has a non-empty `.choices[0].message.content`.
+
+The full JSON body is written to
+`artifacts/penny-vllm-chat-transcript.json` so operators can
+visually inspect the result — this is the "text 결과" part of the
+"screenshot + text" verification the feature was requested with.
+Screenshot is emitted by the `--no-screenshot`-toggled
+`$B`-powered gate at Gate 11; the two artifacts together are the
+full evidence trail.
+
+### What the gate does NOT validate
+
+- **Exact output content** — Penny uses a real LLM, so the answer
+  varies run to run. We only assert "non-empty response".
+- **MCP tool invocation** — today the gate uses a simple "PONG"
+  prompt that does NOT exercise the tool-call path. A follow-up
+  gate will send a prompt that forces
+  `workbench.activity_recent` / `wiki.get` dispatch and assert
+  the tool trace landed in the activity stream.
 
 ## When it fails
 

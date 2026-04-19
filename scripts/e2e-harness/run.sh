@@ -73,16 +73,25 @@ PG_URL="postgres://gadgetron:test_local_only_no_prod@127.0.0.1:$PG_HOST_PORT/gad
 
 QUICK=0
 SKIP_SCREENSHOT=0
-# Optional real-vllm reachability check. Enable via `--real-vllm` (uses the
-# default endpoint below) or `REAL_VLLM_URL=...` in the environment. When
-# unset, the gate is skipped — the mock remains the deterministic primary.
+# Optional real-vllm reachability check (direct, no Gadgetron routing).
+# Enable via `--real-vllm` or `REAL_VLLM_URL=...`. Skipped when unset.
 REAL_VLLM_URL="${REAL_VLLM_URL:-}"
+# Optional Penny↔vLLM round-trip via the Gadgetron chat endpoint.
+# Requires claude-code installed on $CLAUDE_CODE_BIN and a proxy at
+# $PENNY_BRAIN_URL that translates Anthropic Messages → vLLM (OpenAI).
+# Defaults point at the team's internal vLLM proxy endpoint; override
+# per-machine as needed. Skipped when the flag is not passed.
+PENNY_VLLM=0
+PENNY_BRAIN_URL="${PENNY_BRAIN_URL:-http://10.100.1.5:8100}"
+CLAUDE_CODE_BIN="${CLAUDE_CODE_BIN:-$(command -v claude 2>/dev/null || echo '')}"
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
     --no-screenshot) SKIP_SCREENSHOT=1 ;;
     --real-vllm) REAL_VLLM_URL="${REAL_VLLM_URL:-http://10.100.1.5:8100}" ;;
     --real-vllm=*) REAL_VLLM_URL="${arg#*=}" ;;
+    --penny-vllm) PENNY_VLLM=1 ;;
+    --penny-vllm=*) PENNY_VLLM=1; PENNY_BRAIN_URL="${arg#*=}" ;;
     *) echo "unknown flag: $arg"; exit 2 ;;
   esac
 done
@@ -370,7 +379,44 @@ sed \
   -e "s|@MOCK_URL@|http://127.0.0.1:$MOCK_PORT|g" \
   -e "s|@GAD_PORT@|$GAD_PORT|g" \
   "$FIX_DIR/gadgetron-test.toml.tmpl" > "$RENDERED"
+
+# --penny-vllm overlay: point Penny's claude-code subprocess at a real
+# Anthropic-compatible proxy (LiteLLM or similar) fronting vLLM, and
+# swap the no-op `agent.binary = /usr/bin/true` for the real `claude`
+# binary. Everything is appended at the end of the rendered TOML so
+# these keys win over the template defaults (TOML last-wins for
+# duplicate keys within a table? No — TOML forbids dup keys. We use
+# a fresh `[agent.brain]` table and rely on the fact that the
+# template does NOT declare one; the `binary` override is done via
+# an `[agent]` table that duplicates the existing table only if the
+# template's `[agent]` had just `binary = ...` and we re-declare
+# with a new value. To avoid the dup-key error we rewrite `binary`
+# in place via sed).
+if [ "$PENNY_VLLM" -eq 1 ]; then
+  if [ -z "$CLAUDE_CODE_BIN" ] || [ ! -x "$CLAUDE_CODE_BIN" ]; then
+    fail "--penny-vllm requires claude-code on \$CLAUDE_CODE_BIN (got='${CLAUDE_CODE_BIN:-<empty>}')" \
+      "install: https://docs.claude.com/claude/code — or set CLAUDE_CODE_BIN=/path/to/claude"
+    exit 2
+  fi
+  # Rewrite `binary = "/usr/bin/true"` → real claude binary.
+  # Escape any `|` in the path so sed doesn't choke (unlikely but safe).
+  CLAUDE_ESC=$(printf '%s\n' "$CLAUDE_CODE_BIN" | sed 's/[|&\\]/\\&/g')
+  sed -i.bak "s|binary = \"/usr/bin/true\"|binary = \"$CLAUDE_ESC\"|" "$RENDERED"
+  rm -f "$RENDERED.bak"
+  # Append `[agent.brain]` block.
+  cat >> "$RENDERED" <<EOF
+
+# Appended by --penny-vllm flag.
+[agent.brain]
+mode = "external_proxy"
+external_base_url = "$PENNY_BRAIN_URL"
+EOF
+fi
+
 pass "rendered config at $RENDERED (wiki=$WIKI_DIR)"
+if [ "$PENNY_VLLM" -eq 1 ]; then
+  pass "--penny-vllm overlay applied (claude=$CLAUDE_CODE_BIN, brain=$PENNY_BRAIN_URL)"
+fi
 
 # ---------------------------------------------------------------------------
 # Gate 6 — launch gadgetron serve
@@ -607,6 +653,64 @@ if [ -n "${REAL_VLLM_URL:-}" ]; then
   fi
 else
   skip "Optional real-vllm reachability (set --real-vllm or \$REAL_VLLM_URL to enable)"
+fi
+
+# ---------------------------------------------------------------------------
+# Optional — Penny↔vLLM round-trip (skipped unless --penny-vllm)
+#
+# Drives `POST /v1/chat/completions` with `model=penny`, which the gateway
+# routes to the Penny provider. Penny spawns `claude` (the Anthropic CLI);
+# the `--penny-vllm` flag reconfigures Penny to thread
+# `ANTHROPIC_BASE_URL → $PENNY_BRAIN_URL` to the subprocess so claude
+# speaks to an operator-supplied proxy (LiteLLM / similar) that translates
+# Anthropic Messages ↔ vLLM (OpenAI). End-to-end this exercises:
+#
+#   harness curl
+#     → Gadgetron chat handler
+#       → Penny provider
+#         → claude subprocess (ANTHROPIC_BASE_URL=<proxy>)
+#           → proxy translates
+#             → vLLM
+#
+# Skipped by default. Operators opting in must have:
+#   * `claude` CLI on `$CLAUDE_CODE_BIN` (auto-discovered via `which`)
+#   * a running Anthropic-compatible proxy in front of vLLM, reachable
+#     at `$PENNY_BRAIN_URL` (default `http://10.100.1.5:8100`)
+# See `scripts/e2e-harness/README.md` § "Penny↔vLLM testing" for the
+# operator setup.
+# ---------------------------------------------------------------------------
+
+if [ "$PENNY_VLLM" -eq 1 ]; then
+  log "=== Optional: Penny↔vLLM round-trip (brain=${PENNY_BRAIN_URL}) ==="
+  PENNY_RESP="$ART_DIR/penny-vllm-chat.json"
+  # Larger max-time budget — claude-code subprocess boot + network + LLM
+  # inference can legitimately take tens of seconds on first token.
+  if curl -fsS --max-time 60 \
+      -H "Authorization: Bearer $TEST_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+            "model": "penny",
+            "messages": [{"role": "user", "content": "Reply with the single word PONG."}],
+            "max_tokens": 32,
+            "stream": false
+          }' \
+      "$GAD_BASE/v1/chat/completions" > "$PENNY_RESP" 2>&1; then
+    if jq -e '.choices[0].message.content | length > 0' "$PENNY_RESP" >/dev/null 2>&1; then
+      PS="$(jq -r '.choices[0].message.content' < "$PENNY_RESP" | head -c 120)"
+      pass "Penny↔vLLM round-trip OK (→ ${PS})"
+      # Persist result for operator inspection alongside other artifacts —
+      # the user asked for "결과가 잘 나오는지 스크린샷과 텍스트 결과로 확인"
+      # (verify via screenshot + text). The JSON body is the "text" evidence.
+      cp "$PENNY_RESP" "$ART_DIR/penny-vllm-chat-transcript.json"
+    else
+      fail "Penny↔vLLM response had no content" "$(head -c 600 "$PENNY_RESP")"
+    fi
+  else
+    fail "Penny↔vLLM curl failed (proxy down / claude missing / timeout)" \
+      "$(cat "$PENNY_RESP" 2>&1 | head -c 600)"
+  fi
+else
+  skip "Optional Penny↔vLLM round-trip (set --penny-vllm to enable)"
 fi
 
 # ---------------------------------------------------------------------------
