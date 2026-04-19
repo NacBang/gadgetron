@@ -37,11 +37,15 @@ use serde::{Deserialize, Serialize};
 /// # Audit invariant
 ///
 /// Direct-action dispatch is definitionally session-less (workbench doc
-/// §2.2.4 + D-20260411-*). It bypasses Penny's
-/// `GadgetAuditEventSink` — `WorkbenchActionResult.audit_event_id` is
-/// intentionally `None` on this path. Wiring a parallel audit sink for
-/// direct actions is a separate follow-up tracked as
-/// `TODO(audit-direct-action)`.
+/// §2.2.4 + D-20260411-*) so it does not route through Penny's
+/// `GadgetAuditEventSink`. The parallel sink originally tracked as
+/// `TODO(audit-direct-action)` shipped in ISSUE 3 / v0.2.6 (PR #188) as
+/// `gadgetron_core::audit::ActionAuditSink` — every terminal path in
+/// `InProcessWorkbenchActionService::invoke` populates
+/// `WorkbenchActionResult.audit_event_id` with a fresh UUID and emits
+/// one `ActionAuditEvent::DirectActionCompleted` event to the wired
+/// sink (Postgres-backed via `gadgetron_xaas::audit::ActionAuditEventWriter`
+/// when a pool is configured, Noop otherwise).
 #[async_trait]
 pub trait GadgetDispatcher: Send + Sync + 'static {
     /// Dispatch a Gadget call by namespaced name (e.g. `"wiki.search"`).
