@@ -97,7 +97,7 @@ In short: scopes are not a strict binary route gate on the workbench surface. An
 
 ## Creating API keys
 
-### Using the CLI (Sprint 7+)
+### Using the CLI
 
 The recommended way to create tenants and keys is the CLI. The CLI handles key generation, hashing, and database insertion for you.
 

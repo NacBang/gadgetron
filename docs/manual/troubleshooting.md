@@ -509,11 +509,73 @@ If you are uploading a large document, chunk it into pieces that each fit under 
 
 ## Log interpretation
 
+**Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.
+
+For `cargo run` / `gadgetron serve` foreground runs (not via `demo.sh`), logs go to **stderr**. Redirect with `2>gadgetron.log` if you need persistence.
+
 Enable debug logging to see the full middleware trace:
 
 ```sh
 RUST_LOG=gadgetron=debug ./target/release/gadgetron
 ```
+
+**Log format on trunk.** The subscriber is `tracing_subscriber::fmt()` with `EnvFilter::try_from_env("RUST_LOG")` (see `crates/gadgetron-cli/src/main.rs:2494-2499`). Output is the default human-readable text format, not JSON. Each line looks like:
+
+```
+2026-04-19T00:00:00.000Z  LEVEL target::path: message key1=value1 key2=value2
+```
+
+Structured tracing fields appear as bare `key=value` pairs at the end of the line (not JSON keys). Custom targets — e.g. `tracing::info!(target: "wiki_seed", ...)` — replace the module path with the target name (`wiki_seed:` in that case). Switch to JSON output by swapping in `tracing_subscriber::fmt().json()`; the default text format is what `demo.sh`-flow operators see.
+
+Common grep recipes against the demo log path (each pattern is grounded to the exact `tracing::` call that emits it, not a guess):
+
+```sh
+# Every response rejected by the gateway error sink. The fmt subscriber
+# renders `tracing::error!(error.code = ..., error.type_ = ...)` as
+# `error.code=<code> error.type_=<type>` at the end of the line.
+# Trace sink:      crates/gadgetron-gateway/src/error.rs:27-33
+#                  (emits error.code = err.error_code() — dynamic field)
+# Code strings:    crates/gadgetron-core/src/error.rs:319-328
+#                  (the error_code() match arms that resolve to the literal
+#                  alternation values below)
+# Note: 413 `request_too_large` is NOT in this alternation — the body-size
+# limit layer at crates/gadgetron-gateway/src/server.rs:68-74 emits the
+# JSON error body directly, without going through the tracing sink.
+grep -E 'error\.code=(invalid_api_key|forbidden|quota_exceeded|routing_failure|provider_error|stream_interrupted|config_error|billing_error)' \
+  .gadgetron/demo/gadgetron.log
+
+# Scope-denial 403s — one WARN line carries tenant_id, required_scope,
+# and path together. Source: crates/gadgetron-gateway/src/middleware/scope.rs:62-67.
+grep 'scope denied' .gadgetron/demo/gadgetron.log
+
+# Startup: each provider registration emits an INFO with name= field.
+# Source: crates/gadgetron-cli/src/main.rs:2482.
+grep 'provider registered' .gadgetron/demo/gadgetron.log
+
+# Penny registration — happy path and failure path have distinct strings.
+# Source: crates/gadgetron-cli/src/main.rs:~1760-1790.
+#   Happy:   `penny: registered (...)`
+#   Failure: `penny: failed to prepare knowledge registry; skipping`
+grep -E 'penny: registered|penny: failed to prepare knowledge registry' \
+  .gadgetron/demo/gadgetron.log
+
+# Wiki seed injection — happy path emits target "wiki_seed" + message
+# starting "injected" (tracing::info!).
+# Source: crates/gadgetron-knowledge/src/wiki/store.rs:462-466.
+grep 'wiki_seed: injected' .gadgetron/demo/gadgetron.log
+
+# Wiki seed injection — failure path (non-fatal WARN with different message
+# and on a different target). If you see this, seeds were not injected but
+# startup continued normally.
+# Source: crates/gadgetron-knowledge/src/wiki/store.rs:82-85 (tracing::warn!
+# with target="wiki_seed", message "failed to inject seed pages on first open
+# (non-fatal)").
+grep 'wiki_seed: failed to inject seed pages' .gadgetron/demo/gadgetron.log
+```
+
+Bump verbosity to see the full middleware trace by re-running with
+`RUST_LOG=gadgetron=debug` — the same grep recipes still work; the volume
+just grows.
 
 Key log fields to look for:
 

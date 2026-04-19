@@ -65,10 +65,14 @@ All error codes, their HTTP status, and the type they map to:
 | `knowledge_document_not_found` | 404 | `invalid_request_error` | Wiki path does not exist — returned by get, delete, and rename gadgets |
 | `knowledge_invalid_query` | 400 | `invalid_request_error` | Query input to a wiki search gadget is malformed or empty |
 | `knowledge_derived_apply_failed` | 500 | `server_error` | Derived index update failed under `await_derived` write consistency mode |
+| `bundle_manifest_error` | 400 | `invalid_request_error` | Bundle manifest (`bundle.toml`) failed to parse or validate |
+| `bundle_install_failed` | 500 | `server_error` | Bundle install step failed (unpack, copy, register) |
+| `bundle_plug_id_invalid` | 400 | `invalid_request_error` | Plug id referenced by a bundle is malformed or collides with a reserved id |
+| `bundle_home_unresolvable` | 500 | `server_error` | `GADGETRON_BUNDLES_HOME` / `GADGETRON_DATA_DIR` could not be resolved to a usable directory |
 
 Additional database sub-codes (`db_connection_failed`, `db_migration_failed`, `db_constraint`, `db_query_failed`, `db_error`) all return HTTP 500 with type `server_error`.
 
-Node sub-code `node_invalid_mig_profile` returns HTTP 400; all other node sub-codes return HTTP 500.
+Node sub-code `node_invalid_mig_profile` returns HTTP 400; all other node sub-codes return HTTP 500. Node variants not in the specific sub-code list surface as `node_error` (500, `server_error`) — the catch-all from `error_code()` in `crates/gadgetron-core/src/error.rs`.
 
 ### Knowledge error bodies (examples)
 
