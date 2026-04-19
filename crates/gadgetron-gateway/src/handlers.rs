@@ -182,6 +182,21 @@ async fn handle_non_streaming(
                 cost_cents,
                 latency_ms,
             });
+            // ISSUE 4 TASK 4.4: fan out to the /events/ws WebSocket
+            // bus so operator dashboards see the completion in real
+            // time.
+            state.activity_bus.publish(
+                gadgetron_core::activity_bus::ActivityEvent::ChatCompleted {
+                    tenant_id: ctx.tenant_id,
+                    request_id: ctx.request_id,
+                    model: req.model.clone(),
+                    status: "ok".into(),
+                    input_tokens: response.usage.prompt_tokens as i64,
+                    output_tokens: response.usage.completion_tokens as i64,
+                    cost_cents,
+                    latency_ms: latency_ms as i64,
+                },
+            );
 
             // PSL-1d: fire-and-forget capture on successful non-streaming chat.
             // Authority: docs/design/core/knowledge-candidate-curation.md §2.1,
@@ -232,6 +247,18 @@ async fn handle_non_streaming(
                 cost_cents: 0,
                 latency_ms,
             });
+            state.activity_bus.publish(
+                gadgetron_core::activity_bus::ActivityEvent::ChatCompleted {
+                    tenant_id: ctx.tenant_id,
+                    request_id: ctx.request_id,
+                    model: req.model.clone(),
+                    status: "error".into(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_cents: 0,
+                    latency_ms: latency_ms as i64,
+                },
+            );
 
             // PSL-1d / KC-1c: fire-and-forget error capture for non-streaming.
             // Streaming error capture requires a Drop-guard (out of scope, W3-KC-1d).
@@ -343,9 +370,10 @@ async fn handle_streaming(
     // known gap (see the `0, 0` comment the code used to carry). The
     // dispatch-time AuditEntry stays: operators want an A4 audit row
     // even if the stream is abandoned before the first byte.
-    let guard = StreamEndGuard::new(
+    let guard = StreamEndGuard::new_with_activity_bus(
         state.audit_writer.clone(),
         state.candidate_coordinator.clone(),
+        Some(state.activity_bus.clone()),
         ctx.tenant_id,
         ctx.api_key_id,
         ctx.request_id,
