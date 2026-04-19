@@ -185,6 +185,8 @@ Penny 런타임이 읽는 설정 블록은 아래와 같습니다. 각 필드의
 
 ## 트러블슈팅
 
+> **연산자용 와이어 레벨 참조**: 아래 표는 증상→원인→대응 매핑입니다. 실제 HTTP 응답 바디의 정확한 JSON 형태(OpenAI-shaped envelope, `message` / `type` / `code` 필드, 각 코드별 HTTP status)는 [api-reference.md §Penny / Wiki error bodies](api-reference.md#penny--wiki-error-bodies-examples)에서 예시와 함께 확인할 수 있습니다. 클라이언트 SDK를 구현하거나 자동화된 에러 매칭을 작성한다면 그쪽을 먼저 보십시오.
+
 | 증상 | 원인 | 대응 |
 |---|---|---|
 | `/v1/models`에 `penny`가 없음 | `[knowledge]` 섹션이 없거나 검증에 실패함 | `gadgetron.toml`에 `[knowledge]`를 추가하고, `wiki_path` 부모 디렉터리가 존재하는지 확인한 뒤 서버 로그에서 `penny: registered`를 확인 |
