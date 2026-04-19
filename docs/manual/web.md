@@ -266,3 +266,5 @@ api_base_path = "/v1"    # 브라우저가 보는 API 경로 prefix (기본 "/v1
 ## 변경 이력
 
 - **2026-04-14** (D-20260414-02 + ADR-P2A-04): 신규 문서. OpenWebUI sibling process → `gadgetron-web` embed 로 전환. Origin 격리 요구사항·키 회전·XSS 방어 M-W1~M-W7 명시.
+- **2026-04-19 — ISSUE 3 / v0.2.6 (PR #188) — 승인 흐름 섹션 추가**: `/web/wiki` 테이블에 `wiki-delete` (destructive, approval-gated) 행 추가 + §승인 흐름 (destructive action lifecycle) 섹션 신설 — invoke → pending_approval → approve/deny 요청 shape 와 409/403 에러 케이스, Gate 7h.7 / 7h.8 참조.
+- **2026-04-19 — ISSUE 4 / v0.2.7 (PR #194) — `/web/dashboard` 페이지 섹션 추가**: Chat / Wiki / Dashboard 삼형제 레일 탭, 브라우저용 `?token=` 쿼리-토큰 auth fallback, `/events/ws` 랙 프레임 프로토콜, Gate 7k.3 / 11f 참조. ISSUE 5 / v0.2.8 (PR #199) 후속으로 shipped `ActivityBus` 퍼블리셔 (`ChatCompleted` + `ToolCallCompleted`) 열거 + ISSUE 6 / v0.2.9 (PR #201) `CapturedActivityEvent` 갈림길 명시 (broadcast bus 가 아닌 coordinator 경유).
