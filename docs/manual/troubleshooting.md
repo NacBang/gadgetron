@@ -685,6 +685,38 @@ But the **read projection** — reading from the coordinator's backing store int
 
 ---
 
+### HTTP 404 — `mcp_unknown_tool` on `POST /v1/tools/{name}/invoke`
+
+**What you observe:**
+
+```json
+{
+  "error": {
+    "message": "unknown tool: does.not.exist",
+    "type": "invalid_request_error",
+    "code": "mcp_unknown_tool"
+  }
+}
+```
+
+**Why:** ISSUE 7 / v0.2.10+ exposes `GET /v1/tools` as the catalog + `POST /v1/tools/{name}/invoke` as dispatch. The 404 surfaces when the `{name}` in the URL is not in the registry, OR the tool exists but is filtered out of the calling key's view (same masking principle as `workbench_action_not_found` — 404 instead of 403 so scope-gated tool existence doesn't leak).
+
+**Fix:** Query `GET /v1/tools` first; it returns the full `{tools: [...], count}` slice the calling key can invoke. If the expected tool is missing, inspect gateway startup logs for `tracing` target `penny_registry` — a tool set to `never` / `ask` mode in `[agent.gadgets.*]` gets dropped from the registry at freeze time. E2E Gate 7i.3 pins the `mcp_unknown_tool` error code for unknown names as part of the MCP error taxonomy.
+
+---
+
+### `/v1/tools/{name}/invoke` returns success but `tool_audit_events` has no row
+
+**What you observe:** External MCP client (claude-code, custom agent) successfully invokes a tool, gets a `{content, is_error:false}` response, but `GET /api/v1/web/workbench/audit/tool-events?tool_name=<x>` returns zero rows.
+
+**Why:** ISSUE 7 TASK 7.3 (PR #207) wires the audit fan-out behind a Postgres pool. Without `DATABASE_URL` (= `--no-db` or unwired demo), the `GadgetAuditEventWriter` falls back to `NoopGadgetAuditEventSink` and the `tool_audit_events` INSERT never happens — the invoke still succeeds end-to-end, but leaves no durable trail.
+
+Parallel failure on the read side: `GET /audit/tool-events` also 400s without a pool (see §HTTP 400 — `tool audit query requires Postgres`).
+
+**Fix:** Configure `DATABASE_URL` pointing at a pgvector-enabled Postgres. For demo / no-db evaluation, inspect `tracing` logs with filter `target: "penny_audit"` to observe the in-memory event stream that would have persisted. External-MCP vs Penny-internal attribution is encoded in `owner_id`: external calls set `Some(api_key_id)`, Penny-internal calls set `None` — Gate 7i.4 asserts this invariant.
+
+---
+
 ## Log interpretation
 
 **Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.
