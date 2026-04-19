@@ -293,6 +293,9 @@ enabled = true
 api_base_path = "/v1"
 # Optional — file-based descriptor catalog source (ISSUE 8 TASK 8.4 / v0.4.4 / PR #216)
 catalog_path = "/etc/gadgetron/catalog.toml"
+# Optional — multi-bundle directory source (ISSUE 9 TASK 9.2 / v0.4.7 / PR #220)
+# Wins over catalog_path when both are set.
+bundles_dir = "/etc/gadgetron/bundles"
 ```
 
 - `enabled`: `false`면 `/web/*` subtree 자체를 mount하지 않습니다.
@@ -308,11 +311,22 @@ Minimal `bundles/gadgetron-core/bundle.toml` shape:
 ```toml
 [bundle]
 id = "gadgetron-core"
-version = "0.4.6"
+version = "0.4.7"
 
 # [[views]] and [[actions]] entries follow, one table array per descriptor.
 # Schema mirrors WorkbenchViewDescriptor / WorkbenchActionDescriptor exactly
 # because both types derive Deserialize.
+```
+
+- `bundles_dir` (ISSUE 9 TASK 9.2 / v0.4.7 / PR #220): absolute path to a directory containing one subdirectory per bundle, each with a `bundle.toml` (for example `/etc/gadgetron/bundles/gadgetron-core/bundle.toml`, `/etc/gadgetron/bundles/acme-ops/bundle.toml`, etc.). **Precedence: `bundles_dir` > `catalog_path` > `seed_p2b` fallback** — when `bundles_dir` is set it replaces both the single-file source and the hardcoded seed. On every reload (HTTP endpoint or SIGHUP) the handler calls `DescriptorCatalog::from_bundle_dir(dir)`, which (a) scans every immediate subdirectory, (b) skips those without a `bundle.toml` (operator workspaces, hidden dirs — no warning), (c) reads each manifest, (d) **merges views + actions into one catalog in deterministic alphabetical path order** so reload is idempotent across process restarts. The reload response widens with a top-level `bundles: Vec<BundleMetadata>` listing every contributing bundle (omitted via `skip_serializing_if = "Vec::is_empty"` when any other source wins) — admin tooling distinguishes "single bundle loaded" from "N bundles aggregated" by the presence of `bundles` vs the singular `bundle`. **Duplicate action or view ids across bundles are a HARD FAILURE** — the handler returns HTTP 500 `config_error` naming the conflicting id and both bundle ids that declared it. The running snapshot is NOT replaced on failure, matching the TASK 8.4 parse-failure guarantee — a rogue bundle manifest cannot take the workbench down. `allow_direct_actions` is OR-folded across bundles (if ANY manifest opts in, the merged catalog opts in). Example directory layout:
+
+```
+/etc/gadgetron/bundles/
+├── gadgetron-core/
+│   └── bundle.toml    # mirrors seed_p2b() (shipped in repo)
+├── acme-ops/
+│   └── bundle.toml    # operator-authored bundle for their workflows
+└── README.md          # ignored (no bundle.toml inside)
 ```
 
 ---

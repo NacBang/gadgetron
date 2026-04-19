@@ -152,8 +152,8 @@ install/remove capabilities without restart. Substrate for the ecosystem.
     follow-up TASK 8.6 if operator feedback shows demand — SIGHUP
     covers the 90% case with no extra deps or background thread.
 
-### In-flight ISSUE (9)
-- **ISSUE 9 — real bundle manifests** (in-flight; 0.4.6 ships TASK 9.1)
+### Functionally complete (pending EPIC 3 close)
+- **ISSUE 9 — real bundle manifests** — all 3 TASKs shipped across 0.4.6 / 0.4.7 / 0.4.8 (PRs #219 / #220 / #222). Bundle metadata on first-party file, multi-bundle aggregation via `[web] bundles_dir` with hard duplicate-id collisions, and the bundle-driven harness default so E2E runs exercise the production code path.
   - TASK 9.1 ✅ — `BundleMetadata { id, version }` attaches to
     `DescriptorCatalog` via an optional `[bundle]` table in the TOML
     source (0.4.5 → 0.4.6). Reload response gains a `bundle` field

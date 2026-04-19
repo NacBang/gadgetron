@@ -17,19 +17,31 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; nineteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
-#175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
-7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207 7i.4,
-#213 7q.1 + 7q.2, #214 / #216 / #217 / #219 no-new-gates — ISSUE 8
-TASKs 8.3 / 8.4 / 8.5 + ISSUE 9 TASK 9.1 all reuse the existing
-Gate 7q.1 cross-check (response `action_count` vs live
-`/workbench/actions` count) which implicitly proves both catalog
-and validators swapped in lockstep (TASK 8.3), the file-based
-source produced a valid snapshot (TASK 8.4 `catalog_path` fallback
-path), the HTTP-triggered reload landed (TASK 8.5 shares
-`perform_catalog_reload()` with SIGHUP path), and the optional
-`bundle` response field is additive-only (TASK 9.1 `skip_
-serializing_if`) — 64 → 83 PASS). Run
+refresh; twenty-two PRs have landed since (#169 7k.2, #172 7n.2,
+#173 9c, #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188
+7h.7 + 7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207
+7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220
+no-new-gates — ISSUE 8 TASKs 8.3 / 8.4 / 8.5 + ISSUE 9 TASKs 9.1 /
+9.2 all reuse the existing Gate 7q.1 cross-check (response
+`action_count` vs live `/workbench/actions` count) which implicitly
+proves both catalog and validators swapped in lockstep (TASK 8.3),
+the file-based source produced a valid snapshot (TASK 8.4
+`catalog_path` fallback path), the HTTP-triggered reload landed
+(TASK 8.5 shares `perform_catalog_reload()` with SIGHUP path), the
+optional `bundle` response field is additive-only (TASK 9.1
+`skip_serializing_if`), and the multi-bundle merge produced a
+coherent snapshot (TASK 9.2 `from_bundle_dir` + alphabetical order +
+duplicate-id hard error); **#222 7q.3 + retarget of 7q.1** —
+ISSUE 9 TASK 9.3 flipped the harness config from implicit `seed_p2b`
+fallback to explicit `[web] bundles_dir = <repo>/bundles`, Gate 7q.1
+now pins `source == "bundles_dir"` end-to-end, and new Gate 7q.3
+asserts `.bundles[0].id == "gadgetron-core"` so a rename of the
+first-party bundle trips the gate; **#223 7q.4 + 7q.5** — ISSUE 10
+TASK 10.1 shipped the read-only `GET /admin/bundles` enumeration
+endpoint with Management scope, so the harness now also pins the
+response shape + `gadgetron-core` enumeration with `action_count=5`
+(7q.4) and the OpenAiCompat → 403 RBAC contract (7q.5) — 64 →
+86 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -67,8 +79,11 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7k.2 | Management `/api/v1/costs` | PR #169: sibling of 7k — same scope, same pass set; catches scope-handler divergence |
 | 7k.3 | `/workbench/usage/summary` shape (OpenAiCompat scope) | PR #194: all three sub-objects (`chat`, `actions`, `tools`) present with fixed fields even in a zero-state window; `window_hours` echoed from the query param (default 24, clamp `[1,168]`) |
 | 7k.4 | `/workbench/audit/tool-events` shape + limit clamp | PR #199: `{events:[], returned=N}` with `returned == events|length` (tenant-pinned read); `?limit=9999` silently clamps server-side (contract is `[1,500]`) |
-| 7q.1 | `/workbench/admin/reload-catalog` happy path (Management scope) | PR #213: `{reloaded:true, source:"seed_p2b", action_count:N, view_count:N}` response shape + cross-check that `action_count` equals the live `GET /workbench/actions` listing right after (catches "swap happened but read path still sees old pointer" regression from the TASK 8.1 ArcSwap substrate). PR #214 / TASK 8.3 re-uses this gate: since `/workbench/actions` reads validators from the same `Arc<ArcSwap<CatalogSnapshot>>` snapshot, an `action_count` match proves both sides (catalog + validators) published together — no "new catalog against old validators" window. |
+| 7q.1 | `/workbench/admin/reload-catalog` happy path (Management scope) | PR #213 (original) + PR #222 (retargeted): `{reloaded:true, source:"bundles_dir", action_count:N, view_count:N}` response shape + cross-check that `action_count` equals the live `GET /workbench/actions` listing right after (catches "swap happened but read path still sees old pointer" regression from the TASK 8.1 ArcSwap substrate). **Assertion history**: originally pinned `source:"seed_p2b"` (PR #213, TASK 8.2 default); PR #222 / TASK 9.3 flipped the harness config to `[web] bundles_dir = <repo>/bundles` so the assertion is now `source:"bundles_dir"` — this proves the bundle loader is wired end-to-end and that operators' default production path is harness-covered. PR #214 / TASK 8.3 re-uses this gate: since `/workbench/actions` reads validators from the same `Arc<ArcSwap<CatalogSnapshot>>` snapshot, an `action_count` match proves both sides (catalog + validators) published together — no "new catalog against old validators" window. |
 | 7q.2 | `/workbench/admin/reload-catalog` RBAC enforcement | PR #213: same endpoint called with an OpenAiCompat key → 403 (admin sub-tree scope rule precedes the broader workbench rule in `scope_guard_middleware`) |
+| 7q.3 | `/workbench/admin/reload-catalog` contributing-bundles list | PR #222 / TASK 9.3: `.bundles[0].id == "gadgetron-core"` on the reload response when the harness boots against `bundles_dir = <repo>/bundles`. Catches (a) a rename of the first-party bundle (`bundles/gadgetron-core/bundle.toml` → some other id), (b) a silent drop of the `bundles` field from the response (e.g. serde attribute regression removing `skip_serializing_if` or changing `pub bundles: Vec<...>` back to `Option<...>` semantics), (c) the `from_bundle_dir` merge path silently falling through to a different source. |
+| 7q.4 | `GET /workbench/admin/bundles` bundle-discovery shape + enumeration | PR #223 / TASK 10.1: Management-scoped `GET /api/v1/web/workbench/admin/bundles` returns `{bundles_dir, count, bundles: [...]}` with the first-party `gadgetron-core` bundle enumerated at `.bundles[0]` and `.bundles[0].action_count == 5` (matches the seed action set that drift-test guards). Catches: shape regressions (missing top-level fields, `bundles[]` no longer containing `bundle.id` / `source_path` / `action_count` / `view_count`), enumeration drift (first-party bundle renamed or dropped from the repo `bundles/` tree), action-count drift (seed action set changes without drift-test or bundle file updating in lockstep). |
+| 7q.5 | `GET /workbench/admin/bundles` RBAC enforcement | PR #223 / TASK 10.1: same endpoint called with an OpenAiCompat key → 403. Inherits the admin sub-tree scope rule in `scope_guard_middleware` (same path prefix the 7q.2 RBAC gate pins on the reload endpoint). Catches regressions where a future TASK 10.2/10.3/10.4 admin endpoint accidentally exposes the scope rule to a broader path prefix. |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
