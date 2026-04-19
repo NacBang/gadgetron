@@ -664,6 +664,27 @@ then closes the socket.
 
 ---
 
+### `/workbench/activity` returns `{"entries": [], "is_truncated": false}` even after real Penny tool calls
+
+**What you observe:** `GET /api/v1/web/workbench/activity` returns an empty array regardless of traffic — direct-action invocations AND Penny tool calls both ran during your session, but the endpoint reports nothing.
+
+**Why:** This is the **current state**, not a bug. The Penny tool-call + direct-action write paths that feed `/activity` are both live as of v0.2.9:
+
+- Direct-action: `InProcessWorkbenchActionService::invoke` produces `CapturedActivityEvent { origin: UserDirect, kind: DirectAction }` since ISSUE 3 / v0.2.6.
+- Penny tool-call: `GadgetAuditEventWriter::with_coordinator()` fans out each tool call to `CapturedActivityEvent { origin: Penny, kind: GadgetToolCall }` since ISSUE 6 / v0.2.9 (PR #201).
+
+But the **read projection** — reading from the coordinator's backing store into `WorkbenchActivityResponse.entries` — has not been wired yet. `InProcessWorkbenchProjection::activity` still returns an empty vector (see [api-reference.md §/workbench/activity](api-reference.md#get-apiv1webworkbenchactivity)). That's the PSL-1 read-path work tracked for a future ISSUE.
+
+**Fix (inspect the captured rows today):**
+
+- `tracing` logs: filter on `target: "action_audit"` for direct-action rows and `target: "penny_audit"` for Penny tool-call rows. The `CapturedActivityEvent` fan-out emits an `INFO`-level span per row so operators can eyeball attribution without a read-side endpoint.
+- `/audit/events` (direct-action side) and `/audit/tool-events` (Penny side) both query the durable audit tables directly. If what you want is "which actions ran in the last hour" rather than the activity feed's richer `CapturedActivityEvent` shape, the two audit endpoints are the shipped read path today.
+- Dashboard tiles: `GET /usage/summary` + `/events/ws` see the live counts/events. The `/events/ws` WebSocket publishes `ActivityEvent::ChatCompleted` + `::ToolCallCompleted`, which are the broadcast-bus cousins of the durable `CapturedActivityEvent` rows (different path, overlapping signal).
+
+**When does this endpoint start returning rows?** When a future ISSUE wires the coordinator→projection read path. No blocker remains on the write side — both origins produce rows today.
+
+---
+
 ## Log interpretation
 
 **Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.
