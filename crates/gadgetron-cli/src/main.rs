@@ -1561,6 +1561,21 @@ async fn init_serve_runtime(
     // - optional rate-limit wrapper (TASK 11.2): when
     //   `[quota_rate_limit] requests_per_minute > 0`, every request
     //   passes a per-tenant token-bucket check BEFORE the cost check.
+    // ISSUE 14 TASK 14.2 — first-admin bootstrap. Runs once per startup
+    // when a pg pool is available; no-op when users table is already
+    // populated; hard error if users is empty AND [auth.bootstrap] is
+    // missing. Never runs on no-db startups (no users table to check).
+    if let Some(pool) = pg_pool.as_ref() {
+        if let Err(e) = gadgetron_xaas::auth::bootstrap::bootstrap_admin_if_needed(
+            pool,
+            config.auth.bootstrap.as_ref(),
+        )
+        .await
+        {
+            return Err(anyhow::anyhow!("bootstrap admin: {e}"));
+        }
+    }
+
     let base_enforcer: SharedQuotaEnforcer = if let Some(pool) = pg_pool.clone() {
         use gadgetron_xaas::quota::enforcer::PgQuotaEnforcer;
         tracing::info!(
@@ -2842,6 +2857,7 @@ mod tests {
             bundles: std::collections::BTreeMap::new(),
             quota_rate_limit: Default::default(),
             features: gadgetron_core::config::FeaturesConfig::default(),
+            auth: gadgetron_core::config::AuthConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
         assert!(
@@ -2880,6 +2896,7 @@ mod tests {
             bundles: std::collections::BTreeMap::new(),
             quota_rate_limit: Default::default(),
             features: gadgetron_core::config::FeaturesConfig::default(),
+            auth: gadgetron_core::config::AuthConfig::default(),
         };
         let map = build_providers(&cfg).unwrap();
         assert!(
@@ -2918,6 +2935,7 @@ mod tests {
             bundles: std::collections::BTreeMap::new(),
             quota_rate_limit: Default::default(),
             features: gadgetron_core::config::FeaturesConfig::default(),
+            auth: gadgetron_core::config::AuthConfig::default(),
         };
         let map = build_providers(&cfg).expect("Gemini provider must now be implemented");
         assert!(

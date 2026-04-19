@@ -338,6 +338,12 @@ log "=== Gate 3: bootstrap DB schema via transient serve ==="
 
 export GADGETRON_DATABASE_URL="$PG_URL"
 
+# ISSUE 14 TASK 14.2 — env var referenced by `[auth.bootstrap]` in
+# gadgetron-test.toml.tmpl. Any non-empty value works here; the
+# harness doesn't log into the web UI as admin, so the plaintext
+# password never leaves the test process.
+export GADGETRON_BOOTSTRAP_ADMIN_PASSWORD="harness-ci-password"
+
 # Render a minimal config for the bootstrap boot. Use a throwaway wiki dir
 # so we don't touch the real one before the harness test.
 BOOT_WIKI="$(mktemp -d)/boot-wiki"
@@ -2375,6 +2381,7 @@ WARN_LINES="$(sed "$STRIP_ANSI" "$GAD_LOG" 2>/dev/null \
   | grep -vE 'git config user\.name / user\.email not set' \
   | grep -vE 'scope denied .*path=/api/v1/' \
   | grep -vE 'quota_configs row missing' \
+  | grep -vE '\[auth\.bootstrap\] is configured but users table is not empty' \
   || true)"
 if [ -z "$WARN_LINES" ]; then
   pass "no unexpected WARN entries in gadgetron.log (P2A ask-mode + git-config benign WARNs whitelisted)"

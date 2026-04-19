@@ -66,6 +66,9 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron bundle install <name>` — install a Bundle by name. Stubbed in P2A; prints `"bundle install {name}: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."` at runtime with the actual bundle name substituted for `{name}`. `gadgetron install <name>` is an alias for the same command per the ADR.
 - `gadgetron bundle list` — list installed Bundles. Stubbed in P2A; prints `"bundle list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."`
 - `gadgetron plug list` — inspect active Plugs (which Rust trait implementation fills each core port). Stubbed in P2A; prints `"plug list: not yet implemented — tracked in P2B per ADR-P2A-10 §CLI."`
+
+> **Note on the four stub CLI commands above (`gadget list` / `bundle install` / `bundle list` / `plug list`)** — the "tracked in P2B per ADR-P2A-10 §CLI" phrasing in the runtime messages predates EPIC 3 close. EPIC 3 shipped the **HTTP** bundle marketplace (`GET /admin/bundles` / `POST /admin/bundles` / `DELETE /admin/bundles/{id}` / Ed25519 signed manifests — see [api-reference.md](api-reference.md)) but the corresponding CLI verbs did NOT land. Current status: **still stubbed, no active shipping schedule** — operators wanting the same capabilities today use the HTTP endpoints directly (or via a `curl` wrapper). The stub text in `crates/gadgetron-cli/src/main.rs` is code drift that will be updated when the CLI wrapper work actually starts.
+
 - `gadgetron reindex [--full]` — rebuild pgvector semantic index from wiki filesystem; `--full` forces all pages, default is incremental
 - `gadgetron wiki audit [--config <path>]` — report stale pages and pages without frontmatter
 - `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
