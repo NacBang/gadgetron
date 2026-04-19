@@ -701,19 +701,22 @@ fi
 log "=== Gate 7f: workbench /actions ==="
 ACTIONS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/actions" 2>&1 || true)"
-# seed_p2b ships exactly ONE action: `knowledge-search`. Assert it
-# by id — not just array-length — so a regression that swaps the
-# id (e.g. renames the seed) fails loudly here instead of only at
-# the happy-path Gate 7h.1 404.
+# seed_p2b ships four gadget-backed actions — the full wiki CRUD loop:
+# knowledge-search + wiki-list + wiki-read + wiki-write. Assert each by
+# id so a regression that drops or renames any of them (e.g. bundle
+# wiring breaks) fails loudly here, not just at the happy-path gates.
 if echo "$ACTIONS_RESP" | jq -e '
      (.actions | type == "array")
-     and (.actions | length >= 1)
+     and (.actions | length >= 4)
      and any(.actions[]; .id == "knowledge-search")
+     and any(.actions[]; .id == "wiki-list")
+     and any(.actions[]; .id == "wiki-read")
+     and any(.actions[]; .id == "wiki-write")
    ' >/dev/null 2>&1; then
   ACTION_IDS="$(echo "$ACTIONS_RESP" | jq -c '[.actions[].id]')"
-  pass "/workbench/actions surfaces $ACTION_IDS (includes knowledge-search)"
+  pass "/workbench/actions surfaces full CRUD catalog $ACTION_IDS"
 else
-  fail "/workbench/actions missing knowledge-search (seed_p2b regressed?)" \
+  fail "/workbench/actions missing one or more CRUD actions (seed_p2b regressed?)" \
     "$(echo "$ACTIONS_RESP" | head -c 400)"
 fi
 
@@ -859,6 +862,89 @@ if [ "$ACTION_RESP" = "$ACTION_RESP2" ]; then
 else
   fail "replay cache MISS on same client_invocation_id" \
     "first:  $(echo "$ACTION_RESP" | head -c 200) | second: $(echo "$ACTION_RESP2" | head -c 200)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7h.6: big-trunk E2E — wiki write → search → read via workbench API
+# ---------------------------------------------------------------------------
+#
+# Proves the workbench API is a usable product — not just "endpoints
+# return 200". A real user can:
+#   1. Write a page via POST /actions/wiki-write
+#   2. Search for it via POST /actions/knowledge-search (finds the page)
+#   3. Read it back via POST /actions/wiki-read (content matches)
+#
+# Every step exercises the GadgetDispatcher wiring landed in PR #175
+# across a DIFFERENT gadget (write/search/read) — one gate smoke-tests
+# three gadget routes at once. A regression in the dispatcher or in
+# any of the three `KnowledgeGadgetProvider` handlers breaks this
+# scenario loudly, instead of hiding in unit tests.
+log "=== Gate 7h.6: E2E — wiki write → search → read via workbench ==="
+
+# Use a name that WON'T collide with any seed (the "Gadgetron 위키"
+# README.md etc. are seeded on fresh wiki; we want our own sentinel).
+E2E_PAGE_NAME="harness/e2e-$(date +%s)"
+E2E_PAGE_CONTENT="# E2E sentinel
+
+This page was written by the gadgetron-plan harness via the workbench
+\`wiki-write\` action. Its unique marker is __GADGETRON_HARNESS_E2E_MARKER__."
+
+# Step 1 — wiki-write.
+WRITE_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+WRITE_BODY="$(jq -cn \
+  --arg name "$E2E_PAGE_NAME" \
+  --arg content "$E2E_PAGE_CONTENT" \
+  --arg ciid "$WRITE_CIID" \
+  '{args: {name: $name, content: $content}, client_invocation_id: $ciid}')"
+WRITE_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/wiki-write" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$WRITE_BODY" 2>&1 || true)"
+if echo "$WRITE_RESP" | jq -e '.result.status == "ok"' >/dev/null 2>&1; then
+  pass "wiki-write → 200 status=ok (page=$E2E_PAGE_NAME)"
+else
+  fail "wiki-write regression" "$(echo "$WRITE_RESP" | head -c 400)"
+fi
+
+# Step 2 — knowledge-search should find the sentinel marker.
+SEARCH_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+SEARCH_BODY="$(jq -cn --arg ciid "$SEARCH_CIID" \
+  '{args: {query: "__GADGETRON_HARNESS_E2E_MARKER__"}, client_invocation_id: $ciid}')"
+SEARCH_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/knowledge-search" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$SEARCH_BODY" 2>&1 || true)"
+if echo "$SEARCH_RESP" | jq -e '
+     .result.status == "ok"
+     and (.result.payload.hits | type == "array")
+     and (.result.payload.hits | length >= 1)
+   ' >/dev/null 2>&1; then
+  HIT_COUNT="$(echo "$SEARCH_RESP" | jq -r '.result.payload.hits | length')"
+  pass "knowledge-search finds sentinel marker (hits=$HIT_COUNT)"
+else
+  fail "knowledge-search: sentinel page not found after write" \
+    "$(echo "$SEARCH_RESP" | jq -c '.result | {status, hits: (.payload.hits // [])}' | head -c 500)"
+fi
+
+# Step 3 — wiki-read returns the same content we wrote.
+READ_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+READ_BODY="$(jq -cn --arg name "$E2E_PAGE_NAME" --arg ciid "$READ_CIID" \
+  '{args: {name: $name}, client_invocation_id: $ciid}')"
+READ_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/wiki-read" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$READ_BODY" 2>&1 || true)"
+if echo "$READ_RESP" | jq -e \
+     '.result.status == "ok"
+      and (.result.payload.content // "" | contains("__GADGETRON_HARNESS_E2E_MARKER__"))' \
+     >/dev/null 2>&1; then
+  pass "wiki-read returns the content we wrote (marker roundtripped)"
+else
+  fail "wiki-read: content missing or marker absent" \
+    "$(echo "$READ_RESP" | jq -c '.result | {status, payload}' | head -c 500)"
 fi
 
 log "=== Gate 7h.0: workbench routes require Bearer (401 on no-auth POST) ==="

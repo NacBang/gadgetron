@@ -59,35 +59,115 @@ impl DescriptorCatalog {
             renderer: WorkbenchRendererKind::Timeline,
             data_endpoint: "/api/v1/web/workbench/views/knowledge-activity-recent/data".into(),
             refresh_seconds: Some(5),
-            action_ids: vec!["knowledge-search".into()],
+            action_ids: vec![
+                "knowledge-search".into(),
+                "wiki-list".into(),
+                "wiki-read".into(),
+                "wiki-write".into(),
+            ],
             required_scope: None,
             disabled_reason: None,
         }];
 
-        let actions = vec![WorkbenchActionDescriptor {
-            id: "knowledge-search".into(),
-            title: "지식 검색".into(),
-            owner_bundle: "core".into(),
-            source_kind: "gadget".into(),
-            source_id: "wiki.search".into(),
-            gadget_name: Some("wiki.search".into()),
-            placement: WorkbenchActionPlacement::CenterMain,
-            kind: WorkbenchActionKind::Query,
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "minLength": 1, "maxLength": 500 },
-                    "max_results": { "type": "integer", "minimum": 1, "maximum": 20 }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
-            destructive: false,
-            requires_approval: false,
-            knowledge_hint: "wiki.search 가젯을 직접 호출합니다.".into(),
-            required_scope: None,
-            disabled_reason: None,
-        }];
+        // Four actions today — the full wiki CRUD loop via workbench.
+        // Each is gadget-backed so the dispatcher (PR #175) routes to
+        // `KnowledgeGadgetProvider` and returns real results in
+        // `WorkbenchActionResult.payload`. This is what turns the
+        // workbench API from "canned 200 OK" into a product users can
+        // actually drive.
+        let actions = vec![
+            WorkbenchActionDescriptor {
+                id: "knowledge-search".into(),
+                title: "지식 검색".into(),
+                owner_bundle: "core".into(),
+                source_kind: "gadget".into(),
+                source_id: "wiki.search".into(),
+                gadget_name: Some("wiki.search".into()),
+                placement: WorkbenchActionPlacement::CenterMain,
+                kind: WorkbenchActionKind::Query,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+                        "max_results": { "type": "integer", "minimum": 1, "maximum": 20 }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+                destructive: false,
+                requires_approval: false,
+                knowledge_hint: "wiki.search 가젯을 직접 호출합니다.".into(),
+                required_scope: None,
+                disabled_reason: None,
+            },
+            WorkbenchActionDescriptor {
+                id: "wiki-list".into(),
+                title: "위키 목록".into(),
+                owner_bundle: "core".into(),
+                source_kind: "gadget".into(),
+                source_id: "wiki.list".into(),
+                gadget_name: Some("wiki.list".into()),
+                placement: WorkbenchActionPlacement::ContextMenu,
+                kind: WorkbenchActionKind::Query,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                destructive: false,
+                requires_approval: false,
+                knowledge_hint: "wiki.list 가젯을 직접 호출합니다.".into(),
+                required_scope: None,
+                disabled_reason: None,
+            },
+            WorkbenchActionDescriptor {
+                id: "wiki-read".into(),
+                title: "위키 읽기".into(),
+                owner_bundle: "core".into(),
+                source_kind: "gadget".into(),
+                source_id: "wiki.get".into(),
+                gadget_name: Some("wiki.get".into()),
+                placement: WorkbenchActionPlacement::ContextMenu,
+                kind: WorkbenchActionKind::Query,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1, "maxLength": 256 }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }),
+                destructive: false,
+                requires_approval: false,
+                knowledge_hint: "wiki.get 가젯을 직접 호출합니다.".into(),
+                required_scope: None,
+                disabled_reason: None,
+            },
+            WorkbenchActionDescriptor {
+                id: "wiki-write".into(),
+                title: "위키 쓰기".into(),
+                owner_bundle: "core".into(),
+                source_kind: "gadget".into(),
+                source_id: "wiki.write".into(),
+                gadget_name: Some("wiki.write".into()),
+                placement: WorkbenchActionPlacement::ContextMenu,
+                kind: WorkbenchActionKind::Mutation,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "content": { "type": "string", "minLength": 0 }
+                    },
+                    "required": ["name", "content"],
+                    "additionalProperties": false
+                }),
+                destructive: false,
+                requires_approval: false,
+                knowledge_hint: "wiki.write 가젯을 직접 호출합니다. P2B에서는 승인 흐름이 stub — 직접 기록됩니다.".into(),
+                required_scope: None,
+                disabled_reason: None,
+            },
+        ];
 
         Self {
             views,
@@ -307,8 +387,14 @@ mod tests {
     fn visible_actions_no_required_scope_visible() {
         let catalog = DescriptorCatalog::seed_p2b();
         let actions = catalog.visible_actions(&openai_scopes());
-        assert_eq!(actions.len(), 1);
-        assert!(actions[0].disabled_reason.is_none());
+        // seed_p2b ships 4 actions: knowledge-search, wiki-list, wiki-read, wiki-write.
+        assert_eq!(actions.len(), 4);
+        for a in &actions {
+            assert!(
+                a.disabled_reason.is_none(),
+                "no disabled_reason on seed actions by default"
+            );
+        }
     }
 
     #[test]
@@ -347,21 +433,22 @@ mod tests {
     fn visible_actions_disabled_reason_set_when_direct_actions_off() {
         let catalog = DescriptorCatalog::seed_p2b().with_allow_direct_actions(false);
         let actions = catalog.visible_actions(&openai_scopes());
-        // Actions are NOT stripped — they remain in the list, but carry disabled_reason.
-        assert_eq!(actions.len(), 1, "action count must be unchanged");
-        let a = &actions[0];
-        assert!(
-            a.disabled_reason.is_some(),
-            "disabled_reason must be set when direct actions are off"
-        );
-        assert!(
-            a.disabled_reason
-                .as_ref()
-                .unwrap()
-                .contains("Direct actions are disabled"),
-            "disabled_reason must describe the policy, got: {:?}",
-            a.disabled_reason
-        );
+        // Actions are NOT stripped — they remain in the list, but each carries disabled_reason.
+        assert_eq!(actions.len(), 4, "action count must be unchanged");
+        for a in &actions {
+            assert!(
+                a.disabled_reason.is_some(),
+                "disabled_reason must be set on every action when direct actions are off"
+            );
+            assert!(
+                a.disabled_reason
+                    .as_ref()
+                    .unwrap()
+                    .contains("Direct actions are disabled"),
+                "disabled_reason must describe the policy, got: {:?}",
+                a.disabled_reason
+            );
+        }
     }
 
     #[test]
