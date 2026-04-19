@@ -586,6 +586,24 @@ else
   fail "workbench bootstrap JSON shape invalid" "$BS_RESP"
 fi
 
+# Deeper shape check: `.knowledge` is a WorkbenchKnowledgeSummary
+# (gadgetron-core/src/workbench.rs) with three bool readiness flags
+# + `last_ingest_at`. `.active_plugs` entries are PlugHealth with
+# `{id, role, healthy, note}`. A regression that changes this shape
+# breaks the /web UI's plugs panel + knowledge indicator silently.
+if echo "$BS_RESP" | jq -e '
+     (.knowledge.canonical_ready | type == "boolean")
+     and (.knowledge.search_ready | type == "boolean")
+     and (.knowledge.relation_ready | type == "boolean")
+     and (.active_plugs | length >= 1)
+     and all(.active_plugs[]; .id and .role and (.healthy | type == "boolean"))
+   ' >/dev/null 2>&1; then
+  pass "workbench bootstrap inner shape (knowledge bools + plug entries)"
+else
+  fail "workbench bootstrap inner shape regressed" \
+    "$(echo "$BS_RESP" | jq -c '{knowledge, active_plugs}')"
+fi
+
 # ---------------------------------------------------------------------------
 # Gate 7b — wiki seed pages (knowledge layer smoke)
 # ---------------------------------------------------------------------------
