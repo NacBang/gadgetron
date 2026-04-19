@@ -70,15 +70,9 @@ Penny는 Claude Code에 딸려오는 내장 도구(`Bash`, `Read`, `Write`, `Edi
 
 ### 1. 기본 로컬 런타임 준비
 
-```sh
-docker run -d \
-  --name gadgetron-pgvector \
-  -e POSTGRES_USER=gadgetron \
-  -e POSTGRES_PASSWORD=secret \
-  -e POSTGRES_DB=gadgetron_demo \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
+pgvector-enabled PostgreSQL 기동 절차는 [installation.md §Step 4 PostgreSQL setup](installation.md#step-4-postgresql-setup) (Ubuntu) 또는 [installation.md §Step 5 PostgreSQL setup](installation.md#step-5-postgresql-setup) (macOS) 을 canonical path 로 따르십시오. 컨테이너가 올라오면 Gadgetron 빌드 + baseline 설정 생성만 실행합니다:
 
+```sh
 ./demo.sh build
 ./target/release/gadgetron init --yes
 ```
@@ -177,73 +171,15 @@ printf '%s\n' \
 
 ## 설정 요약
 
-### `[agent]`
+Penny 런타임이 읽는 설정 블록은 아래와 같습니다. 각 필드의 타입·범위·기본값·validation 규칙은 [configuration.md](configuration.md)가 canonical 레퍼런스입니다. 본 섹션은 Penny 관점에서 어떤 블록이 필수/선택인지, 누락 시 어떤 동작이 되는지만 요약합니다.
 
-```toml
-[agent]
-binary = "claude"
-claude_code_min_version = "2.1.104"
-request_timeout_secs = 300
-max_concurrent_subprocesses = 4
-```
-
-- `binary`: Claude Code CLI 경로 또는 basename
-- `request_timeout_secs`: 단일 Penny 요청의 subprocess wall-clock 제한
-- `max_concurrent_subprocesses`: 동시 Claude Code 실행 상한
-
-### `[agent.brain]`
-
-```toml
-[agent.brain]
-mode = "claude_max"
-```
-
-- `claude_max`: 기본값. `~/.claude/` OAuth 세션 사용
-- `external_anthropic`: Anthropic API 키 기반 brain
-- `external_proxy`: 외부 proxy URL 기반 brain
-- `gadgetron_local`: 아직 동작하지 않습니다. Phase 2A에서는 startup error입니다
-
-### `[knowledge]`
-
-```toml
-[knowledge]
-wiki_path = "./.gadgetron/wiki"        # config 파일 디렉터리 기준 상대 경로 지원
-wiki_autocommit = true
-wiki_max_page_bytes = 1048576
-```
-
-- `wiki_path`: 위키 저장소 루트. 부모 디렉터리는 미리 존재해야 합니다
-- `wiki_autocommit`: 쓰기마다 git commit 수행 여부
-- `wiki_max_page_bytes`: 페이지 크기 제한
-
-### `[knowledge.search]`
-
-```toml
-[knowledge.search]
-searxng_url = "http://127.0.0.1:8888"
-timeout_secs = 10
-max_results = 10
-```
-
-이 블록이 없으면 `web.search` 도구는 노출되지 않습니다.
-
-### Semantic search (`[knowledge.embedding]` + `[knowledge.reindex]`)
-
-`[knowledge.embedding]` 섹션을 추가하면 pgvector 기반 시맨틱 + 키워드 하이브리드 검색이 활성화됩니다. 없으면 keyword-only 검색입니다. 상세 필드 설명은 [configuration.md §knowledge.embedding](configuration.md#knowledgeembedding-semantic-search-setup) 을 참조하세요.
-
-```toml
-[knowledge.embedding]
-provider = "openai_compat"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-model = "text-embedding-3-small"
-dimension = 1536
-write_mode = "async"
-
-[knowledge.reindex]
-on_startup = true
-stale_threshold_days = 90
-```
+| 블록 | 필수 여부 | Penny에 미치는 영향 | 상세 |
+|---|---|---|---|
+| `[agent]` | 권장 | Claude Code subprocess 런타임 한도 (`binary`, `request_timeout_secs`, `max_concurrent_subprocesses`, session 필드). 누락 시 모두 기본값 사용 | [configuration.md §`[agent]`](configuration.md#agent) |
+| `[agent.brain]` | 권장 | Penny brain 모드 (`claude_max` 기본 / `external_anthropic` / `external_proxy` / `gadgetron_local`은 P2A에서 startup error) | [configuration.md §`[agent.brain]`](configuration.md#agentbrain) |
+| `[knowledge]` | **필수** | 이 블록이 없으면 `/v1/models`에 `penny`가 등록되지 않습니다. `wiki_path` 부모 디렉터리는 미리 존재해야 합니다 | [configuration.md §`[knowledge]`](configuration.md#knowledge) |
+| `[knowledge.search]` | 선택 | 있을 때만 `web.search` MCP 도구가 노출됩니다 (SearXNG 라운드트립) | [configuration.md §`[knowledge.search]`](configuration.md#knowledgesearch) |
+| `[knowledge.embedding]` + `[knowledge.reindex]` | 선택 | 있으면 pgvector 기반 시맨틱+키워드 하이브리드 검색, 없으면 keyword-only | [configuration.md §`[knowledge.embedding]`](configuration.md#knowledgeembedding-semantic-search-setup) |
 
 ---
 
