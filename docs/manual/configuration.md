@@ -285,16 +285,19 @@ SGLang does not require an API key by default. For reasoning models such as GLM-
 
 ### `[web]`
 
-Controls the embedded Web UI served under `/web/*`.
+Controls the embedded Web UI served under `/web/*` and the admin catalog-reload source.
 
 ```toml
 [web]
 enabled = true
 api_base_path = "/v1"
+# Optional — file-based descriptor catalog source (ISSUE 8 TASK 8.4 / v0.4.4 / PR #216)
+catalog_path = "/etc/gadgetron/catalog.toml"
 ```
 
 - `enabled`: `false`면 `/web/*` subtree 자체를 mount하지 않습니다.
 - `api_base_path`: 브라우저가 호출할 API prefix. 기본값은 `/v1`이며, reverse proxy가 경로를 재작성할 때만 변경하십시오.
+- `catalog_path`: absolute path to a TOML file that defines the workbench descriptor catalog (views + actions). Optional. When present, `POST /api/v1/web/workbench/admin/reload-catalog` (Management-scoped) re-reads this file on every call and atomically swaps the in-memory catalog via `Arc<ArcSwap<CatalogSnapshot>>` — operators can edit the file and trigger a reload without restarting the process. When absent (default), the reload endpoint falls back to the hand-coded `DescriptorCatalog::seed_p2b()` seed. See `docs/manual/api-reference.md` §POST /api/v1/web/workbench/admin/reload-catalog for the wire shape (response widens with `source: "config_file"` + `source_path: "<path>"` when this key is configured). **Parse-failure guarantee**: if the file exists but is malformed (bad TOML / schema mismatch), the reload handler returns HTTP 500 with a `config_error` body embedding the file path and parse error — the running snapshot is NOT replaced, so a bad edit cannot take the workbench down. Fix the TOML and retry the reload. The `CatalogFile` shape mirrors `WorkbenchViewDescriptor` + `WorkbenchActionDescriptor` (both already derive `Deserialize`), so the TOML fields match the types documented in [`docs/design/gateway/workbench-projection-and-actions.md`](../design/gateway/workbench-projection-and-actions.md) §2.1.1.
 
 ---
 
