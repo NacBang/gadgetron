@@ -292,16 +292,24 @@ auth middleware — `auth_middleware` cookie fallback with role-
 derived scope synthesis). ISSUE 17 TASK 17.1 closed via PR #260
 / v0.5.10 (ValidatedKey.user_id plumbing — both auth paths now
 carry the owning user id for downstream audit/billing
-attribution without extra DB round-trips). EPIC 4 remaining
-before `v1.0.0`: ISSUE 13 (HF catalog — DEFERRED as
-commercialization layer) + **ISSUE 18** (web UI login form in
-`gadgetron-web` — React/Tailwind consuming the `/auth/*`
-endpoints; see the ISSUE 18 entry below for task breakdown) +
-**ISSUE 19** (audit_log.actor_user_id plumbing — wire the
-ISSUE-17 `ValidatedKey.user_id` through chat + direct-action +
-tool-invoke audit writers; may ship in parallel with ISSUE 18).
-Google OAuth social login tracked separately post-ISSUE-18 on
-`project_multiuser_login_google`.
+attribution without extra DB round-trips). ISSUE 19 TASK 19.1
+closed via PR #262 / v0.5.11 (AuditEntry actor fields
+structural — `actor_user_id` + `actor_api_key_id` columns added
+to the struct, 7 call sites default to `None`). ISSUE 20 TASK
+20.1 closed via PR #263 / v0.5.12 (TenantContext → AuditEntry
+plumbing — `TenantContext` gains `actor_user_id` + `actor_api_key_id`
+populated by `tenant_context_middleware` from `ValidatedKey`;
+chat handler's 3 `AuditEntry` literals now read ctx fields).
+EPIC 4 remaining before `v1.0.0`: ISSUE 13 (HF catalog —
+DEFERRED as commercialization layer) + **ISSUE 18** (web UI
+login form in `gadgetron-web` — React/Tailwind consuming the
+`/auth/*` endpoints; see the ISSUE 18 entry below for task
+breakdown) + **ISSUE 21** (pg audit-log consumer — background
+task that drains the `AuditWriter` mpsc channel and writes
+rows to `audit_log` using the new actor columns, migration
+already
+added in ISSUE 14 TASK 14.1). Google OAuth social login tracked
+separately post-ISSUE-18 on `project_multiuser_login_google`.
 - **ISSUE 12 — billing event telemetry** ✅ closed at telemetry scope
   (invoicing deferred per user directive 2026-04-19 "과금과 같은 상업화는
   뒤로 미뤄도 된다")
@@ -347,6 +355,9 @@ Google OAuth social login tracked separately post-ISSUE-18 on
   - TASK 19.1 ✅ — `AuditEntry` gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>`. All 7 call sites across the workspace (tests, bench fixtures, chat handler, stream_end_guard, auth-fail audit, scope-denial audit) default to `None` for now. Re-scoped: the original "thread user_id through audit sinks + billing_events" plan splits into **ISSUE 20** (plumbing via TenantContext) + **ISSUE 21** (pg consumer writing audit_log). This PR lands only the struct shape so those follow-ups can do their one job each.
 - **ISSUE 20 ✅ TenantContext → AuditEntry plumbing** (v0.5.12, closed 2026-04-19)
   - TASK 20.1 ✅ — `TenantContext` gains `actor_user_id` + `actor_api_key_id` (both `Option<Uuid>`), populated by `tenant_context_middleware` from `ValidatedKey.user_id` and the non-nil-sentinel `ValidatedKey.api_key_id` respectively. Chat handler's 3 `AuditEntry` literals (non-stream Ok, stream Ok+dispatch, stream Ok+spawn) all read ctx fields. Existing 5 `TenantContext` literals (middleware fixture, test helpers) default to `None`. No new harness gate — chat audit ledger is tracing-only (no DB consumer until ISSUE 21); behavior preserved by existing 129 gates.
+- **ISSUE 21 ⏳ pg audit_log consumer** (planned, post-v0.5.12; next logical step after ISSUE 20)
+  - TASK 21.1 (planned) — new background task spawned from `init_serve_runtime` when `pg_pool.is_some()`: drains `AuditWriter`'s mpsc channel and writes rows to `audit_log` table using `actor_user_id` + `actor_api_key_id` (schema columns already added in ISSUE 14 TASK 14.1 migration — unused until now). `--no-db` deployments skip the consumer; existing tracing-log sink continues to work as fallback.
+  - TASK 21.2 (planned) — new operator query endpoint `GET /api/v1/web/workbench/admin/audit/log` (Management-scoped, newest-first, `limit.clamp(1, 500)`, optional `since`, `user_id`, `api_key_id` filter params). Harness gate extension pins `actor_user_id` non-NULL on cookie-auth rows + `actor_api_key_id` non-NULL on Bearer-with-backfilled-user-id rows; NULL tolerance preserved for legacy pre-ISSUE-14 keys.
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).

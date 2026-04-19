@@ -1,6 +1,6 @@
 # Gadgetron — 전체 설계 개요
 
-> **버전**: `0.5.10` — Phase 2 EPIC 1 + EPIC 2 + **EPIC 3 모두 CLOSED** (tag `v0.5.0`); **EPIC 4 Multi-tenant XaaS ACTIVE** (2026-04-20 승격, `v1.0.0` target). 요약은 아래 bullet list, full breakdown 은 [`docs/ROADMAP.md`](ROADMAP.md).
+> **버전**: `0.5.11` — Phase 2 EPIC 1 + EPIC 2 + **EPIC 3 모두 CLOSED** (tag `v0.5.0`); **EPIC 4 Multi-tenant XaaS ACTIVE** (2026-04-20 승격, `v1.0.0` target). 요약은 아래 bullet list, full breakdown 은 [`docs/ROADMAP.md`](ROADMAP.md).
 >
 > **EPIC 1–3 shipping**:
 >
@@ -18,11 +18,13 @@
 > - **ISSUE 16** unified Bearer-or-cookie auth middleware ✅ (PR #259 / 0.5.9) — `auth_middleware` cookie fallback with role-derived scope synthesis (admin → `[OpenAiCompat, Management]`; member → `[OpenAiCompat]`); covers `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*`.
 > - **ISSUE 17** `ValidatedKey.user_id` plumbing ✅ (PR #260 / 0.5.10) — both auth paths carry owning user id for downstream audit/billing attribution without extra DB round-trips.
 > - **ISSUE 18** web UI login form (React/Tailwind in `gadgetron-web`) ⏳ planned.
-> - **ISSUE 19** audit-writer `actor_user_id` wiring ⏳ planned — threads ISSUE-17 `user_id` into `audit_log` + `billing_events` rows.
+> - **ISSUE 19** `AuditEntry` actor fields structural ✅ (PR #262 / 0.5.11) — `actor_user_id` + `actor_api_key_id` columns added to the struct; 7 call sites default to `None` for now.
+> - **ISSUE 20** TenantContext user_id plumbing ⏳ planned — thread ISSUE-17 `ValidatedKey.user_id` through `tenant_context_middleware` and populate the ISSUE-19 `AuditEntry.actor_*` fields at the 7 call sites.
+> - **ISSUE 21** pg `audit_log` consumer ⏳ planned — background task drains `AuditWriter` mpsc channel and writes rows to `audit_log` using the new actor columns, plus a `GET /admin/audit/log` operator query endpoint.
 > - **ISSUE 12.3 / 12.4 / 12.5** (invoice materialization, reconciliation, Stripe ingest) DEFERRED with ISSUE 13 as commercialization layer — post-1.0 patch / minor bumps once market pull justifies.
 >
-> **Harness**: 129 PASS, 0 FAIL (Gate 7v.6 added in PR #259; PR #260 behavior-preserving, no new gate).
-> **EPIC 4 close-for-1.0**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar.
+> **Harness**: 129 PASS, 0 FAIL (Gate 7v.6 added in PR #259; PRs #260 + #262 behavior-preserving, no new gates).
+> **EPIC 4 close-for-1.0**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar.
 > **EPIC 5** (Cluster platform) PLANNED post-1.0 → `v2.0.0`.
 > **이전 tag**: `v0.5.0` (EPIC 3 closure, 2026-04-20), `v0.4.0` (EPIC 2 closure, 2026-04-19), `v0.3.0` (EPIC 1 closure, 2026-04-19), `v0.1.0-phase1` (역사).
 > **버저닝 정책**: [`docs/process/06-versioning-policy.md`](process/06-versioning-policy.md)
@@ -482,7 +484,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 - ~~Streaming audit `latency_ms=0` (dispatch-time only)~~ — **해결 (P2B / ISSUE 4 PR #194)**. `StreamEndGuard` Drop 경로에서 amendment `AuditEntry` 를 보내 실제 `latency_ms` + `output_tokens` + `cost_cents` 를 기록 (`crates/gadgetron-gateway/src/stream_end_guard.rs:241-285`). 남은 한계: streaming 의 `input_tokens` 는 여전히 `0` (provider 가 delta stream 에 prompt token 을 재보고하지 않음 — router upstream rework 필요한 별도 ISSUE).
 - Audit `provider=None` (실제 라우팅된 provider 미기록) — 여전히 유효. `RoutingDecision` 을 handler 까지 surface 하는 rework 이 별도 ISSUE 로 남아 있음.
 
-### Phase 2 — Knowledge Layer + Penny + Bundle Surfaces + Multi-tenant XaaS (v0.2 → **v0.5.10**, EPIC 1 + EPIC 2 + EPIC 3 CLOSED; EPIC 4 **ACTIVE** — ISSUE 11 + ISSUE 12 (telemetry) + ISSUE 14 (self-service) + ISSUE 15 (cookie login) + ISSUE 16 (unified auth middleware) + ISSUE 17 (`ValidatedKey.user_id` plumbing) complete; 12.3 / 12.4 / 12.5 + 13 cost-attribution DEFERRED per 2026-04-20 commercialization-layer direction; ISSUE 13 discovery/pinning + ISSUE 18 web UI login form + ISSUE 19 audit-writer actor_user_id wiring remain)
+### Phase 2 — Knowledge Layer + Penny + Bundle Surfaces + Multi-tenant XaaS (v0.2 → **v0.5.11**, EPIC 1 + EPIC 2 + EPIC 3 CLOSED; EPIC 4 **ACTIVE** — ISSUE 11 + ISSUE 12 (telemetry) + ISSUE 14 (self-service) + ISSUE 15 (cookie login) + ISSUE 16 (unified auth middleware) + ISSUE 17 (`ValidatedKey.user_id` plumbing) + ISSUE 19 (`AuditEntry` actor fields structural) complete; 12.3 / 12.4 / 12.5 + 13 cost-attribution DEFERRED per 2026-04-20 commercialization-layer direction; ISSUE 13 discovery/pinning + ISSUE 18 web UI login form + ISSUE 20 TenantContext user_id plumbing + ISSUE 21 pg audit_log consumer remain)
 
 **목표**: Phase 1 substrate 위에 지식 레이어(LLM Wiki + 웹 조사 + RAW 입수 + 검색 인덱스), Penny, 그리고 Bundle/Plug/Gadget 확장 surface를 올려 지식 협업 플랫폼을 구성.
 
@@ -505,7 +507,7 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 
 **스코프 정정 (2026-04-20 ROADMAP v2 이후)**: 이 섹션은 원래 Phase 1 에서 Phase 3 로 직접 점프하는 2-phase 모델을 전제로 작성되었으나, ROADMAP v2 (PR #186) 에서 EPIC 단위로 리프레임되면서 아래 표 항목들 중 일부가 EPIC 3/4 (Phase 2 내부) 로 재배치되었다:
 - **Bundle 시스템** → EPIC 3 CLOSED `v0.5.0` (ISSUE 8 hot-reload + ISSUE 9 manifests + ISSUE 10 marketplace, 2026-04-20). Phase 2 끝에서 완료.
-- **멀티 테넌시 강화 / GPUaaS / ModelaaS / AgentaaS** → EPIC 4 ACTIVE (ISSUE 11 quotas ✅, ISSUE 12 billing telemetry ✅ (invoicing DEFERRED), ISSUE 14 self-service ✅ (PR #246), ISSUE 15 cookie-session login API ✅ (PR #248), ISSUE 16 unified Bearer-or-cookie middleware ✅ (PR #259 / v0.5.9), ISSUE 17 `ValidatedKey.user_id` plumbing ✅ (PR #260 / v0.5.10); ISSUE 13 HF catalog discovery/pinning + **ISSUE 18** web UI login form (React/Tailwind in `gadgetron-web`) + **ISSUE 19** audit-writer `actor_user_id` wiring (threads the ISSUE-17 `user_id` into `audit_log` + `billing_events` writers) 남음, 닫으면 `v1.0.0` first production release).
+- **멀티 테넌시 강화 / GPUaaS / ModelaaS / AgentaaS** → EPIC 4 ACTIVE (ISSUE 11 quotas ✅, ISSUE 12 billing telemetry ✅ (invoicing DEFERRED), ISSUE 14 self-service ✅ (PR #246), ISSUE 15 cookie-session login API ✅ (PR #248), ISSUE 16 unified Bearer-or-cookie middleware ✅ (PR #259 / v0.5.9), ISSUE 17 `ValidatedKey.user_id` plumbing ✅ (PR #260 / v0.5.10), ISSUE 19 `AuditEntry` actor fields structural ✅ (PR #262 / v0.5.11); ISSUE 13 HF catalog discovery/pinning + **ISSUE 18** web UI login form (React/Tailwind in `gadgetron-web`) + **ISSUE 20** TenantContext user_id plumbing (populate the ISSUE-19 `AuditEntry.actor_*` fields at the 7 call sites) + **ISSUE 21** pg `audit_log` consumer (drains `AuditWriter` mpsc channel → writes rows to `audit_log` using new actor columns; operator `GET /admin/audit/log` query endpoint) 남음, 닫으면 `v1.0.0` first production release).
 - **HuggingFace Hub 통합** → EPIC 4 ISSUE 13 (per-model cost attribution 포함, billing pipeline 과 연동).
 - **핫 리로드** (DescriptorCatalog) → EPIC 3 ISSUE 8 완료 (`POST /admin/reload-catalog` + SIGHUP, CatalogSnapshot ArcSwap). AppConfig 전체 hot-reload 는 여전히 Phase 3 로 deferred.
 
