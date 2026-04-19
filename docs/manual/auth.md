@@ -225,8 +225,72 @@ Revocation sets `revoked_at = NOW()` for the key. The validator checks `revoked_
 
 ---
 
+## Cookie-session auth (ISSUE 15 TASK 15.1 / v0.5.8)
+
+In addition to the Bearer-token API key flow above, Gadgetron v0.5.8+ ships a parallel cookie-session surface for browser clients. Three public endpoints:
+
+```
+POST /api/v1/auth/login    {email, password}  → Set-Cookie: gadgetron_session=...
+POST /api/v1/auth/logout   (cookie)            → Set-Cookie: gadgetron_session=; Max-Age=0
+GET  /api/v1/auth/whoami   (cookie)            → {session_id, user_id, tenant_id, expires_at}
+```
+
+**Relationship to Bearer auth**:
+
+- **Parallel, not layered**: the three routes mount on `public_routes` — they bypass the standard Bearer `AuthLayer` chain. Cookie sessions and Bearer keys do not share a middleware gate.
+- **As of v0.5.8, a route uses EXACTLY ONE of the two**: workbench / chat / admin endpoints still require Bearer (`OpenAiCompat` / `Management` scope via the middleware in §"Middleware stack order" above); the three `/auth/*` endpoints use cookie self-authentication. A unified middleware that accepts Bearer OR cookie on the same route is deferred to ISSUE 16.
+- **Service-role users cannot log in by password** — `SessionError::ServiceRole` pre-empts the password verify. Service accounts must use Bearer API keys (created via `gadgetron key create` or the user self-service `POST /api/v1/web/workbench/keys`).
+
+**Password hashing**: argon2id via the `argon2` crate (v0.5). PHC-string format stored in `users.password_hash` (set by the `[auth.bootstrap]` first-admin flow per ISSUE 14 TASK 14.2, or by `POST /api/v1/web/workbench/admin/users` per ISSUE 14 TASK 14.3). No bcrypt / PBKDF2. Pre-login inactive-user check avoids timing leaks.
+
+**Cookie storage**: the raw 32-byte hex token sent in `Set-Cookie` is hashed SHA-256 server-side before DB lookup. The DB row in `user_sessions` holds only the SHA-256; even with direct DB access the raw cookie cannot be recovered. No argon2 on the cookie — 128+ bit entropy on the random 32-byte token already resists brute force, and a per-request argon2 would add measurable latency without security benefit.
+
+**Cookie attributes**:
+
+| Attribute  | Value                     | Rationale |
+|-----------|--------------------------|-----------|
+| Name       | `gadgetron_session`      | Single canonical name across all deployments |
+| `HttpOnly` | set                      | Blocks JavaScript `document.cookie` read — XSS can't exfiltrate |
+| `SameSite` | `Lax`                    | Top-level GET from other origins OK; cross-site POST/XHR blocked |
+| `Path`     | `/`                      | Single session cookie across all routes |
+| `Max-Age`  | `86400` (24h)            | Server-side `expires_at` is authoritative; browser cookie Max-Age matches |
+| `Secure`   | **not set by gateway**   | Operators terminate TLS externally (reverse proxy / load balancer). The `Secure` flag is deployment-layer concern — handler emits without it so loopback harness + `curl --cookie-jar` work over plaintext HTTP. Production deployments MUST use HTTPS and should add `Secure` at the proxy layer. |
+
+**Session TTL + cleanup**: `user_sessions.expires_at` is set to 24h from login. Expired rows are rejected at lookup time (returned as 401). Cleanup is opportunistic — subsequent logins sweep expired rows for the same user. No background cron job.
+
+**Example flow** (curl):
+
+```sh
+# 1. Login — save cookie to a jar
+curl -sS -c /tmp/gad-cookies.txt \
+  -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"your-password"}'
+
+# 2. whoami — reuse the cookie
+curl -sS -b /tmp/gad-cookies.txt \
+  http://localhost:8080/api/v1/auth/whoami
+
+# 3. Logout — server revokes + browser cookie cleared
+curl -sS -b /tmp/gad-cookies.txt -c /tmp/gad-cookies.txt \
+  -X POST http://localhost:8080/api/v1/auth/logout
+
+# 4. Re-try whoami — 401, cookie is gone
+curl -sS -b /tmp/gad-cookies.txt \
+  http://localhost:8080/api/v1/auth/whoami
+```
+
+**Deferred to ISSUE 16**:
+
+- React + Tailwind login form in `gadgetron-web` that consumes these three endpoints.
+- Unified middleware that accepts Bearer OR cookie on the same path (today's Bearer-only `AuthLayer` still governs `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*`).
+- Google OAuth social-login flow (per the multi-user direction `project_multiuser_login_google` — will stack on top of the same `user_sessions` table + cookie shape).
+
+---
+
 ## Security notes
 
 - The server never logs raw API key values. The `GADGETRON_DATABASE_URL` is wrapped in a `Secret<String>` type and is never emitted to logs.
 - The `api_keys.key_hash` column stores only the SHA-256 hash. Even with direct database access, the original key cannot be recovered from the hash.
 - Auth failures (401) are audited to the structured audit channel. In the current implementation, audit entries are written to tracing logs; PostgreSQL persistence remains future work.
+- Cookie-session: `user_sessions.cookie_hash` follows the same SHA-256-only discipline as `api_keys.key_hash`. `users.password_hash` stores argon2id PHC string (not recoverable; incremental cost tuning possible via argon2 parameters in `crates/gadgetron-xaas/src/auth.rs`).
