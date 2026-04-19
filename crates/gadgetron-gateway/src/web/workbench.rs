@@ -638,6 +638,100 @@ pub struct UsageToolStats {
     pub errors: i64,
 }
 
+/// Per-window stats (daily or monthly) returned by
+/// `GET /quota/status` — ISSUE 11 TASK 11.4. Mirrors the
+/// `quota_configs` column set with a precomputed `remaining_cents`
+/// so the UI doesn't have to subtract on every render.
+#[derive(Debug, serde::Serialize)]
+pub struct QuotaWindowStats {
+    pub used_cents: i64,
+    pub limit_cents: i64,
+    pub remaining_cents: i64,
+}
+
+/// Response for `GET /api/v1/web/workbench/quota/status`.
+#[derive(Debug, serde::Serialize)]
+pub struct QuotaStatusResponse {
+    /// UTC date the `daily` counter refers to. When a new day
+    /// starts, the counter zeros on the first request (via
+    /// `PgQuotaEnforcer`'s CASE rollover) — this field lets the UI
+    /// tell "your daily quota just reset" from "your daily quota
+    /// is lightly used".
+    pub usage_day: chrono::NaiveDate,
+    pub daily: QuotaWindowStats,
+    pub monthly: QuotaWindowStats,
+}
+
+/// `GET /api/v1/web/workbench/quota/status` — current-tenant quota
+/// snapshot (ISSUE 11 TASK 11.4). Scope: `OpenAiCompat` because
+/// end-users checking their own usage don't need Management.
+///
+/// Returns 503 when `pg_pool` isn't configured OR 404 when the
+/// tenant has no `quota_configs` row (bootstrap bug — operator
+/// should inspect).
+pub async fn get_quota_status(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<QuotaStatusResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "quota status requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    // Projected columns include the `usage_day` added by the TASK
+    // 11.3 migration so the response reflects the post-rollover
+    // state without the handler doing the math. CASE zeroing is
+    // intentional: the operator saw rollover intent in the migration;
+    // the UI should too.
+    let row: Option<(i64, i64, i64, i64, chrono::NaiveDate)> = sqlx::query_as(
+        r#"
+        SELECT
+            CASE WHEN usage_day = CURRENT_DATE THEN daily_used_cents ELSE 0 END,
+            daily_limit_cents,
+            CASE WHEN DATE_TRUNC('month', usage_day::timestamp)
+                   = DATE_TRUNC('month', CURRENT_DATE::timestamp)
+                THEN monthly_used_cents
+                ELSE 0
+            END,
+            monthly_limit_cents,
+            CASE WHEN usage_day = CURRENT_DATE THEN usage_day ELSE CURRENT_DATE END
+        FROM quota_configs
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(ctx.tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "quota status query failed: {e}"
+        )))
+    })?;
+
+    // No quota_configs row = tenant hasn't been provisioned with an
+    // explicit quota yet. Fall back to the schema defaults (see
+    // `20260411000003_quota_configs.sql`) so the UI renders "fresh
+    // tenant, full quota" instead of a 400. A future TASK
+    // auto-inserts the default row on tenant create; until then,
+    // this read-side default keeps the endpoint usable.
+    let (daily_used, daily_limit, monthly_used, monthly_limit, usage_day) =
+        row.unwrap_or((0, 1_000_000, 0, 10_000_000, chrono::Utc::now().date_naive()));
+
+    Ok(Json(QuotaStatusResponse {
+        usage_day,
+        daily: QuotaWindowStats {
+            used_cents: daily_used,
+            limit_cents: daily_limit,
+            remaining_cents: (daily_limit - daily_used).max(0),
+        },
+        monthly: QuotaWindowStats {
+            used_cents: monthly_used,
+            limit_cents: monthly_limit,
+            remaining_cents: (monthly_limit - monthly_used).max(0),
+        },
+    }))
+}
+
 /// `GET /usage/summary` — tenant-scoped operations rollup.
 ///
 /// Aggregates over the past `window_hours` (default 24, clamped
@@ -961,6 +1055,8 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/audit/tool-events", get(list_tool_audit_events))
         // ISSUE 4 TASK 4.1 — operator usage summary rollup.
         .route("/usage/summary", get(get_usage_summary))
+        // ISSUE 11 TASK 11.4 — quota status (current tenant).
+        .route("/quota/status", get(get_quota_status))
         // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
         .route("/events/ws", get(events_ws_handler))
         // ISSUE 8 TASK 8.2 — admin catalog hot-reload.

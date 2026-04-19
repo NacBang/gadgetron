@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.3** (post-ISSUE 11 TASK 11.3 — pg-backed spend tracking)
+**Current version: 0.5.4** (post-ISSUE 11 TASK 11.4 — quota status endpoint, ISSUE 11 closed)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -267,8 +267,21 @@ from "self-host" to "accounts you sell."
     job. Migration adds `usage_day DATE` column; CLI picks
     `PgQuotaEnforcer` when a pool is available, else falls back to
     the in-memory enforcer.
-  - TASK 11.4 — `/web` UI surface for the 429 path (quota status
-    banner, retry countdown).
+  - TASK 11.4 ✅ — quota status endpoint (0.5.3 → 0.5.4). `GET
+    /api/v1/web/workbench/quota/status` (OpenAiCompat — tenants
+    can see their own usage) returns `{ usage_day, daily:
+    {used, limit, remaining}, monthly: same }` with CASE rollover
+    baked into the SQL so the response already reflects any
+    day/month boundary crossing. UI integration (dashboard
+    banner, 429 countdown) is a gadgetron-web follow-up that
+    rides on this endpoint. Harness gate 7k.5 pins the shape.
+
+**ISSUE 11 complete.** Quota pipeline is end-to-end: rate-limit
+check (11.2) → pg cost check (11.3) → dispatch → pg record_post
+increment (11.3). Rejections carry structured 429 +
+Retry-After (11.1). Tenants introspect usage via /quota/status
+(11.4). EPIC 4 still has ISSUEs 12 (billing), 13 (HF catalog),
+14 (tenant self-service) before close + `v1.0.0`.
 - **ISSUE 12 — integer-cent billing**: metering pipeline, usage → invoice
   materialization, Postgres-backed ledger.
 - **ISSUE 13 — HuggingFace model catalog**: discovery, pinning, per-model
