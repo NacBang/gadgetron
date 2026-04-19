@@ -1252,6 +1252,32 @@ fi
 # Gate 10 — <gadgetron_shared_context> injected into provider messages
 # ---------------------------------------------------------------------------
 
+log "=== Gate 9c: E2E — Python OpenAI SDK client round-trip ==="
+# Proves OpenAI wire contract holds for a REAL canonical SDK, not
+# just handcrafted curl+jq. A regression that subtly flips field
+# casing / content-type / SSE frame shape would pass every raw
+# gate above and still break every client in the ecosystem. This
+# is our "big trunk" end-to-end scenario — one command exercises:
+#   - auth header plumbing (SDK sends `Authorization: Bearer ...`)
+#   - non-streaming content + id + usage contract (Pydantic-
+#     parsed by the SDK; any shape drift raises ValidationError)
+#   - streaming chunk iteration (SDK expects `chat.completion.chunk`
+#     with consistent id + delta.content + finish_reason)
+#
+# Skip gracefully when `openai` isn't installed (not in baseline
+# harness deps). `pip install openai` on the host unlocks it.
+if python3 -c 'import openai' 2>/dev/null; then
+  SDK_LOG="$ART_DIR/sdk-client.log"
+  if GADGETRON_BASE="$GAD_BASE" GADGETRON_KEY="$TEST_API_KEY" GADGETRON_MODEL="mock" \
+       python3 "$HARNESS_DIR/sdk-client.py" >"$SDK_LOG" 2>&1; then
+    pass "Python OpenAI SDK client: $(tail -1 "$SDK_LOG" | head -c 160)"
+  else
+    fail "Python OpenAI SDK client failed" "$(head -c 600 "$SDK_LOG")"
+  fi
+else
+  skip "Gate 9c SDK round-trip (python3 \`openai\` not installed; pip install openai)"
+fi
+
 log "=== Gate 10: <gadgetron_shared_context> injection (PSL-1b) ==="
 
 # Previous assertion was a bare `grep -q gadgetron_shared_context`
