@@ -1343,11 +1343,25 @@ let cors = CorsLayer::new()
 // 와일드카드 origin 금지 (D-6). 개발 환경에서도 localhost:3000 명시.
 ```
 
-##### §2.B.3.5 Rate Limit [P2]
+##### §2.B.3.5 Rate Limit [shipped via EPIC 4 ISSUE 11 TASK 11.2 / PR #231 / v0.5.2]
 
-Phase 2에서 `ScopeGuardLayer` 뒤에 `RateLimitLayer` 삽입. 구현: `governor 0.6` (Token Bucket).
-설정 필드 (`xaas.rate_limit`): `rpm: u32`, `tpm: u32` — per-tenant.
-Phase 1에서는 `QuotaEnforcer`의 monthly/daily quota만 적용.
+Per-tenant token-bucket rate limiter shipped in `gadgetron-xaas::quota::rate_limit::TokenBucketRateLimiter`. Not layered as a separate `RateLimitLayer` on the tower stack — instead wrapped into the existing `QuotaEnforcer` trait via `RateLimitedQuotaEnforcer` composite, which runs the rate check BEFORE delegating to the inner cost enforcer (fail-fast semantics, no snapshot query on rate rejection).
+
+Buckets are `DashMap<TenantId, Bucket>` sharded, lazy-refilled on `consume()`, monotonic `Instant` clock (wall-clock skew can't double-spend), fractional tokens so small refills don't round to zero. No `governor` crate — hand-rolled to keep the enforcer composition clean and avoid the crate's tower-layer assumptions.
+
+Config block is `[quota_rate_limit]` (NOT `[xaas.rate_limit]` — renamed during implementation):
+
+```toml
+[quota_rate_limit]
+requests_per_minute = 60   # 0 = limiter is a no-op, preserving pre-11.2 behavior
+burst = 30                 # 0 defaults to requests_per_minute
+```
+
+Opt-in: default `requests_per_minute = 0` is a no-op so existing deployments upgrading from pre-0.5.2 see zero behavior change until they configure a non-zero rate. The CLI wires `RateLimitedQuotaEnforcer` at `init_serve_runtime` only when `requests_per_minute > 0`.
+
+Historical context: the "governor 0.6 + tower layer" plan was the original P2 sketch. The implementation in PR #231 opted for the enforcer-composition pattern instead because it shares the request context (`TenantContext`, `QuotaSnapshot`) that the cost enforcer already threads, avoiding duplicate lookups on the hot path. See ISSUE 11 design notes in `docs/modules/xaas-platform.md §5.6` for the composition chain.
+
+Rate rejections surface as structured 429 + `Retry-After: 60` header + `retry_after_seconds: 60` JSON body field (ISSUE 11 TASK 11.1 / PR #230 / v0.5.1). 5 unit tests pin bucket semantics (within-burst, exceeds-burst, refill-after-wait, disabled limiter, per-tenant isolation). No harness gate because harness leaves `quota_rate_limit` disabled — unit tests carry the correctness proof.
 
 ---
 
