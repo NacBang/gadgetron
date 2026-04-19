@@ -16,6 +16,7 @@
 - [ ] **에러 반환** — `GadgetronError` variant 사용이 일관적인가? 신규 variant가 필요하면 제안했는가?
 - [ ] **동시성** — Send/Sync 경계, Lock 전략 선택 근거, deadlock 가능성 검토 완료?
 - [ ] **의존성 방향** — 크레이트 의존성 그래프에 역방향·순환 의존이 없는가?
+- [ ] **그래프 검증 (graphify)** — §3 전체 모듈 연결 구도가 `graphify-out/GRAPH_REPORT.md` + `graphify query/explain/path` 결과를 인용하며 claimed dependency 와 실제 graph edges 가 일치하는가? Speculative dependency list 만으로는 Pass 아님. 리뷰어는 최소한 god node 하나를 `graphify explain <node>` 로 확인하고 설계 문서의 설명과 비교한다. (자세한 규칙은 `docs/process/05-development-process.md §6`)
 - [ ] **Phase 태그** — 섹션/필드가 `[P1]/[P2]/[P3]`로 명확히 구분되었는가?
 - [ ] **레거시 결정 준수** — `pm-decisions.md` D-1 ~ D-13과 충돌하지 않는가?
 
