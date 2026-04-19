@@ -115,19 +115,20 @@ panels without patching Gadgetron source. Hot-reload lets operators
 install/remove capabilities without restart. Substrate for the ecosystem.
 
 ### In-flight ISSUE
-- **ISSUE 8 — DescriptorCatalog hot-reload** (in-flight; 0.4.0 ships TASK 8.1)
+- **ISSUE 8 — DescriptorCatalog hot-reload** (in-flight; 0.4.1 / 0.4.2 / 0.4.3 ship TASK 8.1 / 8.2 / 8.3 respectively)
   - TASK 8.1 ✅ — `Arc<ArcSwap<DescriptorCatalog>>` plumbing (PR #211).
   - TASK 8.2 ✅ — reload endpoint (0.4.1 → 0.4.2). `POST
     /api/v1/web/workbench/admin/reload-catalog` (Management-scoped)
     atomically swaps in a fresh `DescriptorCatalog` and returns
     `{reloaded, action_count, view_count, source}`. Source is
-    hardcoded `"seed_p2b"` until TASK 8.3 adds file-based loading;
-    this TASK proves the plumbing lands. Validators are NOT rebuilt
-    (seed_p2b is schema-stable); TASK 8.3 adds rebuild. Scope
-    middleware gets an `/api/v1/web/workbench/admin/` rule requiring
-    Management before the wider OpenAiCompat workbench rule. Gate
-    7q.1 pins the happy path; Gate 7q.2 pins the
-    OpenAiCompat-is-403 contract.
+    hardcoded `"seed_p2b"` until TASK 8.4 adds file-based loading;
+    this TASK proved the plumbing lands. Validators on
+    `InProcessWorkbenchActionService` were pre-compiled at
+    construction and NOT rebuilt by the swap — this known limitation
+    was closed by TASK 8.3 (see below). Scope middleware gets an
+    `/api/v1/web/workbench/admin/` rule requiring Management before
+    the wider OpenAiCompat workbench rule. Gate 7q.1 pins the happy
+    path; Gate 7q.2 pins the OpenAiCompat-is-403 contract.
   - TASK 8.3 ✅ — `CatalogSnapshot` bundling (0.4.2 → 0.4.3). Catalog
     + validators atomically swapped together via
     `DescriptorCatalog::into_snapshot()`; eliminates the window where
