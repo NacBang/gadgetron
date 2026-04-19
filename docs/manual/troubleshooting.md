@@ -606,7 +606,7 @@ Enable debug logging to see the full middleware trace:
 RUST_LOG=gadgetron=debug ./target/release/gadgetron
 ```
 
-**Log format on trunk.** The subscriber is `tracing_subscriber::fmt()` with `EnvFilter::try_from_env("RUST_LOG")` (see `crates/gadgetron-cli/src/main.rs:2494-2499`). Output is the default human-readable text format, not JSON. Each line looks like:
+**Log format on trunk.** The subscriber is `tracing_subscriber::fmt()` with `EnvFilter::try_from_env("RUST_LOG")` (see `crates/gadgetron-cli/src/main.rs:2553-2560`, `init_tracing` fn). Output is the default human-readable text format, not JSON. Each line looks like:
 
 ```
 2026-04-19T00:00:00.000Z  LEVEL target::path: message key1=value1 key2=value2
@@ -636,11 +636,11 @@ grep -E 'error\.code=(invalid_api_key|forbidden|quota_exceeded|routing_failure|p
 grep 'scope denied' .gadgetron/demo/gadgetron.log
 
 # Startup: each provider registration emits an INFO with name= field.
-# Source: crates/gadgetron-cli/src/main.rs:2482.
+# Source: crates/gadgetron-cli/src/main.rs:2542.
 grep 'provider registered' .gadgetron/demo/gadgetron.log
 
 # Penny registration — happy path and failure path have distinct strings.
-# Source: crates/gadgetron-cli/src/main.rs:~1760-1790.
+# Source: crates/gadgetron-cli/src/main.rs:~1840-1870.
 #   Happy:   `penny: registered (...)`
 #   Failure: `penny: failed to prepare knowledge registry; skipping`
 grep -E 'penny: registered|penny: failed to prepare knowledge registry' \

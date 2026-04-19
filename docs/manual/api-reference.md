@@ -698,7 +698,7 @@ All eight routes are always mounted on trunk; the CLI's `build_workbench(knowled
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
 - `GET /views`, `GET /actions` — return the four descriptors in `seed_p2b` (see `GET /actions` below).
-- `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:45-59`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
+- `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:50-63`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
 
 **What is stubbed on trunk today:**
 - `activity.entries` — always `[]` (see §/activity).
@@ -750,7 +750,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 }
 ```
 
-**Field contract.** Sourced from the Rust structs `WorkbenchBootstrapResponse`, `PlugHealth`, and `WorkbenchKnowledgeSummary` at `crates/gadgetron-core/src/workbench/mod.rs:23-50`. E2E Gate 7 asserts the inner shape on every healthy boot (`scripts/e2e-harness/run.sh`).
+**Field contract.** Sourced from the Rust structs `WorkbenchBootstrapResponse`, `PlugHealth`, and `WorkbenchKnowledgeSummary` at `crates/gadgetron-core/src/workbench/mod.rs:27-54`. E2E Gate 7 asserts the inner shape on every healthy boot (`scripts/e2e-harness/run.sh`).
 
 | Field | Type | Notes |
 |-------|------|-------|
