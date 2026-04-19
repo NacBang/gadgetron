@@ -12,17 +12,26 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use gadgetron_core::activity_bus::{ActivityBus, ActivityEvent};
 use gadgetron_core::audit::{GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 /// Fire-and-forget `GadgetAuditEventSink` that pushes events onto a
 /// bounded `mpsc::Sender`. Drops on channel-full and counts drops
 /// atomically so operators can see if the DB writer is falling behind.
+///
+/// When an `ActivityBus` handle is wired via `with_activity_bus`,
+/// each `send` ALSO publishes a corresponding
+/// `ActivityEvent::ToolCallCompleted` onto the bus so the /events/ws
+/// live feed + /web/dashboard see Penny tool calls in real time
+/// (ISSUE 5 TASK 5.3).
 #[derive(Debug)]
 pub struct GadgetAuditEventWriter {
     tx: mpsc::Sender<GadgetAuditEvent>,
     dropped: Arc<AtomicU64>,
+    activity_bus: Option<ActivityBus>,
 }
 
 impl GadgetAuditEventWriter {
@@ -32,9 +41,17 @@ impl GadgetAuditEventWriter {
             Self {
                 tx,
                 dropped: Arc::new(AtomicU64::new(0)),
+                activity_bus: None,
             },
             rx,
         )
+    }
+
+    /// Attach an `ActivityBus` for live-feed mirroring. Returns a new
+    /// writer — the original consumer channel receiver is unchanged.
+    pub fn with_activity_bus(mut self, bus: ActivityBus) -> Self {
+        self.activity_bus = Some(bus);
+        self
     }
 
     pub fn dropped_count(&self) -> u64 {
@@ -44,6 +61,15 @@ impl GadgetAuditEventWriter {
 
 impl GadgetAuditEventSink for GadgetAuditEventWriter {
     fn send(&self, event: GadgetAuditEvent) {
+        // Mirror to the activity bus BEFORE moving the event into the
+        // mpsc channel. Subscribers filter by tenant client-side; we
+        // never leak to another tenant because the event carries
+        // `tenant_id` as-is.
+        if let Some(bus) = &self.activity_bus {
+            if let Some(activity) = gadget_audit_to_activity(&event) {
+                bus.publish(activity);
+            }
+        }
         if self.tx.try_send(event).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
@@ -51,6 +77,47 @@ impl GadgetAuditEventSink for GadgetAuditEventWriter {
                 "tool audit event dropped — channel full"
             );
         }
+    }
+}
+
+/// Convert a `GadgetAuditEvent` into the matching `ActivityEvent`
+/// for the live feed. Returns `None` when the event has no
+/// user-visible shape (future approval variants, etc).
+fn gadget_audit_to_activity(event: &GadgetAuditEvent) -> Option<ActivityEvent> {
+    match event {
+        GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name,
+            tier,
+            category,
+            outcome,
+            elapsed_ms,
+            conversation_id,
+            tenant_id,
+            ..
+        } => {
+            let (outcome_text, error_code) = match outcome {
+                GadgetCallOutcome::Success => ("success".to_string(), None),
+                GadgetCallOutcome::Error { error_code } => {
+                    ("error".to_string(), Some((*error_code).to_string()))
+                }
+            };
+            let tenant_uuid = tenant_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(Uuid::nil);
+            Some(ActivityEvent::ToolCallCompleted {
+                tenant_id: tenant_uuid,
+                tool_name: gadget_name.clone(),
+                category: category.clone(),
+                tier: tier.as_str().to_string(),
+                outcome: outcome_text,
+                error_code,
+                elapsed_ms: *elapsed_ms as i64,
+                conversation_id: conversation_id.clone(),
+            })
+        }
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }
 
