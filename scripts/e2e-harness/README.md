@@ -17,9 +17,9 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; nine PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
+refresh; ten PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
 #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
-7h.8 — 64 → 69 PASS). Run
+7h.8, #194 7k.3 + 11f — 64 → 73 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -52,6 +52,7 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7j | `/favicon.ico` | 200 or 204 (public, no auth) |
 | 7k | Management `/api/v1/usage` | RBAC positive path (200/501/503); FAILS on 401/403 |
 | 7k.2 | Management `/api/v1/costs` | PR #169: sibling of 7k — same scope, same pass set; catches scope-handler divergence |
+| 7k.3 | `/workbench/usage/summary` shape (OpenAiCompat scope) | PR #194: all three sub-objects (`chat`, `actions`, `tools`) present with fixed fields even in a zero-state window; `window_hours` echoed from the query param (default 24, clamp `[1,168]`) |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
@@ -69,6 +70,7 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 11c | `/web/wiki` standalone page reachable | PR #177: Next.js static-export `wiki.html` served under `/web/wiki` (recognizable HTML markers present) |
 | 11d | `/web/wiki` interactive CRUD E2E (Playwright) | PR #179: real Chromium drives sign-in → list → read → edit + save → search end-to-end against the running gateway; skip when node / playwright-core / `--no-screenshot` |
 | 11e | left-rail Wiki tab → `/web/wiki` (PR #182) | ISSUE A.2: main-shell `/web` HTML contains a nav link to `/wiki` so the standalone workbench is reachable from the chat shell without a URL copy-paste |
+| 11f | `/web/dashboard` page | PR #194: `/web/dashboard` reachable with an authenticated key; both pre-auth `dashboard-auth-gate` and post-auth `dashboard` testids are addressable; LeftRail wires `nav-tab-dashboard` with `href="/web/dashboard"` |
 | — | `/web` screenshot (optional, unless `--no-screenshot`) | gstack `$B` OR node+playwright fallback (`screenshot.mjs`) writes `artifacts/screenshots/web-landing.png` |
 | 12 | `gadgetron.log` has no unexpected `ERROR` or `WARN` lines | Gate 9b's `sse stream error:` + P2A ask-mode/git-config/scope-denied WARNs are whitelisted |
 | 13 | `cargo test --workspace` (unless `--quick`) | all non-infra tests pass (7 pre-existing pgvector `e2e_*` tolerated) |

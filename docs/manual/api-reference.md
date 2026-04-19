@@ -735,7 +735,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.2.6",
+  "gateway_version": "0.2.7",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -754,7 +754,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.6"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.7"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1146,6 +1146,89 @@ Tenant-scoped read over `action_audit_events` — the rows the `ActionAuditSink`
 | `config_error` | 400 | Underlying SQL query failed — message includes the sqlx error. |
 
 E2E Gate 7h.8 verifies an unfiltered GET returns the rows from prior gates and that `?action_id=wiki-write` narrows server-side (not client-side).
+
+---
+
+### GET /api/v1/web/workbench/usage/summary
+
+Tenant-scoped operations rollup over a sliding time window, aggregating the three audit tables (`audit_log` chat, `action_audit_events` workbench direct actions, `tool_audit_events` Penny tool calls) into a fixed-shape response the `/web/dashboard` UI consumes. Landed in ISSUE 4 / v0.2.7 (`crates/gadgetron-gateway/src/web/workbench.rs::get_usage_summary`).
+
+**Auth:** `OpenAiCompat`.
+
+**Query parameters:**
+
+| Name | Type | Default | Notes |
+|---|---|---|---|
+| `window_hours` | integer | 24 | Clamped to `[1, 168]` (one week). Out-of-range values are silently clamped. |
+
+**Tenant boundary:** the handler PINS queries to the authenticated actor's `tenant_id`. No cross-tenant read path.
+
+**Response** (fields are fixed, zero when the window has no data so the dashboard renders a stable layout):
+```json
+{
+  "window_hours": 24,
+  "chat": {
+    "requests": 1200,
+    "errors": 3,
+    "total_input_tokens": 842000,
+    "total_output_tokens": 311000,
+    "total_cost_cents": 1250,
+    "avg_latency_ms": 412.7
+  },
+  "actions": {
+    "total": 87,
+    "success": 83,
+    "error": 1,
+    "pending_approval": 3,
+    "avg_elapsed_ms": 18.4
+  },
+  "tools": {
+    "total": 142,
+    "errors": 2
+  }
+}
+```
+
+- `chat.total_cost_cents` is populated by the `gadgetron_core::pricing` table introduced in ISSUE 4 — model pricing drives real integer cents.
+- `actions.pending_approval` surfaces the same `pending_approval` rows that appear in `GET /audit/events`; they are not errors — approval resolution happens via `POST /approvals/:id/approve|deny`.
+
+**Errors:**
+
+| Code | HTTP | When |
+|---|---|---|
+| `config_error` | 400 | `pg_pool` not configured (in-memory / demo mode). |
+
+E2E Gate 7k.3 verifies the response shape (all three sub-objects present, fields populated, `window_hours` echoed).
+
+---
+
+### GET /api/v1/web/workbench/events/ws
+
+WebSocket endpoint — tenant-filtered live activity feed. Subscribers receive `ActivityEvent` JSON frames in real time as the `ActivityBus` publishes them (today: chat completions; more publishers land as ISSUE 5/6 wire them). Landed in ISSUE 4 / v0.2.7 (`crates/gadgetron-gateway/src/web/workbench.rs::events_ws_handler`).
+
+**Auth:** `OpenAiCompat`. The standard `Authorization: Bearer …` header works for WebSocket upgrade requests issued from non-browser clients. **Browser clients** cannot set `Authorization` on WS upgrades — use the **query-token fallback** `?token=gad_live_…` scoped to this route. Middleware strips `?token=` before logging (`crates/gadgetron-gateway/src/middleware/auth.rs`).
+
+**Protocol:** one JSON text frame per event. No framing envelope — each frame is a complete `ActivityEvent`. Example:
+```json
+{"type":"chat_completed","tenant_id":"…","request_id":"…","model":"gpt-4o-mini","input_tokens":150,"output_tokens":42,"latency_ms":380,"cost_cents":1,"at":"2026-04-19T08:04:30.412Z"}
+```
+
+**Lag behavior:** when the server-side broadcast channel lags (subscriber slower than publishers), the server sends a structured lag notice and closes. Clients MUST reconnect + re-sync via `GET /usage/summary`:
+```json
+{"type":"lag","missed":42,"message":"subscriber lagged; reconnect to resume"}
+```
+The close happens immediately after the lag frame so silent drops don't mask the problem.
+
+**Tenant filter:** events from other tenants are dropped on the handler side before send — subscribers only see their tenant's events.
+
+**Errors:**
+
+| Code | HTTP | When |
+|---|---|---|
+| `config_error` | 400 | `activity_bus` / pool not configured. |
+| 401 / 403 | — | Auth handled by the standard middleware stack; WS upgrade is rejected with an HTTP response before the protocol switch. |
+
+E2E Gate 11f covers the `/web/dashboard` page that consumes this stream via `?token=` auth.
 
 **Common queries (operator recipes).**
 
