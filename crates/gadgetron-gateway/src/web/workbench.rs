@@ -532,9 +532,7 @@ pub struct DenyApprovalResponse {
 
 /// Map `ApprovalError` → `WorkbenchHttpError` keeping the status-code
 /// contract callers rely on.
-fn approval_error_to_http(
-    err: gadgetron_core::workbench::ApprovalError,
-) -> WorkbenchHttpError {
+fn approval_error_to_http(err: gadgetron_core::workbench::ApprovalError) -> WorkbenchHttpError {
     use gadgetron_core::workbench::ApprovalError as E;
     match err {
         E::NotFound => WorkbenchHttpError::ApprovalNotFound,

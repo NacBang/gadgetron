@@ -1310,9 +1310,8 @@ fn build_workbench(
     // approval endpoints (`mark_approved` / `mark_denied`), so a
     // `pending_approval` returned from invoke is visible to the
     // subsequent approve call.
-    let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> = Arc::new(
-        gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
-    );
+    let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> =
+        Arc::new(gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new());
 
     let action_svc: Arc<dyn WorkbenchActionService> =
         Arc::new(InProcessWorkbenchActionService::new_full(

@@ -15,9 +15,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use gadgetron_core::knowledge::AuthenticatedContext;
-use gadgetron_core::workbench::{
-    ApprovalError, ApprovalRequest, ApprovalState, ApprovalStore,
-};
+use gadgetron_core::workbench::{ApprovalError, ApprovalRequest, ApprovalState, ApprovalStore};
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
@@ -30,7 +28,9 @@ impl InMemoryApprovalStore {
         Self::default()
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, ApprovalRequest>>, ApprovalError> {
+    fn lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, ApprovalRequest>>, ApprovalError> {
         self.inner
             .lock()
             .map_err(|e| ApprovalError::Backend(format!("mutex poisoned: {e}")))

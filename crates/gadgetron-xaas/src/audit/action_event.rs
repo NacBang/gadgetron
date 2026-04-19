@@ -67,10 +67,7 @@ impl ActionAuditSink for ActionAuditEventWriter {
 /// Errors are logged but never propagated — audit loss is preferable
 /// to a crash loop in the writer that would silently drop every
 /// subsequent event too.
-pub async fn run_action_audit_writer(
-    mut rx: mpsc::Receiver<ActionAuditEvent>,
-    pool: PgPool,
-) {
+pub async fn run_action_audit_writer(mut rx: mpsc::Receiver<ActionAuditEvent>, pool: PgPool) {
     while let Some(event) = rx.recv().await {
         if let Err(e) = insert_event(&pool, &event).await {
             tracing::warn!(
@@ -113,9 +110,9 @@ pub struct ActionAuditQueryFilter {
     pub limit: i64,
 }
 
-/// Query `action_audit_events` filtered by tenant + optional action_id
-/// + optional `since` timestamp, ordered newest-first. `limit` is
-/// clamped to `[1, 500]` by the caller.
+/// Query `action_audit_events` filtered by tenant + optional action_id +
+/// optional `since` timestamp, ordered newest-first. `limit` is clamped
+/// to `[1, 500]` by the caller.
 ///
 /// Returns rows as owned `ActionAuditRow` values — the caller serializes
 /// them to JSON in the response.

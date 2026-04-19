@@ -306,15 +306,16 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             // `ApprovalGranted` / `ApprovalDenied` events to. Echoed
             // into the response.
             let audit_event_id = Uuid::new_v4();
-            self.audit_sink.send(ActionAuditEvent::DirectActionCompleted {
-                event_id: audit_event_id,
-                action_id: action_id.to_string(),
-                gadget_name: descriptor.gadget_name.clone(),
-                actor_user_id: actor.user_id,
-                tenant_id: actor_tenant_id,
-                outcome: ActionAuditOutcome::PendingApproval,
-                elapsed_ms: start_instant.elapsed().as_millis() as u64,
-            });
+            self.audit_sink
+                .send(ActionAuditEvent::DirectActionCompleted {
+                    event_id: audit_event_id,
+                    action_id: action_id.to_string(),
+                    gadget_name: descriptor.gadget_name.clone(),
+                    actor_user_id: actor.user_id,
+                    tenant_id: actor_tenant_id,
+                    outcome: ActionAuditOutcome::PendingApproval,
+                    elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                });
             let result = WorkbenchActionResult {
                 status: "pending_approval".into(),
                 approval_id: Some(approval_id),
@@ -527,17 +528,18 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                     payload = Some(result.content);
                 }
                 Err(e) => {
-                    self.audit_sink.send(ActionAuditEvent::DirectActionCompleted {
-                        event_id: audit_event_id,
-                        action_id: approval.action_id.clone(),
-                        gadget_name: Some(gadget_name.to_string()),
-                        actor_user_id: actor.user_id,
-                        tenant_id: actor.tenant_id,
-                        outcome: ActionAuditOutcome::Error {
-                            error_code: e.error_code().to_string(),
-                        },
-                        elapsed_ms: start_instant.elapsed().as_millis() as u64,
-                    });
+                    self.audit_sink
+                        .send(ActionAuditEvent::DirectActionCompleted {
+                            event_id: audit_event_id,
+                            action_id: approval.action_id.clone(),
+                            gadget_name: Some(gadget_name.to_string()),
+                            actor_user_id: actor.user_id,
+                            tenant_id: actor.tenant_id,
+                            outcome: ActionAuditOutcome::Error {
+                                error_code: e.error_code().to_string(),
+                            },
+                            elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                        });
                     tracing::warn!(
                         action_id = %approval.action_id,
                         gadget_name = %gadget_name,
@@ -550,15 +552,16 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 }
             }
         }
-        self.audit_sink.send(ActionAuditEvent::DirectActionCompleted {
-            event_id: audit_event_id,
-            action_id: approval.action_id.clone(),
-            gadget_name: descriptor.gadget_name.clone(),
-            actor_user_id: actor.user_id,
-            tenant_id: actor.tenant_id,
-            outcome: ActionAuditOutcome::Success,
-            elapsed_ms: start_instant.elapsed().as_millis() as u64,
-        });
+        self.audit_sink
+            .send(ActionAuditEvent::DirectActionCompleted {
+                event_id: audit_event_id,
+                action_id: approval.action_id.clone(),
+                gadget_name: descriptor.gadget_name.clone(),
+                actor_user_id: actor.user_id,
+                tenant_id: actor.tenant_id,
+                outcome: ActionAuditOutcome::Success,
+                elapsed_ms: start_instant.elapsed().as_millis() as u64,
+            });
         let result = WorkbenchActionResult {
             status: "ok".into(),
             approval_id: Some(approval.id),
@@ -1102,7 +1105,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             gadgetron_core::audit::ActionAuditEvent::DirectActionCompleted {
-                event_id, outcome, ..
+                event_id,
+                outcome,
+                ..
             } => {
                 assert_eq!(*event_id, response_audit_id);
                 assert!(matches!(
@@ -1154,14 +1159,14 @@ mod tests {
         let events = drained_events(&sink);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            gadgetron_core::audit::ActionAuditEvent::DirectActionCompleted {
-                outcome, ..
-            } => match outcome {
-                gadgetron_core::audit::ActionAuditOutcome::Error { error_code } => {
-                    assert!(!error_code.is_empty(), "error_code must be populated");
+            gadgetron_core::audit::ActionAuditEvent::DirectActionCompleted { outcome, .. } => {
+                match outcome {
+                    gadgetron_core::audit::ActionAuditOutcome::Error { error_code } => {
+                        assert!(!error_code.is_empty(), "error_code must be populated");
+                    }
+                    other => panic!("expected Error outcome, got {other:?}"),
                 }
-                other => panic!("expected Error outcome, got {other:?}"),
-            },
+            }
             _ => unreachable!("only DirectActionCompleted shipping today"),
         }
     }
@@ -1223,8 +1228,7 @@ mod tests {
     async fn resume_approval_dispatches_with_stored_args() {
         use crate::web::approval_store::InMemoryApprovalStore;
         use gadgetron_core::workbench::{
-            ApprovalStore, WorkbenchActionDescriptor, WorkbenchActionKind,
-            WorkbenchActionPlacement,
+            ApprovalStore, WorkbenchActionDescriptor, WorkbenchActionKind, WorkbenchActionPlacement,
         };
 
         #[derive(Clone)]

@@ -403,9 +403,9 @@ fn workbench_err_to_gadgetron(err: WorkbenchHttpError) -> GadgetronError {
             },
             message: "Approval not found.".into(),
         },
-        WorkbenchHttpError::ApprovalAlreadyResolved { state } => GadgetronError::Config(
-            format!("approval already resolved (state={state})"),
-        ),
+        WorkbenchHttpError::ApprovalAlreadyResolved { state } => {
+            GadgetronError::Config(format!("approval already resolved (state={state})"))
+        }
         WorkbenchHttpError::ApprovalForbidden => GadgetronError::Forbidden,
     }
 }

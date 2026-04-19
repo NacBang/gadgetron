@@ -13,9 +13,7 @@
 mod action;
 mod event;
 
-pub use action::{
-    ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, NoopActionAuditSink,
-};
+pub use action::{ActionAuditEvent, ActionAuditOutcome, ActionAuditSink, NoopActionAuditSink};
 pub use event::{
     CoreAuditEvent, CoreAuditEventSink, GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome,
     GadgetMetadata, GadgetTier, NoopCoreAuditEventSink, NoopGadgetAuditEventSink,
