@@ -255,7 +255,16 @@ Client
   │ [budget: ~1μs — Vec<Scope> linear scan (최대 3 elements)]
   │
   ── handler 진입 ──────────────────────────────────────────────────────────
-  │ [crate: gadgetron-xaas]
+  │ [crate: gadgetron-xaas] — EPIC 4 composite: `RateLimitedQuotaEnforcer`
+  │                          wraps inner `QuotaEnforcer` when
+  │                          `[quota_rate_limit]` is configured (TASK 11.2)
+  │   [0. RATE-LIMIT STEP — TASK 11.2 / PR #231 / v0.5.2]
+  │     (runs BEFORE cost check, fail-fast: no snapshot query on reject)
+  │     TokenBucketRateLimiter::consume(tenant_id, 1)
+  │       — DashMap-sharded per-tenant bucket, lazy refill at
+  │         consume() time, monotonic Instant clock (skew-proof)
+  │       초과 시 → GadgetronError::QuotaExceeded → HTTP 429 (same wire)
+  │   [1. COST CHECK — `QuotaEnforcer::check_pre`]
   │ [fn: QuotaEnforcer::check_pre(tenant_id: Uuid, estimated_tokens: u32)
   │      -> Result<(), GadgetronError>]
   │   quota_config: moka cache에서 조회 (10min TTL, H-6에서 결정)
@@ -298,13 +307,34 @@ Client
   │   fallback 발생 시: try_fallbacks(fallback_chain, req) → 순차 시도
   │ [budget: ~5μs — DashMap write]
   │
-  │ [crate: gadgetron-xaas]
+  │ [crate: gadgetron-xaas] — EPIC 4 TASK 11.3 / PR #232 / v0.5.3
   │ [fn: QuotaEnforcer::record_post(tenant_id: Uuid, usage: &Usage)
   │      -> Result<(), GadgetronError>]
+  │   Auto-selected at startup: `PgQuotaEnforcer` when
+  │     `pg_pool.is_some()`, else `InMemoryQuotaEnforcer` fallback.
   │   compute_cost_cents(usage, rate) -> i64  (D-20260411-06 변환 지점)
-  │   PostgreSQL UPDATE quota_balances SET used_cents=$1 WHERE tenant_id=$2
-  │   → map_err(sqlx_to_gadgetron)?
-  │ [budget: ~3ms — PostgreSQL write (P1 단일 인스턴스)]
+  │   PgQuotaEnforcer 경로 (`pg_pool.is_some()`):
+  │     PostgreSQL UPDATE quota_configs
+  │       SET daily_used_cents = CASE WHEN usage_day = CURRENT_DATE
+  │                                   THEN daily_used_cents + $cost
+  │                                   ELSE $cost END,
+  │           monthly_used_cents = CASE WHEN date_trunc('month', usage_day)
+  │                                       = date_trunc('month', CURRENT_DATE)
+  │                                     THEN monthly_used_cents + $cost
+  │                                     ELSE $cost END,
+  │           usage_day = CURRENT_DATE
+  │         WHERE tenant_id = $2
+  │     — CASE rollover: daily zeros at UTC midnight, monthly at
+  │       first-of-month, NO background job, rollover happens on
+  │       the first post-boundary request.
+  │     — Fire-and-forget: UPDATE 실패해도 request 는 이미 성공,
+  │       tracing::error 만 로그 + never propagate.
+  │   InMemoryQuotaEnforcer 경로 (pg_pool 없음): 인메모리 token 만
+  │     mark-used, DB 는 건드리지 않음.
+  │ [budget: ~3ms — PostgreSQL write (PgQuotaEnforcer path) /
+  │  ~1μs (InMemory path)]
+  │ [migration: 20260420000001_quota_usage_day.sql adds
+  │  `usage_day DATE DEFAULT CURRENT_DATE` column]
   │
   │ [crate: gadgetron-xaas]
   │ [fn: AuditWriter::send(entry: AuditEntry) — non-blocking]
