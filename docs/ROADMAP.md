@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.7** (post-ISSUE 4 operator observability)
+**Current version: 0.2.8** (post-ISSUE 5 Penny tool-call audit surface)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -66,9 +66,16 @@ against real infrastructure, results stream back as tool outputs AND land
 in the audit + activity trail. Turns Gadgetron into a platform an
 autonomous workflow can drive.
 
+### Completed ISSUEs
+- **ISSUE 5 — Penny tool-call audit surface** (0.2.7 → 0.2.8)
+  Real `GadgetAuditEventWriter` + `run_gadget_audit_writer` consumer
+  persisting `tool_audit_events` rows (was Noop until this ISSUE);
+  `GET /api/v1/web/workbench/audit/tool-events` query endpoint with
+  tenant pinning; `ActivityEvent::ToolCallCompleted` variant + bus
+  fan-out from the writer so dashboards see Penny tool calls in
+  real time. Harness gate 7k.4 (tool-events shape + clamp).
+
 ### Planned ISSUEs
-- **ISSUE 5 — Penny MCP loop**: LiteLLM proxy harness integration,
-  `--penny-vllm` flag wired for real, tool-call audit trail.
 - **ISSUE 6 — activity feed from Penny**: Penny-originated writes show
   in `/workbench/activity` with correct attribution.
 - **ISSUE 7 — first-class MCP server**: `/v1/tools` listing; tool schemas
