@@ -303,7 +303,7 @@ After updating, the next request will use the new scopes (cache TTL is 10 minute
 ```json
 {
   "error": {
-    "message": "Your API usage quota has been exceeded. Contact your administrator to increase limits.",
+    "message": "Your API usage quota has been exceeded. Update quota_configs table to increase limits, or see docs/manual/troubleshooting.md.",
     "type": "quota_error",
     "code": "quota_exceeded"
   }

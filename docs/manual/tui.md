@@ -2,7 +2,7 @@
 
 The `gadgetron-tui` crate provides a terminal-based dashboard for monitoring your Gadgetron cluster. It renders GPU node metrics, model states, and a live request log in a 3-column layout.
 
-As of Sprint 6, the TUI is connected to the live gateway via a `tokio::sync::broadcast` channel. Real-time GPU metrics, model states, and request log entries stream into the dashboard at 1 Hz.
+The TUI is connected to the live gateway via a `tokio::sync::broadcast` channel. Real-time GPU metrics, model states, and request log entries stream into the dashboard at 1 Hz.
 
 ---
 
@@ -142,10 +142,11 @@ The request ID is truncated to 8 characters for display.
 |-----|--------|--------|
 | `q` | Quit the TUI (triggers graceful shutdown) | Implemented |
 | `Esc` | Quit the TUI (triggers graceful shutdown) | Implemented |
-| `r` | Manual refresh trigger | Sprint 7 |
-| Arrow keys | Navigate between panels / scroll | Sprint 7 |
+| `Tab` | Rotate focus across Nodes / Models / Requests panels | Implemented |
+| `Up` / `Down` | Scroll the focused panel by one row | Implemented |
+| `r` | Manual refresh trigger | Planned |
 
-Arrow navigation and manual refresh are shown in the footer as a preview of future functionality. Pressing them in Sprint 6 has no effect.
+`r` is shown in the footer as a preview of future functionality; pressing it today has no effect. `Tab` and the arrow keys are handled by `App::handle_key` in `crates/gadgetron-tui/src/app.rs`.
 
 ---
 
@@ -182,19 +183,19 @@ When VRAM utilization is 90% or higher, the row color overrides to Red regardles
 
 ---
 
-## Sprint 6 status and Sprint 7 roadmap
+## Current status and roadmap
 
-Sprint 6 delivered live gateway integration. What is now working:
+Working today:
 
 - **Live data.** `App::with_channel(rx)` receives `GpuMetrics`, `ModelStatus`, `ClusterHealth`, and `RequestEntry` updates from the gateway via `tokio::sync::broadcast` at 1 Hz.
 - **Real-time request log.** Every request processed by the gateway is forwarded through `metrics_middleware` and appears in the Requests panel as it completes.
 - **Graceful shutdown.** Pressing `q` or `Esc` initiates a 5-second audit drain before the process exits.
+- **Keyboard navigation.** `Tab` rotates focus across the three panels; `Up` / `Down` scroll the focused panel one row at a time (bounded by `saturating_sub` / `saturating_add`).
 
-What is not yet wired (Sprint 7):
+Not yet wired:
 
-- **No keyboard navigation.** Arrow keys and `r` are listed in the footer but not handled.
-- **No scrolling.** The Nodes and Models columns render all entries; there is no scroll position tracking.
-- **No time display.** The header does not show a clock or last-updated timestamp.
+- **Manual refresh.** `r` is listed in the footer but not handled — updates arrive automatically via the broadcast channel at 1 Hz.
+- **Time display.** The header does not show a clock or last-updated timestamp.
 
 ---
 
