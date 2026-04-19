@@ -1525,6 +1525,19 @@ esac
 # ---------------------------------------------------------------------------
 # Gate 7k.3: /api/v1/web/workbench/usage/summary shape (ISSUE 4 TASK 4.1)
 # ---------------------------------------------------------------------------
+log "=== Gate 7k.5: /workbench/quota/status shape (ISSUE 11 TASK 11.4) ==="
+QUOTA_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/quota/status" 2>&1 || true)"
+if echo "$QUOTA_RESP" \
+  | jq -e '.usage_day and (.daily.limit_cents | type == "number") and (.daily.remaining_cents | type == "number") and (.monthly.limit_cents | type == "number")' \
+  >/dev/null 2>&1; then
+  QDL="$(echo "$QUOTA_RESP" | jq '.daily.limit_cents')"
+  QDR="$(echo "$QUOTA_RESP" | jq '.daily.remaining_cents')"
+  pass "/quota/status returns { usage_day, daily, monthly } (daily limit=$QDL, remaining=$QDR)"
+else
+  fail "/quota/status shape regressed" "$(echo "$QUOTA_RESP" | head -c 400)"
+fi
+
 log "=== Gate 7k.3: /workbench/usage/summary shape + defaults ==="
 USAGE_RESP="$(curl -fsS \
   -H "Authorization: Bearer $TEST_API_KEY" \
