@@ -84,6 +84,115 @@ pub async fn run_action_audit_writer(
     tracing::info!(target: "action_audit", "action audit writer exiting — channel closed");
 }
 
+/// Query response row for the `GET /api/v1/web/workbench/audit/events`
+/// endpoint. Mirrors the `action_audit_events` table schema verbatim,
+/// minus the internal bigserial id (we use `event_id` as the stable
+/// client-facing handle).
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct ActionAuditRow {
+    pub event_id: uuid::Uuid,
+    pub action_id: String,
+    pub gadget_name: Option<String>,
+    pub actor_user_id: String,
+    pub tenant_id: String,
+    pub outcome: String,
+    pub error_code: Option<String>,
+    pub elapsed_ms: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Filter shape for the query endpoint. All fields optional — only
+/// `tenant_id` is always set by the handler (from the authenticated
+/// actor) so a tenant cannot accidentally read another tenant's audit
+/// trail.
+#[derive(Debug, Clone, Default)]
+pub struct ActionAuditQueryFilter {
+    pub tenant_id: String,
+    pub action_id: Option<String>,
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: i64,
+}
+
+/// Query `action_audit_events` filtered by tenant + optional action_id
+/// + optional `since` timestamp, ordered newest-first. `limit` is
+/// clamped to `[1, 500]` by the caller.
+///
+/// Returns rows as owned `ActionAuditRow` values — the caller serializes
+/// them to JSON in the response.
+pub async fn query_action_audit_events(
+    pool: &PgPool,
+    filter: &ActionAuditQueryFilter,
+) -> Result<Vec<ActionAuditRow>, sqlx::Error> {
+    // Dynamic WHERE built from optional filters. We prepare one of four
+    // query shapes rather than concatenating SQL because sqlx's
+    // `query_as!` macro needs a stable string, and hand-built dynamic
+    // SQL with user input is an injection waiting to happen. Four
+    // prepared variants is fine given the small fan-out.
+    let limit = filter.limit;
+    match (filter.action_id.as_deref(), filter.since) {
+        (None, None) => {
+            sqlx::query_as::<_, ActionAuditRow>(
+                r#"SELECT event_id, action_id, gadget_name, actor_user_id,
+                          tenant_id, outcome, error_code, elapsed_ms, created_at
+                   FROM action_audit_events
+                   WHERE tenant_id = $1
+                   ORDER BY created_at DESC
+                   LIMIT $2"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(action_id), None) => {
+            sqlx::query_as::<_, ActionAuditRow>(
+                r#"SELECT event_id, action_id, gadget_name, actor_user_id,
+                          tenant_id, outcome, error_code, elapsed_ms, created_at
+                   FROM action_audit_events
+                   WHERE tenant_id = $1 AND action_id = $2
+                   ORDER BY created_at DESC
+                   LIMIT $3"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(action_id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (None, Some(since)) => {
+            sqlx::query_as::<_, ActionAuditRow>(
+                r#"SELECT event_id, action_id, gadget_name, actor_user_id,
+                          tenant_id, outcome, error_code, elapsed_ms, created_at
+                   FROM action_audit_events
+                   WHERE tenant_id = $1 AND created_at >= $2
+                   ORDER BY created_at DESC
+                   LIMIT $3"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(since)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(action_id), Some(since)) => {
+            sqlx::query_as::<_, ActionAuditRow>(
+                r#"SELECT event_id, action_id, gadget_name, actor_user_id,
+                          tenant_id, outcome, error_code, elapsed_ms, created_at
+                   FROM action_audit_events
+                   WHERE tenant_id = $1 AND action_id = $2 AND created_at >= $3
+                   ORDER BY created_at DESC
+                   LIMIT $4"#,
+            )
+            .bind(&filter.tenant_id)
+            .bind(action_id)
+            .bind(since)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+    }
+}
+
 async fn insert_event(pool: &PgPool, event: &ActionAuditEvent) -> Result<(), sqlx::Error> {
     match event {
         ActionAuditEvent::DirectActionCompleted {

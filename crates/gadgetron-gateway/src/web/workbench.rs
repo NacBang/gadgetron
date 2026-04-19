@@ -548,6 +548,59 @@ fn approval_error_to_http(
     }
 }
 
+/// Query parameters for `GET /audit/events`.
+#[derive(Debug, Deserialize)]
+pub struct AuditEventsQuery {
+    /// Restrict to a specific action id (e.g. `wiki-write`).
+    pub action_id: Option<String>,
+    /// Only events at or after this RFC3339 timestamp.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Row cap. Defaults to 100, clamped to `[1, 500]`.
+    pub limit: Option<i64>,
+}
+
+/// Response shape for `GET /audit/events`.
+#[derive(Debug, serde::Serialize)]
+pub struct AuditEventsResponse {
+    pub events: Vec<gadgetron_xaas::audit::ActionAuditRow>,
+    pub returned: usize,
+}
+
+/// `GET /audit/events` — tenant-scoped read over `action_audit_events`.
+///
+/// Filters: `action_id` (exact match), `since` (inclusive), `limit`
+/// (default 100, max 500). The tenant boundary is ALWAYS pinned to the
+/// authenticated actor's tenant — the caller cannot read another
+/// tenant's audit trail regardless of query params.
+/// Returns 503-shape when the server has no Postgres pool.
+pub async fn list_audit_events(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<AuditEventsQuery>,
+) -> Result<Json<AuditEventsResponse>, WorkbenchHttpError> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "audit event query requires Postgres (no pool configured)".into(),
+        ))
+    })?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let filter = gadgetron_xaas::audit::ActionAuditQueryFilter {
+        tenant_id: ctx.tenant_id.to_string(),
+        action_id: query.action_id,
+        since: query.since,
+        limit,
+    };
+    let events = gadgetron_xaas::audit::query_action_audit_events(pool, &filter)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "audit event query failed: {e}"
+            )))
+        })?;
+    let returned = events.len();
+    Ok(Json(AuditEventsResponse { events, returned }))
+}
+
 /// `POST /actions/:action_id` — direct action invocation.
 ///
 /// Requires the action service to be wired in `GatewayWorkbenchService`.
@@ -604,6 +657,8 @@ pub fn workbench_routes() -> Router<AppState> {
         // ISSUE 3 TASK 3.3 — real approval flow.
         .route("/approvals/{approval_id}/approve", post(approve_action))
         .route("/approvals/{approval_id}/deny", post(deny_action))
+        // ISSUE 3 TASK 3.4 — tenant-scoped audit event query.
+        .route("/audit/events", get(list_audit_events))
 }
 
 // ---------------------------------------------------------------------------
