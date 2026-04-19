@@ -139,6 +139,8 @@ Markdown 렌더는 `react-markdown` + `remark-gfm` (GitHub-flavoured) 입니다.
 
 PR #194 shipped `/web/dashboard` as a sibling of `/web` 와 `/web/wiki`: tenant-scoped live tiles driven by `GET /usage/summary` (24-hour rollup over chat / direct-action / Penny tool planes) plus a WebSocket feed from `GET /events/ws` that streams `ActivityEvent` frames as they publish. LeftRail adds a "Dashboard" tab next to Chat / Wiki.
 
+**Shipped `ActivityEvent` publishers:** `ChatCompleted` (ISSUE 4 / PR #194 — `StreamEndGuard` Drop 경로), `ToolCallCompleted` (ISSUE 5 / PR #199 — `run_gadget_audit_writer` fan-out). ISSUE 6 / PR #201 also fans out Penny tool calls to `CapturedActivityEvent` (for `/workbench/activity`) but those flow through a separate coordinator capture path — they do NOT appear as `/events/ws` frames. The `ActivityBus` broadcast channel is the live-tiles signal; the coordinator is the durable activity-feed signal.
+
 **Auth flow — browser-specific.** The WebSocket upgrade path cannot carry an `Authorization` header from browser JavaScript, so the page uses the query-token fallback: `wss://…/events/ws?token=gad_live_…`. The auth middleware checks `?token=` **only** for this route and strips it from logs before the request-id line lands on disk (`crates/gadgetron-gateway/src/middleware/auth.rs`). Non-browser clients should keep using the standard `Authorization: Bearer …` header.
 
 **Lag handling.** When the broadcast channel backs up (subscriber slower than publishers), the server sends a structured `{"type":"lag", "missed":N, …}` frame then closes. The page MUST reconnect and re-sync via `GET /usage/summary` — silent drops would mask a real load problem.

@@ -693,7 +693,7 @@ curl -s http://localhost:8080/ready
 
 The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
 
-All thirteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` and `/audit/events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query.
+All fourteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7, one tool-call audit route added in ISSUE 5 / v0.2.8). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` + `/audit/events` + `/audit/tool-events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`; Penny-attributed activity capture is skipped when `candidate_coordinator` is `None`, per ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query; PR #199 / v0.2.8 extended it for Penny tool-call audit persistence; PR #201 / v0.2.9 threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
@@ -701,7 +701,7 @@ All thirteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, t
 - `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:50-63`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
 
 **What is stubbed on trunk today:**
-- `activity.entries` — always `[]` (see §/activity).
+- `activity.entries` — the endpoint read path still returns `[]` (see §/activity). The underlying capture flow IS live: `CapturedActivityEvent` rows land in the coordinator for both direct-action (ISSUE 3) and Penny tool calls (ISSUE 6 / PR #201). Read-side projection (PSL-1) is the remaining gap.
 - `request_evidence` — always 404 (see §/evidence).
 - `refresh_view_ids` — always `[]` on every action response (see §POST /actions).
 
@@ -735,7 +735,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.2.7",
+  "gateway_version": "0.2.9",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -754,7 +754,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.7"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.9"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -773,7 +773,9 @@ The three `*_ready` booleans are the observable contract gate 7 pins down (`(.kn
 
 ### GET /api/v1/web/workbench/activity
 
-Recent workbench activity feed: Penny turns, direct actions, system events. **On trunk today this is a stub** — `InProcessWorkbenchProjection::activity` at `crates/gadgetron-gateway/src/web/projection.rs:101-106` always returns `{"entries": [], "is_truncated": false}` regardless of `limit` or real traffic. The response shape documented below is the contract future activity-source wiring (PSL-1) will populate; build client code against the shape, but don't expect non-empty data until that ships. E2E Gate 7c asserts the empty-state shape.
+Recent workbench activity feed: Penny turns, direct actions, system events. **On trunk today the HTTP endpoint is still a stub** — `InProcessWorkbenchProjection::activity` at `crates/gadgetron-gateway/src/web/projection.rs:101-106` always returns `{"entries": [], "is_truncated": false}` regardless of `limit` or real traffic. The response shape documented below is the contract future activity-source wiring (PSL-1 read path) will populate; build client code against the shape, but don't expect non-empty data from the endpoint until that ships. E2E Gate 7c asserts the empty-state shape.
+
+**Progress since ISSUE 6 / v0.2.9** (PR #201). The underlying write path is live: Penny tool calls now fan out through `GadgetAuditEventWriter.with_coordinator()` into `KnowledgeCandidateCoordinator::capture_action`, producing `CapturedActivityEvent { origin: Penny, kind: GadgetToolCall }` rows. Direct-action dispatch has been producing `CapturedActivityEvent { origin: UserDirect, kind: DirectAction }` rows since ISSUE 3. What remains for a non-empty endpoint response is the read-projection wiring — reading from the coordinator's backing store into `WorkbenchActivityResponse.entries`. Until that ships, inspect the captured rows via `tracing` logs (`target: "action_audit"` / `"penny_audit"`) or by querying the coordinator directly in tests.
 
 **Auth:** `OpenAiCompat`
 

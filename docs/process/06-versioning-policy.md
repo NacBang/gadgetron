@@ -79,8 +79,8 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
 
 ## 7. 현재 상태
 
-- **Workspace version**: `0.2.8` (EPIC 1 close-criteria + EPIC 2 첫 ISSUE shipped)
-- **활성 EPIC**: EPIC 1 (Workbench MVP) close-criteria 단계 + EPIC 2 (Agent autonomy) 진입. EPIC 1 shipped — ISSUE 1 (0.2.0), ISSUE 2 (0.2.1→0.2.4), ISSUE 2b (0.2.5), ISSUE 3 (0.2.6, PR #188 — production safety), ISSUE 4 (0.2.7, PR #194 — operator observability). EPIC 2 shipped — ISSUE 5 (0.2.8, PR #199 — Penny tool-call audit surface: `run_gadget_audit_writer` + `/audit/tool-events` 쿼리 엔드포인트 + `ActivityEvent::ToolCallCompleted` 버스 팬아웃). EPIC 2 남은 계획 — ISSUE 6 (Penny-originated writes in `/workbench/activity`), ISSUE 7 (first-class MCP server + `/v1/tools`).
-- **다음 patch bump**: EPIC 2 ISSUE 6 머지 시 `0.2.8` → `0.2.9`. EPIC 1 close 는 별도의 manual-validation 단계 통과 후 `0.3.0` minor bump.
+- **Workspace version**: `0.2.9` (EPIC 1 close-criteria + EPIC 2 두 개의 ISSUE shipped)
+- **활성 EPIC**: EPIC 1 (Workbench MVP) close-criteria 단계 + EPIC 2 (Agent autonomy) 진행 중. EPIC 1 shipped — ISSUE 1 (0.2.0), ISSUE 2 (0.2.1→0.2.4), ISSUE 2b (0.2.5), ISSUE 3 (0.2.6, PR #188 — production safety), ISSUE 4 (0.2.7, PR #194 — operator observability). EPIC 2 shipped — ISSUE 5 (0.2.8, PR #199 — Penny tool-call audit surface: `run_gadget_audit_writer` + `/audit/tool-events` 쿼리 엔드포인트 + `ActivityEvent::ToolCallCompleted` 버스 팬아웃), ISSUE 6 (0.2.9, PR #201 — Penny-attributed activity feed: `GadgetAuditEventWriter::with_coordinator(coord)` fan-out → `CapturedActivityEvent { origin: Penny, kind: GadgetToolCall }` 로우 생성; `init_serve_runtime` reorder 로 production Penny 경로에서 coordinator 연결). EPIC 2 남은 계획 — ISSUE 7 (first-class MCP server + `/v1/tools`).
+- **다음 patch bump**: EPIC 2 ISSUE 7 머지 시 `0.2.9` → `0.2.10`. EPIC 1 close 는 별도의 manual-validation 단계 통과 후 `0.3.0` minor bump.
 - **다음 minor bump**: EPIC 1 close 시 `v0.3.0` 태그. EPIC 2 close 시 `v0.4.0` 태그.
 - **이전 tag**: `v0.1.0-phase1` (역사적).

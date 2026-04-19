@@ -67,14 +67,14 @@ in the audit + activity trail. Turns Gadgetron into a platform an
 autonomous workflow can drive.
 
 ### Completed ISSUEs
-- **ISSUE 5 — Penny tool-call audit surface** (0.2.7 → 0.2.8)
+- **ISSUE 5 — Penny tool-call audit surface** (0.2.7 → 0.2.8, PR #199)
   Real `GadgetAuditEventWriter` + `run_gadget_audit_writer` consumer
   persisting `tool_audit_events` rows (was Noop until this ISSUE);
   `GET /api/v1/web/workbench/audit/tool-events` query endpoint with
   tenant pinning; `ActivityEvent::ToolCallCompleted` variant + bus
   fan-out from the writer so dashboards see Penny tool calls in
   real time. Harness gate 7k.4 (tool-events shape + clamp).
-- **ISSUE 6 — Penny-attributed activity feed** (0.2.8 → 0.2.9)
+- **ISSUE 6 — Penny-attributed activity feed** (0.2.8 → 0.2.9, PR #201)
   `GadgetAuditEventWriter::with_coordinator(coord)` fan-out; every
   Penny tool call also captures a `CapturedActivityEvent` with
   `ActivityOrigin::Penny` + `ActivityKind::GadgetToolCall`.
