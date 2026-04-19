@@ -474,9 +474,17 @@ pub fn estimate_vram_mb(params_billion: f64, quantization: Quantization) -> u64 
 
 **서브-스프린트 4종 (P2A→P2D, 각 4주)**, 배포 형태 3종 (Local / On-prem / Cloud, 같은 코드 경로, 스토리지만 swap), 보안 위협 모델 M1–M8은 [`docs/design/phase2/00-overview.md`](design/phase2/00-overview.md)에 통합되어 있다. 핵심 ADR은 [`docs/adr/README.md`](adr/README.md) 참조.
 
-### Phase 3 — Cluster Ops Hardening & Rich Automation (v1.0)
+### Phase 3 — Cluster Ops Hardening & Rich Automation (EPIC 5 / `v2.0.0` — PLANNED, post-1.0)
 
 **목표**: Phase 2 collaboration entry point 를 프로덕션급 멀티 노드/멀티 테넌트 cluster operations platform 으로 승격하고, infra/scheduler/cluster toolization 과 richer automation 으로 확장.
+
+**스코프 정정 (2026-04-20 ROADMAP v2 이후)**: 이 섹션은 원래 Phase 1 에서 Phase 3 로 직접 점프하는 2-phase 모델을 전제로 작성되었으나, ROADMAP v2 (PR #186) 에서 EPIC 단위로 리프레임되면서 아래 표 항목들 중 일부가 EPIC 3/4 (Phase 2 내부) 로 재배치되었다:
+- **Bundle 시스템** → EPIC 3 CLOSED `v0.5.0` (ISSUE 8 hot-reload + ISSUE 9 manifests + ISSUE 10 marketplace, 2026-04-20). Phase 2 끝에서 완료.
+- **멀티 테넌시 강화 / GPUaaS / ModelaaS / AgentaaS** → EPIC 4 ACTIVE (ISSUE 11 quotas 완료, ISSUE 12 billing + ISSUE 13 HF catalog + ISSUE 14 self-service 남음, 닫으면 `v1.0.0` first production release).
+- **HuggingFace Hub 통합** → EPIC 4 ISSUE 13 (per-model cost attribution 포함, billing pipeline 과 연동).
+- **핫 리로드** (DescriptorCatalog) → EPIC 3 ISSUE 8 완료 (`POST /admin/reload-catalog` + SIGHUP, CatalogSnapshot ArcSwap). AppConfig 전체 hot-reload 는 여전히 Phase 3 로 deferred.
+
+따라서 아래 표의 "Phase 3" 항목 중 `v2.0.0` EPIC 5 에 실제로 남는 것은 **K8s 통합, Slurm 통합, NUMA/MIG/인터커넥트 인식 스케줄링, 열/전력 스로틀링, 영구 메트릭 (Prometheus), 벤더 마이그레이션 (클라우드 ↔ 로컬 failover), OpenTelemetry 분산 트레이싱** — 즉 순수 cluster-ops layer 의 것들이다. 다른 항목들 (Bundle / 멀티 테넌시 / HF / 핫 리로드) 은 이미 Phase 2 (EPIC 3/4) 로 흡수되어 여기 표에서는 참고용 역사적 기록이다.
 
 | 항목 | 설명 | 관련 크레이트 |
 |------|------|-------------|
