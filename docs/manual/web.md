@@ -93,6 +93,40 @@ curl -fsSL -D - http://localhost:8080/web/ -o /dev/null | grep -iE 'content-secu
 
 ---
 
+## `/web/wiki` — 브라우저 워크벤치 (wiki CRUD)
+
+트렁크 0.2.0부터 `http://localhost:8080/web/wiki` 에서 단독 페이지로 접근할 수 있는 워크벤치 UI 입니다. PR #175/#176/#177/#179 로 쉘·디스패처·카탈로그·E2E 게이트가 함께 상자에 들어오며, 0.2.2 (ISSUE A.1) 에서 markdown 렌더가, 0.2.3 (ISSUE A.2) 에서 메인 쉘 좌측 레일 통합이 추가되었습니다.
+
+### 접근 경로
+
+두 경로 모두 동일한 페이지입니다 — 같은 `localStorage` API 키를 쓰고, 같은 Origin 격리 규칙을 따릅니다 (§Origin 격리 요구사항 참조).
+
+1. **단독 URL**: `http://localhost:8080/web/wiki` — 타 UI 없이 wiki 만 쓰는 빠른 경로. 첫 방문 시 `/settings` 로 리다이렉트되어 API 키 입력을 요구합니다.
+2. **메인 쉘 좌측 레일**: `http://localhost:8080/web` 접속 → 좌측 레일의 **"Wiki"** 탭 클릭. 탭은 내부적으로 `/wiki` 로 이동하여 동일한 페이지를 렌더합니다 (`LeftRailTab::Wiki` at `crates/gadgetron-web/web/app/components/shell/left-rail.tsx`). Chat 으로 돌아가려면 쉘의 "Chat" 탭을 누르거나 브라우저 뒤로가기를 누르십시오.
+
+### 기능 (구현 완료)
+
+페이지는 네 개의 워크벤치 direct-action 을 `POST /api/v1/web/workbench/actions/{id}` 로 호출합니다 (api-reference.md §POST /actions 참조). 각 버튼이 어떤 action 을 호출하는지:
+
+| UI 조작 | Action id | Gadget | 결과 |
+|---|---|---|---|
+| 검색창에 쿼리 입력 → "Search" 버튼 (또는 Enter) | `knowledge-search` | `wiki.search` | 매칭 페이지 + 스니펫 목록 |
+| 페이지 로드 시 자동, 또는 "Refresh" 버튼 | `wiki-list` | `wiki.list` | 왼쪽 패널의 모든 페이지 이름 목록 |
+| 왼쪽 목록의 페이지 이름 클릭 | `wiki-read` | `wiki.get` | 선택한 페이지의 markdown 렌더 (`<pre>` fallback 포함) |
+| "+ New page" 또는 기존 페이지 편집 → "Save" 버튼 | `wiki-write` | `wiki.write` | 새 페이지 생성 또는 덮어쓰기 |
+
+Markdown 렌더는 `react-markdown` + `remark-gfm` (GitHub-flavoured) 입니다. 파싱이 실패하면 `<pre>` raw 블록으로 fallback — 사용자는 내용을 여전히 읽을 수 있습니다.
+
+### 인증
+
+`/web/wiki` 는 `/web` 채팅 페이지와 **동일한** `localStorage` 키 슬롯을 씁니다. 채팅 페이지에서 API 키를 저장했다면 `/web/wiki` 는 별도 로그인 없이 바로 동작합니다. 반대로 `/web/wiki` 에서 키를 저장하면 `/web` 채팅도 해당 키로 동작합니다 — 같은 Origin 을 공유하기 때문입니다. 이 사실은 §Origin 격리 요구사항의 공격 모델과 정확히 같은 전제 위에서 성립합니다: 이 port 에 다른 웹 앱이 없어야 localStorage 키가 안전합니다.
+
+### E2E 게이트
+
+Gate 11d (`scripts/e2e-harness/run.sh`) 가 Playwright 로 진짜 Chromium 브라우저를 띄우고, 키 입력·페이지 생성·읽기·수정·저장·검색을 전부 자동화해서 검증합니다. Gate 11d 가 초록이면 `/web/wiki` 의 CRUD 루프 전체가 작동한다는 뜻입니다.
+
+---
+
 ## 수동 QA 체크리스트
 
 현재 trunk 기준 수동 확인 항목입니다 (E2E 자동화는 `tests/e2e/web_smoke.sh` 가 커버).

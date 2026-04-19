@@ -70,7 +70,9 @@ The historical Phase 1 snapshot remains tagged as `v0.1.0-phase1`; versioning po
 - `gadgetron wiki audit [--config <path>]` — report stale pages and pages without frontmatter
 - `penny` model registration when `gadgetron.toml` contains a valid `[knowledge]` section
 - Embedded Web UI at `/web` when built with the default `web-ui` feature and `[web].enabled = true`
-- Workbench projection API at `/api/v1/web/workbench/` (Phase 2A): `bootstrap`, `activity`, `requests/{id}/evidence`, `knowledge-status`, `views`, `views/{id}/data`, `actions`, `actions/{id}` — require `OpenAiCompat` scope, available when `[knowledge]` is configured
+- Embedded `/web/wiki` browser workbench (0.2.0+) — full wiki CRUD (search / list / read / write) driven through `POST /api/v1/web/workbench/actions/{id}`. Reachable standalone at `/web/wiki` or as the "Wiki" left-rail tab inside the main `/web` shell (ISSUE A.2, 0.2.3). Markdown rendered via `react-markdown` + `remark-gfm` (0.2.2). Gate 11d drives the full CRUD loop in a real Chromium browser under the harness.
+- Workbench projection API at `/api/v1/web/workbench/` (Phase 2A): `bootstrap`, `activity`, `requests/{id}/evidence`, `knowledge-status`, `views`, `views/{id}/data`, `actions`, `actions/{id}` — require `OpenAiCompat` scope. `build_workbench` always returns `Some(...)`; some sub-fields (`activity.entries`, `request_evidence`, `refresh_view_ids`, `audit_event_id`) are stubbed on trunk today (see [api-reference.md §Workbench endpoints](api-reference.md#workbench-endpoints-phase-2a) for the full stub-vs-real list).
+- Real `POST /api/v1/web/workbench/actions/{id}` dispatch via `Arc<dyn GadgetDispatcher>` (0.2.0+) — `result.payload` carries the live gadget output, not a stub. Four action descriptors ship in `seed_p2b`: `knowledge-search`, `wiki-list`, `wiki-read`, `wiki-write`.
 - `gadgetron-testing` crate — `FakeLlmProvider` and `FailingProvider` for use in unit and integration tests
 
 **Stubbed (HTTP 501):**

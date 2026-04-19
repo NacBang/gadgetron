@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.1** (post-ISSUE 0)
+**Current version: 0.2.3** (post-ISSUE A.2)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -41,12 +41,12 @@ Visible improvements a user would notice within 30 seconds.
 
 **Target**: 0.2.1 → 0.3.0 after all ISSUEs land.
 
-### ISSUE A.1 — Markdown render in /web/wiki read view (0.2.2)
+### ISSUE A.1 — Markdown render in /web/wiki read view (0.2.2) ✅ shipped (#181)
 - TASK A.1.1: Wire `react-markdown` (already in deps) into the content pane.
 - TASK A.1.2: Keep raw `<pre>` fallback when markdown parsing errors.
 - TASK A.1.3: Harness assertion: post-read view contains rendered `<h1>` or similar HTML tags.
 
-### ISSUE A.2 — Wire /web/wiki into WorkbenchShell left-rail (0.2.3)
+### ISSUE A.2 — Wire /web/wiki into WorkbenchShell left-rail (0.2.3) ✅ shipped (#182)
 - TASK A.2.1: Add `wiki` to `LeftRailTab` enum + rail item.
 - TASK A.2.2: Embed `WikiWorkbenchPage` as tab content; swap in/out.
 - TASK A.2.3: Harness: assert the rail has a "Wiki" tab when authed; switch to it renders the workbench layout.
