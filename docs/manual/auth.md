@@ -83,6 +83,16 @@ A key can hold multiple scopes. The `api_keys.scopes` column is a `TEXT[]` (Post
 
 A key with `OpenAiCompat` scope can access `/v1/` routes and `/api/v1/web/workbench/` routes. It cannot access other `/api/v1/` routes (which require `Management`) and will receive HTTP 403 if it tries.
 
+### Scope-based workbench filtering
+
+The route gate above is only the first of two scope checks on the workbench surface. Inside the workbench, each registered **view** and **action** descriptor carries an optional `required_scope` field. `TenantContext.scopes` is threaded from the handler through the projection and action services, which apply a second per-descriptor filter:
+
+- `GET /api/v1/web/workbench/views` and `GET /api/v1/web/workbench/actions` **strip** descriptors whose `required_scope` is not held by the caller. A key with only `OpenAiCompat` sees a shorter list than a key that also holds `Management`.
+- `GET /api/v1/web/workbench/views/{view_id}/data` returns HTTP **404** `workbench_view_not_found` when the caller's scopes do not admit the view. The response is deliberately indistinguishable from a nonexistent view, so scope-restricted views do not leak via a 403 vs 404 signal.
+- `POST /api/v1/web/workbench/actions/{action_id}` returns HTTP **404** `workbench_action_not_found` under the same scope-mismatch condition, for the same reason.
+
+In short: scopes are not a strict binary route gate on the workbench surface. Any automated tooling that discovers views or actions must treat the response as a **dynamic, per-key subset** of the catalog.
+
 ---
 
 ## Creating API keys

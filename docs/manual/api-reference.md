@@ -420,6 +420,8 @@ Actor-visible registered view descriptors. The shell uses these to build the lef
 
 **Auth:** `OpenAiCompat`
 
+**Scope-based filtering:** the route gate requires `OpenAiCompat` (per [auth.md](auth.md)), but each descriptor also carries an optional `required_scope` that drives a second, per-descriptor filter. Descriptors whose `required_scope` is not held by the caller's API key are **omitted** from the response entirely — not returned with `disabled_reason` set. A key with only `OpenAiCompat` sees a smaller list than a key that also holds `Management`.
+
 **Response:**
 
 ```json
@@ -466,7 +468,7 @@ Payload for a single registered view. The shell calls `data_endpoint` from the v
 
 `payload` shape is renderer-specific and typed at the bundle layer.
 
-**Errors:** `404 workbench_view_not_found`.
+**Errors:** `404 workbench_view_not_found` — returned both when `view_id` is not registered AND when the caller's scopes do not admit an existing-but-scope-gated view. The two cases are deliberately indistinguishable to avoid leaking existence of scope-restricted views (callers without admin scope get 404, not 403, on views they shouldn't know exist).
 
 ---
 
@@ -475,6 +477,8 @@ Payload for a single registered view. The shell calls `data_endpoint` from the v
 Actor-visible registered action descriptors. The shell renders these as affordances.
 
 **Auth:** `OpenAiCompat`
+
+**Scope-based filtering:** same per-descriptor filter as `GET /views` — each action carries an optional `required_scope`; descriptors the caller's scopes don't admit are stripped from the response.
 
 **Response:**
 
@@ -532,7 +536,7 @@ Invoke a registered direct action.
     "status": "ok",
     "approval_id": null,
     "activity_event_id": "uuid",
-    "audit_event_id": "uuid",
+    "audit_event_id": null,
     "refresh_view_ids": ["knowledge-activity-recent"],
     "knowledge_candidates": [],
     "payload": null
@@ -542,11 +546,13 @@ Invoke a registered direct action.
 
 `result.status`: `"ok"` | `"pending_approval"` (when `requires_approval = true` on the descriptor). When `pending_approval`, `approval_id` is set.
 
+**Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`; audit plane integration is future work, so `audit_event_id` is currently always `null` in the response regardless of identity state.
+
 **Errors:**
 
 | Code | HTTP | When |
 |------|------|------|
-| `workbench_action_not_found` | 404 | `action_id` not registered or not visible to actor |
+| `workbench_action_not_found` | 404 | `action_id` not registered, OR caller's scopes do not admit an action whose `required_scope` they lack (returned as 404 to avoid leaking existence of scope-gated actions, matching `GET /views/{id}/data` behavior) |
 | `workbench_action_invalid_args` | 400 | `args` fails the descriptor's `input_schema` validation |
 | `forbidden` | 403 | This instance has disabled direct actions (`DirectActionsDisabled` policy) |
 | `config_error` | 400 | Workbench service not wired (no `[knowledge]` configured), or action service not wired in this build |
