@@ -472,9 +472,23 @@ pub async fn approve_action(
         .mark_approved(approval_id, &actor)
         .await
         .map_err(approval_error_to_http)?;
+    // Publish the approval resolution on the live feed BEFORE
+    // dispatching — operators see the decision immediately even if
+    // the subsequent dispatch takes a while.
+    state.activity_bus.publish(
+        gadgetron_core::activity_bus::ActivityEvent::ApprovalResolved {
+            tenant_id: actor.tenant_id,
+            approval_id: approved.id,
+            action_id: approved.action_id.clone(),
+            state: approved.state.as_str().to_string(),
+            resolved_by_user_id: approved.resolved_by_user_id.unwrap_or(actor.user_id),
+        },
+    );
+    let action_id = approved.action_id.clone();
     let resp = action_svc
         .resume_approval(&actor, &ctx.scopes, approved)
         .await?;
+    publish_action_activity(&state, &actor, &action_id, &resp);
     Ok(Json(resp))
 }
 
@@ -503,6 +517,15 @@ pub async fn deny_action(
         .mark_denied(approval_id, &actor, body.reason)
         .await
         .map_err(approval_error_to_http)?;
+    state.activity_bus.publish(
+        gadgetron_core::activity_bus::ActivityEvent::ApprovalResolved {
+            tenant_id: actor.tenant_id,
+            approval_id: denied.id,
+            action_id: denied.action_id.clone(),
+            state: denied.state.as_str().to_string(),
+            resolved_by_user_id: denied.resolved_by_user_id.unwrap_or(actor.user_id),
+        },
+    );
     Ok(Json(DenyApprovalResponse {
         id: denied.id,
         state: denied.state.as_str().to_string(),
@@ -796,7 +819,39 @@ pub async fn invoke_action(
     let resp = action_svc
         .invoke(&actor, &ctx.scopes, &action_id, request)
         .await?;
+    publish_action_activity(&state, &actor, &action_id, &resp);
     Ok(Json(resp))
+}
+
+/// Fan-out to the live-feed WebSocket after an action completes.
+/// Reads the response envelope and fires a matching
+/// `ActivityEvent::ActionCompleted` with the outcome as the client
+/// will see it. Fire-and-forget.
+fn publish_action_activity(
+    state: &AppState,
+    actor: &AuthenticatedContext,
+    action_id: &str,
+    resp: &InvokeWorkbenchActionResponse,
+) {
+    let Some(audit_event_id) = resp.result.audit_event_id else {
+        return;
+    };
+    let outcome = match resp.result.status.as_str() {
+        "ok" => "success",
+        "pending_approval" => "pending_approval",
+        _ => "error",
+    };
+    state.activity_bus.publish(
+        gadgetron_core::activity_bus::ActivityEvent::ActionCompleted {
+            tenant_id: actor.tenant_id,
+            audit_event_id,
+            action_id: action_id.to_string(),
+            gadget_name: None,
+            outcome: outcome.to_string(),
+            error_code: None,
+            elapsed_ms: 0,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +884,81 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/audit/events", get(list_audit_events))
         // ISSUE 4 TASK 4.1 — operator usage summary rollup.
         .route("/usage/summary", get(get_usage_summary))
+        // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
+        .route("/events/ws", get(events_ws_handler))
+}
+
+/// `GET /events/ws` — WebSocket upgrade + tenant-filtered activity
+/// feed. Subscribers receive `ActivityEvent` JSON messages in real
+/// time; non-matching tenants are filtered out handler-side.
+///
+/// Protocol is a simple stream of JSON text frames, one event per
+/// frame. The client SHOULD close the socket when it no longer
+/// needs updates; the server closes when the broadcast channel
+/// lags (client will see an `Lagged` frame and must reconnect /
+/// re-sync via `/usage/summary`).
+pub async fn events_ws_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let bus = state.activity_bus.clone();
+    let tenant_id = ctx.tenant_id;
+    ws.on_upgrade(move |socket| events_ws_session(socket, bus, tenant_id))
+}
+
+async fn events_ws_session(
+    mut socket: axum::extract::ws::WebSocket,
+    bus: gadgetron_core::activity_bus::ActivityBus,
+    tenant_id: Uuid,
+) {
+    use axum::extract::ws::Message;
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = bus.subscribe();
+    loop {
+        tokio::select! {
+            recv = rx.recv() => {
+                match recv {
+                    Ok(event) => {
+                        if event.tenant_id() != tenant_id {
+                            continue;
+                        }
+                        let Ok(text) = serde_json::to_string(&event) else {
+                            continue;
+                        };
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        // Send a structured lag notice + close so the
+                        // client knows to reconnect. Silent drop
+                        // would hide a real problem.
+                        let notice = serde_json::json!({
+                            "type": "lag",
+                            "missed": n,
+                            "message": "subscriber lagged; reconnect to resume",
+                        });
+                        let _ = socket
+                            .send(Message::Text(notice.to_string().into()))
+                            .await;
+                        break;
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            // Drain client frames — mostly keepalives / a client
+            // close. We don't interpret client messages today but
+            // reading them keeps the socket healthy.
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +1049,7 @@ mod tests {
             agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         }
     }
 

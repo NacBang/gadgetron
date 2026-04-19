@@ -11,7 +11,7 @@ gadgetron-provider = { workspace = true }
 gadgetron-router = { workspace = true }
 gadgetron-xaas = { workspace = true }
 gadgetron-web = { workspace = true, optional = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["limit", "trace", "set-header"] }
 async-trait = { workspace = true }

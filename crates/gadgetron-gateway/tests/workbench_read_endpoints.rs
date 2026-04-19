@@ -93,6 +93,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
         agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
         activity_capture_store: None,
         candidate_coordinator: None,
+        activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
     }
 }
 

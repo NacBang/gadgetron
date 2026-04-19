@@ -712,6 +712,7 @@ mod tests {
             penny_assembler: None,
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         }
     }
 
@@ -1122,6 +1123,7 @@ mod tests {
             penny_assembler,
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         }
     }
 

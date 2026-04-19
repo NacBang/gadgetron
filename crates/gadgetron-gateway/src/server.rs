@@ -142,6 +142,12 @@ pub struct AppState {
     /// coordinator. Mirrors `activity_capture_store` so they can be wired
     /// together at startup.
     pub candidate_coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+    /// Activity event bus — broadcast channel fed by chat handler,
+    /// action service, and approval endpoints. Consumed by the
+    /// `/api/v1/web/workbench/events/ws` WebSocket handler (ISSUE 4
+    /// TASK 4.3). Cheap `Clone`; each handler publish is
+    /// fire-and-forget.
+    pub activity_bus: gadgetron_core::activity_bus::ActivityBus,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -429,6 +435,7 @@ mod tests {
             agent_config: Arc::new(AgentConfig::default()),
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         }
     }
 
@@ -449,6 +456,7 @@ mod tests {
             agent_config: Arc::new(AgentConfig::default()),
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         }
     }
 
@@ -786,6 +794,7 @@ mod tests {
             agent_config: Arc::new(AgentConfig::default()),
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -863,6 +872,7 @@ mod tests {
             agent_config: Arc::new(AgentConfig::default()),
             activity_capture_store: None,
             candidate_coordinator: None,
+            activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
         };
 
         let app = build_router(state);

@@ -5,6 +5,7 @@
 // linewise diffable when adding new validation rules.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
+pub mod activity_bus;
 pub mod agent;
 pub mod audit;
 pub mod bundle;
