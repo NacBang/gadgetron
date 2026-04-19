@@ -1256,6 +1256,16 @@ Atomically swap the in-memory `CatalogSnapshot` (catalog + pre-compiled JSON-sch
 
 **Request:** empty body (`Content-Type: application/json` is accepted but ignored — the handler reads no fields).
 
+**Example (curl, local demo):**
+```bash
+# Use a Management-scoped key (the OpenAiCompat chat key will 403).
+export MGMT_KEY=$(gadgetron key create --tenant-id "$(gadgetron tenant list | jq -r '.[0].id')" --scope management | jq -r '.raw_key')
+
+curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/reload-catalog
+```
+
 **Response (HTTP 200):**
 ```json
 {
