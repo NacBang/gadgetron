@@ -336,6 +336,29 @@ Client
   │ [migration: 20260420000001_quota_usage_day.sql adds
   │  `usage_day DATE DEFAULT CURRENT_DATE` column]
   │
+  │ [crate: gadgetron-xaas] — EPIC 4 TASK 12.1 / PR #236 / v0.5.5
+  │ [fn: billing::insert_billing_event(pool, tenant_id, kind,
+  │      cost_cents, source_event_id, model, provider)
+  │      -> Result<(), sqlx::Error>]
+  │   PgQuotaEnforcer 경로에서만 실행 (record_post UPDATE 직후).
+  │   PostgreSQL INSERT INTO billing_events
+  │       (tenant_id, event_kind, source_event_id, cost_cents, model, provider)
+  │       VALUES ($1, 'chat', NULL, $2, NULL, NULL)
+  │     — event_kind 은 TASK 12.1 에서 'chat' 고정 (DB CHECK 제약).
+  │       TASK 12.2 가 'tool' + 'action' emitter 추가 + trait
+  │       시그니처 확장으로 source_event_id/model/provider 도 threading.
+  │     — source_event_id FK 없음 — Stripe-style writer-independence,
+  │       원장 writer 가 source event DB persist 완료를 기다리지 않음.
+  │     — Fire-and-forget — INSERT 실패해도 quota_configs UPDATE 는
+  │       이미 commit 됐으므로 tracing::warn!(target: "billing") 기록
+  │       후 진행. Counter-vs-ledger drift 는 TASK 12.4 reconciliation
+  │       (scan quota_configs vs SUM(cost_cents) GROUP BY tenant_id,
+  │       usage_day) 으로 청산.
+  │ [budget: ~3ms — single PG INSERT, BIGSERIAL + 2 indexes]
+  │ [migration: 20260420000002_billing_events.sql — append-only
+  │  원장 테이블 + `(tenant_id, created_at DESC)` +
+  │  `(event_kind, created_at DESC)` indexes]
+  │
   │ [crate: gadgetron-xaas]
   │ [fn: AuditWriter::send(entry: AuditEntry) — non-blocking]
   │   mpsc::Sender::try_send(entry)  capacity=4_096
@@ -3381,6 +3404,7 @@ Every stateful entity in Gadgetron Phase 1, with its owning tier, durability, an
 | Quota configs (hot) | `moka::future::Cache<Uuid, Arc<QuotaConfig>>` | `gadgetron-xaas` | moka LRU | Ephemeral (10min TTL) | Cold: PG re-query |
 | Audit entries (pending) | `mpsc::Sender<AuditEntry>` channel buffer, cap 4096 | `gadgetron-xaas` | tokio mpsc | Ephemeral (lost on kill) | Not recovered; Phase 2 WAL fallback |
 | Audit entries (committed) | `audit_log` rows | `gadgetron-xaas` | PostgreSQL | Durable | PG query |
+| Billing events (ledger) | `billing_events` rows | `gadgetron-xaas` | PostgreSQL | Durable | PG query on demand — append-only, never UPDATE/DELETE. Written fire-and-forget from `PgQuotaEnforcer::record_post` alongside the `quota_configs` counter UPDATE (TASK 12.1 / PR #236 / v0.5.5). Counter-vs-ledger reconciliation is TASK 12.4 scope. |
 | Node registry | `DashMap<Uuid, NodeInfo>` | `gadgetron-scheduler` | DashMap | Ephemeral | NodeAgent re-registers on restart (§2.D.7, G-1) |
 | Model deployments | `DashMap<Uuid, ModelDeployment>` | `gadgetron-scheduler` | DashMap | Ephemeral | NodeAgent push after re-register |
 | VRAM state (per GPU) | `DashMap<Uuid, Vec<GpuInfo>>` | `gadgetron-scheduler` | DashMap | Ephemeral | Heartbeat within 10s or pull at deploy |
