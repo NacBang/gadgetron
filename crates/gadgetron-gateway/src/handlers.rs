@@ -520,9 +520,7 @@ pub async fn invoke_tool_handler(
     args: Option<Json<serde_json::Value>>,
 ) -> Response {
     use gadgetron_core::agent::tools::{GadgetError, GadgetTier as AgentTier};
-    use gadgetron_core::audit::{
-        GadgetAuditEvent, GadgetCallOutcome, GadgetTier as AuditTier,
-    };
+    use gadgetron_core::audit::{GadgetAuditEvent, GadgetCallOutcome, GadgetTier as AuditTier};
 
     let Some(dispatcher) = state.gadget_dispatcher.as_ref() else {
         return (
