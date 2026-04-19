@@ -1609,6 +1609,85 @@ TASK 12.4 will land the reconciliation pass (scan `quota_configs` vs `SUM(cost_c
 
 ---
 
+### Tenant self-service endpoints (ISSUE 14 — v0.5.7)
+
+Landed by PR #246. Spec: [`docs/design/phase2/08-identity-and-users.md`](../design/phase2/08-identity-and-users.md) §2.6.
+
+#### GET /api/v1/web/workbench/admin/users
+
+List users in the caller's tenant. **Management** scope. Tenant boundary pinned by handler.
+
+Response: `{ users: [UserRow...], returned: N }` where `UserRow = { id, tenant_id, email, display_name, role, is_active, created_at, updated_at, last_login_at }`.
+
+#### POST /api/v1/web/workbench/admin/users
+
+Create a user. **Management** scope.
+
+Body: `{ email, display_name, role: "member"|"admin"|"service", password?: string }`.
+
+`service`-role users MUST omit `password` (400 otherwise). `member`/`admin` require a password.
+
+#### DELETE /api/v1/web/workbench/admin/users/{user_id}
+
+Delete a user. **Management** scope. **Single-admin guard**: refuses when the target is the last active admin in the tenant.
+
+#### GET /api/v1/web/workbench/admin/teams
+
+List teams in the caller's tenant. **Management** scope.
+
+#### POST /api/v1/web/workbench/admin/teams
+
+Create a team. Body: `{ id, display_name, description? }`. `id` is kebab-case, max 32 chars, `'admins'` reserved (400 on violation).
+
+#### DELETE /api/v1/web/workbench/admin/teams/{team_id}
+
+Delete a team. Cascade removes `team_members` rows.
+
+#### GET/POST /api/v1/web/workbench/admin/teams/{team_id}/members
+
+List or add members. POST body: `{ user_id, role?: "member"|"lead" }`.
+
+#### DELETE /api/v1/web/workbench/admin/teams/{team_id}/members/{user_id}
+
+Remove a member. Does not delete the user.
+
+#### GET/POST /api/v1/web/workbench/keys
+
+User self-service API keys. **OpenAiCompat** scope (any authenticated caller). Tenant + user bounded by handler via `caller_user_id` lookup.
+
+`GET`: list keys owned by the calling user.
+`POST`: create a new key. Body: `{ label?, scopes?: ["openai_compat"|"management"|...], kind?: "live"|"test" }`. **Scope narrowing**: requested scopes MUST be a subset of caller's own scopes (400 otherwise). Response includes `raw_key` EXACTLY ONCE.
+
+#### DELETE /api/v1/web/workbench/keys/{key_id}
+
+Revoke a key owned by the caller. Idempotent (re-revoke returns 200).
+
+---
+
+### Cookie-session endpoints (ISSUE 15 — v0.5.8)
+
+Landed by PR #248. Mounted on **public** routes (no Bearer auth); each handler self-authenticates. Spec: [`docs/design/phase2/08-identity-and-users.md`](../design/phase2/08-identity-and-users.md) §2.2.4.
+
+#### POST /api/v1/auth/login
+
+Body: `{ email, password }`. On success returns 200 + `Set-Cookie: gadgetron_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400` + body `{ session_id, user_id, tenant_id, expires_at }`. On invalid credentials returns 401 `{ error: { code: "invalid_credentials" } }`. Service-role users are rejected.
+
+Password verification uses argon2id via the `argon2` crate. The session cookie token is 32 random bytes hex-encoded; only its SHA-256 hash is stored server-side.
+
+**Secure flag**: operator terminates TLS at the proxy so the cookie travels inside the secure tunnel; gateway does NOT emit `Secure` so loopback development works.
+
+#### GET /api/v1/auth/whoami
+
+Reads the `gadgetron_session` cookie and returns `{ session_id, user_id, tenant_id, expires_at }`. Touches `last_active_at` for idle-rotation tracking. 401 on missing/expired/revoked.
+
+#### POST /api/v1/auth/logout
+
+Revokes the session (idempotent). Returns 200 + `Set-Cookie: gadgetron_session=; Max-Age=0` to clear the cookie client-side.
+
+**Harness coverage.** Gate 7v.5 drives login → whoami → bad-password (401) → logout → post-logout-whoami (401).
+
+---
+
 ### GET /api/v1/web/workbench/audit/events
 
 Tenant-scoped read over `action_audit_events` — the rows the `ActionAuditSink` persisted at each action-service terminal. Landed in ISSUE 3 / v0.2.6 (`crates/gadgetron-gateway/src/web/workbench.rs::list_audit_events`, backed by `crates/gadgetron-xaas/src/audit/action_event.rs::query_action_audit_events`).
