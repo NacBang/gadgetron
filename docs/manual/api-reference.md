@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.3",
+  "gateway_version": "0.4.4",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.3"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.4"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1295,20 +1295,35 @@ curl -fsS -X POST \
 ```
 
 **Response (HTTP 200):**
+
+When `[web] catalog_path` is NOT configured (fallback to hand-coded `seed_p2b()`):
 ```json
 {
   "reloaded": true,
   "action_count": 5,
   "view_count": 3,
-  "source": "seed_p2b"
+  "source": "seed_p2b",
+  "source_path": null
+}
+```
+
+When `[web] catalog_path = "/path/to/catalog.toml"` is configured (ISSUE 8 TASK 8.4 / v0.4.4):
+```json
+{
+  "reloaded": true,
+  "action_count": 5,
+  "view_count": 3,
+  "source": "config_file",
+  "source_path": "/path/to/catalog.toml"
 }
 ```
 
 - `reloaded` — always `true` on 200. Clients key observability on this wire field rather than on the HTTP status so a structured audit log can quote the exact flag.
 - `action_count` / `view_count` — counts in the catalog **after** the swap, computed with all three scopes (`OpenAiCompat`, `Management`, `XaasAdmin`) in the visibility filter so the totals reflect every descriptor the fresh catalog carries.
-- `source` — wire-stable enum. Today always `"seed_p2b"` (the only source on trunk is the hand-coded `DescriptorCatalog::seed_p2b()`). TASK 8.4 will widen this to `"config_file"` / `"bundle_manifest"` as reload sources grow.
+- `source` — wire-stable enum. `"seed_p2b"` when no `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback). `"config_file"` when a `catalog_path` is configured and the TOML file parsed successfully (ISSUE 8 TASK 8.4 / PR #216). Future sources will widen this further (`"bundle_manifest"` when ISSUE 9 lands).
+- `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"`. Admin tooling uses this to confirm which file produced the live catalog.
 
-**Plumbing.** The handler reads the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate, rev-bumped to `CatalogSnapshot` in TASK 8.3 / PR #214), builds a fresh catalog via `DescriptorCatalog::seed_p2b()`, turns it into a snapshot with `into_snapshot()` (which compiles JSON-schema validators for every action in the fresh catalog), and calls `ArcSwap::store()` to atomically publish the catalog + validators pair. In-flight requests holding an `Arc<CatalogSnapshot>` snapshot finish reading BOTH catalog and validators from the old pointer; any request that reads the handle after the store sees the new pointer for both sides. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler` and `crates/gadgetron-gateway/src/web/catalog.rs::CatalogSnapshot`.
+**Plumbing.** The handler reads the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate, rev-bumped to `CatalogSnapshot` in TASK 8.3 / PR #214). To build the fresh catalog: if `WebConfig.catalog_path` is `Some(path)` (TASK 8.4 / PR #216), the handler calls `DescriptorCatalog::from_toml_file(path)` which reads + parses the TOML via the `CatalogFile` shape (serde-derived fields matching `WorkbenchViewDescriptor` / `WorkbenchActionDescriptor`). If `catalog_path` is `None` the handler falls back to `DescriptorCatalog::seed_p2b()`. The resulting `DescriptorCatalog` is then turned into a snapshot via `into_snapshot()` (which compiles JSON-schema validators for every action), and `ArcSwap::store()` atomically publishes the `(catalog, validators)` pair. In-flight requests holding an `Arc<CatalogSnapshot>` snapshot finish reading BOTH catalog and validators from the old pointer; any request that reads the handle after the store sees the new pointer for both sides. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`, `crates/gadgetron-gateway/src/web/catalog.rs::CatalogSnapshot`, and `DescriptorCatalog::from_toml_file` in the same catalog module.
 
 **Errors:**
 
@@ -1316,8 +1331,9 @@ curl -fsS -X POST \
 |------|------|------|
 | `scope_required` | 403 | Caller's API key scope is not `Management` (e.g. OpenAiCompat workbench key). Enforced by `scope_guard_middleware`, not the handler. |
 | `config_error` | 503-class (400 on trunk wire) | `state.workbench.descriptor_catalog` is `None`. This only happens in headless test builds that skip `build_workbench` — production paths always set the handle, so the guard is defensive. |
+| `config_error` | 500 | `catalog_path` is configured but the TOML file failed to read or parse (file missing, invalid syntax, schema mismatch). Error message embeds the file path and the specific serde / IO error (TASK 8.4 / PR #216). **The running snapshot is NOT replaced on failure** — a malformed edit cannot take the workbench down. Fix the TOML and retry the reload. |
 
-**Validator rebuild (TASK 8.3 shipped in PR #214).** The TASK 8.2 known-limitation — validators on `InProcessWorkbenchActionService` pre-compiled at construction and NOT rebuilt by reload — is closed. `CatalogSnapshot` bundles the catalog with its pre-compiled JSON-schema validators so one `ArcSwap::store()` replaces both sides. No reader can observe a new catalog paired with old validators (or vice versa). This unblocks TASK 8.4 (file-based catalog source) where reloaded schemas might legitimately differ from the previous generation.
+**Validator rebuild (TASK 8.3 shipped in PR #214).** The TASK 8.2 known-limitation — validators on `InProcessWorkbenchActionService` pre-compiled at construction and NOT rebuilt by reload — is closed. `CatalogSnapshot` bundles the catalog with its pre-compiled JSON-schema validators so one `ArcSwap::store()` replaces both sides. No reader can observe a new catalog paired with old validators (or vice versa). This was a hard prerequisite for TASK 8.4's file-based source (where a legitimate TOML edit can change schemas between reloads); TASK 8.4 / PR #216 ships that file source on top of this foundation.
 
 E2E Gate 7q.1 verifies the swap lands (shape assertion + cross-check that `action_count` in the response equals the count `GET /workbench/actions` reports immediately after — catches the "swap happened but read path still points at the old pointer" regression). Gate 7q.2 verifies that an OpenAiCompat-scoped key gets 403 on this endpoint (RBAC enforced).
 
