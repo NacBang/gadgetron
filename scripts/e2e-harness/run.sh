@@ -696,6 +696,71 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7j — /favicon.ico served (public route, no auth)
+# ---------------------------------------------------------------------------
+#
+# Browser requests /favicon.ico on every page load. If it 404s, the
+# request still consumes middleware cycles and logs a noise line.
+# The gateway explicitly routes this — if the route regresses, the
+# noise lands back in logs and Gate 12 would false-positive on it.
+
+log "=== Gate 7j: /favicon.ico ==="
+FAV_CODE="$(curl -s -o /dev/null -w '%{http_code}' "$GAD_BASE/favicon.ico" 2>&1 || true)"
+if [ "$FAV_CODE" = "200" ] || [ "$FAV_CODE" = "204" ]; then
+  pass "/favicon.ico → $FAV_CODE (public, no auth)"
+else
+  fail "/favicon.ico regressed (expected 200/204, got $FAV_CODE)" ""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7k — /api/v1/usage via Management key (RBAC positive path)
+# ---------------------------------------------------------------------------
+#
+# `MGMT_API_KEY` was created at Gate 3.5. We use it here (and ONLY
+# here — the OpenAiCompat `TEST_API_KEY` is the rest-of-harness
+# default) to cover the Management-scope positive path: the same
+# route that Gate 7g asserted 403 on with OpenAiCompat MUST return
+# 200 with Management.
+
+log "=== Gate 7k: Management-scoped /api/v1/usage ==="
+USAGE_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/usage" 2>&1 || true)"
+# We assert RBAC passes — anything BUT 403 / 401 is acceptable.
+# Today the route is 501 (stub implementation, real aggregator lands
+# in a follow-up PR); what matters for this gate is that the scope
+# guard let the request through. When the stub turns into a real
+# handler (200) this continues to pass without an assertion change.
+case "$USAGE_CODE" in
+  401|403)
+    fail "Management route blocked with Management key (got $USAGE_CODE)" \
+      "scope_guard_middleware or auth middleware regressed" ;;
+  200|501|503)
+    pass "GET /api/v1/usage via Management key → $USAGE_CODE (RBAC positive path clears)" ;;
+  *)
+    fail "Management route unexpected status $USAGE_CODE" \
+      "expected 200 (live) or 501 (stub); got $USAGE_CODE" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Gate 7l — workbench view data (seed view stub)
+# ---------------------------------------------------------------------------
+#
+# seed_p2b's `knowledge-activity-recent` view has a stub payload
+# (`{entries: []}`). This gate catches regressions where the view
+# handler returns 500 / wrong shape instead of the stub.
+
+log "=== Gate 7l: workbench /views/knowledge-activity-recent/data ==="
+VD_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/views/knowledge-activity-recent/data" 2>&1 || true)"
+if echo "$VD_RESP" | jq -e '.view_id == "knowledge-activity-recent" and (has("payload"))' \
+  >/dev/null 2>&1; then
+  pass "view_data(knowledge-activity-recent) returns {view_id, payload}"
+else
+  fail "view_data stub regressed" "$(echo "$VD_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 8 — non-streaming chat completion
 # ---------------------------------------------------------------------------
 
