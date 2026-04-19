@@ -434,6 +434,20 @@ HTTP 200
 }
 ```
 
+**OpenAI wire-contract fields.** The fields below are the minimum contract the Python `openai` SDK and ecosystem clients (LangChain, LlamaIndex, etc.) rely on. E2E Gate 8 (`scripts/e2e-harness/run.sh:985-997`) formally asserts each one on every non-streaming response; a regression that drops or re-types any of these breaks every downstream SDK even though the raw content would still be readable.
+
+| Field | Type | Gate 8 assertion | Purpose |
+|-------|------|-----------------|---------|
+| `id` | string starting with `chatcmpl-` | `(.id | type == "string" and startswith("chatcmpl-"))` | Deduplication + log correlation on the client side. OpenAI reserves the prefix. |
+| `object` | `"chat.completion"` literal | `.object == "chat.completion"` | Distinguishes the non-streaming response shape from `chat.completion.chunk` streaming frames. |
+| `created` | integer (unix seconds) | not in Gate 8 but emitted | Response time, useful for client-side latency breakdowns. |
+| `model` | non-empty string | `(.model | type == "string" and length > 0)` | Identifies which provider-routed model served the request. For Gadgetron this may be the upstream model ID (e.g. `gpt-4o-mini`), not the `model` field the client sent. |
+| `choices` | array, length ≥ 1 | `(.choices | length >= 1)` | Each choice carries `index`, `message`, `finish_reason`. |
+| `choices[].finish_reason` | string (`stop` / `length` / `tool_calls` / etc.) | `(.choices[0].finish_reason | type == "string")` | Must be a string on terminal response. Streaming chunks emit `null` until the final chunk. |
+| `usage.total_tokens` | number | `(.usage.total_tokens | type == "number")` | `prompt_tokens + completion_tokens`. All three are emitted for provider-returned usage; Gadgetron does not re-compute or estimate. |
+
+Additional OpenAI fields like `system_fingerprint` are forwarded as-is when the upstream provider emits them; Gadgetron does not synthesize them. Absent fields remain absent — clients MUST tolerate missing optional fields rather than assuming empty-string defaults.
+
 **`reasoning_content` field (reasoning models — SGLang GLM-5.1 and similar):**
 
 Some models (e.g. GLM-5.1 served via SGLang) include a `reasoning_content` field inside `message`. When the upstream provider returns this field, Gadgetron forwards it unchanged. It contains the model's chain-of-thought text that preceded the final answer.
@@ -488,6 +502,18 @@ data: {"id":"chatcmpl-xyz","object":"chat.completion.chunk","created":1700000000
 ```
 
 `reasoning_content` is absent for providers that do not emit chain-of-thought tokens; treat it as an optional field exactly like the non-streaming response body.
+
+**Streaming chunk-shape contract.** Every non-`[DONE]` `data:` frame is a JSON object with at minimum:
+
+| Field | Value | Gate 9 assertion |
+|-------|-------|-----------------|
+| `id` | non-empty string. In practice starts with `chatcmpl-` (runtime convention, same id across all chunks of one request), but the harness only asserts type + length. | `(.id | type == "string" and length > 0)` |
+| `object` | `"chat.completion.chunk"` literal (distinguishes streaming frames from the non-streaming shape) | `.object == "chat.completion.chunk"` |
+| `choices` | non-empty array; each entry has `index`, `delta`, `finish_reason` | `(.choices | length >= 1)` |
+| `choices[].delta` | object — the **incremental** update for this chunk. First chunk typically carries `role: "assistant"`; subsequent chunks carry only `content` (or `reasoning_content`). | — |
+| `choices[].finish_reason` | `null` on all chunks except the final one; final chunk emits `"stop"` / `"length"` / etc. | — |
+
+E2E Gate 9 (`scripts/e2e-harness/run.sh:1063-1065`) asserts the shape on the first non-`[DONE]` frame of every streaming request. A regression that flips `object` to `chat.completion` (non-streaming shape) on a streaming response would break SDK parsers even though the raw text is readable.
 
 **Streaming error frame:**
 
@@ -617,7 +643,18 @@ All eight routes are mounted at `/api/v1/web/workbench/`. When the knowledge ser
 
 ### GET /api/v1/web/workbench/bootstrap
 
-Gateway version, default model, active plug health, and knowledge plane readiness. Called by the Web UI shell on mount; Gadgetron injects a copy into every `POST /v1/chat/completions` request as `<gadgetron_shared_context>`.
+Gateway version, default model, active plug health, and knowledge plane readiness. Called by the Web UI shell on mount.
+
+**Server-side injection into chat completions.** On every `POST /v1/chat/completions` request the gateway wraps the same bootstrap payload (truncated to `[agent.shared_context].digest_summary_chars` per `gadgetron.toml`) inside `<gadgetron_shared_context>...</gadgetron_shared_context>` tags and prepends it to the request's system message surface via `inject_shared_context_block` (`crates/gadgetron-gateway/src/handlers.rs:411-428`). Two modes, selected by the shape of the caller's first message:
+
+| First message shape | Mode | Emitted tracing line |
+|---------------------|------|----------------------|
+| `role: "system"` with `content: <string>` | `prepend_to_system` — block is inserted at the start of the existing text followed by `\n\n` then the original text. One combined system message; index 0 preserved. | `penny_shared_context.inject: shared context block injected injection_mode=prepend_to_system` |
+| Anything else (empty messages array / first message not `system` / system message with multi-part `content`) | `insert_new_system` — a brand-new `Message::system(block)` is inserted at index 0, pushing every existing message down. | `penny_shared_context.inject: shared context block injected injection_mode=insert_new_system` |
+
+In both modes the block lives in the **first message** of what the provider sees, always with `role: "system"`, always opening with the literal `<gadgetron_shared_context>` tag. E2E Gate 10 asserts this contract on the mock provider log.
+
+Observability: grep the gateway log for `penny_shared_context.inject:` to see which mode fired for a given `request_id`; the `rendered_bytes` field on the same line tells you the post-truncation size of the block. Disable injection entirely by setting `[agent.shared_context].enabled = false` — use only for emergency rollback (see [configuration.md §\[agent.shared_context\]](configuration.md#agentshared_context)).
 
 **Auth:** `OpenAiCompat`
 
