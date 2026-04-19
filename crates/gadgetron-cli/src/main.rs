@@ -1546,16 +1546,27 @@ async fn init_serve_runtime(
     no_db: bool,
     tui_enabled: bool,
 ) -> Result<(axum::Router, ServerRuntimeHandles)> {
-    // Phase 1 keeps quota enforcement in-memory; the DB-backed implementation
-    // lands later without changing the serve orchestration.
-    //
-    // ISSUE 11 TASK 11.2: when the operator configures
-    // `[quota_rate_limit] requests_per_minute > 0`, wrap the plain
-    // in-memory enforcer in `RateLimitedQuotaEnforcer` so every
-    // request passes a per-tenant token-bucket check BEFORE the
-    // cost check. No-op otherwise — existing deployments with no
-    // rate-limit config keep the pre-TASK-11.2 behavior.
-    let base_enforcer: SharedQuotaEnforcer = Arc::new(InMemoryQuotaEnforcer);
+    // Quota enforcement pipeline (ISSUE 11 / ISSUE 12):
+    // - base enforcer: `PgQuotaEnforcer` when a pool is available
+    //   (TASK 11.3 — pg spend tracking; TASK 12.1 — billing ledger),
+    //   else `InMemoryQuotaEnforcer` (check-only, no persistence).
+    // - optional rate-limit wrapper (TASK 11.2): when
+    //   `[quota_rate_limit] requests_per_minute > 0`, every request
+    //   passes a per-tenant token-bucket check BEFORE the cost check.
+    let base_enforcer: SharedQuotaEnforcer = if let Some(pool) = pg_pool.clone() {
+        use gadgetron_xaas::quota::enforcer::PgQuotaEnforcer;
+        tracing::info!(
+            target: "quota.pg",
+            "PgQuotaEnforcer wired — record_post increments quota_configs + emits billing_events"
+        );
+        Arc::new(PgQuotaEnforcer::new(pool))
+    } else {
+        tracing::info!(
+            target: "quota.pg",
+            "no Postgres pool — falling back to InMemoryQuotaEnforcer (no spend persistence, no billing)"
+        );
+        Arc::new(InMemoryQuotaEnforcer)
+    };
     let quota_enforcer: SharedQuotaEnforcer = if config.quota_rate_limit.is_enabled() {
         use gadgetron_xaas::quota::enforcer::RateLimitedQuotaEnforcer;
         use gadgetron_xaas::quota::rate_limit::TokenBucketRateLimiter;

@@ -1,0 +1,239 @@
+# gadgetron-xaas Phase 2 — integer-cent billing ledger (ISSUE 12)
+
+> **담당**: @xaas-platform-lead
+> **상태**: TASK 12.1 Implementation landed (0.5.5); TASKs 12.2+ designed, unbuilt
+> **작성일**: 2026-04-19
+> **관련 크레이트**: `gadgetron-xaas` (새 `billing` 모듈), `gadgetron-gateway`, `gadgetron-cli`
+> **Phase**: [P2] — extends Phase 1 quota infrastructure (`phase1.md`)
+> **반영 결정**: D-4 (PostgreSQL), D-8 (i64 cents, no floats)
+> **선행 TASKs**: ISSUE 11 전체 (quota pipeline이 record_post에서 billing_events를 발행함)
+
+---
+
+## 1. 철학 & 컨셉 (Why)
+
+### 1.1 해결하는 문제
+
+**ISSUE 11이 "얼마 남았나"의 실시간 조회는 해결했지만, "지난 달에 무슨 일이 일어났는가"는 대답 못함.** 지금 `quota_configs.daily_used_cents / monthly_used_cents`는 카운터일 뿐 이력이 없다. 월말에 인보이스를 뽑으려면 (a) 이벤트 단위로 append-only 기록이 있어야 하고, (b) 모델/프로바이더/비용을 조회할 수 있어야 하고, (c) 과거 데이터를 의도치 않게 덮어쓰지 않아야 한다. 그게 이 ISSUE의 scope.
+
+### 1.2 제품 비전과의 연결
+
+- ROADMAP EPIC 4 (Multi-tenant XaaS) → v1.0.0의 전제. 빌링 원장이 없으면 진짜 SaaS라 부를 수 없음.
+- ADR-D-8 (integer cents, i64): BIGINT로 `cost_cents` 기록, 변환/반올림 없음.
+- `docs/modules/xaas-platform.md` 의 "metering pipeline → invoice materialization" 연결선의 맨 아래 절반.
+
+### 1.3 고려한 대안 / 채택하지 않은 이유
+
+| 대안 | 기각 이유 |
+|------|----------|
+| **ClickHouse / TimescaleDB** | 현 Postgres 스택에 신규 의존성 추가 비용 > 당장의 분석 쿼리 성능 이득. 이벤트 볼륨 초기엔 IOPS 평범한 테이블 + 인덱스로 충분. |
+| **Kafka / 외부 큐** | fire-and-forget DB insert 하나보다 복잡. at-least-once 보장이 필요해지면 재검토. 현재는 ISSUE 11 record_post 경로와 같은 트랜잭션 경계로 충분. |
+| **audit_log 확장 (열 추가)** | `audit_log`는 S/T 위협 모델에서 INSERT-only + UPDATE/DELETE/TRUNCATE 금지로 잠긴 보안 자산. 빌링은 invoice 정정(크레딧/환불)이 향후 생길 수 있고, 이를 위해 별도 테이블이 맞다. |
+| **Floating point decimals** | **금지 (D-8)**. 세금 계산/합산에서 반올림 오차가 원장과 인보이스 불일치로 이어짐. |
+| **Soft delete (is_deleted 플래그)** | append-only 원장이 목표. 정정이 필요하면 음수 `cost_cents` 보정 이벤트를 새로 INSERT. |
+
+### 1.4 핵심 설계 원칙
+
+1. **Append-only ledger**: `billing_events`는 INSERT만. 수정은 보정 행(음수 코스트)으로.
+2. **Fire-and-forget on hot path**: `record_post`에서 INSERT 실패는 WARN 로그, 요청 성공은 유지. 빌링 ≠ 요청 gate.
+3. **Integer cents everywhere**: `cost_cents BIGINT`. API 응답도 숫자 그대로 노출 (String 변환 없음).
+4. **Tenant-boundary enforcement in handler**: `/admin/billing/events`는 쿼리 파라미터가 무엇이든 caller의 `tenant_id`로만 조회. 크로스-테넌트 조회 불가.
+5. **Source-of-truth는 이벤트별 audit 테이블**: `source_event_id`는 `audit_log` / `tool_audit_events` / `action_audit_events`의 ID를 느슨하게 참조 (FK 없음) — 빌링이 먼저 INSERT되는 레이스를 막지 않기 위함.
+
+### 1.5 Trade-offs
+
+- **FK 없는 `source_event_id`**: 참조 무결성은 포기, 대신 write-path가 부모 테이블과 독립적. 트레이드오프: 고아 이벤트가 이론상 가능 (audit가 실패했는데 billing은 성공). 상쇄: audit 실패 시 요청 자체가 이미 실패했을 확률이 큼.
+- **INSERT 실패를 WARN으로만**: 요청 성공을 지키기 위한 선택. 상쇄: 드문 경우 quota 카운터는 전진했는데 원장엔 없는 상황. §7 재조정(reconciliation)에서 다룸.
+- **TASK 12.1에서는 chat만**: tool / action 이벤트는 다른 파이프라인을 타므로 별도 TASK(12.2 / 12.3). 당장의 wire-contract 안정화가 우선.
+
+### 1.6 Threat Model (STRIDE, delta from phase1.md)
+
+| Category | Threat | Asset | Mitigation | Phase |
+|:---:|---|---|---|:---:|
+| **T** (Tampering) | 다른 테넌트의 빌링 이벤트를 읽거나 수정 | `billing_events` | `/admin/billing/events` 핸들러가 ctx.tenant_id로 WHERE 절 고정; UPDATE/DELETE API 없음; Management scope 필수 | P2 |
+| **I** (Info Disclosure) | 비-Management key로 인보이스 데이터 접근 | `billing_events` | `/admin/*` prefix로 RBAC 분기; OpenAiCompat key → 403 (harness gate 7k.7) | P2 |
+| **R** (Repudiation) | INSERT 실패 시 활동 흔적 없음 | `billing_events` | `tracing::warn!(target: "billing")` + quota 카운터는 이미 전진 (reconciliation 수단으로 사용) | P2 accepted |
+| **D** (DoS) | 대용량 쿼리로 DB 스트레스 | `billing_events` | `limit.clamp(1, 500)` + `(tenant_id, created_at DESC)` 인덱스 | P2 |
+
+---
+
+## 2. Data Model (SQL — 배포 상태)
+
+```sql
+-- migrations/20260420000002_billing_events.sql
+CREATE TABLE IF NOT EXISTS billing_events (
+    id                BIGSERIAL PRIMARY KEY,
+    tenant_id         UUID         NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    event_kind        TEXT         NOT NULL CHECK (event_kind IN ('chat', 'tool', 'action')),
+    source_event_id   UUID,
+    cost_cents        BIGINT       NOT NULL,
+    model             TEXT,
+    provider          TEXT,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS billing_events_tenant_created_idx
+    ON billing_events (tenant_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS billing_events_kind_created_idx
+    ON billing_events (event_kind, created_at DESC);
+```
+
+**Notes**
+- `BIGSERIAL`: i64로 충분. 테넌트당 초당 1만건 기준 ~29만년치 용량.
+- `ON DELETE CASCADE` on `tenant_id`: 테넌트 삭제 시 원장도 따라감. 컴플라이언스상 문제가 되면 ADR로 분리해 `RESTRICT`로 바꾸는 것을 추후 검토.
+- `event_kind` CHECK: 3가지로 잠금. 새 종류 추가 시 migration 필요 — 이게 feature, bug 아님.
+- `source_event_id`에 FK 없음: §1.5 참조.
+
+---
+
+## 3. Public API 시그니처 (Rust — 배포 상태)
+
+```rust
+// crates/gadgetron-xaas/src/billing/events.rs
+pub enum BillingEventKind { Chat, Tool, Action }
+
+impl BillingEventKind {
+    pub fn as_str(&self) -> &'static str { … } // "chat" | "tool" | "action"
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+pub struct BillingEventRow {
+    pub id: i64,
+    pub tenant_id: Uuid,
+    pub event_kind: String,
+    pub source_event_id: Option<Uuid>,
+    pub cost_cents: i64,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn insert_billing_event(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    kind: BillingEventKind,
+    cost_cents: i64,
+    source_event_id: Option<Uuid>,
+    model: Option<&str>,
+    provider: Option<&str>,
+) -> Result<(), sqlx::Error>;
+
+pub async fn query_billing_events(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    limit: i64, // already clamped at handler
+) -> Result<Vec<BillingEventRow>, sqlx::Error>;
+```
+
+---
+
+## 4. Hot-path 통합 (enforcer 확장)
+
+```rust
+// crates/gadgetron-xaas/src/quota/enforcer.rs PgQuotaEnforcer::record_post
+// (after the existing UPDATE quota_configs …)
+let ins = crate::billing::insert_billing_event(
+    &self.pool,
+    token.tenant_id,
+    crate::billing::BillingEventKind::Chat,
+    actual_cost_cents,
+    None, // TASK 12.2+에서 chat audit_log UUID를 threading
+    None, // model — TASK 12.2에서 enforcer가 컨텍스트로 받음
+    None, // provider — 동일
+).await;
+if let Err(e) = ins {
+    tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
+        "failed to persist billing_events row — counter ahead of ledger until reconciled");
+}
+```
+
+**Why no threading of model/provider/source_event_id now**: `QuotaEnforcer` trait는 현재 `actual_cost_cents: i64`만 받는다. TASK 12.2에서 이 trait 시그니처를 확장하면서 동시에 tool / action 이벤트 경로도 추가. 한 번의 wire change로 3가지 값을 threading — 한 TASK 한 wire change.
+
+---
+
+## 5. HTTP API (배포 상태)
+
+```
+GET /api/v1/web/workbench/admin/billing/events
+    ?since=<ISO-8601>   (optional lower bound)
+    &limit=<1..=500>    (default 100)
+
+Auth: Bearer <Management-scope API key> (OpenAiCompat → 403)
+Response 200:
+  {
+    "events": [
+      {
+        "id": 42,
+        "tenant_id": "…uuid…",
+        "event_kind": "chat",
+        "source_event_id": null,
+        "cost_cents": 17,
+        "model": null,
+        "provider": null,
+        "created_at": "2026-04-19T18:12:03.441Z"
+      },
+      …
+    ],
+    "returned": 1
+  }
+```
+
+**Tenant boundary**: 핸들러가 `ctx.tenant_id`로 WHERE 절을 고정. `since`/`limit` 외의 필터 파라미터는 wire-받지 않음 (향후 `event_kind` 필터는 TASK 12.2에서 추가).
+
+---
+
+## 6. Testability (Round 2 test plan)
+
+### 6.1 Unit tests (in-module)
+
+- `BillingEventKind::as_str` 문자열이 변하지 않음을 pinning (`wire_frozen`). **이미 landed**.
+- `insert_billing_event` + `query_billing_events` 라운드트립 — `gadgetron-testing`의 `PostgresFixture` 사용. **TASK 12.2에서 추가** (현 TASK는 harness 로 cover).
+- `query_billing_events` 의 `since` 필터가 경계치(`=` 포함)에서 올바른지 proptest. **TASK 12.2**.
+
+### 6.2 E2E harness gates (이미 배포)
+
+**Gate 7k.6** `/workbench/admin/billing/events`:
+  - 비-스트리밍 chat 직후 `sleep 1` 후 `/admin/billing/events?limit=5` 호출
+  - `.events[] | select(.event_kind == "chat") | length >= 1` 검증
+  - `{events: array, returned: number}` shape 검증
+  - cost_cents는 >= 0 (mock 모델은 0, 실모델은 양수)
+
+**Gate 7k.7** RBAC 403:
+  - OpenAiCompat scope API key로 `/admin/billing/events` 호출 → 403 기대
+
+### 6.3 향후 load/property tests (TASK 12.2+)
+
+- `proptest!` — (tenant, kind, cost_cents) 조합으로 INSERT 후 query round-trip
+- ledger drift 테스트: 100개 chat 요청 후 `SUM(cost_cents) FROM billing_events` == `quota_configs.daily_used_cents`
+- concurrent INSERT 100개 동시 발행 후 count 무결성
+
+---
+
+## 7. Reconciliation & 운영 (P2 scope)
+
+`record_post`의 INSERT가 실패하면 카운터는 전진, 원장엔 없음 (§1.5). 이를 감지하고 보정하는 경로:
+
+1. 일 1회 `cron` — `SELECT tenant_id, SUM(cost_cents) FROM billing_events WHERE created_at::date = CURRENT_DATE - 1 GROUP BY tenant_id`
+2. `quota_configs.daily_used_cents` (어제 자정 직전 snapshot)와 비교
+3. drift가 있으면 해당 테넌트에 대한 보정 이벤트 (`event_kind='chat', source_event_id=NULL, cost_cents = drift, model='__reconciliation__'`)를 INSERT
+
+**당장 배포하는 것은 detection만** — 자동 보정은 TASK 12.4. 수동 SQL로 먼저 돌려봐야 실제 drift 크기를 안다.
+
+---
+
+## 8. 남은 TASKs (로드맵)
+
+- **TASK 12.2 — tool/action 이벤트 확장**: `QuotaEnforcer` trait에 context(`EventContext { kind, source_event_id, model, provider }`) 추가; tool_audit_events / action_audit_events 경로에서도 발행
+- **TASK 12.3 — 인보이스 materialization**: `invoices` + `invoice_lines` 테이블; 월말 요약 뷰
+- **TASK 12.4 — reconciliation cron + 자동 보정**
+- **TASK 12.5 — Stripe webhook ingest** (외부 결제 성공/환불 이벤트를 ledger에 반영)
+
+---
+
+## 9. 참조
+- Phase 1 foundation: `docs/design/xaas/phase1.md`
+- ADR-D-8 (integer cents)
+- ROADMAP §EPIC 4 / ISSUE 12
+- Implementation code: `crates/gadgetron-xaas/src/billing/`, `crates/gadgetron-xaas/migrations/20260420000002_billing_events.sql`
