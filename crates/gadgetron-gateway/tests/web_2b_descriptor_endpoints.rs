@@ -122,6 +122,7 @@ fn make_state_with_coordinator(
         activity_capture_store: None,
         candidate_coordinator: None,
         activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
+        tool_catalog: None,
     }
 }
 

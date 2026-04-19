@@ -62,6 +62,27 @@ pub trait GadgetDispatcher: Send + Sync + 'static {
     ) -> Result<GadgetResult, GadgetError>;
 }
 
+/// Read-only discovery seam for callers that need to enumerate Gadget
+/// schemas without taking a dependency on `gadgetron-penny`.
+///
+/// The MCP `/v1/tools` endpoint (ISSUE 7) lives in the gateway and
+/// exposes the operator-allowed gadget set to external agents. The
+/// gateway depends only on `gadgetron-core`, so this trait lets it hold
+/// `Arc<dyn GadgetCatalog>` for schema discovery, paralleling the
+/// existing `GadgetDispatcher` seam used for Gadget invocation.
+///
+/// Concrete implementors:
+/// - `gadgetron_penny::GadgetRegistry` — returns the frozen L3-allowed
+///   schema set built from operator config.
+/// - Test fakes — return a fixed schema slice.
+///
+/// The returned schemas are already deduplicated by tool name inside
+/// `GadgetRegistry::freeze`; callers can trust `name` as a unique key.
+pub trait GadgetCatalog: Send + Sync + 'static {
+    /// All Gadget schemas exposed by this catalog.
+    fn all_schemas(&self) -> Vec<GadgetSchema>;
+}
+
 /// Stable Bundle-facing interface for Gadget suppliers.
 ///
 /// Each provider bundles a set of related Gadgets under a namespace (category).

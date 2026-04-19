@@ -284,6 +284,17 @@ impl gadgetron_core::agent::tools::GadgetDispatcher for GadgetRegistry {
     }
 }
 
+/// Schema-discovery seam consumed by the gateway's MCP `/v1/tools`
+/// endpoint. Returns an owned `Vec` so the caller is insulated from
+/// the registry's internal `Arc<[GadgetSchema]>` storage — the cost is
+/// one clone per listing (O(schemas), acceptable for a discovery
+/// endpoint that runs at single-digit QPS).
+impl gadgetron_core::agent::tools::GadgetCatalog for GadgetRegistry {
+    fn all_schemas(&self) -> Vec<GadgetSchema> {
+        self.all_schemas().to_vec()
+    }
+}
+
 /// Determine whether a tool should appear in `--allowed-tools`.
 ///
 /// Per ADR-P2A-06 §"Tier + Mode in P2A", `Ask` is treated as `Never` because

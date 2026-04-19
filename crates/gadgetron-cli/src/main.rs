@@ -60,6 +60,7 @@ struct AppStateParts {
     candidate_coordinator:
         Option<Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>>,
     activity_bus: gadgetron_core::activity_bus::ActivityBus,
+    penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,6 +1481,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         activity_capture_store,
         candidate_coordinator,
         activity_bus,
+        penny_registry,
     } = parts;
 
     AppState {
@@ -1498,6 +1500,8 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         activity_capture_store,
         candidate_coordinator,
         activity_bus,
+        tool_catalog: penny_registry
+            .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>),
     }
 }
 
@@ -1607,6 +1611,7 @@ async fn init_serve_runtime(
         activity_capture_store,
         candidate_coordinator,
         activity_bus,
+        penny_registry: penny_registry.clone(),
     });
     let tui_thread = spawn_tui_thread(tui_tx.as_ref());
     let app = build_http_app(state, &config.web);
@@ -3648,6 +3653,7 @@ wiki_max_page_bytes = 1048576
             activity_capture_store: Some(activity_store),
             candidate_coordinator: Some(candidate_coordinator),
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
+            penny_registry: None,
         });
 
         // PSL-1c field-presence assertions (spec §5).
