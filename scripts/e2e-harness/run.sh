@@ -729,6 +729,57 @@ fi
 # (doc §2.4.1) says 404 (not 403) to avoid leaking existence; this
 # gate covers the simpler "genuinely unknown id" path.
 
+log "=== Gate 7h.1: direct action happy-path (POST knowledge-search) ==="
+# Flip of 7h — seed_p2b ships ONE action (`knowledge-search`); a
+# well-formed POST should return 200 with a result envelope:
+#   {"result":{"status":"ok" | "pending_approval", ...}}
+# Asserts the end-to-end happy path: auth → scope → descriptor
+# lookup → JSON-schema validation → replay-cache miss → coordinator
+# capture → synthetic result. A regression anywhere in that chain
+# flips the status code or hides the result shape.
+ACTION_CIID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+ACTION_BODY="$(jq -cn --arg ciid "$ACTION_CIID" \
+  '{args: {query: "harness smoke"}, client_invocation_id: $ciid}')"
+ACTION_RESP="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/knowledge-search" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ACTION_BODY" 2>&1 || true)"
+if echo "$ACTION_RESP" | jq -e '.result.status | IN("ok", "pending_approval")' \
+  >/dev/null 2>&1; then
+  STATUS="$(echo "$ACTION_RESP" | jq -r '.result.status')"
+  pass "POST /actions/knowledge-search → 200 result.status=$STATUS"
+else
+  fail "happy-path action invocation regressed" \
+    "$(echo "$ACTION_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7h.2: replay cache — same client_invocation_id returns cached
+# ---------------------------------------------------------------------------
+#
+# Same `client_invocation_id` on a second POST must hit the moka
+# replay cache and return an IDENTICAL response (per drift-fix
+# PR #131, N5). A regression that rotates cache keys / lets
+# `client_invocation_id` fall through to a fresh invocation would
+# produce a different `activity_event_id` and this gate catches it.
+
+log "=== Gate 7h.2: replay cache returns cached response on ciid reuse ==="
+ACTION_RESP2="$(curl -fsS \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/knowledge-search" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$ACTION_BODY" 2>&1 || true)"
+# Strip volatile fields we don't care to compare (none today, but
+# future-proof the assertion by diffing whole bodies — if they're
+# not byte-identical, replay cache didn't hit).
+if [ "$ACTION_RESP" = "$ACTION_RESP2" ]; then
+  pass "replay cache HIT — identical body on ciid reuse"
+else
+  fail "replay cache MISS on same client_invocation_id" \
+    "first:  $(echo "$ACTION_RESP" | head -c 200) | second: $(echo "$ACTION_RESP2" | head -c 200)"
+fi
+
 log "=== Gate 7h: action 404 on unknown id ==="
 ACTION_404_CODE="$(http_post_code "$TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/actions/does-not-exist" \
