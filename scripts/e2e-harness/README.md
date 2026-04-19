@@ -17,9 +17,9 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; thirteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
+refresh; fourteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
 #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
-7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3 — 64 → 80 PASS). Run
+7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207 7i.4 — 64 → 81 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -51,6 +51,7 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7i | `/v1/models` listing | `{object: "list", data: [...]}` |
 | 7i.2 | `/v1/tools` MCP tool discovery (OpenAiCompat scope) | PR #204: `{tools:[...], count:N}` shape with empty-registry contract (harness has no `[knowledge]` so count=0 in-test); 401 on unauthenticated |
 | 7i.3 | `/v1/tools/{name}/invoke` MCP invocation | PR #205: happy path `wiki.list` returns `{content, is_error:false}`; unknown-gadget → 404 `mcp_unknown_tool`; unauthenticated → 401 |
+| 7i.4 | `/v1/tools` invoke → `tool_audit_events` row (cross-session audit) | PR #207: fresh `POST /v1/tools/wiki.list/invoke` → after a 1s drain window, `GET /audit/tool-events?tool_name=wiki.list` returns at least one row with `owner_id` populated (external-MCP attribution signal — Penny-internal calls leave `owner_id` NULL in P2A) |
 | 7j | `/favicon.ico` | 200 or 204 (public, no auth) |
 | 7k | Management `/api/v1/usage` | RBAC positive path (200/501/503); FAILS on 401/403 |
 | 7k.2 | Management `/api/v1/costs` | PR #169: sibling of 7k — same scope, same pass set; catches scope-handler divergence |
