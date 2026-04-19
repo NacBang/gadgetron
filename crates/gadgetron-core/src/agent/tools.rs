@@ -21,6 +21,43 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Registry-facing dispatch seam for callers outside the Penny session.
+///
+/// Penny's `GadgetRegistry` lives in `gadgetron-penny`, but the gateway
+/// (workbench direct-action path, `/web` invocations) depends only on
+/// `gadgetron-core`. This trait lets the gateway hold
+/// `Arc<dyn GadgetDispatcher>` and dispatch Gadgets without taking a
+/// dependency on the penny crate.
+///
+/// Concrete implementors:
+/// - `gadgetron_penny::GadgetRegistry` — real dispatch with the L3
+///   allowed-names gate (ADR-P2A-06 §"Tier + Mode").
+/// - Test fakes — return canned results, skip the L3 gate.
+///
+/// # Audit invariant
+///
+/// Direct-action dispatch is definitionally session-less (workbench doc
+/// §2.2.4 + D-20260411-*). It bypasses Penny's
+/// `GadgetAuditEventSink` — `WorkbenchActionResult.audit_event_id` is
+/// intentionally `None` on this path. Wiring a parallel audit sink for
+/// direct actions is a separate follow-up tracked as
+/// `TODO(audit-direct-action)`.
+#[async_trait]
+pub trait GadgetDispatcher: Send + Sync + 'static {
+    /// Dispatch a Gadget call by namespaced name (e.g. `"wiki.search"`).
+    ///
+    /// Implementors MUST preserve:
+    /// - `GadgetError::UnknownGadget(name)` when the name is unregistered.
+    /// - The L3 allowed-names gate when wrapping an operator-config-aware
+    ///   registry — otherwise `Ask` / `Never`-mode tools would be reachable
+    ///   via the workbench path after being disabled for Penny.
+    async fn dispatch_gadget(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<GadgetResult, GadgetError>;
+}
+
 /// Stable Bundle-facing interface for Gadget suppliers.
 ///
 /// Each provider bundles a set of related Gadgets under a namespace (category).

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gadgetron_core::{
+    agent::tools::GadgetDispatcher,
     knowledge::{
         candidate::{
             ActivityKind, ActivityOrigin, CapturedActivityEvent, KnowledgeCandidateCoordinator,
@@ -47,6 +48,15 @@ pub struct InProcessWorkbenchActionService {
     /// Built at construction time from each descriptor's `input_schema` so
     /// validation is purely in-memory with no re-compilation per request.
     pub schema_validators: std::collections::HashMap<String, Arc<jsonschema::Validator>>,
+    /// Optional Gadget dispatcher (typically Penny's `GadgetRegistry`
+    /// via `gadgetron_core::agent::tools::GadgetDispatcher`).
+    ///
+    /// When wired + the descriptor has `gadget_name: Some(...)`, step 7
+    /// performs a real dispatch and the raw Gadget result lands in
+    /// `WorkbenchActionResult.payload`. When unwired (unit tests, server
+    /// without any providers), step 7 falls back to the synthetic result
+    /// and `payload` is `None`.
+    pub gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>>,
 }
 
 impl InProcessWorkbenchActionService {
@@ -61,6 +71,20 @@ impl InProcessWorkbenchActionService {
         descriptor_catalog: DescriptorCatalog,
         replay_cache: InMemoryReplayCache,
         coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+    ) -> Self {
+        Self::new_with_dispatcher(descriptor_catalog, replay_cache, coordinator, None)
+    }
+
+    /// Build a new action service with an optional `GadgetDispatcher`.
+    ///
+    /// When a dispatcher is wired AND the resolved descriptor has
+    /// `gadget_name: Some(...)`, step 7 performs a real Gadget dispatch
+    /// and the result lands in `WorkbenchActionResult.payload`.
+    pub fn new_with_dispatcher(
+        descriptor_catalog: DescriptorCatalog,
+        replay_cache: InMemoryReplayCache,
+        coordinator: Option<Arc<dyn KnowledgeCandidateCoordinator>>,
+        gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>>,
     ) -> Self {
         // Build schema validators for all actions in the catalog.
         // We iterate visible_actions with the broadest scope so we compile
@@ -95,6 +119,7 @@ impl InProcessWorkbenchActionService {
             replay_cache: Arc::new(replay_cache),
             coordinator,
             schema_validators: validators,
+            gadget_dispatcher,
         }
     }
 }
@@ -227,7 +252,45 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         }
 
         // ---------------------------------------------------------------
-        // Step 7: Ok path — synthesize result + optional coordinator capture.
+        // Step 7a: Real Gadget dispatch (when wired + descriptor has one).
+        //
+        // TODO(audit-direct-action): Direct-action dispatch bypasses
+        // Penny's `GadgetAuditEventSink` by design (workbench doc §2.2.4
+        // + D-20260411-*). `WorkbenchActionResult.audit_event_id` stays
+        // `None` until a parallel audit sink is wired — see
+        // `gadgetron_core::agent::tools::GadgetDispatcher` doc comment.
+        // ---------------------------------------------------------------
+        let mut payload: Option<serde_json::Value> = None;
+
+        if let (Some(dispatcher), Some(gadget_name)) = (
+            self.gadget_dispatcher.as_ref(),
+            descriptor.gadget_name.as_deref(),
+        ) {
+            match dispatcher
+                .dispatch_gadget(gadget_name, request.args.clone())
+                .await
+            {
+                Ok(result) => {
+                    // Penny's `GadgetResult { content: Value, is_error: bool }`
+                    // wraps the raw provider output. The workbench contract
+                    // puts that content directly into `payload` — callers
+                    // interpret it per gadget.
+                    payload = Some(result.content);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        gadget_name = %gadget_name,
+                        error = %e,
+                        "gadget dispatch failed; surfacing as error"
+                    );
+                    return Err(WorkbenchHttpError::Core(e.into()));
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Step 7b: Coordinator capture (non-fatal on failure).
         // ---------------------------------------------------------------
         let mut activity_event_id: Option<Uuid> = None;
         let mut knowledge_candidates: Vec<serde_json::Value> = vec![];
@@ -288,7 +351,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             audit_event_id: None,
             refresh_view_ids: vec![],
             knowledge_candidates,
-            payload: None,
+            payload,
         };
         let resp = InvokeWorkbenchActionResponse { result };
 
@@ -576,5 +639,130 @@ mod tests {
             resp.result.audit_event_id.is_none(),
             "audit_event_id not wired in this PR"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 7a: Real Gadget dispatch populates payload
+    // -----------------------------------------------------------------------
+
+    /// Fake `GadgetDispatcher` that records the dispatched name + args and
+    /// returns a canned content payload. Lets us assert that (a) the
+    /// action path calls through to the dispatcher, and (b) the raw
+    /// `GadgetResult.content` ends up in `WorkbenchActionResult.payload`.
+    struct FakeDispatcher {
+        inner: tokio::sync::Mutex<Option<(String, serde_json::Value)>>,
+        response: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl gadgetron_core::agent::tools::GadgetDispatcher for FakeDispatcher {
+        async fn dispatch_gadget(
+            &self,
+            name: &str,
+            args: serde_json::Value,
+        ) -> Result<
+            gadgetron_core::agent::tools::GadgetResult,
+            gadgetron_core::agent::tools::GadgetError,
+        > {
+            *self.inner.lock().await = Some((name.to_string(), args));
+            Ok(gadgetron_core::agent::tools::GadgetResult {
+                content: self.response.clone(),
+                is_error: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_with_dispatcher_populates_payload_from_gadget_result() {
+        let dispatcher = Arc::new(FakeDispatcher {
+            inner: tokio::sync::Mutex::new(None),
+            response: serde_json::json!({
+                "hits": [{"title": "seeded", "score": 0.9}],
+                "total": 1,
+            }),
+        });
+        let svc = InProcessWorkbenchActionService::new_with_dispatcher(
+            DescriptorCatalog::seed_p2b(),
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            None,
+            Some(dispatcher.clone()),
+        );
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "seeded"}),
+            client_invocation_id: None,
+        };
+        let resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.result.status, "ok");
+        let payload = resp.result.payload.expect("payload set on dispatch ok");
+        assert_eq!(payload["total"], 1);
+        assert_eq!(payload["hits"][0]["title"], "seeded");
+
+        let captured = dispatcher.inner.lock().await;
+        let (name, args) = captured.as_ref().expect("dispatcher invoked");
+        // seed_p2b wires knowledge-search → wiki.search gadget.
+        assert_eq!(name, "wiki.search");
+        assert_eq!(args["query"], "seeded");
+    }
+
+    #[tokio::test]
+    async fn invoke_without_dispatcher_keeps_payload_none() {
+        // Regression guard — when no dispatcher is wired, the ok path
+        // must fall back to the synthetic result (payload = None).
+        let svc = make_service(DescriptorCatalog::seed_p2b());
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "no dispatch"}),
+            client_invocation_id: None,
+        };
+        let resp = svc
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
+            .await
+            .unwrap();
+        assert_eq!(resp.result.status, "ok");
+        assert!(
+            resp.result.payload.is_none(),
+            "payload must be None when no dispatcher is wired"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_dispatcher_error_surfaces_as_workbench_error() {
+        struct FailingDispatcher;
+        #[async_trait]
+        impl gadgetron_core::agent::tools::GadgetDispatcher for FailingDispatcher {
+            async fn dispatch_gadget(
+                &self,
+                name: &str,
+                _args: serde_json::Value,
+            ) -> Result<
+                gadgetron_core::agent::tools::GadgetResult,
+                gadgetron_core::agent::tools::GadgetError,
+            > {
+                Err(gadgetron_core::agent::tools::GadgetError::UnknownGadget(
+                    name.to_string(),
+                ))
+            }
+        }
+        let svc = InProcessWorkbenchActionService::new_with_dispatcher(
+            DescriptorCatalog::seed_p2b(),
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            None,
+            Some(Arc::new(FailingDispatcher)),
+        );
+        let req = InvokeWorkbenchActionRequest {
+            args: serde_json::json!({"query": "x"}),
+            client_invocation_id: None,
+        };
+        let err = svc
+            .invoke(&actor(), &actor_scopes_default(), "knowledge-search", req)
+            .await
+            .unwrap_err();
+        match err {
+            WorkbenchHttpError::Core(_) => {}
+            other => panic!("expected Core error from dispatch failure, got {other:?}"),
+        }
     }
 }

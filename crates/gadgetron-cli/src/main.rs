@@ -1183,7 +1183,11 @@ fn init_tui_channel(tui_enabled: bool) -> Option<broadcast::Sender<WsMessage>> {
 fn build_provider_maps(
     config: &AppConfig,
     config_path: &std::path::Path,
-) -> Result<(SharedProviderMap, RouterProviderMap)> {
+) -> Result<(
+    SharedProviderMap,
+    RouterProviderMap,
+    Option<Arc<gadgetron_penny::GadgetRegistry>>,
+)> {
     eprint!("  Checking provider(s)...");
     let providers_ss = build_providers(config).context("failed to initialise LLM providers")?;
     eprintln!(" done ({} configured)", providers_ss.len());
@@ -1198,8 +1202,9 @@ fn build_provider_maps(
         .map(|(k, v)| (k.clone(), Arc::clone(v) as Arc<dyn LlmProvider>))
         .collect();
 
-    register_penny_if_configured(config_path, config, &mut providers_for_router);
-    Ok((providers_ss, providers_for_router))
+    let penny_registry =
+        register_penny_if_configured(config_path, config, &mut providers_for_router);
+    Ok((providers_ss, providers_for_router, penny_registry))
 }
 
 fn build_llm_router(providers: RouterProviderMap, config: &AppConfig) -> Arc<LlmRouter> {
@@ -1240,18 +1245,22 @@ fn build_knowledge_service(
     Ok(Some(provider.service().clone()))
 }
 
-/// Build the workbench gateway service from an optional `KnowledgeService`
-/// and an optional `KnowledgeCandidateCoordinator`.
+/// Build the workbench gateway service from an optional `KnowledgeService`,
+/// optional `KnowledgeCandidateCoordinator`, and optional `GadgetRegistry`.
 ///
 /// Always returns `Some` so the bootstrap endpoint remains reachable even
 /// without a knowledge backend. When no coordinator is supplied, the action
-/// service captures activity events as no-ops.
+/// service captures activity events as no-ops. When no registry is
+/// supplied, direct actions fall back to the synthetic result path (no
+/// real Gadget dispatch).
 fn build_workbench(
     knowledge_service: Option<Arc<gadgetron_knowledge::service::KnowledgeService>>,
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
     >,
+    penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
+    use gadgetron_core::agent::tools::GadgetDispatcher;
     use gadgetron_gateway::web::{
         action_service::InProcessWorkbenchActionService,
         catalog::DescriptorCatalog,
@@ -1268,11 +1277,15 @@ fn build_workbench(
         descriptor_catalog: catalog.clone(),
     });
 
+    let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> =
+        penny_registry.map(|r| r as Arc<dyn GadgetDispatcher>);
+
     let action_svc: Arc<dyn WorkbenchActionService> =
-        Arc::new(InProcessWorkbenchActionService::new(
+        Arc::new(InProcessWorkbenchActionService::new_with_dispatcher(
             catalog,
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             candidate_coordinator,
+            gadget_dispatcher,
         ));
 
     Some(Arc::new(GatewayWorkbenchService {
@@ -1423,7 +1436,8 @@ async fn init_serve_runtime(
     let quota_enforcer = Arc::new(InMemoryQuotaEnforcer) as SharedQuotaEnforcer;
     let (audit_writer, audit_handle) = init_audit_runtime();
     let tui_tx = init_tui_channel(tui_enabled);
-    let (providers_ss, providers_for_router) = build_provider_maps(config, config_path)?;
+    let (providers_ss, providers_for_router, penny_registry) =
+        build_provider_maps(config, config_path)?;
     let llm_router = build_llm_router(providers_for_router, config);
 
     // PSL-1c: Wire the P2B observability stack (knowledge service,
@@ -1476,7 +1490,11 @@ async fn init_serve_runtime(
             _ => (None, None),
         };
 
-    let workbench = build_workbench(knowledge_service.clone(), candidate_coordinator.clone());
+    let workbench = build_workbench(
+        knowledge_service.clone(),
+        candidate_coordinator.clone(),
+        penny_registry.clone(),
+    );
 
     let agent_config = Arc::new(config.agent.clone());
 
@@ -1746,7 +1764,7 @@ fn register_penny_if_configured(
     config_path: &std::path::Path,
     app_config: &AppConfig,
     providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
-) {
+) -> Option<Arc<gadgetron_penny::GadgetRegistry>> {
     // We re-read the toml file to extract the `[knowledge]` section.
     // The main AppConfig load path doesn't include a `knowledge`
     // field — adding one would require cross-crate type sharing
@@ -1756,7 +1774,7 @@ fn register_penny_if_configured(
         Ok(Some(registration)) => registration,
         Ok(None) => {
             // No [knowledge] section → penny not available.
-            return;
+            return None;
         }
         Err(e) => {
             tracing::error!(
@@ -1764,9 +1782,13 @@ fn register_penny_if_configured(
                 error = ?e,
                 "penny: failed to prepare knowledge registry; skipping"
             );
-            return;
+            return None;
         }
     };
+    // Capture the registry Arc BEFORE consuming `registration` so the
+    // workbench direct-action dispatcher can reuse the same L3-gated
+    // dispatch surface Penny uses.
+    let registry = registration.registry.clone();
 
     // Register PennyProvider under the "penny" model id in the
     // router map. The existing provider map already holds concrete
@@ -1789,6 +1811,7 @@ fn register_penny_if_configured(
             "none"
         }
     );
+    Some(registry)
 }
 
 async fn shutdown_signal() {
@@ -3483,6 +3506,7 @@ wiki_max_page_bytes = 1048576
         let workbench = build_workbench(
             Some(knowledge_service.clone()),
             Some(candidate_coordinator.clone()),
+            None,
         );
         assert!(
             workbench.is_some(),
@@ -3578,9 +3602,9 @@ wiki_max_page_bytes = 1048576
             "knowledge_service must be None"
         );
 
-        // build_workbench(None, None) → Some (degraded-mode projection — always
-        // wired so the endpoint returns a degraded bootstrap rather than 404).
-        let workbench = build_workbench(None, None);
+        // build_workbench(None, None, None) → Some (degraded-mode projection —
+        // always wired so the endpoint returns a degraded bootstrap rather than 404).
+        let workbench = build_workbench(None, None, None);
         assert!(
             workbench.is_some(),
             "workbench is always Some (degraded mode) even without knowledge service"
