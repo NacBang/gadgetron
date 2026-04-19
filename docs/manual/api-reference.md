@@ -693,7 +693,7 @@ curl -s http://localhost:8080/ready
 
 The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
 
-All thirteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` and `/audit/events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query.
+All fourteen routes are always mounted on trunk (eight shipped in ISSUE 1–2, three approval / audit routes added in ISSUE 3 / v0.2.6, two observability routes added in ISSUE 4 / v0.2.7, one tool-call audit route added in ISSUE 5 / v0.2.8). The CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry, pg_pool)` helper at `crates/gadgetron-cli/src/main.rs:1256-1331` returns `Some(...)` even when all four arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops; approval store falls back to in-memory; `ActionAuditSink` falls back to `NoopActionAuditSink`; `/usage/summary` + `/audit/events` + `/audit/tool-events` return 400 `config_error` without a pool; `/events/ws` opens against a zero-publisher `ActivityBus`; Penny-attributed activity capture is skipped when `candidate_coordinator` is `None`, per ISSUE 6's `GadgetAuditEventWriter::with_coordinator()` plumbing). PR #188 / v0.2.6 added the fourth `pg_pool` parameter so the action-audit writer + approval store can take a Postgres pool when one is configured; PR #194 / v0.2.7 reused it for the usage rollup + audit query; PR #199 / v0.2.8 extended it for Penny tool-call audit persistence; PR #201 / v0.2.9 threaded `candidate_coordinator` through the Penny registration path so tool-call audit fans out to `CapturedActivityEvent` rows alongside DB persistence.
 
 **What is real on trunk today:**
 - `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
@@ -735,7 +735,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.2.7",
+  "gateway_version": "0.2.9",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -754,7 +754,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.7"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.9"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
