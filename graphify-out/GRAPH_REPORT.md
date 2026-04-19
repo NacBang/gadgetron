@@ -1,7 +1,7 @@
 # Graph Report - /Users/junghopark/dev/gadgetron-plan  (2026-04-19)
 
 ## Corpus Check
-- 224 files · ~1,023,898 words
+- 224 files · ~1,027,252 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -1023,11 +1023,9 @@ Nodes (1): Phase2 Overview Design Doc
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `is_empty()` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 10`, `Community 11`, `Community 16`, `Community 17`, `Community 18`, `Community 20`, `Community 22`, `Community 26`, `Community 27`, `Community 30`, `Community 32`, `Community 33`?**
+  _High betweenness centrality (0.027) - this node is a cross-community bridge._
+- **Why does `run()` connect `Community 28` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 34`, `Community 9`, `Community 10`, `Community 15`?**
   _High betweenness centrality (0.013) - this node is a cross-community bridge._
-- **Why does `parse_links()` connect `Community 33` to `Community 8`, `Community 1`?**
-  _High betweenness centrality (0.011) - this node is a cross-community bridge._
-- **Why does `redact_stderr()` connect `Community 38` to `Community 16`, `Community 4`?**
-  _High betweenness centrality (0.011) - this node is a cross-community bridge._
 - **Are the 77 inferred relationships involving `is_empty()` (e.g. with `to_anthropic_request()` and `from_anthropic_response()`) actually correct?**
   _`is_empty()` has 77 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 19 inferred relationships involving `build_router()` (e.g. with `build_http_app()` and `psl_1d_successful_non_streaming_chat_completions_captures_one_event()`) actually correct?**
@@ -1036,3 +1034,5 @@ _Questions this graph is uniquely positioned to answer:_
   _`build_claude_command_with_env()` has 4 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 20 inferred relationships involving `run()` (e.g. with `.chat_stream()` and `main()`) actually correct?**
   _`run()` has 20 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 3 inferred relationships involving `parse_links()` (e.g. with `.len()` and `.new()`) actually correct?**
+  _`parse_links()` has 3 INFERRED edges - model-reasoned connections that need verification._

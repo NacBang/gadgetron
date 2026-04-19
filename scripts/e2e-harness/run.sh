@@ -1315,6 +1315,32 @@ else
   fail "bundles array missing gadgetron-core" "$(echo "$RELOAD_RESP" | jq -c '.bundles' 2>/dev/null | head -c 200)"
 fi
 
+# Gate 7q.4 — GET /admin/bundles discovery (ISSUE 10 TASK 10.1).
+# Read-only enumeration of everything under `bundles_dir`. Asserts
+# shape + that `gadgetron-core` shows up with action_count=5.
+log "=== Gate 7q.4: admin/bundles discovery ==="
+DISCOVER_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles" 2>&1 || true)"
+DISCOVER_CORE_ACTIONS="$(echo "$DISCOVER_RESP" \
+  | jq -r '.bundles[] | select(.bundle.id == "gadgetron-core") | .action_count' 2>/dev/null || echo -1)"
+if echo "$DISCOVER_RESP" | jq -e '.count >= 1 and (.bundles | type == "array") and (.bundles_dir | type == "string")' >/dev/null 2>&1 \
+   && [ "$DISCOVER_CORE_ACTIONS" = "5" ]; then
+  pass "admin/bundles enumerates gadgetron-core (action_count=5)"
+else
+  fail "admin/bundles shape regressed or gadgetron-core missing" \
+    "$(echo "$DISCOVER_RESP" | head -c 400)"
+fi
+
+# Gate 7q.5 — admin/bundles requires Management scope; OpenAiCompat 403.
+DISCOVER_403_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/bundles" 2>&1 || true)"
+if [ "$DISCOVER_403_CODE" = "403" ]; then
+  pass "admin/bundles via OpenAiCompat key → 403 (RBAC enforced)"
+else
+  fail "admin/bundles OpenAiCompat: expected 403, got $DISCOVER_403_CODE" ""
+fi
+
 # Gate 7q.2 — OpenAiCompat-scoped caller MUST get 403 (admin surface).
 RELOAD_403_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $TEST_API_KEY" \

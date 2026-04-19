@@ -959,6 +959,119 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/events/ws", get(events_ws_handler))
         // ISSUE 8 TASK 8.2 — admin catalog hot-reload.
         .route("/admin/reload-catalog", post(reload_catalog_handler))
+        // ISSUE 10 TASK 10.1 — bundle discovery.
+        .route("/admin/bundles", get(list_bundles_handler))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/web/workbench/admin/bundles — ISSUE 10 TASK 10.1
+// ---------------------------------------------------------------------------
+
+/// One bundle entry in the discovery response.
+#[derive(Debug, serde::Serialize)]
+pub struct BundleDiscoveryEntry {
+    /// Bundle metadata from the manifest's `[bundle]` table. `None`
+    /// when the TOML file didn't declare one — admin UI should show
+    /// a placeholder + nudge the operator to add `[bundle]` because
+    /// marketplace operations (TASK 10.2+) need the id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<crate::web::catalog::BundleMetadata>,
+    /// Absolute path to the `bundle.toml` file on disk — useful for
+    /// SRE runbooks that want to `cat`/`grep` the manifest directly.
+    pub source_path: String,
+    /// Number of actions the manifest ships. Pre-computed so the
+    /// admin UI doesn't have to re-parse every manifest.
+    pub action_count: usize,
+    /// Number of views the manifest ships.
+    pub view_count: usize,
+}
+
+/// Response shape for `GET /admin/bundles`.
+#[derive(Debug, serde::Serialize)]
+pub struct ListBundlesResponse {
+    /// Directory that was scanned (mirrors `[web] bundles_dir`).
+    pub bundles_dir: String,
+    /// All discoverable bundles at the time of the call. Order
+    /// matches `DescriptorCatalog::from_bundle_dir` (subdir-sorted)
+    /// so admin tooling can rely on deterministic listing.
+    pub bundles: Vec<BundleDiscoveryEntry>,
+    /// Total count — convenience for clients that don't want to
+    /// `.len()` the array.
+    pub count: usize,
+}
+
+/// `GET /api/v1/web/workbench/admin/bundles` — enumerate every
+/// bundle under `[web] bundles_dir` without touching the live
+/// catalog (ISSUE 10 TASK 10.1).
+///
+/// Read-only discovery: each entry reports its manifest metadata,
+/// action/view counts, and the absolute path of its `bundle.toml`.
+/// Unlike `/admin/reload-catalog` this does NOT ArcSwap a new
+/// snapshot — operators can list what's on disk without affecting
+/// any in-flight request.
+///
+/// Requires scope: **Management** (admin subtree).
+///
+/// Returns `Config` (503-class) when `bundles_dir` is not wired (a
+/// deployment using `catalog_path` or the seed fallback has no
+/// directory to enumerate).
+pub async fn list_bundles_handler(
+    State(state): State<AppState>,
+) -> Result<Json<ListBundlesResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let dir_cfg = svc.bundles_dir.as_deref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle discovery requires `[web] bundles_dir` to be configured".into(),
+        ))
+    })?;
+    let dir = std::path::Path::new(dir_cfg);
+    let md = std::fs::metadata(dir).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundles dir: cannot stat {dir:?}: {e}",
+        )))
+    })?;
+    if !md.is_dir() {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundles dir: {dir:?} is not a directory",
+        ))));
+    }
+
+    let mut subdirs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundles dir: cannot read {dir:?}: {e}",
+            )))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    subdirs.sort();
+
+    let mut bundles = Vec::new();
+    for sub in subdirs {
+        let manifest = sub.join("bundle.toml");
+        if !manifest.exists() {
+            continue;
+        }
+        let c = crate::web::catalog::DescriptorCatalog::from_toml_file(&manifest)
+            .map_err(WorkbenchHttpError::Core)?;
+        use gadgetron_core::context::Scope;
+        let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
+        bundles.push(BundleDiscoveryEntry {
+            bundle: c.bundle().cloned(),
+            source_path: manifest.to_string_lossy().into_owned(),
+            action_count: c.visible_actions(&all_scopes).len(),
+            view_count: c.visible_views(&all_scopes).len(),
+        });
+    }
+
+    let count = bundles.len();
+    Ok(Json(ListBundlesResponse {
+        bundles_dir: dir_cfg.to_string(),
+        bundles,
+        count,
+    }))
 }
 
 // ---------------------------------------------------------------------------
