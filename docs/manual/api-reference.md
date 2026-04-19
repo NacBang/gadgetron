@@ -1287,8 +1287,8 @@ The following routes are defined in the router but return HTTP 501 (not yet impl
 | `POST` | `/api/v1/models/deploy` | Deploy a model to a node |
 | `DELETE` | `/api/v1/models/{id}` | Undeploy a model |
 | `GET` | `/api/v1/models/status` | Get model deployment status |
-| `GET` | `/api/v1/usage` | Tenant usage report |
-| `GET` | `/api/v1/costs` | Tenant cost report |
+| `GET` | `/api/v1/usage` | Admin (Management-scope, cross-tenant) usage report. The tenant-scoped equivalent for a single caller's tenant is the shipped `GET /api/v1/web/workbench/usage/summary` (ISSUE 4, §above) — that one is under `OpenAiCompat`, not Management, and does not cross tenants. |
+| `GET` | `/api/v1/costs` | Admin cross-tenant cost report. Partial equivalent: the `chat.total_cost_cents` field inside `/api/v1/web/workbench/usage/summary` (ISSUE 4) populates real integer cents from `gadgetron_core::pricing` for the caller's own tenant. The broader admin cross-tenant view remains unimplemented. |
 
 Sending a request to any of these endpoints with a valid `Management`-scoped key returns HTTP 501 today:
 
