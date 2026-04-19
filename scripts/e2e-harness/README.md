@@ -17,7 +17,7 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; twenty-one PRs have landed since (#169 7k.2, #172 7n.2,
+refresh; twenty-two PRs have landed since (#169 7k.2, #172 7n.2,
 #173 9c, #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188
 7h.7 + 7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207
 7i.4, #213 7q.1 + 7q.2, #214 / #216 / #217 / #219 / #220
@@ -36,7 +36,12 @@ ISSUE 9 TASK 9.3 flipped the harness config from implicit `seed_p2b`
 fallback to explicit `[web] bundles_dir = <repo>/bundles`, Gate 7q.1
 now pins `source == "bundles_dir"` end-to-end, and new Gate 7q.3
 asserts `.bundles[0].id == "gadgetron-core"` so a rename of the
-first-party bundle trips the gate — 64 → 84 PASS). Run
+first-party bundle trips the gate; **#223 7q.4 + 7q.5** — ISSUE 10
+TASK 10.1 shipped the read-only `GET /admin/bundles` enumeration
+endpoint with Management scope, so the harness now also pins the
+response shape + `gadgetron-core` enumeration with `action_count=5`
+(7q.4) and the OpenAiCompat → 403 RBAC contract (7q.5) — 64 →
+86 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 
@@ -77,6 +82,8 @@ see the live count — the summary prints `PASS <N>` on exit:
 | 7q.1 | `/workbench/admin/reload-catalog` happy path (Management scope) | PR #213 (original) + PR #222 (retargeted): `{reloaded:true, source:"bundles_dir", action_count:N, view_count:N}` response shape + cross-check that `action_count` equals the live `GET /workbench/actions` listing right after (catches "swap happened but read path still sees old pointer" regression from the TASK 8.1 ArcSwap substrate). **Assertion history**: originally pinned `source:"seed_p2b"` (PR #213, TASK 8.2 default); PR #222 / TASK 9.3 flipped the harness config to `[web] bundles_dir = <repo>/bundles` so the assertion is now `source:"bundles_dir"` — this proves the bundle loader is wired end-to-end and that operators' default production path is harness-covered. PR #214 / TASK 8.3 re-uses this gate: since `/workbench/actions` reads validators from the same `Arc<ArcSwap<CatalogSnapshot>>` snapshot, an `action_count` match proves both sides (catalog + validators) published together — no "new catalog against old validators" window. |
 | 7q.2 | `/workbench/admin/reload-catalog` RBAC enforcement | PR #213: same endpoint called with an OpenAiCompat key → 403 (admin sub-tree scope rule precedes the broader workbench rule in `scope_guard_middleware`) |
 | 7q.3 | `/workbench/admin/reload-catalog` contributing-bundles list | PR #222 / TASK 9.3: `.bundles[0].id == "gadgetron-core"` on the reload response when the harness boots against `bundles_dir = <repo>/bundles`. Catches (a) a rename of the first-party bundle (`bundles/gadgetron-core/bundle.toml` → some other id), (b) a silent drop of the `bundles` field from the response (e.g. serde attribute regression removing `skip_serializing_if` or changing `pub bundles: Vec<...>` back to `Option<...>` semantics), (c) the `from_bundle_dir` merge path silently falling through to a different source. |
+| 7q.4 | `GET /workbench/admin/bundles` bundle-discovery shape + enumeration | PR #223 / TASK 10.1: Management-scoped `GET /api/v1/web/workbench/admin/bundles` returns `{bundles_dir, count, bundles: [...]}` with the first-party `gadgetron-core` bundle enumerated at `.bundles[0]` and `.bundles[0].action_count == 5` (matches the seed action set that drift-test guards). Catches: shape regressions (missing top-level fields, `bundles[]` no longer containing `bundle.id` / `source_path` / `action_count` / `view_count`), enumeration drift (first-party bundle renamed or dropped from the repo `bundles/` tree), action-count drift (seed action set changes without drift-test or bundle file updating in lockstep). |
+| 7q.5 | `GET /workbench/admin/bundles` RBAC enforcement | PR #223 / TASK 10.1: same endpoint called with an OpenAiCompat key → 403. Inherits the admin sub-tree scope rule in `scope_guard_middleware` (same path prefix the 7q.2 RBAC gate pins on the reload endpoint). Catches regressions where a future TASK 10.2/10.3/10.4 admin endpoint accidentally exposes the scope rule to a broader path prefix. |
 | 7l | `/workbench/views/.../data` | `{view_id, payload}` shape on seed view |
 | 7m | `/workbench/requests/{uuid}/evidence` | 404 on unknown v4 UUID |
 | 7n | malformed chat body | POST `{}` → any 4xx (not 2xx / 5xx) |
