@@ -25,6 +25,19 @@ pub struct AuditEntry {
     pub event_id: Uuid,
     pub tenant_id: Uuid,
     pub api_key_id: Uuid,
+    /// Owning user (ISSUE 19 plumbing). Populated from
+    /// `ValidatedKey.user_id` when available (both Bearer and
+    /// cookie-session paths). `None` for legacy keys predating the
+    /// ISSUE 14 TASK 14.1 backfill. Persistence into
+    /// `audit_log.actor_user_id` follows in ISSUE 20 when the pg
+    /// audit consumer lands.
+    pub actor_user_id: Option<Uuid>,
+    /// Populated from `ValidatedKey.api_key_id` when a real Bearer
+    /// key is used. `None` for cookie-session callers where
+    /// `api_key_id == Uuid::nil()` (sentinel). Lets downstream
+    /// distinguish "API-key activity" from "web UI session activity"
+    /// without string-matching on the sentinel UUID.
+    pub actor_api_key_id: Option<Uuid>,
     pub request_id: Uuid,
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -87,6 +100,8 @@ mod tests {
             event_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             api_key_id: Uuid::new_v4(),
+            actor_user_id: None,
+            actor_api_key_id: None,
             request_id: Uuid::new_v4(),
             model: Some("gpt-4o-mini".to_string()),
             provider: Some("openai".to_string()),
@@ -152,6 +167,8 @@ mod tests {
             event_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
             api_key_id: Uuid::nil(),
+            actor_user_id: None,
+            actor_api_key_id: None,
             request_id: Uuid::nil(),
             model: None,
             provider: None,

@@ -76,6 +76,8 @@ pub async fn scope_guard_middleware(
                 event_id: uuid::Uuid::new_v4(),
                 tenant_id: ctx.tenant_id,
                 api_key_id: ctx.api_key_id,
+                actor_user_id: None,
+                actor_api_key_id: None,
                 request_id: ctx.request_id,
                 model: None,
                 provider: None,
