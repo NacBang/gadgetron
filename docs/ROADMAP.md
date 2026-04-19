@@ -123,7 +123,7 @@ validators → future requests see the new bundle. Bundles declare
 `required_scope` to gate access; aggregator rejects duplicate
 action ids across bundles.
 
-### Functionally complete (pending EPIC 3 close)
+### Completed ISSUEs
 - **ISSUE 8 — DescriptorCatalog hot-reload** — all 5 TASKs shipped across 0.4.1 / 0.4.2 / 0.4.3 / 0.4.4 / 0.4.5 (PRs #211 / #213 / #214 / #216 / #217). Operator reload surface: HTTP `POST /admin/reload-catalog` OR POSIX `SIGHUP`, both sharing `perform_catalog_reload()`. File-based source via `[web] catalog_path` TOML. Parse-failure guarantee (running snapshot never replaced by bad edit). Validators bundled into `CatalogSnapshot` so reload never lands mismatched catalog+validators.
   - TASK 8.1 ✅ — `Arc<ArcSwap<DescriptorCatalog>>` plumbing (PR #211).
   - TASK 8.2 ✅ — reload endpoint (0.4.1 → 0.4.2). `POST
@@ -161,7 +161,7 @@ action ids across bundles.
     follow-up TASK 8.6 if operator feedback shows demand — SIGHUP
     covers the 90% case with no extra deps or background thread.
 
-### Functionally complete (pending EPIC 3 close)
+### Completed ISSUEs
 - **ISSUE 9 — real bundle manifests** — all 3 TASKs shipped across 0.4.6 / 0.4.7 / 0.4.8 (PRs #219 / #220 / #222). Bundle metadata on first-party file, multi-bundle aggregation via `[web] bundles_dir` with hard duplicate-id collisions, and the bundle-driven harness default so E2E runs exercise the production code path.
   - TASK 9.1 ✅ — `BundleMetadata { id, version }` attaches to
     `DescriptorCatalog` via an optional `[bundle]` table in the TOML
@@ -187,8 +187,8 @@ action ids across bundles.
     stays as a unit-test fixture + drift-guard reference (the
     bundle file must keep matching its action id set).
 
-### In-flight ISSUE (10)
-- **ISSUE 10 — bundle marketplace** (in-flight; 0.4.9 / 0.4.10 / 0.4.11 ship TASK 10.1 / 10.2 / 10.3 respectively; TASK 10.4 signed manifests remaining)
+### Completed ISSUEs
+- **ISSUE 10 — bundle marketplace** — all 4 TASKs shipped across 0.4.9 / 0.4.10 / 0.4.11 / 0.4.12 (PRs #223 / #224 / #226 / #227). Discovery (read-only enumeration), install/uninstall runtime with path-traversal-safe id regex + no-silent-overwrite collision policy, per-bundle `required_scope` inheritance, Ed25519 signed manifests with `[web.bundle_signing]` trust anchors.
   - TASK 10.1 ✅ — bundle discovery endpoint (0.4.8 → 0.4.9).
     `GET /api/v1/web/workbench/admin/bundles` (Management-scoped)
     enumerates every bundle under `[web] bundles_dir` without
@@ -228,10 +228,10 @@ action ids across bundles.
 
 **ISSUE 10 complete.** Bundle marketplace surface is operational:
 discovery (10.1) → install/uninstall (10.2) → scope isolation
-(10.3) → signed manifests (10.4). EPIC 3 is now ready for close +
-`v0.5.0` tag on the next cycle.
+(10.3) → signed manifests (10.4). EPIC 3 closed 2026-04-20 in PR #228
+with the `0.4.12 → 0.5.0` minor bump and `v0.5.0` tag.
 
-Close → tag `v0.5.0`.
+**Release:** `v0.5.0` — first complete plugin platform.
 
 ## EPIC 4 — Multi-tenant business ops / XaaS (2-3 months)
 
