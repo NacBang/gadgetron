@@ -61,6 +61,8 @@ Force no-db mode even when `GADGETRON_DATABASE_URL` is set.
 
 In this mode, Gadgetron skips PostgreSQL, accepts format-valid API keys without database lookup, and disables quota persistence. This is useful for local development and quick evaluation, but not for production.
 
+**No-db caveats for ISSUE 3 / 4 endpoints** (0.2.6+): several workbench routes need a Postgres pool and return `400 config_error` without one — `GET /api/v1/web/workbench/audit/events`, `GET /api/v1/web/workbench/usage/summary`, and internally the `ActionAuditSink` falls back to `NoopActionAuditSink` (events go through tracing logs only, not the `action_audit_events` table). The `ApprovalStore` itself falls back to `InMemoryApprovalStore` so approve/deny continue to work against in-process state — just without durable `approvals` rows. `GET /api/v1/web/workbench/events/ws` still opens but publishes against a zero-publisher `ActivityBus` since the chat audit writer skips cost aggregation without the pool. For any evaluation that touches those planes, pair `--no-db` with the explicit understanding that the persistence path is short-circuited — see [troubleshooting.md §HTTP 400 — approval store is not wired in this build](troubleshooting.md#http-400--approval-store-is-not-wired-in-this-build) and the sibling /usage/summary recipe.
+
 ---
 
 ### `--provider <URL>`
