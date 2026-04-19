@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.5** (post-roadmap-v2)
+**Current version: 0.2.6** (post-ISSUE 3 production safety)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -36,24 +36,16 @@ Expected duration: ~1-2 months. Close → tag `v0.3.0`.
   Shipped across PRs #180, #181, #182, #184. (Also over-split.)
 - **ISSUE 2b — roadmap recalibration** (0.2.4 → 0.2.5, PR #186)
   Granularity rule clarified (this doc).
+- **ISSUE 3 — production safety** (0.2.5 → 0.2.6)
+  ActionAuditSink trait + Postgres-backed writer, approval flow
+  (ApprovalStore + approve/deny endpoints + resume), `wiki-delete`
+  added to seed_p2b as the canonical approval-gated action,
+  `GET /api/v1/web/workbench/audit/events` query endpoint.
+  Harness gates 7h.7 (lifecycle) + 7h.8 (audit query).
 
 ### Planned ISSUEs
 
-- **ISSUE 3 — production safety (~5-7 days, NEXT)**
-  Multiple TASKs on one branch:
-  - TASK: `ActionAuditEventSink` trait in `gadgetron-core`; Postgres
-    sink in `gadgetron-xaas`; wired into `action_service.rs` step 7a
-    so `audit_event_id` is populated.
-  - TASK: `ApprovalStore` (trait + in-memory + PG); `POST
-    /api/v1/web/workbench/approvals/:id/approve`; resume-on-approve
-    lifecycle replacing the `pending_approval` stub.
-  - TASK: `/api/v1/audit/events` query endpoint with tenant / actor /
-    action_id / time filters.
-  - TASK: harness gates — audit row after wiki-write, pending → approve
-    → ok, `/audit/events` filter returns.
-  - Bump 0.2.5 → 0.2.6 on merge.
-
-- **ISSUE 4 — operator observability (~4-6 days)**
+- **ISSUE 4 — operator observability (~4-6 days, NEXT)**
   Usage summary endpoint + /web dashboard page, cost tracking endpoint,
   WebSocket live activity feed (operators see actions as they happen).
 
