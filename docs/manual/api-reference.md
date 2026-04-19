@@ -912,7 +912,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.4.6",
+  "gateway_version": "0.4.7",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -931,7 +931,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.6"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.4.7"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -1317,20 +1317,38 @@ When `[web] catalog_path = "/path/to/catalog.toml"` is configured and the TOML f
   "source_path": "/path/to/catalog.toml",
   "bundle": {
     "id": "gadgetron-core",
-    "version": "0.4.6"
+    "version": "0.4.7"
   }
 }
 ```
 
 When `[web] catalog_path` points at a legacy anonymous TOML (no `[bundle]` table) OR the fallback `seed_p2b()` path, the `bundle` field is omitted from the JSON (serde `skip_serializing_if = "Option::is_none"`).
 
+When `[web] bundles_dir = "/path/to/bundles"` is configured and at least one `<subdir>/bundle.toml` merges successfully (ISSUE 9 TASK 9.2 / v0.4.7):
+```json
+{
+  "reloaded": true,
+  "action_count": 7,
+  "view_count": 4,
+  "source": "config_file",
+  "source_path": "/path/to/bundles",
+  "bundles": [
+    {"id": "gadgetron-core", "version": "0.4.7"},
+    {"id": "acme-ops", "version": "1.2.0"}
+  ]
+}
+```
+
+The `bundles` field lists **every contributing bundle** in the merged catalog. When the source is a single flat TOML (TASK 8.4) or `seed_p2b()`, the field is omitted entirely via serde `skip_serializing_if = "Vec::is_empty"`.
+
 - `reloaded` — always `true` on 200. Clients key observability on this wire field rather than on the HTTP status so a structured audit log can quote the exact flag.
 - `action_count` / `view_count` — counts in the catalog **after** the swap, computed with all three scopes (`OpenAiCompat`, `Management`, `XaasAdmin`) in the visibility filter so the totals reflect every descriptor the fresh catalog carries.
-- `source` — wire-stable enum. `"seed_p2b"` when no `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback). `"config_file"` when a `catalog_path` is configured and the TOML file parsed successfully (ISSUE 8 TASK 8.4 / PR #216). Future sources will widen this further (`"bundle_manifest"` when TASK 9.2 / 9.3 land).
-- `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"`. Admin tooling uses this to confirm which file produced the live catalog.
-- `bundle` — optional `{id, version}` struct (ISSUE 9 TASK 9.1 / v0.4.6 / PR #219). Populated when the loaded TOML carries a top-level `[bundle]` table with `id` and `version` fields. Operators use this to identify **which catalog they loaded** ("is this the version I just edited?") without out-of-band tracking. `seed_p2b()` and legacy anonymous TOML files produce `None`, which is omitted from the serialized JSON. The first-party bundle file at `bundles/gadgetron-core/bundle.toml` carries `{id: "gadgetron-core", version: <workspace version>}` — a drift test asserts this bundle file and `seed_p2b()` produce the same action id set so the two sources stay in lockstep until TASK 9.3 retires `seed_p2b()`.
+- `source` — wire-stable enum. `"seed_p2b"` when neither `bundles_dir` nor `catalog_path` is configured (hand-coded `DescriptorCatalog::seed_p2b()` fallback). `"config_file"` when `catalog_path` OR `bundles_dir` is configured and parsed successfully (the same enum value covers both file paths — distinguish them via the presence of `bundles` vs `bundle` in the response). Future sources will widen this further (`"bundle_manifest"` when TASK 9.3 lands).
+- `source_path` — `null` when `source == "seed_p2b"`; the absolute path of the TOML file when `source == "config_file"` + `catalog_path`; the absolute path of the bundles directory when `source == "config_file"` + `bundles_dir`. Admin tooling uses this to confirm which on-disk artifact produced the live catalog.
+- `bundle` — optional `{id, version}` struct (ISSUE 9 TASK 9.1 / v0.4.6 / PR #219). Populated when the loaded TOML carries a top-level `[bundle]` table with `id` and `version` fields (single-bundle / flat-file path only). Operators use this to identify **which catalog they loaded** without out-of-band tracking. `seed_p2b()`, anonymous flat TOMLs, and multi-bundle aggregation paths all produce `None` here — the multi-bundle case populates `bundles` (below) instead. The first-party bundle file at `bundles/gadgetron-core/bundle.toml` carries `{id: "gadgetron-core", version: <workspace version>}` — a drift test asserts this bundle file and `seed_p2b()` produce the same action id set so the two sources stay in lockstep until TASK 9.3 retires `seed_p2b()`.
+- `bundles` — `Vec<BundleMetadata>` (ISSUE 9 TASK 9.2 / v0.4.7 / PR #220). Populated with **every contributing bundle** when the loaded catalog came from a bundle directory (`[web] bundles_dir`). The handler scans every immediate subdirectory of `bundles_dir` for a `bundle.toml`, merges matching manifests in alphabetical path order so reloads are idempotent, and records each contributor's metadata here. Subdirectories without `bundle.toml` are silently skipped (operator workspace dirs, hidden dirs). Empty in every other case (seed_p2b / flat-file path / anonymous TOML). Single-bundle callers should read `bundle`; multi-bundle admin tooling should read `bundles` and distinguish "1 bundle" from "N bundles" without a special flag.
 
-**Plumbing.** The handler reads the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate, rev-bumped to `CatalogSnapshot` in TASK 8.3 / PR #214). To build the fresh catalog: if `WebConfig.catalog_path` is `Some(path)` (TASK 8.4 / PR #216), the handler calls `DescriptorCatalog::from_toml_file(path)` which reads + parses the TOML via the `CatalogFile` shape (serde-derived fields matching `WorkbenchViewDescriptor` / `WorkbenchActionDescriptor`). If `catalog_path` is `None` the handler falls back to `DescriptorCatalog::seed_p2b()`. The resulting `DescriptorCatalog` is then turned into a snapshot via `into_snapshot()` (which compiles JSON-schema validators for every action), and `ArcSwap::store()` atomically publishes the `(catalog, validators)` pair. In-flight requests holding an `Arc<CatalogSnapshot>` snapshot finish reading BOTH catalog and validators from the old pointer; any request that reads the handle after the store sees the new pointer for both sides. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`, `crates/gadgetron-gateway/src/web/catalog.rs::CatalogSnapshot`, and `DescriptorCatalog::from_toml_file` in the same catalog module.
+**Plumbing.** The handler reads the shared `Arc<ArcSwap<CatalogSnapshot>>` handle wired by `build_workbench` (ISSUE 8 TASK 8.1 / PR #211 substrate, rev-bumped to `CatalogSnapshot` in TASK 8.3 / PR #214). To build the fresh catalog the handler picks a source in precedence order: (1) **`WebConfig.bundles_dir`** is `Some(dir)` (TASK 9.2 / PR #220) → calls `DescriptorCatalog::from_bundle_dir(dir)` which scans every `<dir>/<name>/bundle.toml` and merges into one catalog; deterministic alphabetical order; duplicate action OR view ids across bundles surface as a hard `Config` error naming the id + both contributing bundle ids so operators must rename or remove one before the next reload succeeds; `allow_direct_actions` is OR-folded across bundles (if ANY manifest opts in, the merged catalog opts in); (2) **`WebConfig.catalog_path`** is `Some(path)` (TASK 8.4 / PR #216) → calls `DescriptorCatalog::from_toml_file(path)` via the `CatalogFile` shape; (3) fallback → `DescriptorCatalog::seed_p2b()`. The resulting `DescriptorCatalog` is then turned into a snapshot via `into_snapshot()` (compiles JSON-schema validators for every action), and `ArcSwap::store()` atomically publishes the `(catalog, validators)` pair. In-flight requests holding an `Arc<CatalogSnapshot>` snapshot finish reading BOTH catalog and validators from the old pointer; any request that reads the handle after the store sees the new pointer for both sides. See `crates/gadgetron-gateway/src/web/workbench.rs::reload_catalog_handler`, `crates/gadgetron-gateway/src/web/catalog.rs::CatalogSnapshot`, `DescriptorCatalog::from_toml_file`, and `DescriptorCatalog::from_bundle_dir` in the same catalog module.
 
 **Errors:**
 
@@ -1339,6 +1357,7 @@ When `[web] catalog_path` points at a legacy anonymous TOML (no `[bundle]` table
 | `scope_required` | 403 | Caller's API key scope is not `Management` (e.g. OpenAiCompat workbench key). Enforced by `scope_guard_middleware`, not the handler. |
 | `config_error` | 503-class (400 on trunk wire) | `state.workbench.descriptor_catalog` is `None`. This only happens in headless test builds that skip `build_workbench` — production paths always set the handle, so the guard is defensive. |
 | `config_error` | 500 | `catalog_path` is configured but the TOML file failed to read or parse (file missing, invalid syntax, schema mismatch). Error message embeds the file path and the specific serde / IO error (TASK 8.4 / PR #216). **The running snapshot is NOT replaced on failure** — a malformed edit cannot take the workbench down. Fix the TOML and retry the reload. |
+| `config_error` | 500 | `bundles_dir` is configured but directory scan / merge failed: (a) directory missing; (b) one of the `<subdir>/bundle.toml` files failed to read/parse; (c) **duplicate action or view id across bundles** — message names the conflicting id and both bundle ids that declared it (TASK 9.2 / PR #220). **The running snapshot is NOT replaced on failure** — same guarantee as TASK 8.4. Rename or remove the duplicate entry in one of the bundles and retry the reload. |
 
 **Validator rebuild (TASK 8.3 shipped in PR #214).** The TASK 8.2 known-limitation — validators on `InProcessWorkbenchActionService` pre-compiled at construction and NOT rebuilt by reload — is closed. `CatalogSnapshot` bundles the catalog with its pre-compiled JSON-schema validators so one `ArcSwap::store()` replaces both sides. No reader can observe a new catalog paired with old validators (or vice versa). This was a hard prerequisite for TASK 8.4's file-based source (where a legitimate TOML edit can change schemas between reloads); TASK 8.4 / PR #216 ships that file source on top of this foundation.
 
