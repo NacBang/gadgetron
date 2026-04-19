@@ -58,7 +58,13 @@ const { chromium } = playwrightMod;
 
 // ---------------------------------------------------------------------------
 
-const SENTINEL = `__WIKI_E2E_SENTINEL_${Date.now()}__`;
+// Pick a sentinel shape that survives a markdown round-trip. An
+// earlier version used `__FOO__` which was fine for the raw <pre>
+// view but gets interpreted as GFM bold once ISSUE A.1 wired
+// react-markdown — `__WORDS__` renders as `<strong>WORDS</strong>`
+// and the surrounding underscores vanish from `textContent`. Plain
+// ASCII + hyphens survive both.
+const SENTINEL = `WIKI-E2E-SENTINEL-${Date.now()}`;
 
 const browser = await chromium.launch({ headless: true });
 let failure = null;
@@ -115,6 +121,25 @@ try {
   await page.waitForSelector('[data-testid="wiki-content-readonly"]', {
     timeout: 5000,
   });
+
+  // Step 4b — ISSUE A.1: verify markdown is rendered (not just <pre>).
+  // The README seed starts with `# Gadgetron 위키` (seeds/README.md).
+  // A real markdown render puts that inside an <h1> under the
+  // read-only container; raw <pre> passthrough would leave the `#`
+  // in a text node with no heading tag. Assert at least one heading
+  // tag exists so a regression that reverts to <pre> is caught.
+  const hasRenderedHeading = await page.evaluate(() => {
+    const root = document.querySelector(
+      '[data-testid="wiki-content-readonly"]',
+    );
+    if (!root) return false;
+    return !!root.querySelector("h1, h2, h3");
+  });
+  if (!hasRenderedHeading) {
+    throw new Error(
+      "markdown did not render a heading tag under wiki-content-readonly — is react-markdown wired?",
+    );
+  }
 
   // Step 5 — click Edit, add sentinel, Save.
   await page.click('[data-testid="wiki-edit-button"]');
