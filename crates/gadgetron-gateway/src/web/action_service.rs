@@ -174,17 +174,16 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // ---------------------------------------------------------------
         // Step 5: Replay-cache check (requires client_invocation_id).
         // ---------------------------------------------------------------
-        // We use a synthetic tenant_id for the replay key because
-        // AuthenticatedContext is a ZST (doc-10 deferred). The ZST means
-        // two actors cannot be distinguished; the tenant boundary is broken
-        // until doc-10 promotes identity. Document this limitation.
-        //
-        // TODO doc-10: replace synthetic_tenant_id with actor.tenant_id.
-        let synthetic_tenant_id = Uuid::nil();
+        // Drift-fix PR 7 landed real `AuthenticatedContext { user_id,
+        // tenant_id }` (doc-10). Replay keys now use `actor.tenant_id`
+        // directly, so replay protection is scoped per-tenant and cannot
+        // cross tenant boundaries — the invariant the spec always
+        // required, finally with a real identity behind it.
+        let actor_tenant_id = actor.tenant_id;
 
         if let Some(ciid) = request.client_invocation_id {
             let replay_key = ReplayKey {
-                tenant_id: synthetic_tenant_id,
+                tenant_id: actor_tenant_id,
                 action_id: action_id.to_string(),
                 client_invocation_id: ciid,
             };
@@ -217,7 +216,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             // Cache under client_invocation_id if provided.
             if let Some(ciid) = request.client_invocation_id {
                 let key = ReplayKey {
-                    tenant_id: synthetic_tenant_id,
+                    tenant_id: actor_tenant_id,
                     action_id: action_id.to_string(),
                     client_invocation_id: ciid,
                 };
@@ -236,9 +235,8 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             let event_id = Uuid::new_v4();
             let event = CapturedActivityEvent {
                 id: event_id,
-                // TODO doc-10: use actor.tenant_id / actor.user_id.
-                tenant_id: synthetic_tenant_id,
-                actor_user_id: Uuid::nil(),
+                tenant_id: actor_tenant_id,
+                actor_user_id: actor.user_id,
                 request_id: None,
                 origin: ActivityOrigin::UserDirect,
                 kind: ActivityKind::DirectAction,
@@ -295,7 +293,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
 
         if let Some(ciid) = request.client_invocation_id {
             let key = ReplayKey {
-                tenant_id: synthetic_tenant_id,
+                tenant_id: actor_tenant_id,
                 action_id: action_id.to_string(),
                 client_invocation_id: ciid,
             };
