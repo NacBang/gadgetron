@@ -169,7 +169,7 @@ Route group matrix:
 | `/ready` | 없음 | 없음 | gateway runtime | [P1] | DB/no-db readiness probe |
 | `/web/*` | 없음 | 없음 | embedded `gadgetron-web` | [P2A] | static shell only, feature+config gated |
 | `/v1/*` | Bearer | `Scope::OpenAiCompat` | OpenAI-compatible data plane | [P1] | `/v1/chat/completions`, `/v1/models` |
-| `/api/v1/web/workbench/admin/*` | Bearer | `Scope::Management` | workbench admin plane (catalog hot-reload today; future bundle install/uninstall) | [P2B-EPIC3] | **must be matched BEFORE** the broader workbench rule — shipped in ISSUE 8 TASK 8.2 / PR #213 |
+| `/api/v1/web/workbench/admin/*` | Bearer | `Scope::Management` | workbench admin plane — catalog hot-reload (`POST /admin/reload-catalog`, TASK 8.2), bundle discovery (`GET /admin/bundles`, TASK 10.1), install + uninstall (`POST + DELETE /admin/bundles/{bundle_id}`, TASK 10.2 with `validate_bundle_id()` path-traversal guard), Ed25519 signature verification on install (TASK 10.4 `signature_hex` request field + `[web.bundle_signing]` trust anchors) | [EPIC 3 complete] | **must be matched BEFORE** the broader workbench rule — shipped across PRs #213 / #223 / #224 / #227 as ISSUE 8–10 rolled in |
 | `/api/v1/web/workbench/*` | Bearer | `Scope::OpenAiCompat` | workbench read/action plane | [P2B] | explicit exception under `/api/v1/*` |
 | `/api/v1/xaas/*` | Bearer | `Scope::XaasAdmin` | XaaS control plane | [P2+] | reserved in scope table even before all routes land |
 | 기타 `/api/v1/*` | Bearer | `Scope::Management` | admin/operator API | [P1] | nodes, deploy, usage, costs |
