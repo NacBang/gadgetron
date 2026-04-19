@@ -65,6 +65,11 @@ FIX_DIR="$HARNESS_DIR/fixtures"
 
 MOCK_PORT="${MOCK_PORT:-19999}"
 MOCK_LOG="$ART_DIR/mock-openai.log"
+# Second mock on MOCK_ERROR_PORT with MOCK_ERROR_MODE=stream_fail —
+# drives the streaming Drop-guard's Err arm for Gate 8b. Distinct
+# JSON log so the main mock's assertions don't see error-mock noise.
+MOCK_ERROR_PORT="${MOCK_ERROR_PORT:-19998}"
+MOCK_ERROR_LOG="$ART_DIR/mock-openai-error.log"
 GAD_LOG="$ART_DIR/gadgetron.log"
 GAD_PORT="${GAD_PORT:-19090}"
 GAD_BASE="http://127.0.0.1:$GAD_PORT"
@@ -168,6 +173,7 @@ skip() {
 }
 
 MOCK_PID=""
+MOCK_ERROR_PID=""
 GAD_PID=""
 cleanup() {
   log "Tearing down..."
@@ -180,10 +186,13 @@ cleanup() {
     kill -KILL "$GAD_PID" 2>/dev/null || true
     wait "$GAD_PID" 2>/dev/null || true
   fi
-  if [ -n "$MOCK_PID" ] && kill -0 "$MOCK_PID" 2>/dev/null; then
-    kill -TERM "$MOCK_PID" 2>/dev/null || true
-    wait "$MOCK_PID" 2>/dev/null || true
-  fi
+  for pid_var in MOCK_PID MOCK_ERROR_PID; do
+    pid="${!pid_var}"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
   # Dump postgres logs on failure before tearing the container down.
   if [ "$FAIL_COUNT" -gt 0 ] && command -v docker >/dev/null 2>&1; then
     docker compose -f "$HARNESS_DIR/docker-compose.yml" logs --no-color postgres \
@@ -292,6 +301,7 @@ BOOT_RENDERED="$ART_DIR/gadgetron-bootstrap.toml"
 sed \
   -e "s|@WIKI_DIR@|$BOOT_WIKI|g" \
   -e "s|@MOCK_URL@|http://127.0.0.1:$MOCK_PORT|g" \
+  -e "s|@MOCK_ERROR_URL@|http://127.0.0.1:$MOCK_ERROR_PORT|g" \
   -e "s|@GAD_PORT@|$BOOT_PORT|g" \
   "$FIX_DIR/gadgetron-test.toml.tmpl" > "$BOOT_RENDERED"
 
@@ -379,24 +389,33 @@ fi
 # Gate 4 — start mock OpenAI provider
 # ---------------------------------------------------------------------------
 
-log "=== Gate 4: start mock OpenAI provider on :$MOCK_PORT ==="
+log "=== Gate 4: start mock OpenAI provider on :$MOCK_PORT (+ error mock on :$MOCK_ERROR_PORT) ==="
 
 MOCK_PORT="$MOCK_PORT" MOCK_LOG="$MOCK_LOG" \
   python3 "$HARNESS_DIR/mock-openai.py" >"$ART_DIR/mock-stderr.log" 2>&1 &
 MOCK_PID=$!
 
+# Second mock with MOCK_ERROR_MODE=stream_fail — closes stream mid-flight
+# (see mock-openai.py lines 171-175). Drives Gate 8b's Drop-guard Err arm.
+MOCK_PORT="$MOCK_ERROR_PORT" MOCK_LOG="$MOCK_ERROR_LOG" \
+  MOCK_ERROR_MODE="stream_fail" \
+  python3 "$HARNESS_DIR/mock-openai.py" >"$ART_DIR/mock-error-stderr.log" 2>&1 &
+MOCK_ERROR_PID=$!
+
 MOCK_UP=0
 for _ in $(seq 1 30); do
-  if curl -fsS "http://127.0.0.1:$MOCK_PORT/health" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$MOCK_PORT/health" >/dev/null 2>&1 \
+     && curl -fsS "http://127.0.0.1:$MOCK_ERROR_PORT/health" >/dev/null 2>&1; then
     MOCK_UP=1
     break
   fi
   sleep 0.3
 done
 if [ "$MOCK_UP" -eq 1 ]; then
-  pass "mock OpenAI /health 200"
+  pass "mock OpenAI /health 200 (both main + error instances)"
 else
-  fail "mock OpenAI did not come up" "$(cat "$ART_DIR/mock-stderr.log")"
+  fail "mock OpenAI did not come up" \
+    "main stderr: $(cat "$ART_DIR/mock-stderr.log" 2>&1 | head -c 200); error stderr: $(cat "$ART_DIR/mock-error-stderr.log" 2>&1 | head -c 200)"
   exit 2
 fi
 
@@ -411,6 +430,7 @@ RENDERED="$ART_DIR/gadgetron-test.toml"
 sed \
   -e "s|@WIKI_DIR@|$WIKI_DIR|g" \
   -e "s|@MOCK_URL@|http://127.0.0.1:$MOCK_PORT|g" \
+  -e "s|@MOCK_ERROR_URL@|http://127.0.0.1:$MOCK_ERROR_PORT|g" \
   -e "s|@GAD_PORT@|$GAD_PORT|g" \
   "$FIX_DIR/gadgetron-test.toml.tmpl" > "$RENDERED"
 
@@ -863,6 +883,69 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 9b — streaming chat ERROR path (Drop-guard Err arm, PR 6 coverage)
+# ---------------------------------------------------------------------------
+#
+# Hits `model=mock_error` which routes to the second mock (port
+# $MOCK_ERROR_PORT, MOCK_ERROR_MODE=stream_fail). That mock sends
+# two chunks then abruptly closes the TCP connection — reqwest's
+# chunked-body stream surfaces that as a terminal error, which
+# Gadgetron's SSE pipeline turns into an `event: error` frame,
+# and the Drop-guard fires with `saw_error=true`.
+#
+# We assert:
+#   1. Curl does NOT receive `data: [DONE]` (spec: no [DONE] after err)
+#   2. Response contains an `event: error` SSE frame
+#   3. `gadgetron.log` records the amendment AuditEntry with
+#      status=error (audit line includes `status="error"`)
+#
+# This is the ONLY gate that exercises the PR 6 Drop-guard's Err
+# path end-to-end. Without it, a regression that drops the
+# amendment on error would silently pass the whole harness.
+
+log "=== Gate 9b: streaming chat error path (Drop-guard Err arm) ==="
+ERR_STREAM_RESP="$(curl -sSN \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  --max-time 10 \
+  -d '{
+        "model": "mock_error",
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": true
+      }' \
+  "$GAD_BASE/v1/chat/completions" 2>&1 || true)"
+
+# The mock sends 2 chunks before closing, so response should contain
+# partial `data: {...}` frames but NOT `data: [DONE]`.
+if echo "$ERR_STREAM_RESP" | grep -q 'data: \[DONE\]'; then
+  fail "Drop-guard Err: [DONE] was emitted despite upstream error (spec violation)" \
+    "$(echo "$ERR_STREAM_RESP" | head -c 400)"
+elif echo "$ERR_STREAM_RESP" | grep -q '^event: error'; then
+  pass "Drop-guard Err: upstream failure surfaced as 'event: error' SSE frame"
+else
+  # On a bare connection-close without any SSE marker, the gate is
+  # inconclusive about Gadgetron's SSE translation — soft-fail.
+  fail "Drop-guard Err: no 'event: error' frame observed — did SSE pipeline swallow the Err?" \
+    "$(echo "$ERR_STREAM_RESP" | head -c 400)"
+fi
+
+# Give the Drop-guard's spawned AuditEntry a beat to land, then grep.
+# `tracing` wraps field values in ANSI escapes — `status="error"`
+# shows up as `status\e[0m\e[2m=\e[0m"error"` on disk. Strip ANSI
+# before matching; `STRIP_ANSI` was defined at the top of the script
+# for Gate 7b's wiki-seed count regex.
+sleep 0.5
+AUDIT_ERR_LINE="$(sed "$STRIP_ANSI" "$GAD_LOG" \
+  | grep -E 'audit .* status="error"' \
+  | head -1 || true)"
+if [ -n "$AUDIT_ERR_LINE" ]; then
+  pass "Drop-guard Err: amendment AuditEntry logged status=\"error\""
+else
+  fail "Drop-guard Err: no error-status audit line in gadgetron.log" \
+    "(grep 'audit.*status=\"error\"' on the ANSI-stripped log comes up empty)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 10 — <gadgetron_shared_context> injected into provider messages
 # ---------------------------------------------------------------------------
 
@@ -1059,12 +1142,18 @@ fi
 
 log "=== Gate 12: ERROR log scrape ==="
 
-ERR_LINES="$(grep ' ERROR ' "$GAD_LOG" 2>/dev/null || true)"
+# Intentional errors from Gate 9b (stream_fail mock) are expected
+# and get filtered out here — they come in as
+# `tracing::error!("sse stream error: ...")` per sse.rs:75.
+# Any OTHER ERROR line is a regression and fails the gate.
+ERR_LINES="$(grep ' ERROR ' "$GAD_LOG" 2>/dev/null \
+  | grep -v 'sse stream error:' \
+  || true)"
 if [ -z "$ERR_LINES" ]; then
-  pass "no ERROR entries in gadgetron.log"
+  pass "no unexpected ERROR entries in gadgetron.log (Gate 9b's stream_fail is whitelisted)"
 else
   ERR_COUNT="$(echo "$ERR_LINES" | wc -l | tr -d ' ')"
-  fail "$ERR_COUNT ERROR entries in gadgetron.log" \
+  fail "$ERR_COUNT unexpected ERROR entries in gadgetron.log" \
     "$(echo "$ERR_LINES" | head -5)"
 fi
 
