@@ -1102,11 +1102,34 @@ fi
 
 log "=== Gate 10: <gadgetron_shared_context> injection (PSL-1b) ==="
 
-if grep -q 'gadgetron_shared_context' "$MOCK_LOG" 2>/dev/null; then
-  pass "shared-context block reached the provider"
+# Previous assertion was a bare `grep -q gadgetron_shared_context`
+# — which would pass even if the block landed in a user message or
+# somewhere else unexpected. Tighten to the actual
+# `inject_shared_context_block` contract (handlers.rs:536-553):
+# the block MUST live in the FIRST message, role MUST be
+# `system`, and content MUST open with `<gadgetron_shared_context>`.
+#
+# This locks in the drift-fix PR 7 + PSL-1b promise that the block
+# gets inserted/prepended as a NEW system message ahead of any
+# user turns.
+if [ ! -s "$MOCK_LOG" ]; then
+  fail "Gate 10: mock-openai.log is empty — did the chat gate fire?" ""
 else
-  fail "shared-context NOT injected into provider messages" \
-    "$(tail -n 1 "$MOCK_LOG" 2>/dev/null | head -c 1000)"
+  FIRST_MSG="$(tail -n 1 "$MOCK_LOG" | jq -r '.body.messages[0] // empty')"
+  if [ -z "$FIRST_MSG" ]; then
+    fail "Gate 10: could not parse first message from mock log" \
+      "$(tail -n 1 "$MOCK_LOG" | head -c 400)"
+  else
+    FIRST_ROLE="$(echo "$FIRST_MSG" | jq -r '.role')"
+    FIRST_CONTENT_PREFIX="$(echo "$FIRST_MSG" | jq -r '.content' | head -c 30)"
+    if [ "$FIRST_ROLE" = "system" ] \
+       && echo "$FIRST_CONTENT_PREFIX" | grep -q '^<gadgetron_shared_context>'; then
+      pass "shared-context block injected as first system message (role=$FIRST_ROLE)"
+    else
+      fail "shared-context NOT in first system message" \
+        "role=$FIRST_ROLE prefix='$FIRST_CONTENT_PREFIX'"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
