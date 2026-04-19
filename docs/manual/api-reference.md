@@ -693,7 +693,18 @@ curl -s http://localhost:8080/ready
 
 The workbench projection API surfaces activity, knowledge plug health, and registered view/action descriptors to the Web UI shell. All endpoints require `OpenAiCompat` scope — the same scope as `/v1/` routes.
 
-All eight routes are always mounted on trunk; the CLI's `build_workbench(knowledge_service, candidate_coordinator)` helper at `crates/gadgetron-cli/src/main.rs:~1250` returns `Some(...)` even when both arguments are `None` (degraded mode: bootstrap + catalog still reachable, activity capture no-ops, knowledge-backed fields show null/defaults). Several response fields — `activity.entries`, `request_evidence.*`, `refresh_view_ids` — are wired to **stub sources** on trunk and will return empty/not-found payloads regardless of runtime traffic until the real activity / evidence sources land. The endpoint subsections below call out which fields are stubbed.
+All eight routes are always mounted on trunk; the CLI's `build_workbench(knowledge_service, candidate_coordinator, penny_registry)` helper at `crates/gadgetron-cli/src/main.rs:1256-1298` returns `Some(...)` even when all three arguments are `None` (degraded mode: bootstrap + catalog still reachable; gadget dispatch returns empty payload; activity capture no-ops).
+
+**What is real on trunk today:**
+- `GET /bootstrap` — returns live `gateway_version` + `knowledge-status` booleans + registered descriptor catalog.
+- `GET /views`, `GET /actions` — return the four descriptors in `seed_p2b` (see `GET /actions` below).
+- `POST /actions/{action_id}` — dispatches to the registered Gadget via `Arc<dyn GadgetDispatcher>` (`crates/gadgetron-core/src/agent/tools.rs:45-59`). When the gateway has a Penny `GadgetRegistry` wired, this reaches the same `wiki.search` / `wiki.list` / `wiki.get` / `wiki.write` gadgets Penny uses. The response's `result.payload` carries the raw `GadgetResult.content` — real wiki data, not a stub.
+
+**What is stubbed on trunk today:**
+- `activity.entries` — always `[]` (see §/activity).
+- `request_evidence` — always 404 (see §/evidence).
+- `refresh_view_ids` — always `[]` on every action response (see §POST /actions).
+- `audit_event_id` — always `null`. Direct-action dispatch bypasses Penny's `GadgetAuditEventSink` by design (tracked as `TODO(audit-direct-action)` in `GadgetDispatcher`'s doc comment).
 
 The `config_error` 400 path exists in `require_workbench(&state)` for the case where `state.workbench` is `None`, but no production build path on trunk produces that state — it is a defensive guard for test harness configurations.
 
@@ -722,7 +733,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 ```json
 {
-  "gateway_version": "0.2.0",
+  "gateway_version": "0.2.2",
   "default_model": "penny",
   "active_plugs": [
     { "id": "wiki-canonical", "role": "canonical", "healthy": true, "note": null }
@@ -741,7 +752,7 @@ Observability: grep the gateway log for `penny_shared_context.inject:` to see wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.0"`. |
+| `gateway_version` | non-empty string | Cargo workspace version, e.g. `"0.2.2"`. |
 | `default_model` | string or `null` | The model ID the Web UI shell should pre-select. `null` when no default is configured; consumers receive either a string or `null`. |
 | `active_plugs` | array of `PlugHealth`, length ≥ 1 on a healthy boot | Each entry has `id`, `role`, `healthy`, `note`. |
 | `active_plugs[].id` | non-empty string | Plug identifier — stable across restarts. |
@@ -919,7 +930,16 @@ Actor-visible registered action descriptors. The shell renders these as affordan
 
 **Response:**
 
-The `seed_p2b` catalog registers exactly one action on trunk, `knowledge-search`, emitted as:
+The `seed_p2b` catalog registers **four** actions on trunk, all backed by the wiki gadget family (`crates/gadgetron-gateway/src/web/catalog.rs::seed_p2b()`). The four ids form the browser-driven CRUD surface exercised by the `/web/wiki` page:
+
+| `id` | `gadget_name` | `kind` | `input_schema.required` | Purpose |
+|---|---|---|---|---|
+| `knowledge-search` | `wiki.search` | `query` | `["query"]` | Full-text search across wiki pages. Extra input: optional `max_results` (1–20). |
+| `wiki-list` | `wiki.list` | `query` | `[]` | List all pages. No args. |
+| `wiki-read` | `wiki.get` | `query` | `["name"]` | Fetch a page by name. |
+| `wiki-write` | `wiki.write` | `mutation` | `["name", "content"]` | Create or overwrite a page. `destructive: false`, `requires_approval: false` — the approval flow is stubbed in P2B, so the write lands synchronously. |
+
+Example response (`knowledge-search` shown; the other three follow the same descriptor shape):
 
 ```json
 {
@@ -948,11 +968,12 @@ The `seed_p2b` catalog registers exactly one action on trunk, `knowledge-search`
       "required_scope": null,
       "disabled_reason": null
     }
+    // + wiki-list, wiki-read, wiki-write descriptors
   ]
 }
 ```
 
-`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`. `input_schema` is a JSON Schema fragment; arg validation on `POST /actions/{action_id}` runs against it (additionalProperties=false rejects unknown keys).
+`placement`: `"left_rail"` | `"center_main"` | `"evidence_pane"` | `"context_menu"`. `kind`: `"query"` | `"mutation"` | `"dangerous"`. `input_schema` is a JSON Schema fragment; arg validation on `POST /actions/{action_id}` runs against it (additionalProperties=false rejects unknown keys). E2E Gate 7f asserts the catalog surfaces all four ids.
 
 ---
 
@@ -991,11 +1012,19 @@ Invoke a registered direct action.
 }
 ```
 
-`result.status`: `"ok"` | `"pending_approval"` (when `requires_approval = true` on the descriptor). When `pending_approval`, `approval_id` is set.
+**`result.payload` is the real gadget output.** When the descriptor has a `gadget_name` and the gateway was built with a `GadgetDispatcher` wired (i.e. a Penny `GadgetRegistry` was registered at startup — the default for any build with `[knowledge]` configured), the action service calls `dispatcher.dispatch_gadget(gadget_name, args)` and places the returned `GadgetResult.content` into `payload` (`crates/gadgetron-gateway/src/web/action_service.rs:262-292`). Callers interpret the payload per gadget:
 
-`refresh_view_ids` is typed as `Vec<String>` on the wire (non-null, possibly empty). On trunk today both the `ok` and `pending_approval` paths return an empty array (`crates/gadgetron-gateway/src/web/action_service.rs:207-215,284-292`) — the refresh-hint channel is reserved for future per-action policy (e.g. an action that should trigger the UI to refetch `knowledge-activity-recent`). Web UI shells should already loop over the array (handling zero gracefully); do not pin to specific view ids.
+- `knowledge-search` / `wiki-list`: an array of page objects.
+- `wiki-read`: the page object (`{ "name": "...", "content": "...", "updated_at": "..." }`).
+- `wiki-write`: an empty object `{}` or a minimal confirmation object — the operator-visible effect is the on-disk wiki update, not the payload.
 
-**Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`; audit plane integration is future work, so `audit_event_id` is currently always `null` in the response regardless of identity state.
+When no `GadgetDispatcher` is wired (degraded mode — see §Workbench overview above) `payload` stays `null` and no side effect occurs. A dispatch error (unknown gadget, gadget-internal failure) surfaces as HTTP 500 with the `GadgetError` converted into the OpenAI envelope; the response body never sets `payload` in that case.
+
+`result.status`: `"ok"` | `"pending_approval"` (when `requires_approval = true` on the descriptor). All four `seed_p2b` actions have `requires_approval = false` today, so you will always see `"ok"` through the current catalog. When `pending_approval`, `approval_id` is set and dispatch is deferred until the approval flow decides — stubbed in P2B.
+
+`refresh_view_ids` is typed as `Vec<String>` on the wire (non-null, possibly empty). On trunk today both paths return an empty array (`action_service.rs:207-215,284-292`) — reserved for future per-action policy. Web UI shells should loop over the array (handling zero gracefully); do not pin to specific view ids.
+
+**Identity capture:** the server propagates `api_key_id` from `TenantContext` into `AuthenticatedContext.user_id` and `tenant_id` into `AuthenticatedContext.tenant_id` before invoking the action service. Activity captures (when the candidate coordinator is wired) record the real caller via `activity_event_id`. `audit_event_id` stays `null` on this path by design — direct-action dispatch deliberately bypasses Penny's `GadgetAuditEventSink` (tracked as `TODO(audit-direct-action)` in the `GadgetDispatcher` trait doc). A parallel direct-action audit sink is future work.
 
 **Errors:**
 
