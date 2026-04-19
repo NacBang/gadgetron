@@ -13,30 +13,39 @@ export GADGETRON_DATABASE_URL="postgres://gadgetron:secret@localhost:5432/gadget
 ./target/release/gadgetron doctor
 ```
 
-Example output (all checks passing):
+`gadgetron doctor` runs 5 checks in order: config file, server port, database, each configured provider, and `/health`. Example output (all checks passing):
 
 ```
-[ok] GADGETRON_DATABASE_URL is set
-[ok] database reachable (latency 2ms)
-[ok] schema migrations are current
-[ok] provider openai reachable (GET /v1/models → 200)
-[ok] bind address 0.0.0.0:8080 is available
+Gadgetron v0.2.0 — System Check
+
+  [PASS] Config file:      gadgetron.toml found and valid TOML
+  [PASS] Server port:      0.0.0.0:8080 available
+  [PASS] Database:         GADGETRON_DATABASE_URL configured
+  [PASS] Provider openai:  https://api.openai.com reachable in 142ms
+  [PASS] /health:          gadgetron is running at http://localhost:8080/health
+
+  All checks passed.
 ```
 
-Example output (with failures):
+Example output (with a failure):
 
 ```
-[ok]   GADGETRON_DATABASE_URL is set
-[FAIL] database reachable — connection refused (postgres://gadgetron:***@localhost:5432/gadgetron)
-       fix: verify PostgreSQL is running: pg_isready -h localhost -p 5432
-[skip] schema migrations — skipped (database unreachable)
-[skip] provider checks — skipped (database unreachable)
-[ok]   bind address 0.0.0.0:8080 is available
+Gadgetron v0.2.0 — System Check
+
+  [PASS] Config file:      gadgetron.toml found and valid TOML
+  [PASS] Server port:      0.0.0.0:8080 available
+  [WARN] Database:         database_url not configured — running in no-db mode
+  [FAIL] Provider openai:  https://api.openai.com unreachable — error sending request
+  [FAIL] /health:          connection refused at http://localhost:8080/health — run: gadgetron serve
+
+  1 warning(s) found.
+  WARN: database_url not configured — running in no-db mode
+  2 failure(s) found.
+  FAIL: https://api.openai.com unreachable — error sending request
+  FAIL: connection refused at http://localhost:8080/health — run: gadgetron serve
 ```
 
-`gadgetron doctor` exits with status 0 if all checks pass, or status 1 if any check fails. Use it in CI pre-flight scripts to catch environment problems before the server starts.
-
-The API key secret is masked as `***` in all `doctor` output. The `GADGETRON_DATABASE_URL` password is never printed.
+`gadgetron doctor` exits with status 0 if all checks pass (warnings do not fail the run), or status 2 if any check is `[FAIL]`. CI pre-flight scripts should check for exit code `!= 0` or explicitly `== 2`, not `== 1`.
 
 ---
 
@@ -430,7 +439,7 @@ If this log line is absent, the provider config is either missing or failed to l
 
 ```sh
 # OpenAI
-curl -s https://api.openai.com/v1/models \
+curl -s https://api.openai.com \
   -H "Authorization: Bearer $OPENAI_API_KEY" | jq .error
 
 # Anthropic
