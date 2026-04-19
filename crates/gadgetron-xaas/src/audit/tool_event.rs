@@ -176,9 +176,9 @@ pub struct ToolAuditQueryFilter {
     pub limit: i64,
 }
 
-/// Query `tool_audit_events` filtered by tenant + optional tool_name
-/// + optional `since` timestamp, ordered newest-first. `limit` is
-/// clamped to `[1, 500]` by the caller.
+/// Query `tool_audit_events` filtered by tenant + optional tool_name +
+/// optional `since` timestamp, ordered newest-first. `limit` is clamped
+/// to `[1, 500]` by the caller.
 ///
 /// Four prepared SQL variants (same pattern as
 /// `query_action_audit_events`) — no dynamic SQL string building.
