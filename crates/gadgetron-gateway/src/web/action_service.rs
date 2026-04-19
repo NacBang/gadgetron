@@ -262,9 +262,10 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // ---------------------------------------------------------------
         let mut payload: Option<serde_json::Value> = None;
 
-        if let (Some(dispatcher), Some(gadget_name)) =
-            (self.gadget_dispatcher.as_ref(), descriptor.gadget_name.as_deref())
-        {
+        if let (Some(dispatcher), Some(gadget_name)) = (
+            self.gadget_dispatcher.as_ref(),
+            descriptor.gadget_name.as_deref(),
+        ) {
             match dispatcher
                 .dispatch_gadget(gadget_name, request.args.clone())
                 .await

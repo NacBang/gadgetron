@@ -1280,14 +1280,13 @@ fn build_workbench(
     let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> =
         penny_registry.map(|r| r as Arc<dyn GadgetDispatcher>);
 
-    let action_svc: Arc<dyn WorkbenchActionService> = Arc::new(
-        InProcessWorkbenchActionService::new_with_dispatcher(
+    let action_svc: Arc<dyn WorkbenchActionService> =
+        Arc::new(InProcessWorkbenchActionService::new_with_dispatcher(
             catalog,
             InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
             candidate_coordinator,
             gadget_dispatcher,
-        ),
-    );
+        ));
 
     Some(Arc::new(GatewayWorkbenchService {
         projection,
