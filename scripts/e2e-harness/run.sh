@@ -1572,6 +1572,27 @@ else
   fail "/web/ did not 30x-redirect to /web" "$REDIRECT_STATUS"
 fi
 
+# ---------------------------------------------------------------------------
+# Gate 11c — /web/wiki standalone workbench page is reachable
+# ---------------------------------------------------------------------------
+#
+# The `/web/wiki` Next.js route ships a standalone page that drives the
+# four workbench CRUD actions (knowledge-search, wiki-list, wiki-read,
+# wiki-write) from a browser. Harness asserts the page is reachable and
+# emits markers (`wiki-workbench` data-testid, wiki-list endpoint path)
+# so a regression in the Next.js build, embed pipeline, or route
+# registration fails loudly here. This is the user-facing "real product"
+# surface — if this 404s the product is broken regardless of how green
+# the API gates are.
+WIKI_PAGE_RESP="$(curl -fsSL "$GAD_BASE/web/wiki" 2>&1 || true)"
+if echo "$WIKI_PAGE_RESP" | grep -q -iE 'wiki-workbench|wiki-auth-gate'; then
+  pass "/web/wiki standalone workbench page is served"
+  echo "$WIKI_PAGE_RESP" | head -c 2000 > "$ART_DIR/web-wiki.html.sample"
+else
+  fail "/web/wiki page missing expected markers (build or embed regression)" \
+    "$(echo "$WIKI_PAGE_RESP" | head -c 400)"
+fi
+
 # -----------------------------------------------------------------------
 # Gate 11b — security headers on /web (CSP + nosniff + referrer + perms)
 # -----------------------------------------------------------------------
