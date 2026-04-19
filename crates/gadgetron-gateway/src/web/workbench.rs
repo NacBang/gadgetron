@@ -1009,6 +1009,18 @@ pub async fn reload_catalog_handler(
     State(state): State<AppState>,
 ) -> Result<Json<ReloadCatalogResponse>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
+    perform_catalog_reload(&svc).map(Json)
+}
+
+/// Do the actual catalog reload work, shared between the HTTP handler
+/// (`reload_catalog_handler`) and the SIGHUP-driven reloader
+/// (`spawn_sighup_reloader`, ISSUE 8 TASK 8.5). Producing a
+/// `ReloadCatalogResponse` means both paths log identical telemetry,
+/// so an operator watching logs sees the same wire shape whether the
+/// reload came from `curl` or `kill -HUP`.
+pub fn perform_catalog_reload(
+    svc: &GatewayWorkbenchService,
+) -> Result<ReloadCatalogResponse, WorkbenchHttpError> {
     let catalog_handle = svc.descriptor_catalog.as_ref().ok_or_else(|| {
         WorkbenchHttpError::Core(GadgetronError::Config(
             "catalog reload requires a configured workbench with a descriptor catalog handle"
@@ -1060,13 +1072,78 @@ pub async fn reload_catalog_handler(
         "descriptor catalog reloaded (CatalogSnapshot = catalog + validators)"
     );
 
-    Ok(Json(ReloadCatalogResponse {
+    Ok(ReloadCatalogResponse {
         reloaded: true,
         action_count,
         view_count,
         source: source_label,
         source_path,
-    }))
+    })
+}
+
+/// Spawn a background task that watches for SIGHUP and triggers a
+/// catalog reload each time (ISSUE 8 TASK 8.5).
+///
+/// Standard operator workflow: edit `catalog_path`, then
+/// `kill -HUP <gadgetron-pid>`. No HTTP endpoint required, no
+/// per-service auth ceremony, no cluster-aware fan-out — just the
+/// POSIX primitive operators already know. Each HUP triggers the
+/// same `perform_catalog_reload` code path as the HTTP handler, so
+/// the audit trail + logs look identical.
+///
+/// Unix-only. On non-Unix platforms this function is a no-op —
+/// operators on Windows use the HTTP endpoint instead.
+#[cfg(unix)]
+pub fn spawn_sighup_reloader(workbench: Arc<GatewayWorkbenchService>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        let mut stream = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "workbench.admin",
+                    error = %e,
+                    "SIGHUP reloader: failed to install signal handler; catalog hot-reload via HUP will not work"
+                );
+                return;
+            }
+        };
+        tracing::info!(
+            target: "workbench.admin",
+            "SIGHUP reloader armed — kill -HUP <pid> triggers a descriptor catalog reload"
+        );
+        while stream.recv().await.is_some() {
+            match perform_catalog_reload(&workbench) {
+                Ok(resp) => {
+                    tracing::info!(
+                        target: "workbench.admin",
+                        trigger = "sighup",
+                        action_count = resp.action_count,
+                        view_count = resp.view_count,
+                        source = resp.source,
+                        source_path = resp.source_path.as_deref().unwrap_or(""),
+                        "SIGHUP reload complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "workbench.admin",
+                        trigger = "sighup",
+                        error = %format!("{e:?}"),
+                        "SIGHUP reload failed; running snapshot preserved"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+pub fn spawn_sighup_reloader(_workbench: Arc<GatewayWorkbenchService>) {
+    tracing::info!(
+        target: "workbench.admin",
+        "SIGHUP reloader is Unix-only; use POST /admin/reload-catalog on this platform"
+    );
 }
 
 /// `GET /events/ws` — WebSocket upgrade + tenant-filtered activity
