@@ -84,6 +84,39 @@ REAL_VLLM_URL="${REAL_VLLM_URL:-}"
 PENNY_VLLM=0
 PENNY_BRAIN_URL="${PENNY_BRAIN_URL:-http://10.100.1.5:8100}"
 CLAUDE_CODE_BIN="${CLAUDE_CODE_BIN:-$(command -v claude 2>/dev/null || echo '')}"
+print_help() {
+  cat <<'EOF'
+Gadgetron E2E harness — the mandatory PR gate.
+
+Usage:
+  ./scripts/e2e-harness/run.sh [FLAGS]
+
+Flags:
+  --quick                     Skip Gate 13 (`cargo test --workspace`).
+                              Runs in ~30s on a warm cargo cache.
+  --no-screenshot             Skip Gate 11 /web screenshot. CI-friendly.
+  --real-vllm[=URL]           Probe reachability of a real vLLM endpoint
+                              (default http://10.100.1.5:8100). Direct
+                              call — does NOT route through Gadgetron.
+  --penny-vllm[=URL]          Opt-in Penny↔vLLM chat round-trip via the
+                              Gadgetron chat endpoint. Requires `claude`
+                              CLI + Anthropic↔OpenAI proxy in front of
+                              vLLM. See README § "Penny↔vLLM testing".
+  -h, --help                  Print this help and exit.
+
+Env vars (pre-flag overrides):
+  REAL_VLLM_URL       default for --real-vllm
+  PENNY_BRAIN_URL     default for --penny-vllm (claude `ANTHROPIC_BASE_URL`)
+  CLAUDE_CODE_BIN     path to `claude` CLI (auto-discovered via `which`)
+  MOCK_PORT           mock OpenAI port (default 19999)
+  GAD_PORT            gadgetron serve port (default 19090)
+  PG_HOST_PORT        Postgres host-mapped port (default 15432)
+
+Exit codes: 0 = all gates green, non-zero = DO NOT OPEN PR.
+See scripts/e2e-harness/README.md for the full gate table + runbook.
+EOF
+}
+
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
@@ -92,7 +125,8 @@ for arg in "$@"; do
     --real-vllm=*) REAL_VLLM_URL="${arg#*=}" ;;
     --penny-vllm) PENNY_VLLM=1 ;;
     --penny-vllm=*) PENNY_VLLM=1; PENNY_BRAIN_URL="${arg#*=}" ;;
-    *) echo "unknown flag: $arg"; exit 2 ;;
+    -h|--help) print_help; exit 0 ;;
+    *) echo "unknown flag: $arg" >&2; echo "run '$0 --help' for usage." >&2; exit 2 ;;
   esac
 done
 
@@ -537,6 +571,131 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7e — workbench /views (descriptor catalog visibility)
+# ---------------------------------------------------------------------------
+#
+# seed_p2b ships exactly one view: `knowledge-activity-recent`. The
+# caller's scopes are threaded from the auth middleware (drift-fix
+# PR #138); an OpenAiCompat-scoped key should still see unrestricted
+# views.
+
+log "=== Gate 7e: workbench /views ==="
+VIEWS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/views" 2>&1 || true)"
+if echo "$VIEWS_RESP" | jq -e '(.views | type == "array") and (.views | length >= 1)' \
+  >/dev/null 2>&1; then
+  VIEW_IDS="$(echo "$VIEWS_RESP" | jq -c '[.views[].id]')"
+  pass "/workbench/views surfaces $VIEW_IDS"
+else
+  fail "/workbench/views regressed (expected non-empty array)" \
+    "$(echo "$VIEWS_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7f — workbench /actions (direct-action catalog visibility)
+# ---------------------------------------------------------------------------
+
+log "=== Gate 7f: workbench /actions ==="
+ACTIONS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/actions" 2>&1 || true)"
+if echo "$ACTIONS_RESP" | jq -e '(.actions | type == "array") and (.actions | length >= 1)' \
+  >/dev/null 2>&1; then
+  ACTION_IDS="$(echo "$ACTIONS_RESP" | jq -c '[.actions[].id]')"
+  pass "/workbench/actions surfaces $ACTION_IDS"
+else
+  fail "/workbench/actions regressed (expected non-empty array)" \
+    "$(echo "$ACTIONS_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7g — auth / scope enforcement (must come BEFORE chat gates so an
+# auth regression is diagnosed with a clean log).
+# ---------------------------------------------------------------------------
+#
+# Three wire contracts the auth middleware chain promises:
+#   * no Bearer header → 401
+#   * bogus Bearer → 401
+#   * Management route via an OpenAiCompat-only key → 403 (not 404)
+# These are the exact contracts operators rely on for rotating keys
+# and smoke-testing RBAC. An accidental middleware reorder that flips
+# any of these to 200/500 is a silent security regression.
+
+log "=== Gate 7g: auth + scope enforcement ==="
+
+AUTH_NONE_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock","messages":[{"role":"user","content":"x"}]}' 2>&1 || true)"
+if [ "$AUTH_NONE_CODE" = "401" ]; then
+  pass "POST /v1/chat/completions without Bearer → 401"
+else
+  fail "no-Bearer request: expected 401, got $AUTH_NONE_CODE" ""
+fi
+
+AUTH_BAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/v1/chat/completions" \
+  -H "Authorization: Bearer gad_live_definitelynotreal" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock","messages":[{"role":"user","content":"x"}]}' 2>&1 || true)"
+if [ "$AUTH_BAD_CODE" = "401" ]; then
+  pass "POST /v1/chat/completions with invalid Bearer → 401"
+else
+  fail "invalid-Bearer request: expected 401, got $AUTH_BAD_CODE" ""
+fi
+
+# Management route via OpenAiCompat key: scope_guard_middleware MUST 403.
+# The OpenAiCompat key is the one the rest of the harness uses.
+SCOPE_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/nodes" 2>&1 || true)"
+if [ "$SCOPE_CODE" = "403" ]; then
+  pass "Management route via OpenAiCompat key → 403"
+else
+  fail "scope mismatch: expected 403 on /api/v1/nodes via OpenAiCompat, got $SCOPE_CODE" \
+    "(if 404, the route may have moved; if 200, scope_guard_middleware is broken)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7h — direct action invocation (404 on unknown action)
+# ---------------------------------------------------------------------------
+#
+# POST /actions/:action_id must return 404 for an action id that isn't
+# in the descriptor catalog. The scope-restricted-action contract
+# (doc §2.4.1) says 404 (not 403) to avoid leaking existence; this
+# gate covers the simpler "genuinely unknown id" path.
+
+log "=== Gate 7h: action 404 on unknown id ==="
+ACTION_404_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST "$GAD_BASE/api/v1/web/workbench/actions/does-not-exist" \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"args":{},"client_invocation_id":null}' 2>&1 || true)"
+if [ "$ACTION_404_CODE" = "404" ]; then
+  pass "POST /actions/does-not-exist → 404"
+else
+  fail "unknown action: expected 404, got $ACTION_404_CODE" ""
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7i — /v1/models listing (OpenAI-compat surface)
+# ---------------------------------------------------------------------------
+#
+# Every OpenAI-compatible gateway serves `/v1/models`. Asserting the
+# shape keeps downstream clients (SDKs, TUIs) safe from a schema
+# regression.
+
+log "=== Gate 7i: /v1/models listing ==="
+MODELS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/v1/models" 2>&1 || true)"
+if echo "$MODELS_RESP" | jq -e '.object == "list" and (.data | type == "array")' \
+  >/dev/null 2>&1; then
+  MODEL_COUNT="$(echo "$MODELS_RESP" | jq '.data | length')"
+  pass "/v1/models returns {object:list, data:[...]} (count=$MODEL_COUNT)"
+else
+  fail "/v1/models shape regressed" "$(echo "$MODELS_RESP" | head -c 400)"
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 8 — non-streaming chat completion
 # ---------------------------------------------------------------------------
 
@@ -579,10 +738,16 @@ STREAM_RESP="$(curl -fsSN \
       }' \
   "$GAD_BASE/v1/chat/completions" 2>&1 || true)"
 
-if echo "$STREAM_RESP" | grep -q 'data: \[DONE\]'; then
-  pass "streaming chat: ends with data: [DONE]"
+# Stronger assertion than a bare `grep -q` — `[DONE]` must be the LAST
+# non-empty data frame in the stream. A regression that emits further
+# chunks after `[DONE]` (violates OpenAI spec) would pass a grep-only
+# check silently; this catches it.
+LAST_DATA_LINE="$(echo "$STREAM_RESP" | grep '^data: ' | tail -1 || true)"
+if [ "$LAST_DATA_LINE" = "data: [DONE]" ]; then
+  pass "streaming chat: final frame is data: [DONE]"
 else
-  fail "streaming chat did not emit [DONE]" "$STREAM_RESP"
+  fail "streaming chat final frame regressed (expected 'data: [DONE]')" \
+    "last data line: '$LAST_DATA_LINE'"
 fi
 
 # ---------------------------------------------------------------------------
