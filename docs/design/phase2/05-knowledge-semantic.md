@@ -1,6 +1,6 @@
 # 05 — Semantic Knowledge Layer: pgvector + Embedding Provider
 
-> **Status**: Draft v1 (2026-04-16) — office-hours 1 round + adversarial reviewer 2 rounds (16 issues found/fixed, 91/100 final) — **P2B extension: `docs/design/phase2/11-raw-ingestion-and-rag.md` (RAW ingestion pipeline + RAG foundation, 2026-04-18)**
+> **Status**: Draft v1 (2026-04-16) → **IMPLEMENTED on trunk**. `SemanticBackend` in `gadgetron-knowledge::semantic_index` (pgvector + OpenAI-compat embeddings, registered as `"semantic-pgvector"` plug) + hybrid search (pgvector RRF fusion) + `gadgetron reindex` CLI subcommand (supports `--full` / `--incremental` / `--dry-run` / `--verbose`; auto-applies PostgreSQL migrations before reindex). Office-hours 1 round + adversarial reviewer 2 rounds (16 issues found/fixed, 91/100 final). — **P2B extension: `docs/design/phase2/11-raw-ingestion-and-rag.md` (RAW ingestion pipeline + RAG foundation, 2026-04-18)**
 > **Author**: PM (Claude) — user-directed via `/office-hours`
 > **Parent**: `docs/design/phase2/00-overview.md` v3, `docs/design/phase2/01-knowledge-layer.md` v3
 > **Drives**: ADR-P2A-07

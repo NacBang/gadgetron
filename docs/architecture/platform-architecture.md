@@ -143,7 +143,7 @@ docs/architecture/platform-architecture.md  ← [본 문서] 통합 뷰
 |  │  │/completions  │  │              │  │  usage,costs}            │  │  |
 |  │  └──────────────┘  └──────────────┘  └──────────────────────────┘  │  |
 |  │  ┌──────────────┐  ┌──────────────────────────────────────────────┐ │  |
-|  │  │GET /health   │  │ /api/v1/xaas/* [P1] /api/v1/ws/* [P2]      │ │  |
+|  │  │GET /health   │  │ /api/v1/xaas/* [P1] /api/v1/web/workbench/events/ws (shipped ISSUE 4 / v0.2.7) │ │  |
 |  │  │GET /ready    │  │                                              │ │  |
 |  │  └──────────────┘  └──────────────────────────────────────────────┘ │  |
 |  │                                                                     │  |
@@ -636,7 +636,7 @@ pub enum GadgetronError {
     Forbidden,  // B-8: 인증 성공 + 권한 부족 → HTTP 403
 
     #[error("Billing error: {0}")]
-    Billing(String),  // D-13, [P2]
+    Billing(String),  // D-13 — active on trunk; ISSUE 12 TASK 12.1 / PR #236 / v0.5.5 landed the `billing_events` ledger write path which can surface this variant on INSERT / schema failure. Originally tagged [P2] in the Phase 1 design; that tag is stale post-0.5.5.
 
     #[error("Download failed: {0}")]
     DownloadFailed(String),  // D-13
@@ -820,7 +820,7 @@ AuditWriter 백그라운드 태스크를 일시 정지(tokio::test에서 sleep i
 | `/v1/*` | 외부 클라이언트 (OpenAI 호환) | semver major 전까지 불변 | Bearer `gad_live_*` or `gad_test_*` | `Scope::OpenAiCompat` |
 | `/api/v1/*` | 운영자, 관리 도구 | semver-minor 추가 허용 | Bearer | `Scope::Management` |
 | `/api/v1/xaas/*` | XaaS 관리자 | Phase 2 안정화 후 stable | Bearer | `Scope::XaasAdmin` |
-| `/api/v1/ws/*` | TUI/Web UI realtime [P2] | [P2] stable 예정 | Bearer | `Scope::OpenAiCompat` or `Management` |
+| `/api/v1/web/workbench/events/ws` | Web UI realtime WebSocket (activity bus fan-out) | semver-minor 추가 허용 | Bearer or `?access_token=` query-param (auth middleware query-token fallback scoped to this path only) | `Scope::OpenAiCompat` (workbench subtree scope rule) — shipped EPIC 1 ISSUE 4 / v0.2.7 / PR #194; original `/api/v1/ws/*` prefix never materialized, workbench subtree absorbed it |
 | `/health` | K8s liveness probe | 불변 | 없음 (public) | — |
 | `/ready` | K8s readiness probe | 불변 | 없음 (public) | — |
 | `/metrics` | Prometheus scrape | [P1] | 없음 (internal network only) | — |
@@ -1270,8 +1270,12 @@ ServiceBuilder::new()
     .layer(AuthLayer::new(key_validator))        // 3. Bearer 검증 → TenantContext
     .layer(TenantContextLayer)                   // 4. TenantContext를 request Extension에 삽입
     .layer(ScopeGuardLayer)                      // 5. 경로별 Scope 검사 (401/403)
-    // [P2] .layer(RateLimitLayer::new(rate_cfg))
-    // [P2] .layer(GuardrailsLayer)
+    // NOTE: rate limit does NOT sit on the tower stack — it shipped
+    // in EPIC 4 ISSUE 11 TASK 11.2 (PR #231 / v0.5.2) as
+    // `RateLimitedQuotaEnforcer` composite inside the handler-level
+    // QuotaEnforcer::check_pre path, not as a tower layer. See
+    // §2.B.3.5 for rationale.
+    // [future] .layer(GuardrailsLayer) — not scheduled
     .service(router)                             // 6. axum Router
 ```
 
@@ -1284,7 +1288,7 @@ ServiceBuilder::new()
 | `AuthLayer` | `gadgetron-gateway` (from xaas) | `middleware::auth::AuthLayer<PgKeyValidator>` | `TenantNotFound`, `Forbidden` | < 1ms cache hit / < 8ms miss |
 | `TenantContextLayer` | `gadgetron-gateway` | Extension 삽입만 — no I/O | — | ~100ns |
 | `ScopeGuardLayer` | `gadgetron-gateway` | `require_scope(ctx, Scope::OpenAiCompat)` — Vec linear scan (max 3 elements) | `Forbidden` | ~1μs |
-| `[P2] RateLimitLayer` | `gadgetron-xaas` | Token bucket per tenant | `QuotaExceeded` (429) | ~1μs |
+| ~~`RateLimitLayer`~~ (NOT on tower stack) | `gadgetron-xaas` | Shipped as `RateLimitedQuotaEnforcer` composite wrapping the inner cost enforcer; rate check runs inside `QuotaEnforcer::check_pre` before cost check (fail-fast). Opt-in via `[quota_rate_limit]` config. EPIC 4 ISSUE 11 TASK 11.2 / PR #231 / v0.5.2. | `QuotaExceeded` (429 + `Retry-After: 60` + `retry_after_seconds` body field) | ~1μs DashMap-sharded lazy refill |
 
 **`AuthLayer` 구현 계약**:
 ```rust
@@ -1343,11 +1347,25 @@ let cors = CorsLayer::new()
 // 와일드카드 origin 금지 (D-6). 개발 환경에서도 localhost:3000 명시.
 ```
 
-##### §2.B.3.5 Rate Limit [P2]
+##### §2.B.3.5 Rate Limit [shipped via EPIC 4 ISSUE 11 TASK 11.2 / PR #231 / v0.5.2]
 
-Phase 2에서 `ScopeGuardLayer` 뒤에 `RateLimitLayer` 삽입. 구현: `governor 0.6` (Token Bucket).
-설정 필드 (`xaas.rate_limit`): `rpm: u32`, `tpm: u32` — per-tenant.
-Phase 1에서는 `QuotaEnforcer`의 monthly/daily quota만 적용.
+Per-tenant token-bucket rate limiter shipped in `gadgetron-xaas::quota::rate_limit::TokenBucketRateLimiter`. Not layered as a separate `RateLimitLayer` on the tower stack — instead wrapped into the existing `QuotaEnforcer` trait via `RateLimitedQuotaEnforcer` composite, which runs the rate check BEFORE delegating to the inner cost enforcer (fail-fast semantics, no snapshot query on rate rejection).
+
+Buckets are `DashMap<TenantId, Bucket>` sharded, lazy-refilled on `consume()`, monotonic `Instant` clock (wall-clock skew can't double-spend), fractional tokens so small refills don't round to zero. No `governor` crate — hand-rolled to keep the enforcer composition clean and avoid the crate's tower-layer assumptions.
+
+Config block is `[quota_rate_limit]` (NOT `[xaas.rate_limit]` — renamed during implementation):
+
+```toml
+[quota_rate_limit]
+requests_per_minute = 60   # 0 = limiter is a no-op, preserving pre-11.2 behavior
+burst = 30                 # 0 defaults to requests_per_minute
+```
+
+Opt-in: default `requests_per_minute = 0` is a no-op so existing deployments upgrading from pre-0.5.2 see zero behavior change until they configure a non-zero rate. The CLI wires `RateLimitedQuotaEnforcer` at `init_serve_runtime` only when `requests_per_minute > 0`.
+
+Historical context: the "governor 0.6 + tower layer" plan was the original P2 sketch. The implementation in PR #231 opted for the enforcer-composition pattern instead because it shares the request context (`TenantContext`, `QuotaSnapshot`) that the cost enforcer already threads, avoiding duplicate lookups on the hot path. See ISSUE 11 design notes in `docs/modules/xaas-platform.md §5.6` for the composition chain.
+
+Rate rejections surface as structured 429 + `Retry-After: 60` header + `retry_after_seconds: 60` JSON body field (ISSUE 11 TASK 11.1 / PR #230 / v0.5.1). 5 unit tests pin bucket semantics (within-burst, exceeds-burst, refill-after-wait, disabled limiter, per-tenant isolation). No harness gate because harness leaves `quota_rate_limit` disabled — unit tests carry the correctness proof.
 
 ---
 

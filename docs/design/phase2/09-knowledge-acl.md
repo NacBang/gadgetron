@@ -11,7 +11,7 @@
 > **관련 크레이트**: `gadgetron-knowledge` (wiki + 검색), `gadgetron-core` (scope 타입), `gadgetron-xaas` (TeamCache)
 > **Phase**: [P2B]
 >
-> **Canonical terminology note**: historical references in this doc to `plugin` mainly refer to seed/frontmatter compatibility fields and legacy bundle working identifiers. Product terminology remains Bundle / Plug / Gadget.
+> **Canonical terminology note**: historical references in this doc to `plugin` mainly refer to seed/frontmatter compatibility fields and legacy bundle working identifiers. Product terminology remains Bundle / Plug / Gadget. Additionally, §5 의 code example 에서 `impl McpToolProvider for WikiToolProvider` 는 legacy name — trunk 의 canonical 이름은 `GadgetProvider` 다 (ADR-P2A-10 rename; `McpToolProvider` → `GadgetProvider`, `McpToolRegistry` → `GadgetRegistry`). 본 ACL 설계의 trait 구현 예시를 읽을 때 그 mapping 을 적용할 것.
 
 ---
 

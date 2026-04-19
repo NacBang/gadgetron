@@ -1031,7 +1031,7 @@ Streaming requests produce **two audit entries**, both sharing the same `request
 
 For end-to-end streaming latency (dispatch entry `latency_ms` is not useful for this), use:
 - **TUI dashboard** (`gadgetron serve --tui`) — the Requests panel shows wall-clock latency from the `metrics_middleware` layer, which measures the full chain including the stream body
-- **`/metrics` Prometheus histogram** — planned in Phase 2
+- **`/metrics` Prometheus histogram** — not implemented on trunk. The "Phase 2" planning label from ROADMAP v1 did not carry into ROADMAP v2 — no active EPIC/ISSUE covers `/metrics` at present. Likely lands alongside EPIC 5 (Cluster platform, post-1.0) or as a separate observability ISSUE once demand materializes. Until then, use the TUI dashboard or client-side timing.
 - **Client-side timing** — measure `time.perf_counter()` around the OpenAI SDK call
 
 To correlate both entries for a single stream: `WHERE request_id = '<id>' ORDER BY created_at`.
