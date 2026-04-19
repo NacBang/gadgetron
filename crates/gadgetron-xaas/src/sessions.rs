@@ -106,8 +106,13 @@ pub async fn create_session(
     if !is_active {
         return Err(SessionError::Inactive);
     }
-    if role == "service" {
-        return Err(SessionError::ServiceRole);
+    // Parse the role column through the typed enum so an unexpected
+    // value (shouldn't happen — DB has CHECK — but defensive) short-
+    // circuits instead of falling through to password verification.
+    match crate::identity::Role::parse(&role) {
+        Some(crate::identity::Role::Service) => return Err(SessionError::ServiceRole),
+        Some(_) => {} // Member or Admin — OK to continue.
+        None => return Err(SessionError::InvalidCredentials),
     }
     let Some(stored_hash) = password_hash else {
         return Err(SessionError::InvalidCredentials);
