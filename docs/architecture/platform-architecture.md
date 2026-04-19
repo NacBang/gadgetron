@@ -4181,6 +4181,8 @@ Cross-ref: Axis C §2.C.4.5 for `terminationGracePeriodSeconds: 70` Helm value.
 #### §2.E.1 Phase 1 → 2 → 3 로드맵 개요
 
 > **결정 기반**: D-20260411-01 옵션 B (12주 중간 범위), D-20260411-04 (GPU 기능 범위)
+>
+> **ROADMAP v2 supersession (PR #186, 2026-04-18)**: 이하 Phase 표는 프로젝트 초기 Phase 1→2→3 스펙의 **역사적 기록** 입니다. 현재 canonical 계획은 [`docs/ROADMAP.md`](../ROADMAP.md) 의 EPIC/ISSUE/TASK 트리로, Phase 2 는 **EPIC 1 (Workbench MVP, `v0.3.0` closed, PR #208) + EPIC 2 (Agent autonomy, `v0.4.0` closed, PR #209)** 로 쪼개졌습니다. Phase 2 오리지널 목표 중 shipped (Web UI ✅ 0.2.0+, `/audit/events`+`/audit/tool-events` 기반 observability ✅ 0.2.6/0.2.8) vs still-deferred (K8s operator, `/v1/embeddings`, distributed Redis rate-limit, pgbackrest WAL, MIG dynamic, semantic routing) 는 개별 ISSUE 로 재배치 예정 — EPIC 3 (Plugin platform), EPIC 4 (Multi-tenant XaaS), EPIC 5 (Cluster platform) 가 해당 미실장 항목들을 분산 흡수합니다. 아래 표의 "완료 기준" 은 오리지널 Phase-1 spec 에 정의된 것이며, 실제 릴리스는 EPIC close tag (v0.3.0 / v0.4.0) 기준입니다.
 
 | Phase | 기간 | 핵심 목표 | 게이트된 기능 (포함 안 됨) | 완료 기준 |
 |-------|------|----------|--------------------------|----------|
@@ -4218,6 +4220,7 @@ Cross-ref: Axis C §2.C.4.5 for `terminationGracePeriodSeconds: 70` Helm value.
 | `GET /api/v1/costs` | 제공 | **minor 이내 안정** | 비용 필드 추가 | 기존 필드 제거·단위 변경 (→ major bump) |
 | `/api/v1/xaas/*` (테넌트·쿼터·감사) | 제공 | **Phase 2 안정화까지 불안정** | Phase 1 기간 중 breaking change 허용 (내부 운영용), Phase 2 이후 additive-only | Phase 2 안정화 이후 필드 제거 |
 | `/api/v1/web/workbench/*` (projection + actions + approvals + audit + usage + events ws) | 제공 (ISSUE 1–6, v0.2.0–v0.2.9) | **additive-only** (EPIC 1 CLOSED with v0.3.0 tag, PR #208) | 응답에 필드 추가만 허용 — 기존 필드 제거·이름 변경·shape 재구성 → major bump. 14 개 개별 엔드포인트 목록은 `docs/manual/api-reference.md §Workbench endpoints` 참조 (하나의 SSOT; ISSUE 5 / PR #199 가 14 번째 `/audit/tool-events` 를 추가). | 기존 필드 제거·이름 변경·shape 재구성 (→ major bump) |
+| `/v1/tools` + `/v1/tools/{name}/invoke` (외부 MCP 서버 surface, OpenAiCompat) | 제공 (ISSUE 7, v0.2.10 → v0.2.12) | **additive-only** (EPIC 2 CLOSED with v0.4.0 tag, PR #209) | 응답 shape 에 필드 추가 (새 `GadgetSchema` 필드, `tool_audit_events` 컬럼 등) 만 허용. `mcp_unknown_tool` 포함 error code 세트는 wire-frozen — 새 에러 code 추가는 OK, 기존 code rename → major bump. `Arc<dyn GadgetDispatcher>` L3 allowed-names gate 가 이 surface 의 불변 보안 계약. | 기존 필드 제거·이름 변경·shape 재구성·error code rename (→ major bump) |
 
 **SSE 이벤트 계약 (안정, Phase 1~3)**:
 - 스트림 청크: `data: {"id":"...","object":"chat.completion.chunk","choices":[...]}\n\n`
