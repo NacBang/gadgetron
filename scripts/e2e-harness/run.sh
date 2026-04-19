@@ -680,12 +680,17 @@ fi
 log "=== Gate 7e: workbench /views ==="
 VIEWS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/views" 2>&1 || true)"
-if echo "$VIEWS_RESP" | jq -e '(.views | type == "array") and (.views | length >= 1)' \
-  >/dev/null 2>&1; then
+# seed_p2b ships exactly ONE view: `knowledge-activity-recent`.
+# Assert by id so a rename regression fails here.
+if echo "$VIEWS_RESP" | jq -e '
+     (.views | type == "array")
+     and (.views | length >= 1)
+     and any(.views[]; .id == "knowledge-activity-recent")
+   ' >/dev/null 2>&1; then
   VIEW_IDS="$(echo "$VIEWS_RESP" | jq -c '[.views[].id]')"
-  pass "/workbench/views surfaces $VIEW_IDS"
+  pass "/workbench/views surfaces $VIEW_IDS (includes knowledge-activity-recent)"
 else
-  fail "/workbench/views regressed (expected non-empty array)" \
+  fail "/workbench/views missing knowledge-activity-recent (seed_p2b regressed?)" \
     "$(echo "$VIEWS_RESP" | head -c 400)"
 fi
 
@@ -696,12 +701,19 @@ fi
 log "=== Gate 7f: workbench /actions ==="
 ACTIONS_RESP="$(curl -fsS -H "Authorization: Bearer $TEST_API_KEY" \
   "$GAD_BASE/api/v1/web/workbench/actions" 2>&1 || true)"
-if echo "$ACTIONS_RESP" | jq -e '(.actions | type == "array") and (.actions | length >= 1)' \
-  >/dev/null 2>&1; then
+# seed_p2b ships exactly ONE action: `knowledge-search`. Assert it
+# by id — not just array-length — so a regression that swaps the
+# id (e.g. renames the seed) fails loudly here instead of only at
+# the happy-path Gate 7h.1 404.
+if echo "$ACTIONS_RESP" | jq -e '
+     (.actions | type == "array")
+     and (.actions | length >= 1)
+     and any(.actions[]; .id == "knowledge-search")
+   ' >/dev/null 2>&1; then
   ACTION_IDS="$(echo "$ACTIONS_RESP" | jq -c '[.actions[].id]')"
-  pass "/workbench/actions surfaces $ACTION_IDS"
+  pass "/workbench/actions surfaces $ACTION_IDS (includes knowledge-search)"
 else
-  fail "/workbench/actions regressed (expected non-empty array)" \
+  fail "/workbench/actions missing knowledge-search (seed_p2b regressed?)" \
     "$(echo "$ACTIONS_RESP" | head -c 400)"
 fi
 
