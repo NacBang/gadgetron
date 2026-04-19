@@ -538,6 +538,47 @@ CREATE INDEX quota_configs_usage_day_idx
 
 기존 row 는 DEFAULT 로 CURRENT_DATE 를 얻어, 첫 post-migration request 에서 spuriously monthly usage 가 zero 되지 않는다. Partial index 는 operator 의 "최근 31일 지출" 리포트를 위한 것 — full index 가 아니라서 오래된 row 를 index 에 포함시키는 오버헤드를 피함.
 
+### 5.7 Tenant 내부 조회 엔드포인트 (TASK 11.4 / PR #234 / v0.5.4)
+
+`GET /api/v1/web/workbench/quota/status` 가 §5.6 의 write-path 와 대칭인 read-path. OpenAiCompat scope — Management 권한 없이 사용자가 자기 tenant 의 사용량을 볼 수 있다. Cross-tenant read 는 설계상 안 됨 (`tenant_id` 는 `TenantContext` 에서만 읽음, 쿼리 파라미터로 오버라이드 불가).
+
+**Response shape** (integer cents):
+
+```json
+{
+  "usage_day": "2026-04-20",
+  "daily":   { "used_cents": 342,    "limit_cents": 1000000,    "remaining_cents": 999658 },
+  "monthly": { "used_cents": 15240,  "limit_cents": 10000000,   "remaining_cents": 9984760 }
+}
+```
+
+**CASE rollover inline in SELECT**. §5.6 의 write-path 는 매 request 마다 UPDATE 로 rollover 를 적용하지만, 마지막 request 이후 day/month boundary 를 넘어간 tenant 는 `quota_configs` row 가 아직 stale — `usage_day` 가 어제거나 지난 달일 수 있음. Status 엔드포인트는 이를 해결하기 위해 SELECT 에서 동일 CASE 식을 project 한다:
+
+```sql
+SELECT
+    CURRENT_DATE AS usage_day,
+    CASE WHEN usage_day = CURRENT_DATE THEN daily_used_cents   ELSE 0 END AS daily_used_cents,
+    CASE WHEN date_trunc('month', usage_day) = date_trunc('month', CURRENT_DATE)
+         THEN monthly_used_cents ELSE 0 END AS monthly_used_cents,
+    daily_limit_cents,
+    monthly_limit_cents
+  FROM quota_configs
+  WHERE tenant_id = $1;
+```
+
+즉 reader 는 항상 "지금 맞는" 숫자를 본다 — DB 의 `usage_day` 값이 어제든 today 든 무관. 다음 write (`record_post`) 때 UPDATE 가 row 를 갱신한다.
+
+**Bootstrap-gap fallback**. Tenant 가 막 생성되고 `quota_configs` 에 row 가 아직 없으면 (tenant provisioning 이 quota row insert 를 아직 안 함), 핸들러는 4xx 대신 schema default 를 반환한다:
+
+- `limit_cents`: daily = 1_000_000 ($10k), monthly = 10_000_000 ($100k)
+- `used_cents`: 0
+- `remaining_cents` = `limit_cents`
+- `usage_day`: `CURRENT_DATE` (UTC)
+
+근거: UI 가 "fresh tenant, full quota" 를 렌더하게 해서 tenant 프로비저닝 중에 나타나는 4xx error 혼란을 피함. Harness Gate 7k.5 가 이 경로를 specifically 탄다 (test config 가 `quota_configs` 를 populate 하지 않아, gate 가 fallback shape + 값을 고정한다).
+
+**Operator workflow**. `/web` dashboard 에 quota banner 를 그릴 때 이 엔드포인트를 polling — response 가 cheap 하고 ArcSwap 같은 shared mutable state 를 건드리지 않으므로 높은 빈도 polling 이 safe. SDK client 는 429 받기 전에 `remaining_cents == 0` 을 미리 감지해 backoff 시작할 수 있음 (429 발생 후 Retry-After 를 보는 것보다 UX 가 더 부드러움).
+
 ---
 
 ## 6. 감사 로깅 `[P1]`
