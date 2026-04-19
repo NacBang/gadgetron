@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.2.11** (post-ISSUE 7 TASK 7.2 `/v1/tools/{name}/invoke`)
+**Current version: 0.2.12** (post-ISSUE 7 — MCP server complete)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -84,23 +84,25 @@ autonomous workflow can drive.
   `audit::tool_event` cover the fan-out; full E2E requires the
   `--penny-vllm` opt-in path which defers to ISSUE 7's MCP server.
 
-### In-flight ISSUE
-- **ISSUE 7 — first-class MCP server** (in-flight; 0.2.11 ships TASK 7.2)
-  - TASK 7.1 ✅ — `GET /v1/tools` discovery endpoint (0.2.9 → 0.2.10,
-    PR #204). `GadgetCatalog` trait in core; `GadgetRegistry` implements
-    it; AppState holds `Option<Arc<dyn GadgetCatalog>>`. Harness gate
-    7i.2 pins shape + 401-on-no-auth.
-  - TASK 7.2 ✅ — `POST /v1/tools/{name}/invoke` tool invocation
-    endpoint (0.2.10 → 0.2.11). AppState holds
-    `Option<Arc<dyn GadgetDispatcher>>`; handler dispatches via the
-    existing seam, translates every `GadgetError` variant to an HTTP
-    status + `mcp_*` code, and returns `{content, is_error}` on
-    success. Dispatcher-unwired deployments get 503 `mcp_not_available`
-    so clients don't retry. Harness gate 7i.3 pins happy path, unknown
-    gadget 404 + `mcp_unknown_tool`, and 401-on-no-auth.
-  - TASK 7.3 — cross-session audit: correlate external-agent tool
-    invocations to `tool_audit_events` with an `external_caller_id`
-    attribution.
+### Completed ISSUE 7
+- **ISSUE 7 — first-class MCP server** (0.2.9 → 0.2.12, 3 PRs)
+  - TASK 7.1 ✅ — `GET /v1/tools` discovery (0.2.10, PR #204).
+    `GadgetCatalog` trait erases gateway→penny dep. Gate 7i.2.
+  - TASK 7.2 ✅ — `POST /v1/tools/{name}/invoke` invocation (0.2.11,
+    PR #205). `GadgetDispatcher` reuse; full `mcp_*` error taxonomy;
+    503 `mcp_not_available` when unwired. Gate 7i.3.
+  - TASK 7.3 ✅ — cross-session audit (0.2.12). Every
+    `/v1/tools/invoke` call lands a `GadgetCallCompleted` row in
+    `tool_audit_events` with `owner_id = Some(api_key_id)` and
+    `tenant_id = Some(tenant_id)` — Penny P2A rows keep both NULL,
+    so `WHERE owner_id IS NOT NULL` picks out external MCP callers.
+    AppState gains `tool_audit_sink: Arc<dyn GadgetAuditEventSink>`;
+    init_serve_runtime spawns a second `GadgetAuditEventWriter` with
+    `with_activity_bus` + `with_coordinator` so dashboards + the
+    `/workbench/activity` capture plane see external calls in real
+    time. Gate 7i.4 queries `/workbench/audit/tool-events` and
+    asserts at least one row with non-null `owner_id` after an
+    invoke.
 
 Close → tag `v0.4.0`.
 

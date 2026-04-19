@@ -515,10 +515,14 @@ pub async fn list_tools_handler(State(state): State<AppState>) -> Response {
 ///   from retrying a deployment that can never dispatch.
 pub async fn invoke_tool_handler(
     State(state): State<AppState>,
+    Extension(ctx): Extension<TenantContext>,
     axum::extract::Path(name): axum::extract::Path<String>,
     args: Option<Json<serde_json::Value>>,
 ) -> Response {
-    use gadgetron_core::agent::tools::GadgetError;
+    use gadgetron_core::agent::tools::{GadgetError, GadgetTier as AgentTier};
+    use gadgetron_core::audit::{
+        GadgetAuditEvent, GadgetCallOutcome, GadgetTier as AuditTier,
+    };
 
     let Some(dispatcher) = state.gadget_dispatcher.as_ref() else {
         return (
@@ -535,13 +539,43 @@ pub async fn invoke_tool_handler(
     };
 
     let args_value = args.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
+    let category = name.split('.').next().unwrap_or("").to_string();
+    let tier = state
+        .tool_catalog
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .all_schemas()
+                .into_iter()
+                .find(|schema| schema.name == name)
+                .map(|schema| match schema.tier {
+                    AgentTier::Read => AuditTier::Read,
+                    AgentTier::Write => AuditTier::Write,
+                    AgentTier::Destructive => AuditTier::Destructive,
+                })
+        })
+        .unwrap_or(AuditTier::Read);
 
-    match dispatcher.dispatch_gadget(&name, args_value).await {
-        Ok(result) => Json(serde_json::json!({
-            "content": result.content,
-            "is_error": result.is_error,
-        }))
-        .into_response(),
+    let started = std::time::Instant::now();
+    let result = dispatcher.dispatch_gadget(&name, args_value).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    let (outcome, response) = match result {
+        Ok(gadget_result) => {
+            let outcome = if gadget_result.is_error {
+                GadgetCallOutcome::Error {
+                    error_code: "gadget_reported_error",
+                }
+            } else {
+                GadgetCallOutcome::Success
+            };
+            let resp = Json(serde_json::json!({
+                "content": gadget_result.content,
+                "is_error": gadget_result.is_error,
+            }))
+            .into_response();
+            (outcome, resp)
+        }
         Err(err) => {
             let code = err.error_code();
             let status = match err {
@@ -553,15 +587,40 @@ pub async fn invoke_tool_handler(
                 GadgetError::Execution(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             let message = err.to_string();
-            (
+            let resp = (
                 status,
                 Json(serde_json::json!({
                     "error": { "code": code, "message": message }
                 })),
             )
-                .into_response()
+                .into_response();
+            (GadgetCallOutcome::Error { error_code: code }, resp)
         }
-    }
+    };
+
+    // ISSUE 7 TASK 7.3 — cross-session audit. Every `/v1/tools/{name}/invoke`
+    // call lands a `GadgetCallCompleted` row in `tool_audit_events` with
+    // `owner_id = Some(api_key_id)` and `tenant_id = Some(tenant_id)`.
+    // Penny calls in P2A populate both as `None`, so operators can filter
+    // `WHERE owner_id IS NOT NULL` to pick out cross-session (external MCP)
+    // callers. Fire-and-forget: the sink is a bounded channel writer when
+    // Postgres is wired, and a Noop otherwise — handler latency is
+    // unaffected either way.
+    state
+        .tool_audit_sink
+        .send(GadgetAuditEvent::GadgetCallCompleted {
+            gadget_name: name,
+            tier,
+            category,
+            outcome,
+            elapsed_ms,
+            conversation_id: None,
+            claude_session_uuid: None,
+            owner_id: Some(ctx.api_key_id.to_string()),
+            tenant_id: Some(ctx.tenant_id.to_string()),
+        });
+
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +936,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         }
     }
 
@@ -1290,6 +1350,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         }
     }
 

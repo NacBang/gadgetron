@@ -151,6 +151,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         }
     }
 
@@ -225,6 +226,7 @@ mod tests {
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             tool_catalog: None,
             gadget_dispatcher: None,
+            tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
         };
         let app = build_router(state);
 
