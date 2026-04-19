@@ -238,6 +238,22 @@ impl From<GadgetronError> for WorkbenchHttpError {
     }
 }
 
+/// Extract the Postgres pool from `AppState`, returning a 503-shape
+/// `WorkbenchHttpError::Core(Config(...))` when the pool is unwired
+/// (no-db serve mode). Centralizes the per-handler pre-check so each
+/// call site collapses from 5 lines to 1. `what` names the operation
+/// (user-facing string in the error body).
+fn require_pg_pool<'a>(
+    state: &'a AppState,
+    what: &str,
+) -> Result<&'a sqlx::PgPool, WorkbenchHttpError> {
+    state.pg_pool.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "{what} requires Postgres (no pool configured)"
+        )))
+    })
+}
+
 impl IntoResponse for WorkbenchHttpError {
     fn into_response(self) -> Response {
         match self {
@@ -673,11 +689,7 @@ pub async fn get_quota_status(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
 ) -> Result<Json<QuotaStatusResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "quota status requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "quota status")?;
     // Projected columns include the `usage_day` added by the TASK
     // 11.3 migration so the response reflects the post-rollover
     // state without the handler doing the math. CASE zeroing is
@@ -761,11 +773,7 @@ pub async fn list_billing_events(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Query(query): axum::extract::Query<BillingEventsQuery>,
 ) -> Result<Json<BillingEventsResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "billing events query requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "billing events query")?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let events = gadgetron_xaas::billing::events::query_billing_events(
         pool,
@@ -822,11 +830,7 @@ pub async fn list_users_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Query(query): axum::extract::Query<ListUsersQuery>,
 ) -> Result<Json<ListUsersResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "user listing requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "user listing")?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let users = gadgetron_xaas::identity::list_users(pool, ctx.tenant_id, limit)
         .await
@@ -844,11 +848,7 @@ pub async fn create_user_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<Json<gadgetron_xaas::identity::UserRow>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "user creation requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "user creation")?;
     let row = gadgetron_xaas::identity::create_user(
         pool,
         ctx.tenant_id,
@@ -869,11 +869,7 @@ pub async fn delete_user_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<DeleteUserResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "user deletion requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "user deletion")?;
     gadgetron_xaas::identity::delete_user(pool, ctx.tenant_id, user_id)
         .await
         .map_err(|e| {
@@ -922,11 +918,7 @@ pub async fn list_my_keys_handler(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
 ) -> Result<Json<ListKeysResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "key listing requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "key listing")?;
     let owner = gadgetron_xaas::identity_keys::caller_user_id(pool, ctx.api_key_id)
         .await
         .map_err(|e| {
@@ -949,11 +941,7 @@ pub async fn create_my_key_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Json(body): Json<CreateKeyRequest>,
 ) -> Result<Json<gadgetron_xaas::identity_keys::NewKeyResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "key creation requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "key creation")?;
     let kind = body.kind.as_deref().unwrap_or("live");
     if !matches!(kind, "live" | "test") {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
@@ -1005,11 +993,7 @@ pub async fn revoke_my_key_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(key_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<RevokeKeyResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "key revoke requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "key revoke")?;
     let owner = gadgetron_xaas::identity_keys::caller_user_id(pool, ctx.api_key_id)
         .await
         .map_err(|e| {
@@ -1071,9 +1055,7 @@ pub async fn list_teams_handler(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
 ) -> Result<Json<ListTeamsResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
-    })?;
+    let pool = require_pg_pool(&state, "teams")?;
     let teams = gadgetron_xaas::teams::list_teams(pool, ctx.tenant_id)
         .await
         .map_err(|e| {
@@ -1088,9 +1070,7 @@ pub async fn create_team_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Json(body): Json<CreateTeamRequest>,
 ) -> Result<Json<gadgetron_xaas::teams::TeamRow>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
-    })?;
+    let pool = require_pg_pool(&state, "teams")?;
     let row = gadgetron_xaas::teams::create_team(
         pool,
         ctx.tenant_id,
@@ -1109,9 +1089,7 @@ pub async fn delete_team_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(team_id): axum::extract::Path<String>,
 ) -> Result<Json<SimpleOkResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
-    })?;
+    let pool = require_pg_pool(&state, "teams")?;
     gadgetron_xaas::teams::delete_team(pool, ctx.tenant_id, &team_id)
         .await
         .map_err(|e| {
@@ -1125,9 +1103,7 @@ pub async fn list_team_members_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(team_id): axum::extract::Path<String>,
 ) -> Result<Json<ListMembersResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
-    })?;
+    let pool = require_pg_pool(&state, "teams")?;
     let members = gadgetron_xaas::teams::list_team_members(pool, ctx.tenant_id, &team_id)
         .await
         .map_err(|e| {
@@ -1143,9 +1119,7 @@ pub async fn add_team_member_handler(
     axum::extract::Path(team_id): axum::extract::Path<String>,
     Json(body): Json<AddMemberRequest>,
 ) -> Result<Json<gadgetron_xaas::teams::TeamMemberRow>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
-    })?;
+    let pool = require_pg_pool(&state, "teams")?;
     let row = gadgetron_xaas::teams::add_team_member(
         pool,
         ctx.tenant_id,
@@ -1166,9 +1140,7 @@ pub async fn remove_team_member_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path((team_id, user_id)): axum::extract::Path<(String, uuid::Uuid)>,
 ) -> Result<Json<SimpleOkResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config("teams require pg pool".into()))
-    })?;
+    let pool = require_pg_pool(&state, "teams")?;
     gadgetron_xaas::teams::remove_team_member(pool, ctx.tenant_id, &team_id, user_id)
         .await
         .map_err(|e| {
@@ -1192,11 +1164,7 @@ pub async fn get_usage_summary(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Query(query): axum::extract::Query<UsageSummaryQuery>,
 ) -> Result<Json<UsageSummaryResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "usage summary requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "usage summary")?;
     let window_hours = query.window_hours.unwrap_or(24).clamp(1, 168);
     let since = chrono::Utc::now() - chrono::Duration::hours(window_hours as i64);
     let tenant_id_text = ctx.tenant_id.to_string();
@@ -1333,11 +1301,7 @@ pub async fn list_audit_events(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Query(query): axum::extract::Query<AuditEventsQuery>,
 ) -> Result<Json<AuditEventsResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "audit event query requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "audit event query")?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let filter = gadgetron_xaas::audit::ActionAuditQueryFilter {
         tenant_id: ctx.tenant_id.to_string(),
@@ -1383,11 +1347,7 @@ pub async fn list_tool_audit_events(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Query(query): axum::extract::Query<ToolAuditEventsQuery>,
 ) -> Result<Json<ToolAuditEventsResponse>, WorkbenchHttpError> {
-    let pool = state.pg_pool.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "tool audit query requires Postgres (no pool configured)".into(),
-        ))
-    })?;
+    let pool = require_pg_pool(&state, "tool audit query")?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let filter = gadgetron_xaas::audit::ToolAuditQueryFilter {
         tenant_id: ctx.tenant_id.to_string(),
