@@ -70,6 +70,72 @@ Additional database sub-codes (`db_connection_failed`, `db_migration_failed`, `d
 
 Node sub-code `node_invalid_mig_profile` returns HTTP 400; all other node sub-codes return HTTP 500.
 
+### Knowledge error bodies (examples)
+
+All `knowledge_*` errors use the same OpenAI-shaped envelope shown above (`{"error": {"message", "type", "code"}}`). The `message` strings below are emitted verbatim by `GadgetronError::error_message()` in `crates/gadgetron-core/src/error.rs` — the `{plug}`, `{path}`, `{reason}` slots are interpolated at runtime from the failing `KnowledgeService` call. Clients can match either on `code` (stable) or on `type` (OpenAI taxonomy — `invalid_request_error` is user-recoverable; `server_error` is operator-recoverable).
+
+`knowledge_backend_not_registered` (HTTP 500, `server_error`) — operator misconfiguration, returned during startup or first use when `[knowledge]` references a plug id that no enabled bundle provides:
+
+```json
+{
+  "error": {
+    "message": "Knowledge backend \"pgvector\" is referenced in configuration but was not registered at startup. Check `[knowledge]` canonical_store / search_plugs / relation_plugs against the enabled bundles.",
+    "type": "server_error",
+    "code": "knowledge_backend_not_registered"
+  }
+}
+```
+
+`knowledge_backend_unavailable` (HTTP 503, `server_error`) — plug is registered but its backend is currently unreachable (pgvector pool exhausted, external daemon down). 503 carries the usual RFC 9110 §15.6.4 semantics: transient, callers may retry after a backoff; operators should inspect the backend's own health channel. Upstream stack traces are deliberately **not** echoed (Phase 2 STRIDE row 4):
+
+```json
+{
+  "error": {
+    "message": "Knowledge backend \"pgvector\" is currently unavailable. Check the backend's health / connectivity (pgvector pool, external runtime) and retry.",
+    "type": "server_error",
+    "code": "knowledge_backend_unavailable"
+  }
+}
+```
+
+`knowledge_document_not_found` (HTTP 404, `invalid_request_error`) — wiki path does not exist. Returned by `wiki.get`, `wiki.delete`, `wiki.rename`, and the workbench view loader when a referenced page is absent:
+
+```json
+{
+  "error": {
+    "message": "Knowledge document not found: notes/missing-page. Use `wiki.list` or `wiki.search` to discover existing paths.",
+    "type": "invalid_request_error",
+    "code": "knowledge_document_not_found"
+  }
+}
+```
+
+`knowledge_invalid_query` (HTTP 400, `invalid_request_error`) — query input to a wiki search gadget is malformed or empty. The `reason` slot carries the validator's explanation (e.g. `"query must not be empty"`, `"limit must be between 1 and 100"`):
+
+```json
+{
+  "error": {
+    "message": "Knowledge query is invalid: query must not be empty.",
+    "type": "invalid_request_error",
+    "code": "knowledge_invalid_query"
+  }
+}
+```
+
+`knowledge_derived_apply_failed` (HTTP 500, `server_error`) — emitted under `write_consistency = "await_derived"` when the canonical store write succeeded but a derived index/relation plug failed to re-project. The canonical wiki page is intact; rerun `gadgetron reindex` to reconcile:
+
+```json
+{
+  "error": {
+    "message": "Derived index / relation plug \"pgvector-embeddings\" failed to apply a write. The canonical store succeeded; rerun `gadgetron reindex` to recover.",
+    "type": "server_error",
+    "code": "knowledge_derived_apply_failed"
+  }
+}
+```
+
+All five bodies are emitted with the standard `x-request-id` header; include that UUID in any bug report. Streaming callers (`/v1/chat/completions` with `stream: true`) receive the same envelope serialized inside a single `data: {...}` SSE frame followed by `data: [DONE]`, matching OpenAI's SSE error convention.
+
 ---
 
 ## OpenAI-compatible endpoints

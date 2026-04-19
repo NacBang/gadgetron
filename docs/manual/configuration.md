@@ -441,9 +441,13 @@ wiki_max_page_bytes = 1048576
 ```toml
 [knowledge.search]
 searxng_url = "http://127.0.0.1:8888"
-timeout_secs = 10
-max_results = 10
+timeout_secs = 10    # 범위: [1, 60]
+max_results = 10     # 범위: [1, 100]
 ```
+
+- `searxng_url`: `http://` 또는 `https://` 스킴이어야 하며, 유효한 URL 이어야 합니다 (파싱 실패 시 startup error).
+- `timeout_secs`: SearXNG 요청 타임아웃. 범위 밖 값은 서버 시작 오류를 발생시킵니다.
+- `max_results`: 단일 검색 호출에서 반환할 최대 결과 수.
 
 이 블록이 없으면 `web.search` MCP 도구는 노출되지 않습니다.
 
