@@ -730,6 +730,7 @@ fn canonicalize_config_path_for_mcp(config_path: &std::path::Path) -> PathBuf {
 fn prepare_penny_router_registration(
     config_path: &std::path::Path,
     app_config: &AppConfig,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Result<Option<PennyRouterRegistration>> {
     if !config_path.exists() {
         return Ok(None);
@@ -740,8 +741,26 @@ fn prepare_penny_router_registration(
     };
 
     let agent_cfg = Arc::new(app_config.agent.clone());
-    let audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink> =
-        Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink);
+    // ISSUE 5 TASK 5.1: replace the long-standing Noop sink with a
+    // real `GadgetAuditEventWriter` + consumer task when Postgres is
+    // configured. Without a pool we fall back to Noop so `--no-db`
+    // and unit-test flows keep working identically. The writer side
+    // is fire-and-forget (bounded mpsc, drop-on-full), and the
+    // consumer task INSERTs into `tool_audit_events` row by row.
+    let audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink> = if let Some(pool) =
+        pg_pool
+    {
+        use gadgetron_xaas::audit::{run_gadget_audit_writer, GadgetAuditEventWriter};
+        let (writer, rx) = GadgetAuditEventWriter::new(4_096);
+        tokio::spawn(run_gadget_audit_writer(rx, pool));
+        tracing::info!(
+            target: "penny_audit",
+            "GadgetAuditEventWriter wired — Penny tool-call events will persist to tool_audit_events",
+        );
+        Arc::new(writer)
+    } else {
+        Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink)
+    };
     let session_store = Arc::new(gadgetron_penny::SessionStore::new(
         agent_cfg.session_ttl_secs,
         agent_cfg.session_store_max_entries,
@@ -1184,6 +1203,7 @@ fn init_tui_channel(tui_enabled: bool) -> Option<broadcast::Sender<WsMessage>> {
 fn build_provider_maps(
     config: &AppConfig,
     config_path: &std::path::Path,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Result<(
     SharedProviderMap,
     RouterProviderMap,
@@ -1204,7 +1224,7 @@ fn build_provider_maps(
         .collect();
 
     let penny_registry =
-        register_penny_if_configured(config_path, config, &mut providers_for_router);
+        register_penny_if_configured(config_path, config, &mut providers_for_router, pg_pool);
     Ok((providers_ss, providers_for_router, penny_registry))
 }
 
@@ -1476,7 +1496,7 @@ async fn init_serve_runtime(
     let (audit_writer, audit_handle) = init_audit_runtime();
     let tui_tx = init_tui_channel(tui_enabled);
     let (providers_ss, providers_for_router, penny_registry) =
-        build_provider_maps(config, config_path)?;
+        build_provider_maps(config, config_path, pg_pool.clone())?;
     let llm_router = build_llm_router(providers_for_router, config);
 
     // PSL-1c: Wire the P2B observability stack (knowledge service,
@@ -1805,13 +1825,14 @@ fn register_penny_if_configured(
     config_path: &std::path::Path,
     app_config: &AppConfig,
     providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Option<Arc<gadgetron_penny::GadgetRegistry>> {
     // We re-read the toml file to extract the `[knowledge]` section.
     // The main AppConfig load path doesn't include a `knowledge`
     // field — adding one would require cross-crate type sharing
     // (gadgetron-core ↔ gadgetron-knowledge) that's more churn than
     // a ~5 ms second file read.
-    let registration = match prepare_penny_router_registration(config_path, app_config) {
+    let registration = match prepare_penny_router_registration(config_path, app_config, pg_pool) {
         Ok(Some(registration)) => registration,
         Ok(None) => {
             // No [knowledge] section → penny not available.
