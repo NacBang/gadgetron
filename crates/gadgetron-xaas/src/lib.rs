@@ -5,4 +5,5 @@ pub mod error;
 pub mod identity;
 pub mod identity_keys;
 pub mod quota;
+pub mod sessions;
 pub mod teams;

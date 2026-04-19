@@ -1666,6 +1666,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7v.5 — web UI cookie-session login (ISSUE 15 TASK 15.1)
+# ---------------------------------------------------------------------------
+#
+# The bootstrap admin in the DEFAULT tenant is the only user with a
+# password. Exercise POST /auth/login → GET /auth/whoami (cookie) →
+# POST /auth/logout → GET /auth/whoami (expired). Negative: wrong
+# password returns 401.
+log "=== Gate 7v.5: cookie-session login / whoami / logout (ISSUE 15 TASK 15.1) ==="
+COOKIE_JAR="$ART_DIR/session-cookie.jar"
+rm -f "$COOKIE_JAR"
+
+LOGIN_BODY="$(jq -cn --arg email "harness-admin@example.com" \
+                      --arg pw "$GADGETRON_BOOTSTRAP_ADMIN_PASSWORD" \
+  '{email: $email, password: $pw}')"
+LOGIN_RESP="$(curl -fsS -c "$COOKIE_JAR" -X POST \
+  -H "Content-Type: application/json" \
+  -d "$LOGIN_BODY" \
+  "$GAD_BASE/api/v1/auth/login" 2>&1 || true)"
+LOGIN_SESSION_ID="$(echo "$LOGIN_RESP" | jq -r '.session_id // ""' 2>/dev/null)"
+LOGIN_USER_ID="$(echo "$LOGIN_RESP" | jq -r '.user_id // ""' 2>/dev/null)"
+if [ -n "$LOGIN_SESSION_ID" ] && [ -n "$LOGIN_USER_ID" ]; then
+  pass "POST /auth/login returned session (id=$LOGIN_SESSION_ID)"
+else
+  fail "/auth/login regressed" "$(echo "$LOGIN_RESP" | head -c 400)"
+fi
+
+# whoami via cookie
+WHOAMI_RESP="$(curl -fsS -b "$COOKIE_JAR" \
+  "$GAD_BASE/api/v1/auth/whoami" 2>&1 || true)"
+WHOAMI_USER_ID="$(echo "$WHOAMI_RESP" | jq -r '.user_id // ""' 2>/dev/null)"
+if [ "$WHOAMI_USER_ID" = "$LOGIN_USER_ID" ]; then
+  pass "GET /auth/whoami returns correct user from cookie"
+else
+  fail "/auth/whoami regressed — expected user_id=$LOGIN_USER_ID, got=$WHOAMI_USER_ID" \
+    "$(echo "$WHOAMI_RESP" | head -c 400)"
+fi
+
+# Invalid password → 401
+BAD_BODY="$(jq -cn --arg email "harness-admin@example.com" \
+  '{email: $email, password: "definitely-not-the-password"}')"
+BAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Content-Type: application/json" \
+  -d "$BAD_BODY" \
+  "$GAD_BASE/api/v1/auth/login" 2>&1 || true)"
+if [ "$BAD_CODE" = "401" ]; then
+  pass "invalid password → 401"
+else
+  fail "invalid password regressed — expected 401, got $BAD_CODE" ""
+fi
+
+# logout
+LOGOUT_RESP="$(curl -fsS -b "$COOKIE_JAR" -X POST \
+  "$GAD_BASE/api/v1/auth/logout" 2>&1 || true)"
+if echo "$LOGOUT_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+  pass "POST /auth/logout succeeded"
+else
+  fail "/auth/logout regressed" "$(echo "$LOGOUT_RESP" | head -c 400)"
+fi
+
+# whoami after logout → 401 (session revoked)
+POST_LOGOUT_CODE="$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  "$GAD_BASE/api/v1/auth/whoami" 2>&1 || true)"
+if [ "$POST_LOGOUT_CODE" = "401" ]; then
+  pass "/auth/whoami after logout → 401 (session revoked)"
+else
+  fail "/auth/whoami after logout regressed — expected 401, got $POST_LOGOUT_CODE" ""
+fi
+rm -f "$COOKIE_JAR"
+
+# ---------------------------------------------------------------------------
 # Gate 7q.1 — admin/reload-catalog happy path (ISSUE 8 TASK 8.2)
 # ---------------------------------------------------------------------------
 #

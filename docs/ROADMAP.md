@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.7** (post-ISSUE 14 close — tenant self-service: users + teams + CLI)
+**Current version: 0.5.8** (post-ISSUE 15 close — cookie-session login/logout/whoami API)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
@@ -311,6 +311,9 @@ Retry-After (11.1). Tenants introspect usage via /quota/status
   - TASK 14.5 ✅ teams + members CRUD — `/admin/teams/*` + tenant-boundary guards + CASCADE delete
   - TASK 14.7 ✅ CLI — `gadgetron {user,team} {create,list,delete}` targeting default tenant
   - TASK 14.6 (web UI session login) deferred to ISSUE 15 — out of this ISSUE's scope
+- **ISSUE 15 ✅ cookie-session login API** (v0.5.8, closed 2026-04-19)
+  - TASK 15.1 ✅ — `POST /api/v1/auth/login` (email/password → SHA-256-hashed session cookie), `POST /auth/logout`, `GET /auth/whoami`. argon2id verify; 24h TTL + idle `last_active_at`; HttpOnly + SameSite=Lax cookie (Secure via proxy). Harness gate 7v.5 (6 assertions: login, whoami, wrong-password 401, logout, whoami-after-logout 401).
+  - Web UI login FORM (React/Tailwind) + unified middleware (Bearer OR cookie) deferred to ISSUE 16.
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).
