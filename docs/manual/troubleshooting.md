@@ -772,6 +772,31 @@ If the reload 500s with a `config_error` that does NOT name a file path (just sa
 
 ---
 
+### "Which bundle is live?" — identifying the loaded catalog
+
+**What you want to know:** Someone edited `catalog.toml`, triggered a reload, and the workbench is now serving actions. Is the live catalog the edited one, the previous version, or the hardcoded `seed_p2b()` fallback?
+
+**How to check (HTTP path — returns JSON):** POST the reload endpoint with a Management-scoped key and inspect the response `bundle` + `source_path` fields. The endpoint is idempotent on `seed_p2b()` / unchanged TOML — calling it again only forces a re-parse + re-swap of an identical snapshot.
+
+```bash
+curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  http://localhost:8080/api/v1/web/workbench/admin/reload-catalog \
+  | jq '{source, source_path, bundle}'
+```
+
+Possible outputs and what each means:
+
+- `{"source": "seed_p2b", "source_path": null, "bundle": null}` — `[web] catalog_path` is NOT configured in `gadgetron.toml`. The live catalog is the hardcoded `seed_p2b()` fallback. No operator edit will ever change this until `catalog_path` is set (see [`configuration.md`](configuration.md#web)). **Note:** `jq '{...bundle}'` on an absent field renders `null`; the actual JSON omits the key via `skip_serializing_if = "Option::is_none"` — `jq '.bundle // null'` will likewise render `null`.
+- `{"source": "config_file", "source_path": "/etc/gadgetron/catalog.toml", "bundle": null}` — `catalog_path` is configured, but the loaded TOML has no top-level `[bundle]` table. The file is loading correctly but without an identity stamp. Adding `[bundle]\nid = "..."\nversion = "..."` to the TOML and triggering another reload will populate the `bundle` field.
+- `{"source": "config_file", "source_path": "/etc/gadgetron/catalog.toml", "bundle": {"id": "gadgetron-core", "version": "0.4.6"}}` — `catalog_path` is configured AND the TOML carries a `[bundle]` table. This is the canonical "I loaded the file I think I loaded, and it identifies itself as X@Y" state. Admin tooling should log both `source_path` and `bundle.version` alongside every reload.
+
+**How to check (SIGHUP path — no HTTP response):** `kill -HUP $(pidof gadgetron)` emits a `workbench.admin: descriptor catalog reloaded action_count=N view_count=N source="..."` line to stderr / `gadgetron.log` but does NOT include the `bundle` field in the log line (the trace is structured around `ReloadCatalogResponse` but the signal path discards the response body). To verify bundle identity after a SIGHUP reload, follow up with the HTTP call above — it's idempotent and will show the live `bundle` from the current snapshot.
+
+**Why the drift-test matters.** Until ISSUE 8 TASK 9.3 retires `seed_p2b()`, both sources ship: `bundles/gadgetron-core/bundle.toml` + the hardcoded seed. A drift test in the test suite asserts they produce the same action id set, so "load the bundle file" vs "fall back to seed_p2b" cannot silently diverge in what actions are exposed. If you're debugging a "missing action" issue in production with `catalog_path` pointing at the first-party bundle, the drift test is your sanity check — if `cargo test -p gadgetron-gateway` is green, the bundle file and seed_p2b have the same action ids.
+
+---
+
 ## Log interpretation
 
 **Log file location (demo flow):** `.gadgetron/demo/gadgetron.log` inside the repo root — set by `demo.sh` via `STATE_DIR=${REPO_ROOT}/.gadgetron/demo`, `LOG_FILE="${STATE_DIR}/gadgetron.log"` (see `demo.sh:5-14`). Use `./demo.sh logs` for the default 80-line tail or `./demo.sh logs -f` to follow in real time.

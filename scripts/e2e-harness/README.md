@@ -17,14 +17,19 @@ prove that the code path a real operator hits — auth → scope → handler
 
 Gates fire in execution order — each one is a hard pass/fail. The
 baseline was 53 PASS on `--quick --no-screenshot` after the #167
-refresh; sixteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
+refresh; nineteen PRs have landed since (#169 7k.2, #172 7n.2, #173 9c,
 #175 7h.1b, #176 7h.6, #177 11c, #179 11d, #182 11e, #188 7h.7 +
 7h.8, #194 7k.3 + 11f, #199 7k.4, #204 7i.2, #205 7i.3, #207 7i.4,
-#213 7q.1 + 7q.2, #214 no-new-gates — ISSUE 8 TASK 8.3 `Catalog
-Snapshot` bundling relies on the existing Gate 7q.1 cross-check
-(response `action_count` vs live `/workbench/actions` count) to
-prove both catalog and validators swapped in lockstep from a
-single snapshot generation — 64 → 83 PASS). Run
+#213 7q.1 + 7q.2, #214 / #216 / #217 / #219 no-new-gates — ISSUE 8
+TASKs 8.3 / 8.4 / 8.5 + ISSUE 9 TASK 9.1 all reuse the existing
+Gate 7q.1 cross-check (response `action_count` vs live
+`/workbench/actions` count) which implicitly proves both catalog
+and validators swapped in lockstep (TASK 8.3), the file-based
+source produced a valid snapshot (TASK 8.4 `catalog_path` fallback
+path), the HTTP-triggered reload landed (TASK 8.5 shares
+`perform_catalog_reload()` with SIGHUP path), and the optional
+`bundle` response field is additive-only (TASK 9.1 `skip_
+serializing_if`) — 64 → 83 PASS). Run
 `./scripts/e2e-harness/run.sh --quick --no-screenshot` locally to
 see the live count — the summary prints `PASS <N>` on exit:
 

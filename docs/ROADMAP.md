@@ -114,8 +114,8 @@ Goal: third-party bundles ship their own actions, providers, and UI
 panels without patching Gadgetron source. Hot-reload lets operators
 install/remove capabilities without restart. Substrate for the ecosystem.
 
-### In-flight ISSUE
-- **ISSUE 8 — DescriptorCatalog hot-reload** (in-flight; 0.4.1 / 0.4.2 / 0.4.3 ship TASK 8.1 / 8.2 / 8.3 respectively)
+### Functionally complete (pending EPIC 3 close)
+- **ISSUE 8 — DescriptorCatalog hot-reload** — all 5 TASKs shipped across 0.4.1 / 0.4.2 / 0.4.3 / 0.4.4 / 0.4.5 (PRs #211 / #213 / #214 / #216 / #217). Operator reload surface: HTTP `POST /admin/reload-catalog` OR POSIX `SIGHUP`, both sharing `perform_catalog_reload()`. File-based source via `[web] catalog_path` TOML. Parse-failure guarantee (running snapshot never replaced by bad edit). Validators bundled into `CatalogSnapshot` so reload never lands mismatched catalog+validators.
   - TASK 8.1 ✅ — `Arc<ArcSwap<DescriptorCatalog>>` plumbing (PR #211).
   - TASK 8.2 ✅ — reload endpoint (0.4.1 → 0.4.2). `POST
     /api/v1/web/workbench/admin/reload-catalog` (Management-scoped)
