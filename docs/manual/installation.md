@@ -163,13 +163,13 @@ gadgetron --help
 
 ## Headless build (no Web UI)
 
-The default Gadgetron build includes the Web UI (`gadgetron-web` crate compiled into the binary via the `web-ui` Cargo feature on `gadgetron-gateway`, on by default). To produce a headless binary for API-only deployments (or for build environments without Node.js), use the `headless` alias:
+The default Gadgetron build includes the Web UI (`gadgetron-web` crate compiled into the binary via the `web-ui` Cargo feature on `gadgetron-gateway`, on by default). To produce a headless binary for API-only deployments (or for build environments without Node.js), disable default features:
 
 ```bash
-cargo build --release --no-default-features --features headless -p gadgetron-cli
+cargo build --release --no-default-features -p gadgetron-cli
 ```
 
-This disables the `web-ui` feature on `gadgetron-gateway` transitively and skips the `gadgetron-web` crate's `build.rs` entirely (no `npm` invocation required at build time).
+This turns off `gadgetron-cli`'s `default = ["web-ui"]`, which in turn disables the `web-ui` feature on `gadgetron-gateway` transitively and skips the `gadgetron-web` crate's `build.rs` entirely (no `npm` invocation required at build time). `gadgetron-cli` does not define a standalone `headless` feature — `--no-default-features` alone is the correct invocation.
 
 **Verify**:
 
@@ -188,7 +188,7 @@ The `/web/*` subtree is not registered and returns the generic 404 — no indica
 | Node.js | 20.19.0 (pinned via `crates/gadgetron-web/web/.nvmrc`) | `nvm install 20.19.0` / `brew install node@20` |
 | npm | bundled with Node 20 (npm 10+) | — |
 
-If `npm` is not on PATH when building the default profile and you do NOT want the Web UI, set `GADGETRON_SKIP_WEB_BUILD=1` to embed a fallback `index.html` that displays "Gadgetron Web UI unavailable" — or use the `headless` alias above for a clean build. The canonical local path remains `./demo.sh build` / `start`; `start` auto-rebuilds the release binary when tracked source files are newer.
+If `npm` is not on PATH when building the default profile and you do NOT want the Web UI, set `GADGETRON_SKIP_WEB_BUILD=1` to embed a fallback `index.html` that displays "Gadgetron Web UI unavailable" — or use `--no-default-features` above for a clean build. The canonical local path remains `./demo.sh build` / `start`; `start` auto-rebuilds the release binary when tracked source files are newer.
 
 Related: `docs/manual/web.md` (Web UI setup), `docs/design/phase2/03-gadgetron-web.md §20` (feature flag topology).
 
