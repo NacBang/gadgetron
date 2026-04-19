@@ -107,15 +107,17 @@ crates/gadgetron-xaas/
     │   ├── config.rs                # QuotaConfig (RPM/TPM/concurrent_max)
     │   ├── enforcer.rs              # QuotaEnforcer (pre-check/post-record)
     │   └── bucket.rs                # TokenBucket (RPM + TPM refill)
-    ├── audit/                       # [P1]
-    │   ├── entry.rs                 # AuditEntry struct
-    │   └── writer.rs                # AuditWriter (mpsc channel -> batch insert)
+    ├── audit/                       # [P1] chat-side + [P2B] direct-action side
+    │   ├── entry.rs                 # AuditEntry struct (chat audit)
+    │   ├── writer.rs                # AuditWriter (mpsc channel -> batch insert, chat audit)
+    │   └── action_event.rs          # [P2B] ActionAuditEventWriter + ActionAuditRow + query_action_audit_events (direct-action audit, ISSUE 3 / 0.2.6 / PR #188) — core trait is `gadgetron_core::audit::ActionAuditSink`
     ├── db/
     │   └── migrations/              # sqlx PostgreSQL migrations
     │       ├── 20260411000001_tenants.sql
     │       ├── 20260411000002_api_keys.sql
     │       ├── 20260411000003_quotas.sql
-    │       └── 20260411000004_audit_log.sql
+    │       ├── 20260411000004_audit_log.sql          # chat audit (P1)
+    │       └── 20260419000001_action_audit_events.sql # direct-action audit (P2B / ISSUE 3 / PR #188)
     │
     ├── billing/                     # [P2] — 추가 예정 모듈
     │   ├── ledger.rs                # LedgerEntry (i64 cents)
