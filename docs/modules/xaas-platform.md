@@ -473,6 +473,71 @@ CREATE TABLE quotas (
 - Monthly soft limit (warning email + grace period)
 - Model-level override (특정 고가 모델 제한)
 
+### 5.6 EPIC 4 ISSUE 11 enforcement stack — landed on trunk today
+
+Trunk 에는 §5.2–5.5 에서 설명한 P1 token-bucket 설계 위에 EPIC 4 ISSUE 11 이 3 개의 새 `QuotaEnforcer` 구현 + 1 개 composite wrapper 를 쌓았다. startup 시 composition chain 은:
+
+```text
+┌─ gateway handler (chat completion 경로) ─────────────────────────────────┐
+│                                                                          │
+│   RateLimitedQuotaEnforcer (composite, TASK 11.2 / PR #231 / v0.5.2)    │
+│     ├─ step 0: TokenBucketRateLimiter::consume(tenant_id, 1)             │
+│     │            (rate check — fail-fast, no snapshot query on reject)   │
+│     │            매 requests_per_minute 에 refill, burst 최대 burst 토큰 │
+│     │            reject 시 → GadgetronError::QuotaExceeded → HTTP 429    │
+│     │            (TASK 11.1 Retry-After: 60 + retry_after_seconds: 60)   │
+│     │                                                                    │
+│     └─ step 1: 내부 QuotaEnforcer::check_pre 위임                        │
+│                  ↓                                                       │
+│                 CLI init_serve_runtime 가 pg_pool 유무로 선택 ↓         │
+│                                                                          │
+│   ┌─────────────────────────────────┬─────────────────────────────────┐ │
+│   │ PgQuotaEnforcer                 │ InMemoryQuotaEnforcer (P1)      │ │
+│   │ (TASK 11.3 / PR #232 / v0.5.3)  │                                 │ │
+│   │                                 │                                 │ │
+│   │ pg_pool.is_some() 일 때 선택    │ pg_pool 없을 때 fallback       │ │
+│   │ check_pre: moka-cached          │ check_pre: moka-cached          │ │
+│   │   QuotaSnapshot 에서 비용 체크  │   QuotaSnapshot (§5.2 동일)     │ │
+│   │ record_post: 한 번의 UPDATE     │ record_post: 인메모리 token     │ │
+│   │   쿼리가 daily_used_cents +     │   mark-used, DB 는 건드리지     │ │
+│   │   monthly_used_cents 를 CASE    │   않음 (P1 original 동작)       │ │
+│   │   expression 으로 rollover      │                                 │ │
+│   │   (daily UTC midnight, monthly  │                                 │ │
+│   │   first-of-month — background  │                                 │ │
+│   │   job 없음, 첫 post-boundary    │                                 │ │
+│   │   요청에서 rollover)            │                                 │ │
+│   │ 실패 시 fire-and-forget —       │                                 │ │
+│   │   tracing::error 만 로그,       │                                 │ │
+│   │   request 는 이미 성공          │                                 │ │
+│   └─────────────────────────────────┴─────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why rate-first composition.** TASK 11.2 가 check_pre 에서 rate 체크를 cost 체크보다 먼저 실행하도록 설계된 이유: 한 악성 client 가 quota 를 의도적으로 초과시키려고 rapid-fire retry 를 해도 DB snapshot lookup 비용 (캐시 miss 시 ~5ms) 을 지불하지 않고 token-bucket 만으로 빠르게 거절할 수 있다. Cost 체크가 먼저였다면 매 거절마다 Postgres 왕복이 발생해 bad actor 가 서버를 소비할 수 있다.
+
+**Why CASE-expression rollover.** TASK 11.3 의 rollover 는 매 request 에서 `usage_day = CURRENT_DATE` 를 비교해 하루/한 달 경계가 넘었으면 누적값을 reset 한다. Background job (cron / scheduled task) 없이 "lazy rollover" 로 구현했기 때문에: (1) 추가 인프라 없음, (2) 시계 skew 문제 없음 (DB 의 CURRENT_DATE 가 single source of truth), (3) tenant 가 activity 없는 기간 동안 아무 DB write 가 없으므로 idle 비용 0. Trade-off: 오퍼레이터가 "이 tenant 의 today 사용량" 를 쿼리할 때 마지막 request 이후 경계가 넘어갔으면 stale 값을 볼 수 있음 — 하지만 그건 report 쿼리 쪽에서 `WHERE usage_day = CURRENT_DATE` 로 필터하면 해결된다 (partial index 가 그 쿼리를 지원).
+
+**Config**:
+
+```toml
+[quota_rate_limit]                        # TASK 11.2 opt-in (default off)
+requests_per_minute = 120                 # 0 = disabled (limiter는 no-op)
+burst = 120                                # 0 = requests_per_minute (매칭 default)
+```
+
+**PostgreSQL schema — `quota_configs` 확장** (migration `20260420000001_quota_usage_day.sql`):
+
+```sql
+ALTER TABLE quota_configs
+    ADD COLUMN usage_day DATE NOT NULL DEFAULT CURRENT_DATE;
+
+CREATE INDEX quota_configs_usage_day_idx
+    ON quota_configs (usage_day)
+    WHERE usage_day >= CURRENT_DATE - INTERVAL '31 days';
+```
+
+기존 row 는 DEFAULT 로 CURRENT_DATE 를 얻어, 첫 post-migration request 에서 spuriously monthly usage 가 zero 되지 않는다. Partial index 는 operator 의 "최근 31일 지출" 리포트를 위한 것 — full index 가 아니라서 오래된 row 를 index 에 포함시키는 오버헤드를 피함.
+
 ---
 
 ## 6. 감사 로깅 `[P1]`
