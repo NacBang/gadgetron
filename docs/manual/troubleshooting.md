@@ -145,6 +145,58 @@ If none of the above pins the issue, capture upstream traffic under `RUST_LOG=ga
 
 ---
 
+## `RUST_LOG` cheat sheet
+
+Gadgetron uses `tracing` with filter rules parsed by [`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) from the `RUST_LOG` env var. The format is `module=level,module=level,...` (commas between rules, `=` between target and level). Targets are the strings declared at each call site via `tracing::<level>!(target: "name", …)` — see `installation.md §7.1` for the full list on trunk.
+
+**Default** (`RUST_LOG` unset or `info`): every call site logs `info` and above. Practical but noisy for some targets at normal request volume.
+
+### Symptom → recommended filter
+
+| Scenario | `RUST_LOG` |
+|---|---|
+| First request to a newly-configured provider fails | `gadgetron=info,gadgetron_provider=debug` |
+| Chat returns wrong `model` id or routes to unexpected provider | `gadgetron_router=debug,gadgetron_provider=debug` |
+| Streaming chunks arrive empty / SSE terminates early | `gadgetron_provider=debug,gadgetron_gateway=debug` |
+| Penny subprocess hangs or returns nothing | `penny_subprocess=debug,penny_stream=debug,penny_session=debug` |
+| Penny wiki tool silently fails | `llm_wiki_store=debug,wiki_audit=debug,wiki_frontmatter=debug` |
+| `web.search` tool times out or returns empty | `penny_stream=debug,wiki_search=debug` |
+| Knowledge semantic / pgvector issues (`/v1/models` missing `penny`, reindex failing) | `knowledge_config=debug,knowledge_service=debug,knowledge_semantic=debug` |
+| Config file rejected at startup | `gadgetron_config=debug,agent_config=debug,config_migration=debug` |
+| Chat audit rows missing from `audit_log` | `gadgetron_audit=debug` |
+| Activity feed (`/events/ws`) silent | `gadgetron_gateway=debug` (activity capture logs live here) |
+| Cookie-session login 401s | `gadgetron_xaas=debug,gadgetron_gateway=debug` |
+| Migration stuck or rerunning | `sqlx=info` (plus `gadgetron=info`) |
+| Deprecation warnings pre-upgrade audit | `cli_deprecation=warn,config_migration=warn` |
+
+Combine multiple scopes with commas. `RUST_LOG=info,gadgetron_provider=debug,gadgetron_router=debug` keeps the default `info` everywhere else and bumps only the two provider-debugging targets to `debug`.
+
+### Production-safe defaults
+
+Running `debug` on hot-path targets (`gadgetron_audit`, `gadgetron_provider`, `penny_stream`) at typical request volume costs real disk IO + promtail CPU. Recommended prod defaults:
+
+```
+RUST_LOG=info,sqlx=warn,hyper=warn,reqwest=warn,h2=warn
+```
+
+- `sqlx=warn` suppresses the per-query `DEBUG` stream that fires once per `SELECT`/`INSERT`.
+- `hyper`/`reqwest`/`h2` are upstream HTTP stacks that log at `DEBUG` per request — noisy at scale.
+- `gadgetron*` targets stay at `info` so chat audit + config-reload + key-revocation events still land.
+
+For *narrow* prod debugging (one target noisy for one operator investigation), set a temporary scope like `RUST_LOG=info,gadgetron_provider=debug` only on the node where you're investigating — journal mass-capture at `debug` against a busy gateway blows past typical 50 MB/minute promtail budgets.
+
+### Filter at the shipper instead
+
+If you can't afford the verbose level on the gateway itself but want it in the log backend on-demand, scrape everything at `info` and use the Loki query filter `{target="gadgetron_provider"} |~ "error|timeout"` or equivalent. This keeps the gateway steady-state cheap while letting operators pull deeper context from already-captured logs.
+
+### What NOT to do
+
+- **`RUST_LOG=debug` or `RUST_LOG=trace`** without a target scope — broadcasts every crate in the workspace (including `tokio`, `hyper`, `axum` internals). At 100 req/min on a 2-core box this can saturate `journald` backpressure inside a minute.
+- **`RUST_LOG=error`** — silently drops 401 / 403 / 429 events that live at `WARN` in `gadgetron_audit`. Operators lose the ability to detect abuse patterns.
+- **Changing `RUST_LOG` mid-request** — the filter is parsed at startup; a systemd `Environment=` change requires `systemctl restart gadgetron` (the §6.1 in-place upgrade recipe is the simplest way; for a hot reconfigure, see the deferred observability ISSUE track).
+
+---
+
 ## Server startup errors
 
 ### "GADGETRON_DATABASE_URL is not set"
