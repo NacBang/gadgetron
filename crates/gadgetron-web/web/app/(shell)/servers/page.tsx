@@ -158,6 +158,92 @@ function ProgressBar({
 
 type AuthMode = "key_path" | "key_paste" | "password_bootstrap";
 
+type StepStatus = "pending" | "running" | "ok" | "failed" | "skipped";
+
+interface ProgressStep {
+  key: string;
+  label: string;
+  /** Expected wall-clock in ms. Client uses this to advance the
+   * animated cursor; the final server response still overrides. */
+  etaMs: number;
+}
+
+const STEPS_KEY_PATH: ProgressStep[] = [
+  { key: "verify_key", label: "Verifying SSH key", etaMs: 2000 },
+  { key: "save_inventory", label: "Saving to inventory", etaMs: 200 },
+];
+
+const STEPS_KEY_PASTE: ProgressStep[] = [
+  { key: "write_key", label: "Writing private key (0600)", etaMs: 100 },
+  { key: "verify_key", label: "Verifying SSH key", etaMs: 2000 },
+  { key: "save_inventory", label: "Saving to inventory", etaMs: 200 },
+];
+
+const STEPS_PW_BOOTSTRAP: ProgressStep[] = [
+  { key: "keygen", label: "Generating ed25519 keypair", etaMs: 500 },
+  { key: "authorize", label: "Pushing public key to authorized_keys", etaMs: 2500 },
+  { key: "sudoers", label: "Installing /etc/sudoers.d/gadgetron-monitor", etaMs: 3000 },
+  { key: "apt_base", label: "apt-get install lm-sensors smartmontools ipmitool", etaMs: 25000 },
+  { key: "detect_gpu", label: "Detecting NVIDIA GPU", etaMs: 1000 },
+  { key: "dcgm", label: "Installing DCGM (if GPU present)", etaMs: 45000 },
+  { key: "verify_key", label: "Verifying key-only login", etaMs: 3000 },
+  { key: "save_inventory", label: "Saving to inventory", etaMs: 200 },
+];
+
+function stepsFor(mode: AuthMode): ProgressStep[] {
+  if (mode === "key_path") return STEPS_KEY_PATH;
+  if (mode === "key_paste") return STEPS_KEY_PASTE;
+  return STEPS_PW_BOOTSTRAP;
+}
+
+function StepRow({
+  step,
+  status,
+  elapsed,
+}: {
+  step: ProgressStep;
+  status: StepStatus;
+  elapsed: number | null;
+}) {
+  const glyph =
+    status === "ok"
+      ? "✓"
+      : status === "failed"
+        ? "✕"
+        : status === "running"
+          ? "◐"
+          : status === "skipped"
+            ? "·"
+            : "○";
+  const tone =
+    status === "ok"
+      ? "text-emerald-400"
+      : status === "failed"
+        ? "text-red-400"
+        : status === "running"
+          ? "text-amber-400 animate-pulse"
+          : status === "skipped"
+            ? "text-zinc-600"
+            : "text-zinc-700";
+  return (
+    <li
+      data-testid={`bootstrap-step-${step.key}`}
+      data-status={status}
+      className="flex items-center gap-2 py-0.5 text-[11px]"
+    >
+      <span className={`w-4 text-center font-mono ${tone}`}>{glyph}</span>
+      <span className={status === "ok" || status === "failed" ? "text-zinc-300" : "text-zinc-500"}>
+        {step.label}
+      </span>
+      {elapsed != null && (
+        <span className="font-mono text-[10px] text-zinc-600">
+          {(elapsed / 1000).toFixed(1)}s
+        </span>
+      )}
+    </li>
+  );
+}
+
 function AddHostForm({
   apiKey,
   onAdded,
@@ -174,6 +260,11 @@ function AddHostForm({
   const [sshPw, setSshPw] = useState("");
   const [sudoPw, setSudoPw] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [progress, setProgress] = useState<Array<{ status: StepStatus; elapsed: number | null }>>(
+    [],
+  );
+
+  const steps = stepsFor(mode);
 
   const submit = async () => {
     if (!host.trim() || !user.trim()) {
@@ -193,16 +284,74 @@ function AddHostForm({
       args.sudo_password = sudoPw;
     }
     setSubmitting(true);
+
+    // Client-side progress animation. Advances through the predefined
+    // step list at the ETA cadence; real server response at the end
+    // finalizes the checklist (remaining steps → ok, skipped DCGM →
+    // skipped, failed step → failed with error detail below).
+    const now = () => performance.now();
+    const startedAt = now();
+    const stepStartedAt: number[] = steps.map(() => 0);
+    setProgress(steps.map(() => ({ status: "pending", elapsed: null })));
+    let cursor = 0;
+    const advance = () => {
+      if (cursor >= steps.length) return;
+      stepStartedAt[cursor] = now();
+      setProgress((prev) => {
+        const next = prev.slice();
+        next[cursor] = { status: "running", elapsed: null };
+        return next;
+      });
+    };
+    advance();
+    const timers: number[] = [];
+    let cumulative = 0;
+    for (let i = 0; i < steps.length - 1; i++) {
+      cumulative += steps[i].etaMs;
+      const idx = i;
+      const t = window.setTimeout(() => {
+        setProgress((prev) => {
+          const next = prev.slice();
+          next[idx] = { status: "ok", elapsed: now() - stepStartedAt[idx] };
+          return next;
+        });
+        cursor = idx + 1;
+        advance();
+      }, cumulative);
+      timers.push(t);
+    }
+
     try {
       const resp = await invokeAction(apiKey, "server-add", args);
       const payload = unwrapPayload(resp) as {
         id: string;
-        bootstrap: { installed_pkgs?: string[]; gpu_detected?: boolean; dcgm_enabled?: boolean };
+        bootstrap: {
+          installed_pkgs?: string[];
+          skipped_pkgs?: string[];
+          gpu_detected?: boolean;
+          dcgm_enabled?: boolean;
+          notes?: string[];
+        };
       };
+      // Cancel remaining timers and mark everything done.
+      timers.forEach((t) => clearTimeout(t));
+      setProgress((prev) => {
+        const totalElapsed = now() - startedAt;
+        return steps.map((s, i) => {
+          if (s.key === "dcgm" && !payload.bootstrap.gpu_detected) {
+            return { status: "skipped", elapsed: null };
+          }
+          const prevEntry = prev[i];
+          const elapsed = prevEntry?.elapsed ?? totalElapsed / steps.length;
+          return { status: "ok", elapsed };
+        });
+      });
       toast.success(`Registered ${host} → ${payload.id.slice(0, 8)}`, {
         description:
           (payload.bootstrap.installed_pkgs?.join(", ") || "no pkg install") +
-          (payload.bootstrap.gpu_detected ? ` · GPU(${payload.bootstrap.dcgm_enabled ? "DCGM" : "nvidia-smi"})` : ""),
+          (payload.bootstrap.gpu_detected
+            ? ` · GPU(${payload.bootstrap.dcgm_enabled ? "DCGM" : "nvidia-smi"})`
+            : ""),
       });
       setHost("");
       setUser("");
@@ -211,6 +360,17 @@ function AddHostForm({
       setKeyPaste("");
       onAdded();
     } catch (e) {
+      timers.forEach((t) => clearTimeout(t));
+      // Mark the currently-running step failed; leave earlier ok, later
+      // pending so the operator can see how far we got.
+      setProgress((prev) => {
+        const next = prev.slice();
+        const current = next.findIndex((p) => p.status === "running");
+        if (current >= 0) {
+          next[current] = { status: "failed", elapsed: now() - stepStartedAt[current] };
+        }
+        return next;
+      });
       toast.error("server.add failed", { description: (e as Error).message });
     } finally {
       setSubmitting(false);
@@ -312,6 +472,24 @@ function AddHostForm({
           {submitting ? "Registering…" : "Register"}
         </Button>
       </div>
+      {(submitting || progress.some((p) => p.status !== "pending")) && (
+        <div
+          data-testid="bootstrap-progress"
+          className="rounded border border-zinc-800 bg-zinc-900/50 p-3"
+        >
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-zinc-500">
+            Bootstrap progress ({mode})
+          </div>
+          <ol className="flex flex-col">
+            {steps.map((s, i) => {
+              const entry = progress[i] ?? { status: "pending" as StepStatus, elapsed: null };
+              return (
+                <StepRow key={s.key} step={s} status={entry.status} elapsed={entry.elapsed} />
+              );
+            })}
+          </ol>
+        </div>
+      )}
     </section>
   );
 }
