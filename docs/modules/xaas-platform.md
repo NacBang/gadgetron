@@ -632,7 +632,7 @@ CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
 
 ```rust
 // PgQuotaEnforcer::record_post (after quota_configs UPDATE).
-// Struct-based API (v0.5.16 refactor) — typed constructor encodes
+// Struct-based API (PR #279 refactor, post-v0.5.15) — typed constructor encodes
 // kind + default cost invariant. ISSUE 24 will flip chat to
 // `.with_actor_user(Some(token.user_id))` once QuotaToken carries
 // user_id. Tool + action paths already use `.with_actor_user(..)`

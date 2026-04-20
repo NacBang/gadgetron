@@ -282,7 +282,7 @@ Response 200:
 #### 시그니처 및 호출 지점
 
 ```rust
-// 현재 시그니처 (struct-based after the 0.5.16 refactor — §3 참조):
+// 현재 시그니처 (struct-based after the PR #279 refactor — §3 참조):
 pub async fn insert_billing_event(
     pool: &PgPool,
     event: BillingEventInsert,
