@@ -1656,10 +1656,10 @@ curl -fsS \
 ```
 
 - `id` is `BIGSERIAL` — strictly increasing per-row, safe as a tie-breaker cursor when `created_at` collides.
-- `event_kind` is one of `"chat" | "tool" | "action"` (CHECK constraint at the DB layer; new kinds require a migration — TASK 12.2 will add `tool` + `action` emitters). TASK 12.1 only emits `"chat"` from `PgQuotaEnforcer::record_post`.
-- `source_event_id` is `null` today; TASK 12.2 threads the originating chat-audit UUID so invoice queries can join against `action_audit_events` / `tool_audit_events` for line-item explanations. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted yet.
-- `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents`; integer cents end-to-end per ADR-D-8.
-- `model` / `provider` are `null` today for the same reason as `source_event_id` — TASK 12.2 widens the `QuotaEnforcer::record_post` trait signature to thread these three fields in one wire change.
+- `event_kind` is one of `"chat" | "tool" | "action"` (CHECK constraint at the DB layer; new kinds require a migration). All three emitters now ship — chat from `PgQuotaEnforcer::record_post` (TASK 12.1), tool from `/v1/tools/{name}/invoke` success path (TASK 12.2), action from workbench direct-action + approved-action success terminals (TASK 12.2).
+- `source_event_id`: currently populated **only on `action` rows** (carries the `audit_event_id` from `action_audit_events`) so invoice materialization can join ledger → action audit for line-item explanations. `chat` + `tool` rows leave it `null` today — `chat` because the enforcer emits before an audit UUID is generated, `tool` because the tool-dispatch path hasn't been threaded yet. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted.
+- `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents` for `chat` rows (integer cents end-to-end per ADR-D-8). `tool` + `action` rows carry `cost_cents = 0` — emission exists for audit-trail completeness, monetary cost is only assigned at the chat terminal today. Per-action / per-tool pricing attribution lands with TASKs 12.3 (invoice materialization) / ISSUE 13 (HuggingFace catalog) — both DEFERRED as commercialization layer.
+- `model` / `provider`: **repurposed by `event_kind`**. For `chat` rows both fields are currently `null` (threading chat model + provider onto the enforcer surface is a future follow-up). For `tool` rows `model` carries the gadget name invoked (e.g., `"wiki.search"`) and `provider` stays `null`. For `action` rows `model` carries the workbench action id (e.g., `"knowledge-search"`) and `provider` stays `null`. Operator queries that want "which gadget generated this tool-event" read `model` on kind=tool rows.
 
 **Errors:**
 
@@ -1683,6 +1683,102 @@ TASK 12.4 will land the reconciliation pass (scan `quota_configs` vs `SUM(cost_c
 **Harness coverage.** Gate 7k.6 runs a non-streaming chat completion, waits briefly, then polls `/admin/billing/events?limit=5` and asserts `.events[] | select(.event_kind == "chat") | length >= 1` — proving the `record_post` → `insert_billing_event` write path actually persists under the harness's default `PgQuotaEnforcer` configuration.
 
 **Design reference.** Full STRIDE threat model, SQL schema, trait signatures, and reconciliation plan for TASK 12.4: [`docs/design/xaas/phase2-billing.md`](../design/xaas/phase2-billing.md).
+
+#### Billing query operator recipes
+
+**Paginate through a tenant's full ledger** (reconciliation / export use case):
+
+```sh
+MGMT_KEY="gad_live_your_management_key"
+GAD="http://localhost:8080"
+
+# Cold start — newest 500 rows
+BATCH=$(curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/billing/events?limit=500")
+echo "$BATCH" | jq '.events'
+
+# Subsequent pages — use the OLDEST created_at in the batch as the exclusive
+# upper bound. Since the endpoint filters on `created_at > since` (strictly
+# greater), we iterate backwards by querying with `since=<second-oldest>`
+# WARNING: the current endpoint only supports `since` (lower bound). Full
+# backwards pagination needs a `before` (upper bound) parameter — TASK 12.4
+# follow-up. For now, operators who need historical snapshot dumps should
+# SQL directly against `billing_events` ORDER BY created_at ASC.
+```
+
+**Forward-tail pagination** (watch new events land — e.g., a dashboard updating every 30s):
+
+```sh
+# Persist the last-seen created_at between polls
+STATE_FILE=/tmp/billing-cursor
+[ -f "$STATE_FILE" ] && LAST_SEEN=$(cat "$STATE_FILE") || LAST_SEEN="2026-01-01T00:00:00Z"
+
+RESP=$(curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/billing/events?since=$LAST_SEEN&limit=100")
+
+# Update cursor to the NEWEST created_at in the response
+NEW_LAST=$(echo "$RESP" | jq -r '.events[0].created_at // empty')
+[ -n "$NEW_LAST" ] && echo "$NEW_LAST" > "$STATE_FILE"
+
+echo "$RESP" | jq '.events | map(select(.event_kind == "chat")) | length'
+```
+
+**Audit ↔ ledger join for `action` rows** (line-item explanation for workbench actions):
+
+```sh
+TENANT_ID="018fa1a2-..."
+
+# 1. Pull recent action rows from billing
+ACTION_ROWS=$(curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/billing/events?limit=50" \
+  | jq '[.events[] | select(.event_kind == "action")]')
+
+# 2. For each action row, source_event_id is the audit_log UUID.
+#    Cross-ref via /audit/events (same tenant, OpenAiCompat scope works):
+for AUDIT_ID in $(echo "$ACTION_ROWS" | jq -r '.[].source_event_id'); do
+  curl -fsS \
+    -H "Authorization: Bearer $MGMT_KEY" \
+    "$GAD/api/v1/web/workbench/audit/events?action_id=knowledge-search" \
+    | jq --arg id "$AUDIT_ID" '.events[] | select(.request_id == $id)'
+done
+```
+
+**Per-kind aggregation** (daily rollup — SQL directly, faster than HTTP for bulk):
+
+```sql
+-- Monthly spend by event kind for a tenant
+SELECT
+  date_trunc('month', created_at) AS month,
+  event_kind,
+  COUNT(*) AS events,
+  SUM(cost_cents) AS cents,
+  SUM(cost_cents) / 100.0 AS dollars
+FROM billing_events
+WHERE tenant_id = 'your-tenant-uuid'
+  AND created_at >= date_trunc('month', now()) - interval '3 months'
+GROUP BY 1, 2
+ORDER BY 1 DESC, 2;
+
+-- Counter-vs-ledger divergence check (sanity test for TASK 12.4 reconciliation):
+SELECT
+  qc.tenant_id,
+  qc.daily_used_cents AS counter_cents,
+  COALESCE(SUM(be.cost_cents), 0) AS ledger_cents,
+  qc.daily_used_cents - COALESCE(SUM(be.cost_cents), 0) AS drift_cents
+FROM quota_configs qc
+LEFT JOIN billing_events be
+  ON be.tenant_id = qc.tenant_id
+ AND be.created_at >= qc.usage_day::timestamp
+ AND be.created_at < qc.usage_day::timestamp + interval '1 day'
+ AND be.event_kind = 'chat'
+WHERE qc.usage_day = CURRENT_DATE
+GROUP BY qc.tenant_id, qc.daily_used_cents;
+```
+
+Non-zero `drift_cents` is expected when the ledger INSERT failed but the counter UPDATE succeeded (see "Reconciliation model" above). TASK 12.4 will land an operator-visible drift alert for positive drift above a threshold.
 
 ---
 
