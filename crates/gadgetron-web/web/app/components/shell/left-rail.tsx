@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   MessageSquare,
   BookOpen,
@@ -10,7 +11,6 @@ import {
   Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,9 +28,8 @@ interface NavItem {
   label: string;
   icon: React.ReactNode;
   functional: boolean;
-  /** When present, clicking the tab navigates to this route instead of
-   * toggling internal state. The wiki tab uses `/wiki` so the standalone
-   * /web/wiki page is reachable from the main shell (ISSUE A.2). */
+  /** Route this tab navigates to. Undefined = stub / P2B-only tab that
+   * shows a "not yet wired" notice instead of navigating. */
   href?: string;
 }
 
@@ -40,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
     label: "Chat",
     icon: <MessageSquare className="size-4" aria-hidden />,
     functional: true,
+    href: "/",
   },
   {
     id: "wiki",
@@ -69,25 +69,34 @@ const NAV_ITEMS: NavItem[] = [
   },
 ];
 
+// Next.js basePath is `/web`, so `usePathname()` returns `"/"` for the
+// chat page, `"/wiki"` for the wiki, `"/dashboard"` for the dashboard.
+// Map pathname → tab id.
+function tabFromPathname(pathname: string | null): LeftRailTab {
+  if (!pathname) return "chat";
+  if (pathname.startsWith("/wiki")) return "wiki";
+  if (pathname.startsWith("/dashboard")) return "dashboard";
+  return "chat";
+}
+
 // ---------------------------------------------------------------------------
 // LeftRail
 // ---------------------------------------------------------------------------
 
 interface LeftRailProps {
-  activeTab: LeftRailTab;
-  onTabChange: (tab: LeftRailTab) => void;
   collapsed: boolean;
   onCollapse: (collapsed: boolean) => void;
   width?: number;
 }
 
 export function LeftRail({
-  activeTab,
-  onTabChange,
   collapsed,
   onCollapse,
   width = 240,
 }: LeftRailProps) {
+  const pathname = usePathname();
+  const activeTab = tabFromPathname(pathname);
+
   return (
     <aside
       data-testid="left-rail"
@@ -114,22 +123,21 @@ export function LeftRail({
       {/* Navigation */}
       <nav className="flex flex-col gap-1 p-2">
         {NAV_ITEMS.map((item) => {
+          const isActive = activeTab === item.id;
           const buttonClass = cn(
             "flex items-center gap-2.5 rounded px-2 py-2 text-xs font-medium transition-colors",
-            activeTab === item.id
+            isActive
               ? "bg-zinc-800 text-zinc-100"
               : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300",
             !item.functional && "cursor-default opacity-50",
           );
-          // `href` present → route link (navigates to a standalone page).
-          // No href + functional → in-shell tab toggle.
-          // No href + not functional → stub button (no-op, styled disabled).
           if (item.href && item.functional) {
             return (
               <Link
                 key={item.id}
                 href={item.href}
                 role="tab"
+                aria-selected={isActive}
                 aria-label={item.label}
                 data-testid={`nav-tab-${item.id}`}
                 className={buttonClass}
@@ -145,11 +153,11 @@ export function LeftRail({
               key={item.id}
               type="button"
               role="tab"
-              aria-selected={activeTab === item.id}
+              aria-selected={isActive}
               aria-label={item.label}
               data-testid={`nav-tab-${item.id}`}
               onClick={() => {
-                if (item.functional) onTabChange(item.id);
+                /* stub tab — no route yet */
               }}
               title={
                 !item.functional
@@ -165,11 +173,11 @@ export function LeftRail({
         })}
       </nav>
 
-      {/* P2B notice for non-functional tabs when collapsed */}
+      {/* P2B stub notice — shown only when a stub tab would be selected.
+       * Today no stub tab is reachable via URL, so this is dormant; left
+       * in for when `/knowledge` / `/bundles` land. */}
       {!collapsed &&
-        activeTab !== "chat" &&
-        activeTab !== "wiki" &&
-        activeTab !== "dashboard" && (
+        (activeTab === "knowledge" || activeTab === "bundles") && (
           <div
             className="mx-2 mt-4 rounded border border-zinc-800 bg-zinc-900/50 p-3"
             data-testid="p2b-not-wired"

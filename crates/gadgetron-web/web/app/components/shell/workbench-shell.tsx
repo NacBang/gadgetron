@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { StatusStrip, useGatewayHealth } from "./status-strip";
-import { LeftRail, type LeftRailTab } from "./left-rail";
+import { LeftRail } from "./left-rail";
 import { EvidencePane } from "./evidence-pane";
 import { FailurePanel } from "./failure-panel";
 import { useWorkbenchPrefs } from "./use-workbench-prefs";
@@ -42,84 +42,108 @@ function OfflineBanner() {
 // ---------------------------------------------------------------------------
 // WorkbenchShell
 //
-// 3-panel layout:
+// Shared chrome for every post-auth /web route. Rendered once by the
+// `(shell)/layout.tsx` route-group layout so Chat / Wiki / Dashboard
+// share the same `StatusStrip` + `LeftRail` + `EvidencePane` and the
+// React tree survives route transitions (no Assistant runtime
+// unmount, no chat-state reset — ROADMAP ISSUE 29 TASK 29.1).
+//
 //   ┌─────────────────────────────────────────────────────┐
-//   │ StatusStrip (gateway health, active bundles)        │
+//   │ StatusStrip (gateway health, active plugs, session) │
 //   ├───────┬──────────────────────────┬──────────────────┤
-//   │ Left  │ Chat column (children)   │ EvidencePane     │
-//   │ rail  │                          │ (stub P2A)       │
+//   │ Left  │ page header (slot)       │ EvidencePane     │
+//   │ rail  │ page body (children)     │ (or `rightRail`) │
 //   └───────┴──────────────────────────┴──────────────────┘
+//
+// Pages supply a `header` slot for page-level titles / actions. The
+// right rail defaults to the shared `EvidencePane`; pages can override
+// via `rightRail` (e.g. a dashboard live-feed or a wiki search-hits
+// panel when those fold into the shell in future work).
 // ---------------------------------------------------------------------------
 
 interface WorkbenchShellProps {
-  children: React.ReactNode;
+  children: ReactNode;
+  /** Page-level header rendered inside the chat column, above the body.
+   * Supplies the page title + page-scoped actions (e.g. "Wiki Workbench
+   * · N pages + New/Refresh"). Shared affordances (plug status, sign-out)
+   * live in the `StatusStrip` and stay outside the slot. */
+  header?: ReactNode;
+  /** Replace the default `EvidencePane` with a page-specific right rail.
+   * Pass `null` to hide the right area entirely (pre-auth state). */
+  rightRail?: ReactNode | null;
+  /** Pre-auth rendering: the page body is the login form. The left rail
+   * and evidence pane are hidden so an unauthenticated visitor does not
+   * see product surface labels they cannot use (ROADMAP TASK 28.2 /
+   * 28.4). */
+  preAuth?: boolean;
 }
 
-export function WorkbenchShell({ children }: WorkbenchShellProps) {
+export function WorkbenchShell({
+  children,
+  header,
+  rightRail,
+  preAuth = false,
+}: WorkbenchShellProps) {
   const [prefs, updatePrefs] = useWorkbenchPrefs();
   const health = useGatewayHealth();
-  const [activeTab, setActiveTab] = useState<LeftRailTab>("chat");
-  const [retryCount, setRetryCount] = useState(0);
+  const [, setRetryCount] = useState(0);
 
-  const showFailureOverlay =
-    health.status === "blocked" || health.status === "degraded";
-
-  // Only show the overlay for hard failures (non-2xx); degraded still allows chat
   const showHardFailureOverlay = health.status === "blocked";
 
   const handleRetry = () => {
     setRetryCount((n) => n + 1);
-    // Triggering retryCount change causes useGatewayHealth to re-poll on mount,
-    // but since it already polls by interval, just refreshing the page is also
-    // a valid recovery path. The retry button is a UX affordance.
     window.location.reload();
   };
+
+  // Default right rail: the shared EvidencePane. `rightRail === null`
+  // means the caller explicitly opted out (pre-auth). `rightRail`
+  // passed as a node means "use my custom right rail". Undefined =
+  // fall back to the default EvidencePane.
+  const resolvedRightRail =
+    rightRail === null
+      ? null
+      : rightRail ?? (
+          <EvidencePane
+            open={prefs.evidencePaneOpen}
+            onToggle={(v) => updatePrefs({ evidencePaneOpen: v })}
+            width={prefs.evidencePaneWidth}
+          />
+        );
 
   return (
     <div
       className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100"
       data-testid="workbench-shell"
     >
-      {/* Offline banner — above status strip */}
       <OfflineBanner />
-
-      {/* Status strip */}
       <StatusStrip />
 
       {/* 3-panel body */}
       <div className="flex flex-1 overflow-hidden" data-testid="workbench-body">
-        {/* Left rail */}
-        <LeftRail
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          collapsed={prefs.leftRailCollapsed}
-          onCollapse={(v) => updatePrefs({ leftRailCollapsed: v })}
-          width={prefs.leftRailWidth}
-        />
+        {!preAuth && (
+          <LeftRail
+            collapsed={prefs.leftRailCollapsed}
+            onCollapse={(v) => updatePrefs({ leftRailCollapsed: v })}
+            width={prefs.leftRailWidth}
+          />
+        )}
 
-        {/* Center: Chat column (children = existing assistant-ui ThreadPrimitive) */}
         <main
           className={cn(
             "flex flex-1 flex-col overflow-hidden min-w-0",
-            // Show degraded border when degraded but not fully blocked
             health.status === "degraded" &&
               "border-l border-r border-amber-900/20",
           )}
           data-testid="chat-column"
-          aria-label="Chat"
+          aria-label="Main content"
         >
+          {header}
           {children}
         </main>
 
-        {/* Right: Evidence pane */}
-        <EvidencePane
-          open={prefs.evidencePaneOpen}
-          onToggle={(v) => updatePrefs({ evidencePaneOpen: v })}
-          width={prefs.evidencePaneWidth}
-        />
+        {!preAuth && resolvedRightRail}
       </div>
 
-      {/* Hard failure overlay — full-screen when gateway completely unreachable */}
       {showHardFailureOverlay && (
         <FailurePanel
           status={health.status}
