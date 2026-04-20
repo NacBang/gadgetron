@@ -749,6 +749,122 @@ Rollback is always a binary swap paired with (sometimes) a schema restore. The d
 - **Catalog-only reload** (`[web].catalog_path` / `[web].bundles_dir` pointee changes): `POST /api/v1/web/workbench/admin/reload-catalog` or `kill -HUP <pid>` — see [api-reference.md §POST /admin/reload-catalog](api-reference.md). No process restart needed.
 - **Provider-table changes** (new `[providers.x]` block): full restart. Live-add of a provider is NOT supported on trunk.
 
+### 7. Observability integration
+
+Gadgetron does not expose a Prometheus `/metrics` scrape endpoint on trunk — metrics-style monitoring is assembled from the structured tracing log stream plus a handful of HTTP endpoints. The sections below cover what the binary emits, how to ship it somewhere queryable, and what to alert on.
+
+#### 7.1 What the binary emits natively
+
+**Tracing targets** (structured JSON logs when `RUST_LOG` is set to non-default and a JSON subscriber is installed; plain text otherwise). Every call site uses `tracing::<level>!(target: "<name>", ...)` — filter by target rather than by file path. Current targets on trunk (verified via `grep -r 'target: "' crates/`):
+
+| Target | What it emits |
+|---|---|
+| `gadgetron_audit` | Chat audit events (one line per completed `/v1/chat/completions`). `RUST_LOG=gadgetron_audit=info` is the minimum to observe chat traffic. |
+| `gadgetron_config` | Startup config summary + config reload events. Errors here are fatal during boot. |
+| `config_migration` | v0.1.x `[penny]` → `[agent.brain]` per-field deprecation warnings. See also `cli_deprecation`. |
+| `penny_audit` | Penny tool-call audit events (the `ToolCallCompleted` sink — persists to `tool_audit_events` when the pool is wired). |
+| `penny_subprocess` | Claude Code subprocess lifecycle (spawn / exit / timeout / signal). |
+| `penny_stream` | Penny streaming event transformation. Noisy at `debug`; keep at `warn` in prod. |
+| `penny_session` | Claude Code session resumption + token budget. |
+| `penny_shared_context` / `penny_shared_context.inject` | Pre-chat context injection (wiki seed pages, agent instructions). |
+| `knowledge_service`, `knowledge_semantic`, `knowledge_config` | Knowledge layer reads, pgvector index state, config validation. |
+| `llm_wiki_store`, `wiki_search`, `wiki_audit`, `wiki_frontmatter`, `wiki_seed` | Wiki-specific subsystems. |
+| `agent_config` | `[agent]` / `[agent.brain]` validation at startup + reload. |
+| `cli_deprecation` | CLI verb deprecations (`gadgetron mcp serve` → `gadget serve`). Safe to route to WARN-level alerts. |
+| `home`, `penny_home`, `node` | Home-directory creation + node-registry events. |
+
+**HTTP surface**:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /health` | none | Unconditional liveness (200 on live process). |
+| `GET /ready` | none | PostgreSQL pool health (200 healthy / 503 unhealthy). Use for load-balancer readiness probes. |
+| `GET /api/v1/web/workbench/usage/summary` | `OpenAiCompat` | 24h tenant-scoped chat roll-up — counts, tokens, costs, latency percentiles. The closest Gadgetron has to a "metrics" endpoint today; scrape it on a cron. |
+| `GET /api/v1/web/workbench/events/ws` | `OpenAiCompat` (query-token fallback for browsers) | WebSocket live activity stream — `ChatCompleted` + `ToolCallCompleted` frames as they publish. |
+| `GET /api/v1/web/workbench/admin/audit/log` | `Management` | Tenant-pinned audit reads, filterable by `actor_user_id` + `since` + `limit`. |
+| `GET /api/v1/web/workbench/admin/billing/events` | `Management` | Tenant-pinned billing ledger reads (chat + tool + action). |
+
+**Postgres-side observability** (query directly from monitoring):
+
+```sql
+-- Applied migrations (upgrade success signal)
+SELECT version, description, installed_on, success
+FROM _sqlx_migrations ORDER BY version DESC LIMIT 5;
+
+-- Recent auth failures (401 rate)
+SELECT COUNT(*) FROM audit_log
+WHERE status != 'ok' AND timestamp > NOW() - INTERVAL '5 minutes';
+
+-- Per-tenant 24h chat counts (sanity vs /usage/summary)
+SELECT tenant_id, COUNT(*) AS chats, SUM(cost_cents) AS cents
+FROM audit_log WHERE timestamp > NOW() - INTERVAL '24 hours'
+GROUP BY tenant_id ORDER BY chats DESC LIMIT 10;
+```
+
+#### 7.2 Shipping logs
+
+Gadgetron writes to stdout/stderr. Route the stream to your aggregator of choice — the systemd unit in §1 already captures both into the journal.
+
+**journald → Loki (recommended for small / single-cluster deployments)**:
+
+```yaml
+# promtail.yml — scrape the systemd journal and tag gadgetron lines
+scrape_configs:
+  - job_name: journal
+    journal:
+      json: false
+      max_age: 12h
+      labels:
+        job: systemd-journal
+    relabel_configs:
+      - source_labels: ['__journal__systemd_unit']
+        target_label: unit
+    pipeline_stages:
+      - match:
+          selector: '{unit="gadgetron.service"}'
+          stages:
+            - regex:
+                expression: '^(?P<ts>[0-9T:.Z-]+)\s+(?P<level>[A-Z]+)\s+(?P<target>[a-z_.]+):\s+(?P<msg>.*)$'
+            - labels:
+                level:
+                  target:
+```
+
+Sample LogQL queries after that ships:
+
+```logql
+# Chat audit rows per minute (should trend with your request volume)
+sum by (tenant_id) (rate({unit="gadgetron.service",target="gadgetron_audit"}[1m]))
+
+# 401 surge detector (>10 failures in 5m)
+sum(count_over_time({unit="gadgetron.service"} |= "401" [5m]))
+
+# Deprecation warnings (flag before a minor-bump release)
+{unit="gadgetron.service",target="cli_deprecation"}
+```
+
+**stdout → Fluentd / ELK / CloudWatch**: any log-forwarder that reads systemd journal or stdout works; Gadgetron's output is plain text unless the operator configures a `tracing_subscriber::fmt::json()` layer (feature not exposed via TOML on trunk — requires a code tweak to `crates/gadgetron-cli/src/telemetry.rs`).
+
+#### 7.3 Alerting signals
+
+Seven signals that catch most real production failures. Each row gives the signal, a sample rule, and the fix path.
+
+| Signal | Rule (LogQL-ish) | Typical cause / fix |
+|---|---|---|
+| Process died | `/health` returns connection-refused for 30s | systemd would restart per `Restart=on-failure`; page if restart loop detected. |
+| Database unhealthy | `/ready` returns 503 for 60s | pgvector container exited, connection-pool exhaustion, network partition. `psql "$GADGETRON_DATABASE_URL" -c '\l'` from the gadgetron host to confirm. |
+| Migration failure | `_sqlx_migrations.success = false` OR last row `installed_on` is older than the deploy | sqlx rolls back failed migrations — re-deploy or hand-apply per §6.4. |
+| 401 surge | `rate({target="gadgetron_audit",status="error"}[5m]) > baseline×10` | Brute-force attempt or client regression — cross-check `api_keys.revoked_at` for legitimate keys, `audit_log.api_key_id = nil` for anonymous 401s. |
+| 429 pressure | `/admin/billing/events` showing bursts near `quota_configs.daily_used_cents` limits | Quota too tight for observed load — tune `[quota_rate_limit]` per `configuration.md §Production tuning recipes`. |
+| Penny subprocess stuck | `{target="penny_subprocess"}` entries without a matching completion for > `request_timeout_secs` | Claude Code subprocess hung — check `ps -ef \| grep claude`, verify `[agent].request_timeout_secs` isn't higher than the reverse-proxy read timeout. |
+| Disk growth | `audit_log` / `billing_events` / `tool_audit_events` row count growing with no pruning cron | Apply `auth.md §Audit log retention and tenant lifecycle` pruning recipe. |
+
+#### 7.4 What's not provided
+
+- **No Prometheus `/metrics` endpoint** — if you need pull-based scrape, run an adapter (e.g. `mtail` over the journal) or submit a PR to add one. Pull-based metrics are tracked as a P2C observability ISSUE, not scheduled.
+- **No pre-packaged Grafana dashboard** — the LogQL/SQL recipes above are the primitives; operators assemble panels to taste.
+- **No built-in trace export (OTel)** — `tracing` is captured but not forwarded to OTLP today. Adding an `opentelemetry-otlp` exporter in `telemetry.rs` is a one-commit addition for operators who need distributed traces.
+
 ---
 
 ## Troubleshooting install issues
