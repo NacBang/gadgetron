@@ -1662,6 +1662,96 @@ User self-service API keys. **OpenAiCompat** scope (any authenticated caller). T
 
 Revoke a key owned by the caller. Idempotent (re-revoke returns 200).
 
+#### Operator recipes
+
+**Provision a new member user** (Management-scope caller):
+
+```sh
+MANAGEMENT_KEY="gad_live_your_admin_key"
+
+# 1. Create the user
+curl -sS -X POST http://localhost:8080/api/v1/web/workbench/admin/users \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "email": "alice@example.com",
+    "display_name": "Alice",
+    "role": "member",
+    "password": "alice-initial-password"
+  }' | jq .
+# Response: {"user":{"id":"<uuid>","tenant_id":"...","email":"alice@example.com",...}}
+
+# 2. Alice can now login via the cookie-session API or mint her own key.
+```
+
+**Alice mints her own API key** (OpenAiCompat-scope self-service). She logs in via cookie session first, then POSTs to `/keys` using the cookie:
+
+```sh
+# Alice logs in (captures the cookie in a jar)
+curl -sS -c /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"alice-initial-password"}' \
+  http://localhost:8080/api/v1/auth/login
+
+# Alice creates a key using her cookie (v0.5.9+ unified middleware accepts cookie on /keys)
+curl -sS -b /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alice-laptop","kind":"live"}' \
+  http://localhost:8080/api/v1/web/workbench/keys | jq .
+# Response: {"key":{"id":"<uuid>","label":"alice-laptop","kind":"live",...},
+#           "raw_key":"gad_live_..."}   # shown ONCE — save it now
+```
+
+**Rotate a key** (revoke-old-after-new pattern — avoids a window with no live key):
+
+```sh
+OLD_KEY_ID="<uuid>"
+
+# 1. Create the replacement
+curl -sS -b /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alice-laptop-v2"}' \
+  http://localhost:8080/api/v1/web/workbench/keys | jq .raw_key
+# Save the new raw key. Update the client.
+
+# 2. Verify the client works with the new key. Then revoke the old one:
+curl -sS -b /tmp/alice.jar -X DELETE \
+  http://localhost:8080/api/v1/web/workbench/keys/$OLD_KEY_ID
+# 200 on first call, 200 on re-run (idempotent).
+```
+
+**Team membership** (Management-scope caller):
+
+```sh
+# Create a team (id must be kebab-case, 'admins' reserved)
+curl -sS -X POST http://localhost:8080/api/v1/web/workbench/admin/teams \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"platform","display_name":"Platform Team"}'
+
+# Add Alice to the team
+curl -sS -X POST \
+  http://localhost:8080/api/v1/web/workbench/admin/teams/platform/members \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"$ALICE_UUID\",\"role\":\"member\"}"
+
+# Remove Alice from the team (does NOT delete the user)
+curl -sS -X DELETE \
+  http://localhost:8080/api/v1/web/workbench/admin/teams/platform/members/$ALICE_UUID \
+  -H "Authorization: Bearer $MANAGEMENT_KEY"
+```
+
+**Common error shapes**:
+
+| Status | `code` | Trigger |
+|--------|--------|---------|
+| 400 | `validation_error` | kebab-case regex fail on team id, `'admins'` reserved-name violation, `service` role with password, email format invalid |
+| 400 | `scope_narrowing_violation` | POST /keys requested scope exceeds caller's own scopes |
+| 403 | `scope_required` | Management-only endpoint called with OpenAiCompat-only key |
+| 409 | `single_admin_guard` | DELETE /admin/users on the last remaining active admin in the tenant |
+| 4xx | `cross_tenant_rejected` | POST /admin/teams/{id}/members with a user_id from a different tenant |
+
 ---
 
 ### Cookie-session endpoints (ISSUE 15 — v0.5.8)
