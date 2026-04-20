@@ -653,3 +653,103 @@ COMMIT;
 ```
 
 The nullable/`NOT NULL` split is a known schema asymmetry — it pre-dates the formal erasure contract and hasn't been reconciled on trunk. File an ISSUE against EPIC 4 if your deployment needs uniform nullability; the current pragmatic path is DELETE for the three `NOT NULL` tables. If the operator needs a cryptographic shred instead of a delete, add a hashing step before the UPDATE — but Gadgetron does not ship a helper for it on trunk.
+
+---
+
+## Production security hardening
+
+`troubleshooting.md §"failed to run database migrations"` suggests `GRANT ALL PRIVILEGES` as a quick unblock — that's a **development** shortcut. Production deployments should run with least-privilege PostgreSQL roles + rotated secrets. This section collects the hardening recipes scattered across `architecture/platform-architecture.md` §Role grants, `installation.md §1 systemd unit`, and `auth.md §Cookie-session auth` into one actionable checklist.
+
+### Pre-launch checklist
+
+| # | Item | Rationale / reference |
+|---|---|---|
+| 1 | TLS terminates at the reverse proxy, not the gateway | `installation.md §2 Nginx` / §3 Caddy. Gateway does NOT emit `Secure` on session cookies; TLS is an operator responsibility. |
+| 2 | `CorsLayer::permissive()` is NOT mounted | D-6 — deliberately absent. Cross-origin browser access is blocked unless you add CORS at the reverse proxy for specific origins. |
+| 3 | `GADGETRON_DATABASE_URL` is populated via a secret manager (env var, Vault, KMS), never hardcoded in `gadgetron.toml` | The `Secret<String>` wrapper masks it in tracing logs, but the config file on disk is not encrypted by Gadgetron. |
+| 4 | `[auth.bootstrap]` password env var is set for first boot, then **removed** once the admin user is created | The bootstrap path fires exactly once (when `users` is empty) — re-running it is a no-op, but leaving the env var wired leaks the password into process env for no benefit. |
+| 5 | Minimum PostgreSQL privileges applied (see §Production PG role below) | Production ≠ development. `GRANT ALL` on a live tenant database breaks audit-trail integrity guarantees. |
+| 6 | API key rotation cadence defined (recommend 90 days for `Management`-scope, 30 for service keys) | `api_keys.revoked_at` supports the revoke-new-after-old pattern per `api-reference.md §Rotate a key`. |
+| 7 | Admin `[auth.bootstrap]` password rotated before first production use | The initial value was likely shared via config or env during provisioning — rotate to a secret the bootstrapping operator never saw. |
+| 8 | `audit_log` retention policy defined (see §Audit log retention and tenant lifecycle above) | Unbounded growth is a liability. Pick a cutoff (90d / 365d / 7y depending on compliance) and schedule pruning. |
+| 9 | Observability alerts wired for the 7 signals in `installation.md §7.3` | Most notably: migration failure + 401 surge + `audit_log` / `billing_events` disk-growth. |
+| 10 | `gadgetron doctor` + `curl /health` + `curl /ready` all green from an external probe, not just localhost | Per `installation.md §4 Health probe pattern` — what reaches the probe is what's actually serving. |
+
+Run through this list before first production cutover. Store the signed-off version (with dates + operator initials) in your ops repo as the go-live gate.
+
+### Production PostgreSQL role
+
+Gadgetron does not ship the role SQL — your DBA / IaC pipeline must apply it. The minimum-privilege shape, derived from the 16 tables on trunk (`crates/gadgetron-xaas/migrations/*.sql`):
+
+```sql
+-- 1. Runtime role (what `gadgetron serve` connects as)
+CREATE ROLE gadgetron_app LOGIN PASSWORD :'GADGETRON_DB_PASSWORD';
+
+-- 2. Full CRUD on mutable business tables
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    tenants, api_keys, quota_configs,
+    users, teams, team_members, user_sessions,
+    wiki_pages, wiki_chunks,
+    knowledge_candidates, candidate_decisions
+TO gadgetron_app;
+
+-- 3. INSERT-only on append-only audit + ledger tables.
+--    audit_log enforces compliance append-only at the DB layer — an attacker
+--    who compromises the application process cannot rewrite history through
+--    this connection even if application code is bypassed.
+GRANT SELECT, INSERT ON
+    audit_log, billing_events,
+    tool_audit_events, action_audit_events,
+    activity_events
+TO gadgetron_app;
+
+REVOKE UPDATE, DELETE, TRUNCATE ON
+    audit_log, billing_events,
+    tool_audit_events, action_audit_events,
+    activity_events
+FROM gadgetron_app;
+
+-- 4. Connect + schema usage on the target database
+GRANT CONNECT ON DATABASE gadgetron TO gadgetron_app;
+GRANT USAGE ON SCHEMA public TO gadgetron_app;
+
+-- 5. Future-table inheritance — new tables from future migrations get the
+--    same CRUD default; tighten on append-only tables in that migration's
+--    companion GRANT block.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO gadgetron_app;
+```
+
+**Separate migration role** (runs only at deploy time):
+
+```sql
+CREATE ROLE gadgetron_migrator LOGIN PASSWORD :'GADGETRON_MIGRATOR_PASSWORD';
+GRANT CONNECT ON DATABASE gadgetron TO gadgetron_migrator;
+GRANT CREATE ON SCHEMA public TO gadgetron_migrator;
+-- CREATE / DROP / ALTER privs on existing tables are implicit via table ownership;
+-- easier: make gadgetron_migrator the owner of all tables after initial creation.
+ALTER SCHEMA public OWNER TO gadgetron_migrator;
+```
+
+On trunk, `gadgetron serve` itself runs `sqlx::migrate!` on startup (`crates/gadgetron-cli/src/main.rs:761/799/1428`) — so `gadgetron_app` also needs CREATE on the schema if you only maintain one role. The two-role split is cleaner: override the connection string to `gadgetron_migrator` for one-shot migration runs (e.g. a systemd `ExecStartPre` that runs a migration-only binary, or a separate deploy step), then `gadgetron serve` uses `gadgetron_app`. This is deployment-specific — pick the shape your operations allows.
+
+### Secret + key rotation cadence
+
+| Secret | Rotation interval | How |
+|---|---|---|
+| `GADGETRON_DATABASE_URL` password | 180 days | `ALTER ROLE gadgetron_app WITH PASSWORD ...` + restart gadgetron (brief outage) |
+| Admin API keys (Management scope) | 90 days | `api-reference.md §Rotate a key` (create-new-then-revoke pattern — no outage) |
+| Member API keys (OpenAiCompat) | 180 days | Same rotate pattern; for many keys, run in batches |
+| Service role keys (programmatic callers) | 30 days | Aggressive rotation recommended since these often land in CI secrets; same rotate pattern |
+| Admin user passwords | 90 days | `gadgetron user` subcommand does not ship a password-reset flow yet — operators currently update `users.password_hash` directly with a freshly argon2id'd digest (see `crates/gadgetron-xaas/src/auth.rs` for the argon2 parameters; any argon2id library with the same params round-trips). A proper CLI reset is tracked as a post-v1.0.0 DX item. |
+| Cookie session secret | Automatic — `user_sessions.cookie_hash` rotates per login, no global secret to manage | — |
+
+Record each rotation in your ops runbook. The `audit_log` captures the resulting key-usage pattern change — unusual gaps in a rotated key's traffic are a signal that a downstream client didn't get the memo.
+
+### Common hardening mistakes (flagged by real incident reports)
+
+- **Leaving `[auth.bootstrap]` enabled after first boot.** The bootstrap is a one-shot. Once the first admin exists, the config block is inert — but keeping the env var wired means the password is readable by anyone with `/proc/<pid>/environ` access. Remove the env var after go-live.
+- **Granting `ALL PRIVILEGES` to `gadgetron_app`.** Loses the append-only guarantee on `audit_log` + `billing_events`. A compromised process can rewrite history.
+- **Exposing `/health` or `/ready` to the internet instead of the LB only.** These probes return stack details on failure — keep them on the loopback / internal network.
+- **Using the same API key across services.** Audit attribution lumps all traffic under one key. Mint per-service keys (`label` field in POST /keys helps) so you can revoke granularly without collateral damage.
+- **Forgetting the reverse-proxy WebSocket upgrade directive** (Nginx only — see `installation.md §2`). `/api/v1/web/workbench/events/ws` fails silently without it, which masks the dashboard going dark.
