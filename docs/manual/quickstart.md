@@ -129,7 +129,7 @@ The server must be running for migrations and key management.
 ./target/release/gadgetron key create --tenant-id <tenant_uuid>
 ```
 
-The second command prints the raw `gad_live_...` key once. Use that Bearer token for API and Web UI access.
+The second command prints the raw `gad_live_...` key once to **stderr** (SEC-M7: prevents accidental capture in scripts that pipe stdout). Use that Bearer token for API and Web UI access. For the full CLI surface (scopes, revocation, user / team management, reindex, doctor) see [cli.md](cli.md).
 
 ---
 
