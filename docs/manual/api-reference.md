@@ -1661,7 +1661,7 @@ curl -fsS \
 - `source_event_id`: currently populated **only on `action` rows** (carries the `audit_event_id` from `action_audit_events`) so invoice materialization can join ledger → action audit for line-item explanations. `chat` + `tool` rows leave it `null` today — `chat` because the enforcer emits before an audit UUID is generated, `tool` because the tool-dispatch path hasn't been threaded yet. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted.
 - `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents` for `chat` rows (integer cents end-to-end per ADR-D-8). `tool` + `action` rows carry `cost_cents = 0` — emission exists for audit-trail completeness, monetary cost is only assigned at the chat terminal today. Per-action / per-tool pricing attribution lands with TASKs 12.3 (invoice materialization) / ISSUE 13 (HuggingFace catalog) — both DEFERRED as commercialization layer.
 - `model` / `provider`: **repurposed by `event_kind`**. For `chat` rows both fields are currently `null` (threading chat model + provider onto the enforcer surface is a future follow-up). For `tool` rows `model` carries the gadget name invoked (e.g., `"wiki.search"`) and `provider` stays `null`. For `action` rows `model` carries the workbench action id (e.g., `"knowledge-search"`) and `provider` stays `null`. Operator queries that want "which gadget generated this tool-event" read `model` on kind=tool rows.
-- `actor_user_id` (ISSUE 23 / PR #271 / v0.5.15): nullable UUID, populated on `tool` + `action` rows from the invoking `TenantContext.actor_user_id` (which flows from `ValidatedKey.user_id` per ISSUE 17). `chat` rows currently leave it `null` — the enforcer emit-path hasn't been widened to carry user_id yet; ISSUE 24 will thread user_id through `QuotaToken` + `QuotaEnforcer` trait. Legacy tool/action traffic predating PR #271 also surfaces `null`. Index `(actor_user_id, created_at DESC)` supports per-user spend-report queries without a cross-table join through audit. FK intentionally skipped (heterogeneous callers; best-effort telemetry); `LEFT JOIN users u ON u.id = be.actor_user_id` at read time.
+- `actor_user_id` (ISSUE 23 / PR #271 / v0.5.15 + ISSUE 24 / PR #289 / v0.5.16): nullable UUID, populated on all three kinds end-to-end with the real user UUID. **chat** flows through `QuotaToken.user_id` (ISSUE 24) into `PgQuotaEnforcer::record_post`; **tool** flows through `TenantContext.actor_user_id` (ISSUE 17/23); **action** flows through `AuthenticatedContext.real_user_id` (ISSUE 24). Harness Gate 7k.6b-identity pins `COUNT(DISTINCT actor_user_id) = 1` for chat + tool + action emitted by the same request — confirms all three converge on the same UUID rather than each emitting its own placeholder. Legacy tool/action traffic predating PR #271 and chat/action traffic predating PR #289 still surfaces `null`. The column remains nullable because pre-ISSUE-24 rows exist and because harness modes without a wired `TenantContext` (bench fixtures) still write `None`. Index `(actor_user_id, created_at DESC)` supports per-user spend-report queries without a cross-table join through audit. FK intentionally skipped (heterogeneous callers; best-effort telemetry); `LEFT JOIN users u ON u.id = be.actor_user_id` at read time.
 
 **Errors:**
 
@@ -1748,7 +1748,7 @@ for AUDIT_ID in $(echo "$ACTION_ROWS" | jq -r '.[].source_event_id'); do
 done
 ```
 
-**Per-user spend report** (ISSUE 23 / PR #271 / v0.5.15 — `actor_user_id` column). Covers tool + action usage per-user today; chat rows will populate once ISSUE 24 widens `QuotaToken`:
+**Per-user spend report** (ISSUE 23 column / PR #271 + ISSUE 24 chat/action populate / PR #289 / v0.5.16). Covers chat + tool + action per-user end-to-end. Legacy pre-PR-#289 chat/action rows still carry `actor_user_id = NULL`; filter with `WHERE actor_user_id IS NOT NULL` to exclude them, or `LEFT JOIN` + `COALESCE` if you need historical context:
 
 ```sql
 -- Monthly tool/action events by user for a tenant
@@ -1778,7 +1778,7 @@ GROUP BY event_kind, model, day
 ORDER BY day DESC, events DESC;
 ```
 
-The `LEFT JOIN users` keeps rows where `actor_user_id` has been soft-deleted (email surfaces as `NULL` but the event count + total still count against historical reporting). Chat rows carry `actor_user_id = NULL` today; add `OR event_kind = 'chat'` and a separate join through `audit_log.actor_user_id` if you need to include chat in the report before ISSUE 24 lands.
+The `LEFT JOIN users` keeps rows where `actor_user_id` has been soft-deleted (email surfaces as `NULL` but the event count + total still count against historical reporting). Post-ISSUE-24 all three kinds populate the column; pre-ISSUE-24 chat + action rows remain `NULL` — for reports that must span that boundary, `UNION` in a lookup through `audit_log.actor_user_id` keyed on `audit_log.request_id = billing_events.source_event_id`.
 
 **Per-kind aggregation** (daily rollup — SQL directly, faster than HTTP for bulk):
 

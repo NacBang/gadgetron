@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — integer-cent billing ledger (ISSUE 12)
 
 > **담당**: @xaas-platform-lead
-> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution shipped (PR #271 / 0.5.15)** — `actor_user_id` column + tenant-first composite index + `insert_billing_event(pool, event)` struct signature (refactored from the original 8-arg flat call to `BillingEventInsert` with 3 typed constructors via PR #279). ISSUE 24 is the queued follow-up that threads real `user_id` through `QuotaToken` + `AuthenticatedContext` so chat + action paths populate the column (tool path populates today). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
+> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution column shipped (PR #271 / 0.5.15)** — `actor_user_id` + tenant-first composite index + `insert_billing_event(pool, event)` struct signature (refactored from the original 8-arg flat call to `BillingEventInsert` with 3 typed constructors via PR #279) + **ISSUE 24 end-to-end threading shipped (PR #289 / 0.5.16)** — chat + tool + action `billing_events` all populate `actor_user_id` with the real user UUID via `QuotaToken.user_id` (chat) + `TenantContext.actor_user_id` (tool) + `AuthenticatedContext.real_user_id` (action). Harness Gate 7k.6b-identity asserts the three converge to a single UUID per request. ISSUE 25 is the type-confusion hardening follow-up (full `AuthenticatedContext` rename + audit_log contamination fix + billing-insert SLO counter). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
 > **작성일**: 2026-04-19
 > **관련 크레이트**: `gadgetron-xaas` (새 `billing` 모듈), `gadgetron-gateway`, `gadgetron-cli`
 > **Phase**: [P2] — extends Phase 1 quota infrastructure (`phase1.md`)
@@ -164,13 +164,15 @@ pub async fn query_billing_events(
 ```rust
 // crates/gadgetron-xaas/src/quota/enforcer.rs PgQuotaEnforcer::record_post
 // (after the existing UPDATE quota_configs …)
-// ISSUE 24 will flip chat to `.with_actor_user(Some(token.user_id))`
-// once QuotaToken carries user_id. Today the typed constructor
-// defaults all optionals (source_event_id, model, provider,
-// actor_user_id) to None.
+// ISSUE 24 (PR #289 / v0.5.16) threaded QuotaToken.user_id through this
+// call site. The typed constructor still defaults source_event_id +
+// model + provider to None (those remain pending a trait-signature
+// widening — separate from the user_id plumbing), but actor_user_id
+// is now populated via .with_actor_user(token.user_id).
 let ins = crate::billing::insert_billing_event(
     &self.pool,
-    crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents),
+    crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents)
+        .with_actor_user(token.user_id),
 ).await;
 if let Err(e) = ins {
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
@@ -180,15 +182,15 @@ if let Err(e) = ins {
 
 **Why no threading of model/provider/source_event_id now**: `QuotaEnforcer` trait는 현재 `actual_cost_cents: i64`만 받는다. TASK 12.2에서 이 trait 시그니처를 확장하면서 동시에 tool / action 이벤트 경로도 추가. 한 번의 wire change로 3가지 값을 threading — 한 TASK 한 wire change.
 
-**Per-path `actor_user_id` nullability contract (ISSUE 23)**:
+**Per-path `actor_user_id` population contract (post-ISSUE 23 + ISSUE 24)**:
 
-| 경로 | source | 현재 값 | ISSUE 24 이후 |
-|------|--------|---------|---------------|
-| chat | `PgQuotaEnforcer::record_post` (이 §) | `None` | `Some(token.user_id)` — `QuotaToken` 확장 |
+| 경로 | source | Pre-ISSUE-24 (v0.5.15) | Post-ISSUE-24 (v0.5.16) |
+|------|--------|-------------------------|--------------------------|
+| chat | `PgQuotaEnforcer::record_post` (이 §) | `None` | `Some(token.user_id)` — `QuotaToken::new(tenant, cost, user_id)` 확장 via `QuotaEnforcer::check_pre(tenant, user_id, snapshot)` (PR #289) |
 | tool | `handlers.rs` tool billing | `Some(ctx.actor_user_id)` ✅ | unchanged |
-| action | `action_service::emit_action_billing` | `None` — `AuthenticatedContext.user_id` 가 api_key_id placeholder 라 security review 가 반전 | `Some(actor.real_user_id)` — `AuthenticatedContext` 에 `real_user_id` 필드 추가 |
+| action | `action_service::emit_action_billing` | `None` (security-review revert) | `Some(actor.real_user_id)` — `AuthenticatedContext.real_user_id` 필드 추가 (PR #289); legacy `actor.user_id` 는 여전히 api_key_id placeholder, rustdoc "DO NOT READ" 경고 부착, rename 은 ISSUE 25 |
 
-Harness Gate 7k.6b (PR #271) 이 per-kind population 을 직접 Postgres query 로 assert: chat=NULL + tool≥1 NOT NULL + action=NULL.
+Harness Gate 7k.6b (PR #271 ISSUE 23 + PR #289 ISSUE 24) 는 per-kind population 을 직접 Postgres query 로 assert: post-ISSUE-24 chat + tool + action 셋 모두 `IS NOT NULL`. Gate 7k.6b-identity (PR #289) 은 같은 request 에서 발행된 3 row 이 `COUNT(DISTINCT actor_user_id) = 1` 로 converge 함을 추가로 assert.
 
 ---
 
@@ -319,15 +321,20 @@ UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건
 추가하고 `new_full` 생성자에 파라미터로 받는다. CLI 초기화에서 wire.
 
 ```rust
-// action_service.rs — both success paths delegate to a private helper
-// (PR #280 refactor; emit_action_billing signature after dropping the
-// always-None actor_user_id parameter — ISSUE 24 will reintroduce it
-// sourced from AuthenticatedContext.real_user_id):
+// action_service.rs — both success paths delegate to a private helper.
+// Signature trail: original flat-call (pre-PR-#279) → dropped always-None
+// actor_user_id parameter (PR #280 / post-ISSUE-23) → reintroduced via
+// ISSUE 24 (PR #289 / v0.5.16) now that AuthenticatedContext.real_user_id
+// carries the real user id. The parameter is explicitly actor.real_user_id,
+// NOT actor.user_id — the legacy user_id field is an api_key_id placeholder
+// with a rustdoc "DO NOT READ for new user-identity logic" warning. Full
+// rename pending ISSUE 25.
 fn emit_action_billing(
     pool: Option<&sqlx::PgPool>,
     tenant_id: Uuid,
     audit_event_id: Uuid,
     gadget_name: Option<String>,
+    actor_user_id: Option<Uuid>,   // pass actor.real_user_id, NOT actor.user_id
 ) {
     let Some(pool) = pool else { return; };
     let pool = pool.clone();
@@ -336,9 +343,8 @@ fn emit_action_billing(
             &pool,
             gadgetron_xaas::billing::BillingEventInsert::action(
                 tenant_id, audit_event_id, gadget_name,
-            ),
-            // No .with_actor_user(..) — action path writes NULL by
-            // design until ISSUE 24 (see doc comment on the helper).
+            )
+            .with_actor_user(actor_user_id),
         ).await;
     });
 }
