@@ -227,6 +227,42 @@ pub async fn health_handler() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
+/// `GET /metrics` — Prometheus text-format scrape surface (ISSUE 27).
+///
+/// Unauthenticated — intended to live behind the same network
+/// boundary as the operator's Prometheus server (K8s ServiceMonitor,
+/// Nomad scrape job, or equivalent). Callers on the public internet
+/// should be blocked at the reverse proxy / ingress layer; the
+/// endpoint itself does not gate-keep.
+///
+/// Exports:
+/// - `gadgetron_billing_insert_failures_total{kind="chat|tool|action"}`
+///   (ISSUE 26 counter). Scrape + alert on any non-zero delta.
+///
+/// Future metrics plug in here without a contract change: the
+/// output is literal-concatenation of `HELP` / `TYPE` / sample
+/// lines per the Prometheus text format spec.
+pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.billing_failures.snapshot();
+    let body = format!(
+        "# HELP gadgetron_billing_insert_failures_total \
+         Number of billing_events INSERT errors since process start, per event kind. \
+         Counter resets on restart; long-horizon reconciliation is TASK 12.4 scope.\n\
+         # TYPE gadgetron_billing_insert_failures_total counter\n\
+         gadgetron_billing_insert_failures_total{{kind=\"chat\"}} {chat}\n\
+         gadgetron_billing_insert_failures_total{{kind=\"tool\"}} {tool}\n\
+         gadgetron_billing_insert_failures_total{{kind=\"action\"}} {action}\n",
+        chat = snapshot.chat,
+        tool = snapshot.tool,
+        action = snapshot.action,
+    );
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
 /// `GET /ready`
 ///
 /// In no-db mode (`state.no_db == true`): always returns HTTP 200 `{"status":"ready"}`.
@@ -344,6 +380,10 @@ pub fn build_router(state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
+        // ISSUE 27 — /metrics Prometheus scrape surface. Unauthenticated;
+        // assumes network-level isolation (operator's Prometheus runs
+        // inside the same network boundary). See handler rustdoc.
+        .route("/metrics", get(metrics_handler))
         // ISSUE 15 TASK 15.1 — cookie session endpoints. Not Bearer-authed;
         // login handles its own email/password check, logout/whoami read
         // the session cookie. Safe to mount publicly.
