@@ -201,6 +201,63 @@ Or change `[server].bind` in `gadgetron.toml`.
 
 ---
 
+### "users table is empty but [auth.bootstrap] is missing" (ISSUE 14 TASK 14.2 / v0.5.7)
+
+**What happened:** `gadgetron serve` exits during startup with:
+
+```
+bootstrap admin: users table is empty but [auth.bootstrap] is missing.
+  Set [auth.bootstrap] in gadgetron.toml to create the first admin.
+```
+
+**Why:** On any pg-backed deployment, `init_serve_runtime` calls `bootstrap_admin_if_needed(pool, config.auth.bootstrap.as_ref())` at startup (`crates/gadgetron-cli/src/main.rs:1806`). When the `users` table has zero rows AND `[auth.bootstrap]` is absent from `gadgetron.toml`, the flow fail-closes — there is no path to a populated auth surface without either this config block or manual SQL `INSERT` into `users`. This is intentional per ISSUE 14 TASK 14.2: fail loudly rather than boot with an unreachable admin surface.
+
+**Fix — add the bootstrap block:**
+
+```toml
+# gadgetron.toml
+[auth.bootstrap]
+admin_email         = "admin@example.com"
+admin_display_name  = "Initial Admin"
+admin_password_env  = "GADGETRON_ADMIN_PW"   # NAME of the env var, not the password
+```
+
+Then export the password and restart:
+
+```sh
+export GADGETRON_ADMIN_PW="pick-a-strong-password-here"
+./target/release/gadgetron serve
+```
+
+The bootstrap flow will argon2id-hash the password, insert the admin row into `users`, and proceed with startup. On subsequent restarts the block is ignored with a warn log (`[auth.bootstrap] configured but users table is not empty — ignoring`); safe to leave in place but recommended to remove on the next deploy to keep secrets out of the config.
+
+**Related failure — "env var X is not set":** if `admin_password_env` names an env var that isn't exported or is empty, serve exits with `bootstrap admin: env var GADGETRON_ADMIN_PW is not set`. Export the variable before startup. `--no-db` deployments bypass the bootstrap path entirely (no users table to check). See [`configuration.md §[auth.bootstrap]`](configuration.md#authbootstrap) for the full behavior matrix.
+
+---
+
+### "failed to run bootstrap admin" — tenant FK constraint
+
+**What happened:** The bootstrap flow reaches the argon2id hash step but the `INSERT INTO users (..., tenant_id, ...)` fails with:
+
+```
+bootstrap admin: database error during bootstrap: insert or update on table "users"
+  violates foreign key constraint "users_tenant_id_fkey"
+```
+
+**Why:** The bootstrap flow upserts a hardcoded default tenant row (`00000000-0000-0000-0000-000000000001`) before the admin INSERT, so this almost never fires. When it does, the pre-migration tenant schema is incompatible (e.g., an older `tenants` table without the UUID primary key from `20260420000004_users_teams_sessions.sql`).
+
+**Fix:** Verify migrations ran. Run `gadgetron serve` once to apply all migrations, then retry bootstrap. If the migration already ran but the tenant row is missing, upsert it manually:
+
+```sql
+INSERT INTO tenants (id, name)
+VALUES ('00000000-0000-0000-0000-000000000001', 'default')
+ON CONFLICT (id) DO NOTHING;
+```
+
+Then restart.
+
+---
+
 ## Request errors
 
 ### HTTP 401 Unauthorized — invalid or missing API key
@@ -261,6 +318,73 @@ WHERE k.key_hash = 'your-64-char-hash';
 ```
 
 If `status` is `Suspended` or `Deleted`, the tenant cannot authenticate. Restore the tenant status or create a new tenant.
+
+---
+
+### HTTP 401 Unauthorized — cookie-session failures (ISSUE 16 / v0.5.9+ unified auth)
+
+**What you observe:** Same `invalid_api_key` 401 body as the Bearer case above, but the request had NO `Authorization: Bearer ...` header — only a `gadgetron_session` cookie.
+
+**Why:** As of v0.5.9 (PR #259), the unified `auth_middleware` accepts Bearer OR cookie on every protected route (`/v1/*`, `/api/v1/web/workbench/*`, `/api/v1/xaas/*`). When Bearer is absent and a cookie is present, `validate_session_and_build_key(pool, cookie_token)` looks up the session and synthesizes a `ValidatedKey`. Cookie-path 401 means one of:
+
+1. **Missing cookie**: neither Bearer header nor `gadgetron_session` cookie in the request.
+2. **Expired session**: `user_sessions.expires_at < now()`. 24h TTL from login.
+3. **Revoked session**: `user_sessions.revoked_at IS NOT NULL` (logout clears this).
+4. **Stale cookie token**: the cookie value SHA-256-hashed doesn't match any `user_sessions.cookie_hash` — client saved an old cookie from a prior login.
+5. **User inactive**: `users.is_active = false` — admin revoked the user.
+6. **Service-role user**: `users.role = 'service'` — service accounts can't drive cookie sessions; login itself blocks this, but the middleware re-checks defensively.
+7. **No-db mode**: `gadgetron serve --no-db` silently skips the cookie path entirely — Bearer-only.
+
+**Fix — distinguish Bearer-path from cookie-path 401** at the log level. Both emit `target: "auth.failure"` WARNs with a `code = "invalid_api_key"` field. The structured attributes differ:
+
+```
+# Bearer path
+auth.failure: reason="missing_bearer" OR "unknown_key" OR "revoked"
+
+# Cookie path (v0.5.9+)
+auth.failure: reason="missing_cookie" OR "session_expired" OR "session_revoked"
+            OR "session_user_inactive" OR "service_role"
+```
+
+Grep `gadgetron.log` for the `reason=` attribute to localize which failure class hit.
+
+**Fix — operator recipe for "my cookie stopped working":**
+
+```sh
+# 1. Check whether the session row still exists + is active
+curl -s -b /tmp/gad-cookies.txt \
+  http://localhost:8080/api/v1/auth/whoami
+# 401 → session is gone; 200 → session OK but the downstream endpoint has a separate issue
+
+# 2. If whoami returns 401, re-login:
+curl -sS -c /tmp/gad-cookies.txt -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"your-password"}' \
+  http://localhost:8080/api/v1/auth/login
+
+# 3. Retry the original request with the fresh cookie jar
+curl -sS -b /tmp/gad-cookies.txt \
+  http://localhost:8080/api/v1/web/workbench/bootstrap
+```
+
+**Fix — SQL inspect (Management-scope operators):**
+
+```sql
+-- Find live sessions for a user
+SELECT id, user_id, expires_at, revoked_at, last_active_at
+FROM user_sessions
+WHERE user_id = '<uuid>'
+  AND revoked_at IS NULL
+  AND expires_at > now();
+
+-- Expire all sessions for a user (force re-login everywhere)
+UPDATE user_sessions SET revoked_at = now() WHERE user_id = '<uuid>';
+
+-- Clear a specific tenant's audit noise (sessions that expire naturally)
+DELETE FROM user_sessions WHERE expires_at < now() - interval '7 days';
+```
+
+See [`auth.md §Cookie-session auth`](auth.md#cookie-session-auth-issue-15-task-151--v058--issue-16-task-161--v059) for the full cookie-session contract, and [`api-reference.md §Cookie-session endpoints`](api-reference.md#cookie-session-endpoints-issue-15--v058) for the three `/auth/*` endpoints used in the re-login recipe above.
 
 ---
 
