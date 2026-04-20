@@ -632,16 +632,19 @@ CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
 
 ```rust
 // PgQuotaEnforcer::record_post (after quota_configs UPDATE).
-// Struct-based API (PR #279 refactor, post-v0.5.15) — typed constructor encodes
-// kind + default cost invariant. ISSUE 24 will flip chat to
-// `.with_actor_user(Some(token.user_id))` once QuotaToken carries
-// user_id. Tool path uses `.with_actor_user(ctx.actor_user_id)` today;
-// action path dropped the always-None parameter in PR #280 and will
-// reintroduce `.with_actor_user(actor.real_user_id)` at ISSUE 24 once
-// AuthenticatedContext carries a distinct real user_id field.
+// Struct-based API (PR #279 refactor) + ISSUE 24 (PR #289 / v0.5.16) user_id
+// threading. QuotaToken now carries an Option<Uuid> user_id which the enforcer
+// feeds into BillingEventInsert::chat via .with_actor_user(..). Tool path
+// continues to use ctx.actor_user_id from TenantContext (ISSUE 17/23). Action
+// path regained its actor_user_id parameter (reintroduced in PR #289 after
+// PR #280 dropped the always-None variant) and both call sites pass
+// actor.real_user_id — explicitly NOT actor.user_id (that legacy field is
+// an api_key_id placeholder; rustdoc marks it "DO NOT READ for new user-
+// identity logic" pending ISSUE 25 rename).
 let ins = crate::billing::insert_billing_event(
     &self.pool,
-    crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents),
+    crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents)
+        .with_actor_user(token.user_id),
 ).await;
 if let Err(e) = ins {
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
@@ -653,13 +656,13 @@ if let Err(e) = ins {
 
 **Public read endpoint**. `GET /api/v1/web/workbench/admin/billing/events` — Management scope (OpenAiCompat → 403 via `scope_guard_middleware`). 핸들러 `list_billing_events` 가 `ctx.tenant_id` 로 WHERE 를 고정하고, query param 은 `since` (ISO-8601 lower bound) + `limit` (1..=500, default 100) 만 받음. `event_kind` 필터는 TASK 12.2 에서 추가 예정. Cross-tenant read 는 설계상 불가능 — query param 으로 `tenant_id` 오버라이드 못함. Response shape 과 운영 레시피는 [`manual/api-reference.md §GET /api/v1/web/workbench/admin/billing/events`](../manual/api-reference.md) 를 authoritative 로 참고.
 
-**Harness 커버리지**. Gate 7k.6: 비-스트리밍 chat 직후 짧은 sleep 후 `/admin/billing/events?limit=5` 를 poll 해서 `.events[] | select(.event_kind == "chat") | length >= 1` 을 assert. `record_post` → `insert_billing_event` write path 가 harness 의 기본 `PgQuotaEnforcer` 설정에서 실제로 persist 되는지 end-to-end 증명. Gate 7k.6b (ISSUE 23 / PR #271) 는 추가로 per-kind `actor_user_id` population contract 를 직접 Postgres query 로 assert: `chat IS NULL` (pre-ISSUE-24) + `tool IS NOT NULL` (실제 ValidatedKey.user_id 가 threading 됨) + `action IS NULL` (AuthenticatedContext.user_id 가 api_key_id placeholder 라 pre-ISSUE-24 에 NULL 선택).
+**Harness 커버리지**. Gate 7k.6: 비-스트리밍 chat 직후 짧은 sleep 후 `/admin/billing/events?limit=5` 를 poll 해서 `.events[] | select(.event_kind == "chat") | length >= 1` 을 assert. `record_post` → `insert_billing_event` write path 가 harness 의 기본 `PgQuotaEnforcer` 설정에서 실제로 persist 되는지 end-to-end 증명. Gate 7k.6b (ISSUE 23 / PR #271 + ISSUE 24 / PR #289) 는 per-kind `actor_user_id` population contract 를 직접 Postgres query 로 assert: post-ISSUE-24 셋 모두 `IS NOT NULL` (chat + tool + action 모두 populate). Gate 7k.6b-identity (PR #289) 는 추가로 같은 request 에서 발행된 3 row 이 single `COUNT(DISTINCT actor_user_id) = 1` 로 converge 함을 assert — 서로 다른 placeholder 가 아닌 실제 같은 user UUID 임을 증명. Gate 3.5 precondition (PR #289) 은 harness 실행 전 `api_keys.user_id IS NOT NULL` 을 assert 해서 "user_id never threaded" 와 "threaded but NULL" failure 를 구분.
 
-**ISSUE 23 per-user attribution 보강 (PR #271 / v0.5.15)**. 원장이 `actor_user_id` 를 운반하게 됨으로써, 운영자가 `/admin/billing/events` 또는 직접 SQL 로 per-user 지출 리포트를 audit_log 에 JOIN 하지 않고 만들 수 있다. 3 call site 의 null 규약:
+**ISSUE 23 + 24 per-user attribution 최종 상태 (PR #271 / v0.5.15 + PR #289 / v0.5.16)**. 원장이 `actor_user_id` 를 end-to-end 로 운반하게 됨으로써, 운영자가 `/admin/billing/events` 또는 직접 SQL 로 per-user 지출 리포트를 audit_log 에 JOIN 하지 않고 만들 수 있다. 3 call site 의 최종 population 규약:
 
-- **chat** (`PgQuotaEnforcer::record_post`, 이 §5.8): `None` — `QuotaToken` 이 아직 `user_id` 를 운반하지 않음 (ISSUE 24 확장 예정).
-- **tool** (`handlers.rs` tool billing emission): `Some(ctx.actor_user_id)` — `TenantContext` 가 middleware 에서 `ValidatedKey.user_id` 를 이미 운반.
-- **action** (`action_service::emit_action_billing`): `None` — `AuthenticatedContext.user_id` 가 workbench 레이어에서 `ctx.api_key_id` placeholder 에서 빌드됨 (legacy). Security review 가 `api_key_id` 를 `actor_user_id` 컬럼에 쓰면 audit 에서 type-confusion 버그가 됨을 flag 해 pre-publish 에 `None` 으로 반전. ISSUE 24 가 `AuthenticatedContext` 에 `real_user_id` 필드를 추가해 이 경로도 populate 하도록 확장.
+- **chat** (`PgQuotaEnforcer::record_post`, 이 §5.8): `Some(token.user_id)` — `QuotaToken::new(tenant, cost, user_id)` 가 `ctx.actor_user_id` 를 운반 (ISSUE 24 TASK 24.1 / PR #289).
+- **tool** (`handlers.rs` tool billing emission): `Some(ctx.actor_user_id)` — `TenantContext` 가 middleware 에서 `ValidatedKey.user_id` 를 이미 운반 (ISSUE 20/23).
+- **action** (`action_service::emit_action_billing`): `Some(actor.real_user_id)` — `AuthenticatedContext.real_user_id` 필드 (ISSUE 24 TASK 24.2 / PR #289) 로 threading. 주의: legacy `actor.user_id` 는 여전히 api_key_id placeholder 이며 rustdoc "DO NOT READ for new user-identity logic" 경고가 붙어 있음. Full rename `user_id` → `api_key_id` + `real_user_id` → `user_id` 는 ISSUE 25 로 deferred — 그때까지 두 field 모두 `Option<Uuid>` 로 존재.
 
 FK 가 없는 이유는 migration comment 에 명시: heterogeneous caller 로 인한 silent insert failure 위험 회피 (best-effort telemetry). 운영자 reconciliation 쿼리는 read time 에 `LEFT JOIN users(id) ON ... AND b.tenant_id = u.tenant_id` 로 병합하면 된다. 실제 per-user 지출 SQL template 은 [`manual/api-reference.md §Per-user spend report`](../manual/api-reference.md) 참고.
 
