@@ -1533,6 +1533,83 @@ E2E Gate 7q.8 uninstalls a previously-installed bundle and verifies it no longer
 
 **Compose with reload.** Install + uninstall both leave the live `CatalogSnapshot` untouched. The typical operator workflow is: (1) `POST /admin/bundles` to stage, (2) `DELETE /admin/bundles/{old}` if replacing, (3) `POST /admin/reload-catalog` (or `kill -HUP <pid>`) to activate. This keeps the "snapshot swap" moment explicit — an accidental install never changes behaviour until the operator decides to reload.
 
+#### Bundle operator recipes (install → activate → verify → rollback)
+
+**Deploy a new bundle to production** (composite 5-step flow):
+
+```sh
+MGMT_KEY="gad_live_your_management_key"
+GAD="http://localhost:8080"
+
+# Stage 1: Install the manifest. Writes to disk, does NOT swap live catalog.
+BUNDLE_TOML=$(cat my-bundle.toml)
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/bundles" \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg t "$BUNDLE_TOML" '{bundle_toml: $t}')" | jq .
+# Response: {"installed":true,"bundle_id":"acme-ops","manifest_path":"...","reload_hint":"..."}
+
+# Stage 2: Verify the new bundle is on disk AND the discovery endpoint sees it.
+# (Optional — the install response already confirms manifest_path, but this
+#  cross-checks that `GET /admin/bundles` discovery agrees, catching a
+#  `bundles_dir` misconfiguration that would leave the file lying unfound.)
+curl -fsS "$GAD/api/v1/web/workbench/admin/bundles" \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  | jq '.bundles[] | select(.bundle.id == "acme-ops")'
+
+# Stage 3: Activate via reload. The live CatalogSnapshot swaps atomically.
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/reload-catalog" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq .
+# Response: {"reloaded":true,"action_count":N,"view_count":M,"source":"bundles_dir",
+#            "source_path":null,"bundles":[{id:"gadgetron-core",...},{id:"acme-ops",...}]}
+
+# Stage 4: Verify live catalog includes the new bundle's actions.
+# Cross-check reload response `action_count` against the live /actions listing
+# (same pattern as harness Gate 7q.1 — proves catalog + validators published
+#  together, no "swap happened but read path sees old pointer" regression).
+ACTIONS_FROM_RELOAD=$(curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/reload-catalog" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq .action_count)
+ACTIONS_LIVE=$(curl -fsS "$GAD/api/v1/web/workbench/actions" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq 'length')
+[ "$ACTIONS_FROM_RELOAD" = "$ACTIONS_LIVE" ] && echo "OK: catalog + read path in sync"
+
+# Stage 5 (if broken): Rollback by uninstall + reload.
+curl -fsS -X DELETE "$GAD/api/v1/web/workbench/admin/bundles/acme-ops" \
+  -H "Authorization: Bearer $MGMT_KEY"
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/reload-catalog" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq .action_count
+# action_count returns to the pre-install baseline.
+```
+
+**Install a signed bundle** (when `[web.bundle_signing].require_signature = true`, see [`configuration.md §[web.bundle_signing]`](configuration.md#web-bundle_signing)):
+
+```sh
+BUNDLE_FILE=my-bundle.toml
+PRIV_KEY=signer.ed25519.key   # 32-byte raw Ed25519 private key
+
+# Sign the manifest (openssl or any Ed25519 library; the signature is over
+# the raw TOML bytes, NOT the JSON-wrapped request body)
+SIG_HEX=$(openssl pkeyutl -sign -inkey <(cat "$PRIV_KEY") \
+  -rawin -in "$BUNDLE_FILE" | xxd -p -c 9999)
+
+# Install with the signature attached
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/bundles" \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg t "$(cat $BUNDLE_FILE)" --arg s "$SIG_HEX" \
+    '{bundle_toml: $t, signature_hex: $s}')" | jq .
+```
+
+See the TASK 10.4 signature-policy matrix (6 branches) in this section above for when a signed install is accepted vs rejected.
+
+**Key invariants pinned by harness 7q gates**:
+
+- `reloaded == true` AND `action_count == GET /actions.length` (Gate 7q.1) — catalog + read path published together.
+- `.bundles[0].id == "gadgetron-core"` on `bundles_dir`-sourced reloads (Gate 7q.3) — first-party bundle rename trips the gate.
+- `GET /admin/bundles` `.bundles[0].action_count == 5` against the harness fixture (Gate 7q.4) — seed action-set drift detected.
+- `OpenAiCompat` → `403 scope_required` on every `/admin/*` endpoint (Gates 7q.2 / 7q.5) — scope isolation from workbench subtree.
+- Install with `id = "../etc/passwd"` → `4xx config_error` BEFORE any disk write (Gate 7q.7) — `validate_bundle_id()` path-traversal guard.
+
 ---
 
 ### GET /api/v1/web/workbench/admin/billing/events
@@ -1579,10 +1656,10 @@ curl -fsS \
 ```
 
 - `id` is `BIGSERIAL` — strictly increasing per-row, safe as a tie-breaker cursor when `created_at` collides.
-- `event_kind` is one of `"chat" | "tool" | "action"` (CHECK constraint at the DB layer; new kinds require a migration — TASK 12.2 will add `tool` + `action` emitters). TASK 12.1 only emits `"chat"` from `PgQuotaEnforcer::record_post`.
-- `source_event_id` is `null` today; TASK 12.2 threads the originating chat-audit UUID so invoice queries can join against `action_audit_events` / `tool_audit_events` for line-item explanations. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted yet.
-- `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents`; integer cents end-to-end per ADR-D-8.
-- `model` / `provider` are `null` today for the same reason as `source_event_id` — TASK 12.2 widens the `QuotaEnforcer::record_post` trait signature to thread these three fields in one wire change.
+- `event_kind` is one of `"chat" | "tool" | "action"` (CHECK constraint at the DB layer; new kinds require a migration). All three emitters now ship — chat from `PgQuotaEnforcer::record_post` (TASK 12.1), tool from `/v1/tools/{name}/invoke` success path (TASK 12.2), action from workbench direct-action + approved-action success terminals (TASK 12.2).
+- `source_event_id`: currently populated **only on `action` rows** (carries the `audit_event_id` from `action_audit_events`) so invoice materialization can join ledger → action audit for line-item explanations. `chat` + `tool` rows leave it `null` today — `chat` because the enforcer emits before an audit UUID is generated, `tool` because the tool-dispatch path hasn't been threaded yet. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted.
+- `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents` for `chat` rows (integer cents end-to-end per ADR-D-8). `tool` + `action` rows carry `cost_cents = 0` — emission exists for audit-trail completeness, monetary cost is only assigned at the chat terminal today. Per-action / per-tool pricing attribution lands with TASKs 12.3 (invoice materialization) / ISSUE 13 (HuggingFace catalog) — both DEFERRED as commercialization layer.
+- `model` / `provider`: **repurposed by `event_kind`**. For `chat` rows both fields are currently `null` (threading chat model + provider onto the enforcer surface is a future follow-up). For `tool` rows `model` carries the gadget name invoked (e.g., `"wiki.search"`) and `provider` stays `null`. For `action` rows `model` carries the workbench action id (e.g., `"knowledge-search"`) and `provider` stays `null`. Operator queries that want "which gadget generated this tool-event" read `model` on kind=tool rows.
 
 **Errors:**
 
@@ -1606,6 +1683,344 @@ TASK 12.4 will land the reconciliation pass (scan `quota_configs` vs `SUM(cost_c
 **Harness coverage.** Gate 7k.6 runs a non-streaming chat completion, waits briefly, then polls `/admin/billing/events?limit=5` and asserts `.events[] | select(.event_kind == "chat") | length >= 1` — proving the `record_post` → `insert_billing_event` write path actually persists under the harness's default `PgQuotaEnforcer` configuration.
 
 **Design reference.** Full STRIDE threat model, SQL schema, trait signatures, and reconciliation plan for TASK 12.4: [`docs/design/xaas/phase2-billing.md`](../design/xaas/phase2-billing.md).
+
+#### Billing query operator recipes
+
+**Paginate through a tenant's full ledger** (reconciliation / export use case):
+
+```sh
+MGMT_KEY="gad_live_your_management_key"
+GAD="http://localhost:8080"
+
+# Cold start — newest 500 rows
+BATCH=$(curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/billing/events?limit=500")
+echo "$BATCH" | jq '.events'
+
+# Subsequent pages — use the OLDEST created_at in the batch as the exclusive
+# upper bound. Since the endpoint filters on `created_at > since` (strictly
+# greater), we iterate backwards by querying with `since=<second-oldest>`
+# WARNING: the current endpoint only supports `since` (lower bound). Full
+# backwards pagination needs a `before` (upper bound) parameter — TASK 12.4
+# follow-up. For now, operators who need historical snapshot dumps should
+# SQL directly against `billing_events` ORDER BY created_at ASC.
+```
+
+**Forward-tail pagination** (watch new events land — e.g., a dashboard updating every 30s):
+
+```sh
+# Persist the last-seen created_at between polls
+STATE_FILE=/tmp/billing-cursor
+[ -f "$STATE_FILE" ] && LAST_SEEN=$(cat "$STATE_FILE") || LAST_SEEN="2026-01-01T00:00:00Z"
+
+RESP=$(curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/billing/events?since=$LAST_SEEN&limit=100")
+
+# Update cursor to the NEWEST created_at in the response
+NEW_LAST=$(echo "$RESP" | jq -r '.events[0].created_at // empty')
+[ -n "$NEW_LAST" ] && echo "$NEW_LAST" > "$STATE_FILE"
+
+echo "$RESP" | jq '.events | map(select(.event_kind == "chat")) | length'
+```
+
+**Audit ↔ ledger join for `action` rows** (line-item explanation for workbench actions):
+
+```sh
+TENANT_ID="018fa1a2-..."
+
+# 1. Pull recent action rows from billing
+ACTION_ROWS=$(curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/billing/events?limit=50" \
+  | jq '[.events[] | select(.event_kind == "action")]')
+
+# 2. For each action row, source_event_id is the audit_log UUID.
+#    Cross-ref via /audit/events (same tenant, OpenAiCompat scope works):
+for AUDIT_ID in $(echo "$ACTION_ROWS" | jq -r '.[].source_event_id'); do
+  curl -fsS \
+    -H "Authorization: Bearer $MGMT_KEY" \
+    "$GAD/api/v1/web/workbench/audit/events?action_id=knowledge-search" \
+    | jq --arg id "$AUDIT_ID" '.events[] | select(.request_id == $id)'
+done
+```
+
+**Per-kind aggregation** (daily rollup — SQL directly, faster than HTTP for bulk):
+
+```sql
+-- Monthly spend by event kind for a tenant
+SELECT
+  date_trunc('month', created_at) AS month,
+  event_kind,
+  COUNT(*) AS events,
+  SUM(cost_cents) AS cents,
+  SUM(cost_cents) / 100.0 AS dollars
+FROM billing_events
+WHERE tenant_id = 'your-tenant-uuid'
+  AND created_at >= date_trunc('month', now()) - interval '3 months'
+GROUP BY 1, 2
+ORDER BY 1 DESC, 2;
+
+-- Counter-vs-ledger divergence check (sanity test for TASK 12.4 reconciliation):
+SELECT
+  qc.tenant_id,
+  qc.daily_used_cents AS counter_cents,
+  COALESCE(SUM(be.cost_cents), 0) AS ledger_cents,
+  qc.daily_used_cents - COALESCE(SUM(be.cost_cents), 0) AS drift_cents
+FROM quota_configs qc
+LEFT JOIN billing_events be
+  ON be.tenant_id = qc.tenant_id
+ AND be.created_at >= qc.usage_day::timestamp
+ AND be.created_at < qc.usage_day::timestamp + interval '1 day'
+ AND be.event_kind = 'chat'
+WHERE qc.usage_day = CURRENT_DATE
+GROUP BY qc.tenant_id, qc.daily_used_cents;
+```
+
+Non-zero `drift_cents` is expected when the ledger INSERT failed but the counter UPDATE succeeded (see "Reconciliation model" above). TASK 12.4 will land an operator-visible drift alert for positive drift above a threshold.
+
+---
+
+### GET /api/v1/web/workbench/admin/audit/log
+
+Management-scoped read over tenant-pinned `audit_log` rows, shipped in **ISSUE 22 TASK 22.1 / PR #269 / v0.5.14**; handler: `list_audit_log_handler` in `crates/gadgetron-gateway/src/web/workbench.rs:1036`.
+
+**Scope:** `Management`. `OpenAiCompat` keys get `403 forbidden` (type `permission_error`) via `scope_guard_middleware`, so `/api/v1/web/workbench/admin/audit/log` is an operator endpoint, not a tenant self-service endpoint.
+
+**Tenant boundary.** The handler always WHERE-pins `tenant_id` to `ctx.tenant_id` before calling the query helper. There is no `tenant_id` query parameter, so the caller cannot widen or override the tenant scope from the URL. Cross-tenant reads are impossible by construction. A Management key for tenant A sees only tenant A rows, even if the operator knows another tenant UUID.
+
+**Query parameters** (all optional):
+
+| Name | Type | Default | Meaning |
+|------|------|---------|---------|
+| `actor_user_id` | UUID | unbounded | Narrow to rows attributed to a single user. Useful when a tenant has multiple admins or mixed cookie-session and Bearer traffic. |
+| `since` | ISO-8601 timestamp | unbounded | Lower bound on `timestamp` (`>=` semantics, inclusive). Paging forward with the last-seen timestamp will re-read the boundary row; use `id` or `request_id` client-side for dedup when paginating through bursty traffic. |
+| `limit` | integer | `100` | Clamped to `1..=500` at the handler. Values below `1` clip to `1`, values above `500` clip to `500`. |
+
+Rows are returned newest-first. The response shape is `{rows: Vec<AuditLogRow>, returned: N}` where `returned` is the number of rows actually emitted after filters and limit clamp.
+
+Implementation note: `query_audit_log(pool, tenant_id, actor_user_id, since, limit)` lives in `crates/gadgetron-xaas/src/audit/writer.rs:130`. It uses four prepared-statement shapes, one per `(actor_user_id, since)` permutation, instead of string-building SQL at runtime. The WHERE clause is always tenant-pinned, and there is no dynamic SQL concatenation.
+
+**Example:**
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "http://localhost:8080/api/v1/web/workbench/admin/audit/log?limit=5"
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "rows": [
+    {
+      "id": "f4a88a62-7d89-4e28-b5b9-0b59b31b2d2c",
+      "tenant_id": "4c7b47aa-7284-4658-86a4-831828f91f1f",
+      "api_key_id": "00000000-0000-0000-0000-000000000000",
+      "actor_user_id": "e61d1784-9cc3-46c8-aab0-5a14d7fb0f16",
+      "actor_api_key_id": null,
+      "request_id": "7dba0b98-39aa-45f3-9c07-f9fb47f43795",
+      "model": "gpt-4o-mini",
+      "provider": "openai",
+      "status": "ok",
+      "input_tokens": 182,
+      "output_tokens": 49,
+      "cost_cents": 7,
+      "latency_ms": 421,
+      "timestamp": "2026-04-19T09:12:03.441Z"
+    }
+  ],
+  "returned": 1
+}
+```
+
+- `rows` is an array of `AuditLogRow` projections. The handler emits the newest rows first, so `rows[0]` is the latest matching row at read time.
+- `returned` is the actual row count in this response. It can be smaller than `limit` when the tenant has fewer matching rows or when the filter narrows the result set.
+- `id` is the audit row UUID primary key. It identifies the persisted audit record itself, not the HTTP request lifecycle as a whole.
+- `tenant_id` is the tenant foreign key pinned by the handler. It is present in every row, but the caller cannot change it through the query string.
+- `api_key_id` is never `null`. This field records the request-path credential marker that entered the audit pipeline.
+- `api_key_id = 00000000-0000-0000-0000-000000000000` is the cookie-session sentinel from ISSUE 16. It means the request came through the session-cookie path, not a real Bearer API key row.
+- `api_key_id` holding any non-nil UUID means the row came from a Bearer credential path. For those rows, the UUID is the request credential recorded at emit time.
+- `actor_user_id` is the owning user UUID when the request identity was plumbed through `ValidatedKey.user_id`. This is the main field to use when you want "activity by user" rather than "activity by key".
+- `actor_user_id = null` is expected for legacy API keys that predate the ISSUE 14 TASK 14.1 ownership backfill. It does not mean the audit row is malformed.
+- `actor_api_key_id` is the real `api_keys.id` for Bearer callers when the key survived validation and the tenant context preserved the concrete key identity.
+- `actor_api_key_id = null` is expected for cookie-session callers. `tenant_context_middleware` converts the nil-sentinel cookie path into `None` here, so operators do not have to string-match on the sentinel to understand the caller type.
+- `api_key_id` and `actor_api_key_id` intentionally differ. `api_key_id` is the path marker, always present, while `actor_api_key_id` is the real persisted API key owner handle and is absent on cookie-session traffic.
+- `api_key_id = 00000000-0000-0000-0000-000000000000` plus `actor_api_key_id = null` is the normal cookie-session combination.
+- `api_key_id != 00000000-0000-0000-0000-000000000000` plus non-null `actor_api_key_id` is the normal Bearer combination.
+- `request_id` is the HTTP request correlation UUID. Multiple audit rows can share one `request_id`, so use `id` when you need the audit row identity and `request_id` when you need to correlate related request work.
+- `model` is the resolved model id when the write path knew it, for example `gpt-4o-mini`. It can be `null` when the upstream emit site did not set a model.
+- `provider` is the resolved provider string when available, for example `openai`. It can be `null` for rows emitted by code paths that did not populate provider metadata.
+- `status` is the write-side status string persisted by the audit writer. As of v0.5.14 the common values are `ok`, `error`, and `stream_interrupted`.
+- `input_tokens` is the integer input token count persisted for the audited request.
+- `output_tokens` is the integer output token count persisted for the audited request.
+- `cost_cents` is the integer-cent cost attributed to the audited request at write time. This is the same unit used elsewhere in the XaaS billing and quota surfaces.
+- `latency_ms` is the request latency in milliseconds as recorded by the write path.
+- `timestamp` is the UTC write timestamp used for newest-first ordering and `since` filtering.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `forbidden` | 403 | Caller's API key scope is not `Management`. `OpenAiCompat` callers fail in `scope_guard_middleware` before the handler runs; response `type` is `permission_error`. |
+| `config_error` | 400 | Either (a) `pg_pool` is not wired (for example `--no-db` mode or missing `database_url`) — the handler calls `require_pg_pool(&state, "admin audit log query")` and fails before any SQL executes; or (b) SQL execution failed and the handler mapped the `sqlx` error to `GadgetronError::Config` with message prefix `audit log query: ...`. Both collapse to HTTP 400 because `WorkbenchHttpError::Core(GadgetronError::Config(_))` → `http_status_code() = 400` (`crates/gadgetron-core/src/error.rs:535`). No-db vs SQL-failure distinguishable by reading the `error.message` body field. |
+| `n/a` | 4xx | Axum query deserialization rejected the URL before the handler ran, for example malformed `actor_user_id` (non-UUID) or `since` (non-ISO-8601) or a non-integer `limit`. |
+
+Malformed `actor_user_id` also fails in the query deserializer path because the field is typed as UUID, but the common operator mistakes seen during manual testing are malformed `since` and non-integer `limit`.
+
+#### Operator recipes
+
+**Who accessed this tenant in the last hour?**
+
+Use `since` to narrow the window, then extract unique `actor_user_id` values from the returned rows. This shows known user identities; legacy-key rows with `actor_user_id = null` are omitted by the `jq` filter.
+
+```bash
+GAD="http://localhost:8080"
+MGMT_KEY="gad_live_your_management_key"
+SINCE=$(
+  python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+PY
+)
+
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?since=$SINCE&limit=500" \
+  | jq -r '.rows[] | .actor_user_id // empty' \
+  | sort -u
+```
+
+If you also want request counts per user, replace the final `jq` pipeline with:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?since=$SINCE&limit=500" \
+  | jq -r '.rows[] | .actor_user_id // empty' \
+  | sort \
+  | uniq -c \
+  | sort -nr
+```
+
+**All chat completions by alice**
+
+When you already know Alice's user UUID, combine `actor_user_id` and `since` in the same request. `audit_log` is the chat audit persistence surface after ISSUE 21, so this endpoint is the direct operator read path for recent chat completions attributed to that user.
+
+```bash
+GAD="http://localhost:8080"
+MGMT_KEY="gad_live_your_management_key"
+ALICE_USER_ID="e61d1784-9cc3-46c8-aab0-5a14d7fb0f16"
+SINCE="2026-04-20T00:00:00Z"
+
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?actor_user_id=$ALICE_USER_ID&since=$SINCE&limit=500" \
+  | jq '.rows[] | {
+      timestamp,
+      request_id,
+      model,
+      provider,
+      status,
+      input_tokens,
+      output_tokens,
+      cost_cents,
+      latency_ms
+    }'
+```
+
+If you need only successful rows, add `select(.status == "ok")` in the `jq` filter:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?actor_user_id=$ALICE_USER_ID&since=$SINCE&limit=500" \
+  | jq '.rows[]
+        | select(.status == "ok")
+        | {timestamp, request_id, model, input_tokens, output_tokens, cost_cents}'
+```
+
+**Cross-reference audit_log with billing_events**
+
+For bulk reconciliation or incident response, SQL is faster than paginating both HTTP endpoints. The join key below is `audit_log.request_id = billing_events.source_event_id`, which lets you line up request-correlated audit rows with any billing rows that carried the same source event UUID.
+
+```sql
+SELECT
+  al.request_id,
+  al.timestamp AS audit_timestamp,
+  al.actor_user_id,
+  al.model AS audit_model,
+  al.provider AS audit_provider,
+  al.status,
+  al.input_tokens,
+  al.output_tokens,
+  al.cost_cents AS audit_cost_cents,
+  be.id AS billing_event_id,
+  be.event_kind,
+  be.cost_cents AS billing_cost_cents,
+  be.created_at AS billing_created_at
+FROM audit_log al
+JOIN billing_events be
+  ON be.source_event_id = al.request_id
+WHERE al.tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+ORDER BY al.timestamp DESC
+LIMIT 100;
+```
+
+Use `LEFT JOIN` instead of `JOIN` when you want to find audit rows that do not yet have a correlated billing row:
+
+```sql
+SELECT
+  al.request_id,
+  al.timestamp,
+  al.status,
+  al.cost_cents,
+  be.id AS billing_event_id
+FROM audit_log al
+LEFT JOIN billing_events be
+  ON be.source_event_id = al.request_id
+WHERE al.tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+  AND al.timestamp >= now() - interval '1 day'
+ORDER BY al.timestamp DESC;
+```
+
+**Cookie-vs-Bearer breakdown**
+
+`api_key_id` is the fast discriminator for caller path. Cookie-session rows use the nil sentinel, Bearer rows use any non-nil UUID. `IS DISTINCT FROM` is used below so the Bearer branch stays correct even if future schema changes ever allow nullable intermediate projections.
+
+```sql
+SELECT
+  'cookie' AS caller_type,
+  COUNT(*) AS rows,
+  COUNT(actor_user_id) AS rows_with_user_id,
+  COUNT(actor_api_key_id) AS rows_with_real_key_id
+FROM audit_log
+WHERE tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+  AND api_key_id = '00000000-0000-0000-0000-000000000000'
+
+UNION ALL
+
+SELECT
+  'bearer' AS caller_type,
+  COUNT(*) AS rows,
+  COUNT(actor_user_id) AS rows_with_user_id,
+  COUNT(actor_api_key_id) AS rows_with_real_key_id
+FROM audit_log
+WHERE tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+  AND api_key_id IS DISTINCT FROM '00000000-0000-0000-0000-000000000000';
+```
+
+For a recent-window breakdown instead of all-time tenant history, add a timestamp predicate to both branches:
+
+```sql
+AND timestamp >= now() - interval '7 days'
+```
+
+**Harness coverage.** Gate 7v.8 covers both scope enforcement and happy-path reads. The harness first lands at least one `audit_log` row through the ISSUE 21 `run_audit_log_writer` path by making an earlier chat completion, then asserts that a Management key gets HTTP 200 with `.rows.length >= 1`. The same gate also calls this endpoint with an `OpenAiCompat` key and expects HTTP 403.
+
+**Design reference.** Identity and audit-field background lives in [`docs/design/phase2/08-identity-and-users.md`](../design/phase2/08-identity-and-users.md) and the shipped version chain is tracked in [`docs/ROADMAP.md`](../ROADMAP.md). Follow-ups that are tracked but not blocking `v1.0.0` include cursor-based pagination for result sets larger than 500 rows, additional filters such as `status`, `model`, and `request_id`, and `billing_events` user-id plumbing for easier cross-surface joins.
+
+After ISSUE 21, `audit_log` is the canonical persistence target for chat audit rows. The write path is `run_audit_log_writer`, which is separate from this read-only endpoint; `GET /api/v1/web/workbench/admin/audit/log` only projects rows that have already been persisted.
 
 ---
 
@@ -1661,6 +2076,96 @@ User self-service API keys. **OpenAiCompat** scope (any authenticated caller). T
 #### DELETE /api/v1/web/workbench/keys/{key_id}
 
 Revoke a key owned by the caller. Idempotent (re-revoke returns 200).
+
+#### Operator recipes
+
+**Provision a new member user** (Management-scope caller):
+
+```sh
+MANAGEMENT_KEY="gad_live_your_admin_key"
+
+# 1. Create the user
+curl -sS -X POST http://localhost:8080/api/v1/web/workbench/admin/users \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "email": "alice@example.com",
+    "display_name": "Alice",
+    "role": "member",
+    "password": "alice-initial-password"
+  }' | jq .
+# Response: {"user":{"id":"<uuid>","tenant_id":"...","email":"alice@example.com",...}}
+
+# 2. Alice can now login via the cookie-session API or mint her own key.
+```
+
+**Alice mints her own API key** (OpenAiCompat-scope self-service). She logs in via cookie session first, then POSTs to `/keys` using the cookie:
+
+```sh
+# Alice logs in (captures the cookie in a jar)
+curl -sS -c /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"alice-initial-password"}' \
+  http://localhost:8080/api/v1/auth/login
+
+# Alice creates a key using her cookie (v0.5.9+ unified middleware accepts cookie on /keys)
+curl -sS -b /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alice-laptop","kind":"live"}' \
+  http://localhost:8080/api/v1/web/workbench/keys | jq .
+# Response: {"key":{"id":"<uuid>","label":"alice-laptop","kind":"live",...},
+#           "raw_key":"gad_live_..."}   # shown ONCE — save it now
+```
+
+**Rotate a key** (revoke-old-after-new pattern — avoids a window with no live key):
+
+```sh
+OLD_KEY_ID="<uuid>"
+
+# 1. Create the replacement
+curl -sS -b /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alice-laptop-v2"}' \
+  http://localhost:8080/api/v1/web/workbench/keys | jq .raw_key
+# Save the new raw key. Update the client.
+
+# 2. Verify the client works with the new key. Then revoke the old one:
+curl -sS -b /tmp/alice.jar -X DELETE \
+  http://localhost:8080/api/v1/web/workbench/keys/$OLD_KEY_ID
+# 200 on first call, 200 on re-run (idempotent).
+```
+
+**Team membership** (Management-scope caller):
+
+```sh
+# Create a team (id must be kebab-case, 'admins' reserved)
+curl -sS -X POST http://localhost:8080/api/v1/web/workbench/admin/teams \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"platform","display_name":"Platform Team"}'
+
+# Add Alice to the team
+curl -sS -X POST \
+  http://localhost:8080/api/v1/web/workbench/admin/teams/platform/members \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"$ALICE_UUID\",\"role\":\"member\"}"
+
+# Remove Alice from the team (does NOT delete the user)
+curl -sS -X DELETE \
+  http://localhost:8080/api/v1/web/workbench/admin/teams/platform/members/$ALICE_UUID \
+  -H "Authorization: Bearer $MANAGEMENT_KEY"
+```
+
+**Common error shapes**:
+
+| Status | `code` | Trigger |
+|--------|--------|---------|
+| 400 | `validation_error` | kebab-case regex fail on team id, `'admins'` reserved-name violation, `service` role with password, email format invalid |
+| 400 | `scope_narrowing_violation` | POST /keys requested scope exceeds caller's own scopes |
+| 403 | `scope_required` | Management-only endpoint called with OpenAiCompat-only key |
+| 409 | `single_admin_guard` | DELETE /admin/users on the last remaining active admin in the tenant |
+| 4xx | `cross_tenant_rejected` | POST /admin/teams/{id}/members with a user_id from a different tenant |
 
 ---
 

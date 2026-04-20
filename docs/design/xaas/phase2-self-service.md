@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — tenant self-service implementation plan (ISSUE 14)
 
 > **담당**: @xaas-platform-lead
-> **상태**: ISSUE 14 ✅ CLOSED (PR #246 / v0.5.7, 2026-04-19). TASK 14.6 split out to ISSUE 15 ✅ CLOSED (PR #248 / v0.5.8). ISSUE 16 TASK 16.1 (unified Bearer-or-cookie middleware) ✅ CLOSED (PR #259 / v0.5.9, 2026-04-19). ISSUE 17 TASK 17.1 (`ValidatedKey.user_id` plumbing) ✅ CLOSED (PR #260 / v0.5.10, 2026-04-19). ISSUE 19 TASK 19.1 (`AuditEntry` actor fields structural) ✅ CLOSED (PR #262 / v0.5.11, 2026-04-19). ISSUE 20 TASK 20.1 (TenantContext → AuditEntry plumbing) ✅ CLOSED (PR #263 / v0.5.12, 2026-04-19). 남은 스코프: **ISSUE 18** web UI 로그인 폼, **ISSUE 21** pg audit_log consumer.
+> **상태**: ISSUE 14 ✅ CLOSED (PR #246 / v0.5.7). ISSUE 15 ✅ CLOSED (PR #248 / v0.5.8). ISSUE 16 ✅ CLOSED (PR #259 / v0.5.9). ISSUE 17 ✅ CLOSED (PR #260 / v0.5.10). ISSUE 19 ✅ CLOSED (PR #262 / v0.5.11). ISSUE 20 ✅ CLOSED (PR #263 / v0.5.12). ISSUE 21 TASK 21.1 (pg audit_log consumer) ✅ CLOSED (PR #267 / v0.5.13). ISSUE 22 TASK 22.1 (admin `/audit/log` query endpoint) ✅ CLOSED (PR #269 / v0.5.14). 남은 스코프: **ISSUE 18** web UI 로그인 폼 (하나만 남음).
 > **작성일**: 2026-04-19
 > **설계 출처**: `docs/design/phase2/08-identity-and-users.md` (approved 2026-04-18)
 > **이 문서**: 상위 설계(08) → 구체적 마이그레이션/엔드포인트/TASK 분해로 브리징
@@ -27,11 +27,12 @@ TASK 순서는 무엇인지, ISSUE 14 close까지의 패치 버전 경로.
 | **14.6** → **ISSUE 15** web UI 세션 로그인 — `/auth/login`, `/auth/logout`, `/auth/whoami` | `crates/gadgetron-xaas/src/sessions.rs` + `crates/gadgetron-gateway/src/auth_session.rs` | ✅ PR #248 (ISSUE 15 close) |
 | **14.7** CLI subcommands — `gadgetron user {create,list,delete}`, `gadgetron team {create,list,delete}` | `gadgetron-cli` main.rs | ✅ PR #246 |
 
-**CLOSED**: ISSUE 14 merged as PR #246 / v0.5.7, ISSUE 15 (ex-14.6) as PR #248 / v0.5.8, ISSUE 16 (TASK 16.1 단일 middleware) as PR #259 / v0.5.9, ISSUE 17 (TASK 17.1 `ValidatedKey.user_id` plumbing) as PR #260 / v0.5.10, ISSUE 19 (TASK 19.1 `AuditEntry` actor fields structural) as PR #262 / v0.5.11, ISSUE 20 (TASK 20.1 TenantContext → AuditEntry plumbing) as PR #263 / v0.5.12. Harness 126 PASS at ISSUE 15 close → 129 PASS at ISSUE 16 close (Gate 7v.6 added). ISSUE 17 + 19 + 20 모두 behavior-preserving (data-flow + struct-shape) 변경이므로 새 gate 없이 129 유지.
+**CLOSED**: ISSUE 14 (PR #246 / v0.5.7) + ISSUE 15 (PR #248 / v0.5.8) + ISSUE 16 TASK 16.1 단일 middleware (PR #259 / v0.5.9) + ISSUE 17 TASK 17.1 `ValidatedKey.user_id` plumbing (PR #260 / v0.5.10) + ISSUE 19 TASK 19.1 `AuditEntry` actor fields structural (PR #262 / v0.5.11) + ISSUE 20 TASK 20.1 TenantContext → AuditEntry plumbing (PR #263 / v0.5.12) + ISSUE 21 TASK 21.1 pg `audit_log` consumer (PR #267 / v0.5.13, Gate 7v.7 +2) + ISSUE 22 TASK 22.1 admin `/audit/log` query endpoint (PR #269 / v0.5.14, Gate 7v.8 +2). Harness progression: 126 → 129 (PR #259 ISSUE 16 Gate 7v.6) → 131 (PR #267 ISSUE 21 Gate 7v.7) → 133 (PR #269 ISSUE 22 Gate 7v.8). ISSUE 17 + 19 + 20 은 behavior-preserving 변경으로 새 gate 없이 기존 가드에 의존.
 
-남은 multi-user 스코프 (post-PR-#263):
-- **ISSUE 18**: web UI 로그인 form (React/Tailwind in `gadgetron-web`) — 사용자가 `/web` 방문 시 cookie 없으면 로그인 폼으로 리다이렉트. Playwright E2E gate 7v.7 이 login → shell render → logout → back-to-form 루프를 검증 예정.
-- **ISSUE 21**: pg `audit_log` consumer — `init_serve_runtime` 에서 spawn 되는 background task 가 `AuditWriter` 의 mpsc channel 을 drain 해 `audit_log` 테이블에 새 `actor_user_id` + `actor_api_key_id` column 으로 기록 (migration column 은 ISSUE 14 TASK 14.1 에서 이미 추가됨 — 지금까지 unused; ISSUE 20 가 chat handler 에서 populate 하지만 현재는 tracing sink 로만 흐름). 새 operator query endpoint `GET /api/v1/web/workbench/admin/audit/log` (Management-scoped, `limit.clamp(1, 500)`, optional `since` + `user_id` + `api_key_id` filter).
+남은 multi-user 스코프 (post-PR-#269):
+- **ISSUE 18**: web UI 로그인 form (React/Tailwind in `gadgetron-web`) — 사용자가 `/web` 방문 시 cookie 없으면 로그인 폼으로 리다이렉트. Playwright E2E gate 7v.9 (7v.7 + 7v.8 이 ISSUE 21/22 에 선점되었으므로) 이 login → shell render → logout → back-to-form 루프를 검증 예정.
+- Session rotation on cookie refresh — 현재 whoami 가 `last_active_at` 만 갱신; 주기적 session token rotation 은 post-v1.0.0 보안 강화 항목.
+- Google OAuth 소셜 로그인 — `project_multiuser_login_google` 로 tracked; ISSUE 18 이후 stack up.
 - Session rotation on cookie refresh — 현재 whoami 가 `last_active_at` 만 갱신; 주기적 session token rotation 은 post-v1.0.0 보안 강화 항목.
 - Google OAuth 소셜 로그인 — `project_multiuser_login_google` 로 tracked; ISSUE 18 이후 stack up.
 
