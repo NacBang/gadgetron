@@ -2323,6 +2323,33 @@ else
   fail "admin/billing/insert-failures OpenAiCompat: expected 403, got $FAILURES_403_CODE" ""
 fi
 
+# Gate 7p — /metrics Prometheus scrape surface (ISSUE 27).
+# Label chosen to avoid collision with the existing Gate 7m
+# (request_evidence 404). Unauthenticated by design (network-boundary
+# trust model); endpoint emits Prometheus text format with
+# gadgetron_billing_insert_failures_total per kind. Harness asserts
+# the HELP/TYPE/sample lines are present and the content-type matches
+# spec. Happy-path values are all zero (same invariant as Gate 7k.8),
+# so the total is pinned for regression.
+log "=== Gate 7p: /metrics Prometheus endpoint (ISSUE 27) ==="
+METRICS_RESP="$(curl -fsS -i "$GAD_BASE/metrics" 2>&1 || true)"
+if echo "$METRICS_RESP" | grep -qi '^content-type: text/plain; version=0.0.4'; then
+  pass "/metrics content-type matches Prometheus text format spec (0.0.4)"
+else
+  fail "/metrics content-type header regressed" "$(echo "$METRICS_RESP" | head -c 400)"
+fi
+# Body assertions — all 3 kinds must have HELP + TYPE + a sample line.
+METRICS_BODY="$(curl -fsS "$GAD_BASE/metrics" 2>&1 || true)"
+if echo "$METRICS_BODY" | grep -q '^# HELP gadgetron_billing_insert_failures_total' \
+   && echo "$METRICS_BODY" | grep -q '^# TYPE gadgetron_billing_insert_failures_total counter' \
+   && echo "$METRICS_BODY" | grep -q 'gadgetron_billing_insert_failures_total{kind="chat"} 0' \
+   && echo "$METRICS_BODY" | grep -q 'gadgetron_billing_insert_failures_total{kind="tool"} 0' \
+   && echo "$METRICS_BODY" | grep -q 'gadgetron_billing_insert_failures_total{kind="action"} 0'; then
+  pass "/metrics exposes HELP + TYPE + 3 per-kind billing_insert_failures counters (all zero, happy path)"
+else
+  fail "/metrics body missing Prometheus metric shape" "$(echo "$METRICS_BODY" | head -c 400)"
+fi
+
 # -------------------------------------------------------------------
 # Gate 7k.6b — billing_events.actor_user_id population per kind (ISSUE 24)
 # -------------------------------------------------------------------

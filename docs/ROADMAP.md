@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.18** (post-ISSUE 26 close — process-local `BillingFailureCounter` + `GET /admin/billing/insert-failures` Management-scope endpoint; closes the security-review-flagged observability gap where fire-and-forget billing INSERT errors logged to tracing but had no in-memory signal for SLO alerts)
+**Current version: 0.5.19** (post-ISSUE 27 close — `GET /metrics` Prometheus text-format scrape surface exposes `gadgetron_billing_insert_failures_total{kind="chat|tool|action"}`; unauthenticated by design assuming network-boundary trust model, consumable by operator Prometheus / Grafana without per-scrape API key rotation)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
