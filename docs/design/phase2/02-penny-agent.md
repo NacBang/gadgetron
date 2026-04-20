@@ -1392,22 +1392,14 @@ impl GadgetronError {
 
 ## 10. Configuration (`config.rs`) — dx + security fixes
 
-> **v4 note (2026-04-14)**: The canonical P2A operator-facing config schema is
-> `[agent]` + `[agent.brain]` in `04-mcp-tool-registry.md v2 §4`. `AgentConfig`
-> lives in `gadgetron-core::agent::config` (landed in commit `b6b314d`) and
-> drives the subprocess env plumbing via a thin `PennyConfig`-shaped view
-> inside `gadgetron-penny` that reads `[agent.brain]` fields at startup.
->
-> The `PennyConfig` struct below is preserved as the **internal** config
-> surface that `PennyProvider::new` consumes — it is populated from
-> `AgentConfig` by the loader, not parsed directly from `[penny]` in
-> `gadgetron.toml`. Operators upgrading from v0.1.x with an existing
-> `[penny]` section get a one-shot migration to `[agent.brain]` per
-> `04 v2 §11.1` (pre-deserialize loader pass with `tracing::warn!` per
-> moved field).
->
-> The TOML example at the bottom of this section is **retained for migration
-> reference only** — do NOT treat it as the canonical P2A authoring example.
+> **v4 note (2026-04-14)**: The canonical P2A operator-facing config schema
+> is `[agent]` + `[agent.brain]` in [`04-mcp-tool-registry.md v2 §4`](./04-mcp-tool-registry.md#4-agent-schema).
+> `AgentConfig` lives in `gadgetron-core::agent::config` (landed in commit
+> `b6b314d`). `PennyConfig` below remains the **internal** struct that
+> `PennyProvider::new` consumes, populated from `AgentConfig` by the loader
+> (not parsed directly from TOML). v0.1.x `[penny]` operators see a one-shot
+> migration to `[agent.brain]` — mechanics live in
+> [`04 §11.1`](./04-mcp-tool-registry.md#111-v01x--v020-config-migration-dx-mcp-b2--ca-mcp-b1).
 
 ```rust
 use std::path::PathBuf;
@@ -1488,33 +1480,15 @@ impl PennyConfig {
 }
 ```
 
-### TOML example — LEGACY v0.1.x (retained for migration reference only)
+### Legacy v0.1.x `[penny]` TOML — see `04 §11.1`
 
-**This `[penny]` section is superseded by `[agent]` + `[agent.brain]` in `04 v2 §4`.** The loader accepts it for backward compatibility in v0.2.0 with a per-field deprecation warning; it will be removed in Phase 2C.
-
-```toml
-# LEGACY — do not author new configs with this shape. See 04 v2 §4 for [agent].
-[penny]
-claude_binary = "claude"
-# claude_base_url = "http://127.0.0.1:4000"         # optional, commented out
-# claude_model = "claude-3-5-sonnet-20241022"       # optional, commented out
-request_timeout_secs = 300
-max_concurrent_subprocesses = 4                      # P2A desktop default; range [1, 32]
-```
-
-**Field mapping to `[agent]` (v0.2.0 canonical):**
-
-| v0.1.x `[penny]` | v0.2.0 destination | Notes |
-|---|---|---|
-| `claude_binary` | `[agent].binary` | Populate + `tracing::warn!` |
-| `claude_base_url` | `[agent.brain].external_base_url` + set `mode = "external_proxy"` | Populate + warn |
-| `claude_model` | **DROPPED** — agent cannot pick its own brain model (ADR-P2A-05 §14) | ERROR-level log, operator must move to `[agent.brain]` |
-| `request_timeout_secs` | `[agent].request_timeout_secs` (NEW field on `AgentConfig`) | Populate + warn |
-| `max_concurrent_subprocesses` | `[agent].max_concurrent_subprocesses` (NEW field on `AgentConfig`) | Populate + warn |
-
-See `04 v2 §11.1` for the loader implementation and test names.
-
-**v0.2.0 env override convention**: `GADGETRON_AGENT_*` with section path uppercased and `.` → `_`. Legacy `GADGETRON_PENNY_*` vars are recognized during P2A with the same deprecation warning as the TOML fields; they stop being read in P2C.
+The v0.1.x `[penny]` TOML shape, field-by-field mapping to `[agent]` / `[agent.brain]`,
+loader migration behavior (per-field `tracing::warn!`, `claude_model` ERROR + drop),
+and `GADGETRON_PENNY_*` env override recognition are authoritative in
+[`04 §11.1`](./04-mcp-tool-registry.md#111-v01x--v020-config-migration-dx-mcp-b2--ca-mcp-b1).
+The canonical P2A authoring shape is `[agent]` + `[agent.brain]` in
+[`04 §4`](./04-mcp-tool-registry.md#4-agent-schema) — do not
+author new configs with `[penny]`.
 
 ---
 
