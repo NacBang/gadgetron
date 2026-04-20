@@ -365,6 +365,194 @@ The delete calls then return `{"deleted": true, "user_id": "<alice_uuid>"}` for 
 
 ---
 
+## Day-2 operations
+
+The walkthrough above covers the first-time provisioning flow. The recipes below cover ongoing operator work: offboarding, bulk rotation, team restructuring, tenant suspension, and access review. All assume the `$MGMT_KEY` + `$WB` variables from `§1 Assumed state`.
+
+**What admin HTTP exists on trunk** (`api-reference.md §Tenant self-service endpoints (ISSUE 14 — v0.5.7)`): list/create/delete `users`, list/create/delete `teams`, list/create/delete `team_members`, plus the user-self-service `/workbench/keys` triplet. **No admin endpoint yet exists** for inspecting another user's keys, admin-revoking a specific key by id, or suspending a tenant. Those gaps are plugged below via either the `gadgetron` CLI (PostgreSQL-backed) or direct SQL. Track `ROADMAP.md` §EPIC 4 for the admin-key-management ISSUE if your deployment needs them as HTTP surface.
+
+### Offboarding a departing user
+
+Three steps: revoke keys → delete user → (optionally) erase PII via the `auth.md §Audit log retention §Per-user erasure` recipe.
+
+```bash
+DEPARTING_USER_ID="e61d1784-9cc3-46c8-aab0-5a14d7fb0f16"
+DEPARTING_TENANT_ID="b7e43ab0-c920-4e8f-8765-31b7c29e4321"
+
+# 1. Enumerate the user's active keys via SQL (no admin HTTP yet
+#    for cross-user key inventory).
+psql "$GADGETRON_DATABASE_URL" -tAc "
+  SELECT id, label, scopes, created_at
+  FROM api_keys
+  WHERE user_id = '$DEPARTING_USER_ID' AND revoked_at IS NULL
+  ORDER BY created_at
+"
+
+# 2. Revoke each active key. gadgetron key revoke marks
+#    revoked_at = NOW(). The 10-minute validator cache TTL still
+#    applies (auth.md §How authentication works), so restart the
+#    gateway if you need immediate blackout.
+for KEY_ID in $(psql "$GADGETRON_DATABASE_URL" -tAc \
+    "SELECT id FROM api_keys WHERE user_id = '$DEPARTING_USER_ID' AND revoked_at IS NULL"); do
+  ./target/release/gadgetron key revoke --key-id "$KEY_ID"
+done
+
+# 3. Delete the user via the admin HTTP. user_sessions + team_members
+#    cascade off user_id per the schema FK table in
+#    auth.md §Audit log retention §Full tenant deletion (order matters).
+#    Note: single_admin_guard returns 409 if this is the tenant's last
+#    active admin — promote someone first or the delete will refuse.
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$WB/admin/users/$DEPARTING_USER_ID" | jq .
+
+# 4. (Optional, GDPR Art. 17) Erase per-user audit attribution.
+#    Full 6-table recipe in auth.md §Audit log retention §Per-user erasure (GDPR Art. 17).
+#    Minimum viable — clear the UUID-typed columns + drop NOT NULL rows:
+psql "$GADGETRON_DATABASE_URL" <<SQL
+BEGIN;
+UPDATE audit_log         SET actor_user_id = NULL WHERE actor_user_id = '$DEPARTING_USER_ID';
+UPDATE billing_events    SET actor_user_id = NULL WHERE actor_user_id = '$DEPARTING_USER_ID';
+UPDATE tool_audit_events SET owner_id      = NULL WHERE owner_id      = '$DEPARTING_USER_ID';
+DELETE FROM action_audit_events  WHERE actor_user_id = '$DEPARTING_USER_ID';
+DELETE FROM activity_events      WHERE actor_user_id = '$DEPARTING_USER_ID';
+DELETE FROM knowledge_candidates WHERE actor_user_id = '$DEPARTING_USER_ID';
+COMMIT;
+SQL
+```
+
+**Do not skip step 2 even if step 3 will cascade `user_sessions`.** `user_sessions` cascades on user DELETE, but `api_keys.user_id` does NOT cascade (`auth.md §Audit log retention §Full tenant deletion` FK table) — dropping the user first fails with a FK violation.
+
+### Bulk key rotation on suspected compromise
+
+Credential compromise on a single developer's laptop usually means every key that laptop held is suspect. The user's own `/workbench/keys` self-service endpoint is the cleanest rotate-and-revoke path when the user is still cooperating; for admin-driven rotation of a user who no longer has cookie access, fall back to SQL + CLI.
+
+**User-driven (self-service)** — the user logs in via cookie session and rotates each key one at a time with the pattern in `api-reference.md §Rotate a key`:
+
+```bash
+# From the user's cookie jar:
+curl -sS -b /tmp/alice.jar -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"alice-laptop-v2"}' \
+  "$WB/keys" | jq .raw_key
+# ... update the client, confirm works, then:
+curl -sS -b /tmp/alice.jar -X DELETE "$WB/keys/$OLD_KEY_ID"
+```
+
+**Admin-driven (user unavailable)** — enumerate + revoke via CLI/SQL, mint replacement via impersonation-log-then-deliver-out-of-band:
+
+```bash
+# Suspect key ids from your secret-manager audit log or git-leaks scan.
+SUSPECT_KEY_IDS=(
+  "2ddf6a51-3e4a-4870-9d55-8857d1f51f77"
+  "a1b2c3d4-5678-9012-abcd-ef1234567890"
+)
+
+for KEY_ID in "${SUSPECT_KEY_IDS[@]}"; do
+  # Who owns it? Capture for audit + notification.
+  OWNER_EMAIL=$(psql "$GADGETRON_DATABASE_URL" -tAc \
+    "SELECT u.email FROM api_keys k JOIN users u ON u.id = k.user_id
+     WHERE k.id = '$KEY_ID'")
+  echo "Revoking $KEY_ID (owner: $OWNER_EMAIL)"
+
+  # Revoke via CLI. This marks revoked_at = NOW() atomically.
+  ./target/release/gadgetron key revoke --key-id "$KEY_ID"
+done
+
+# Flush the validator cache to close the 10-minute-TTL window
+# immediately. Production-deployment pattern is systemd restart,
+# per installation.md §6.1 In-place upgrade — readers are quick
+# enough to survive the /ready 503 blip.
+sudo systemctl restart gadgetron
+```
+
+The user then requests a new key via the standard `POST /workbench/keys` flow once their cookie session is restored. Track "admin mint on behalf of user" as a DX gap — no endpoint exists today, and splicing it in without careful audit plumbing risks the same type-confusion landmine ISSUE 25 closed.
+
+### Team restructuring — merge, rename, reassign
+
+Teams are identified by the kebab-case `id` column, which is human-facing (`"platform"`, `"ml-ops"`). Renaming isn't supported directly; do it as delete + recreate + re-add members:
+
+```bash
+# 1. Snapshot the current members + lead structure.
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$WB/admin/teams/platform/members" \
+  | jq '.members' > /tmp/platform-members.json
+
+# 2. Create the new team with the desired id.
+curl -fsS -X POST \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"platform-eng","display_name":"Platform Engineering"}' \
+  "$WB/admin/teams"
+
+# 3. Re-add each member with their original role.
+jq -r '.[] | "\(.user_id)\t\(.role)"' /tmp/platform-members.json | \
+  while IFS=$'\t' read -r UID ROLE; do
+    curl -fsS -X POST \
+      -H "Authorization: Bearer $MGMT_KEY" \
+      -H 'Content-Type: application/json' \
+      -d "$(jq -n --arg uid "$UID" --arg role "$ROLE" '{user_id: $uid, role: $role}')" \
+      "$WB/admin/teams/platform-eng/members"
+  done
+
+# 4. Delete the old team. team_members cascade off team_id
+#    (auth.md §Audit log retention §Tenant lifecycle table).
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$WB/admin/teams/platform"
+```
+
+**Merging two teams** follows the same shape: snapshot both, create merged team, re-add all members, delete both originals. Keep the snapshots — `team_members` cascade on team DELETE means a mid-merge failure has no undo button without them.
+
+### Tenant suspension and reinstatement
+
+Suspending a tenant (e.g. payment lapse, compliance incident) preserves all their data but blocks new requests. **No admin HTTP endpoint exists for this on trunk** — the flip is SQL-only against `tenants.status`. Validator cache-miss re-reads the status, so a 10-minute blackout window applies same as key revocation.
+
+```sql
+-- Suspend
+UPDATE tenants SET status = 'Suspended' WHERE id = :tenant_id;
+
+-- Reinstate
+UPDATE tenants SET status = 'Active' WHERE id = :tenant_id;
+```
+
+After the UPDATE, either wait 10 minutes (validator cache TTL) or `systemctl restart gadgetron` to flush immediately. While suspended, every `/v1/*` + `/api/v1/web/workbench/*` request from that tenant's keys returns 401 `invalid_api_key` — `manual/troubleshooting.md §HTTP 401 — invalid or missing API key` cites "tenant status is Suspended/Deleted" as one of the 6 401 causes.
+
+`status = 'Deleted'` is a different path — `auth.md §Audit log retention §Full tenant deletion` covers the FK cascade sequence. Treat Suspended as reversible, Deleted as permanent.
+
+### Quarterly access review
+
+Who has `Management`-scope access right now? Who hasn't logged in for 90+ days? These are the two queries every compliance program eventually asks:
+
+```sql
+-- Management-scope key inventory (ISSUE 14 / per-user attribution via ISSUE 17)
+SELECT
+    u.email,
+    u.role,
+    k.label,
+    k.created_at,
+    k.scopes
+FROM api_keys k
+JOIN users u ON u.id = k.user_id
+WHERE k.revoked_at IS NULL
+  AND 'Management' = ANY(k.scopes)
+  AND u.tenant_id = :tenant_id
+ORDER BY u.email, k.created_at;
+
+-- Stale users (no login in 90+ days). Candidates for offboarding.
+SELECT email, role, last_login_at
+FROM users
+WHERE is_active = true
+  AND tenant_id = :tenant_id
+  AND (last_login_at IS NULL OR last_login_at < NOW() - INTERVAL '90 days')
+ORDER BY last_login_at NULLS FIRST;
+```
+
+Treat the results as a triage queue: confirm each row with the employee's manager, then either rotate the key (if legitimate but stale) or run the §Offboarding a departing user recipe above.
+
+---
+
 ## Harness invariants
 
 | Gate ID | Pinned behavior |
