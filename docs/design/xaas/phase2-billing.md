@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — integer-cent billing ledger (ISSUE 12)
 
 > **담당**: @xaas-platform-lead
-> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
+> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution shipped (PR #271 / 0.5.15)** — `actor_user_id` column + tenant-first composite index + 8-arg `insert_billing_event`. ISSUE 24 is the queued follow-up that threads real `user_id` through `QuotaToken` + `AuthenticatedContext` so chat + action paths populate the column (tool path populates today). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
 > **작성일**: 2026-04-19
 > **관련 크레이트**: `gadgetron-xaas` (새 `billing` 모듈), `gadgetron-gateway`, `gadgetron-cli`
 > **Phase**: [P2] — extends Phase 1 quota infrastructure (`phase1.md`)
@@ -77,6 +77,15 @@ CREATE INDEX IF NOT EXISTS billing_events_tenant_created_idx
 
 CREATE INDEX IF NOT EXISTS billing_events_kind_created_idx
     ON billing_events (event_kind, created_at DESC);
+
+-- migrations/20260420000005_billing_events_actor_user_id.sql  (ISSUE 23)
+ALTER TABLE billing_events
+    ADD COLUMN IF NOT EXISTS actor_user_id UUID;
+
+-- Tenant-first composite — forces per-user spend queries to pin
+-- tenant_id (cross-tenant leakage defense per security review).
+CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
+    ON billing_events (tenant_id, actor_user_id, created_at DESC);
 ```
 
 **Notes**
@@ -84,6 +93,7 @@ CREATE INDEX IF NOT EXISTS billing_events_kind_created_idx
 - `ON DELETE CASCADE` on `tenant_id`: 테넌트 삭제 시 원장도 따라감. 컴플라이언스상 문제가 되면 ADR로 분리해 `RESTRICT`로 바꾸는 것을 추후 검토.
 - `event_kind` CHECK: 3가지로 잠금. 새 종류 추가 시 migration 필요 — 이게 feature, bug 아님.
 - `source_event_id`에 FK 없음: §1.5 참조.
+- **`actor_user_id` (ISSUE 23)**: nullable, **FK 없음**. caller 가 heterogeneous sources (ValidatedKey.user_id / TenantContext.actor_user_id / AuthenticatedContext placeholder) 에서 populate 하므로 strict FK 는 buggy caller 를 silent INSERT failure 로 만들 위험이 있다. 운영자 reconciliation 쿼리는 read-time `LEFT JOIN users(id)` 로 병합. ISSUE 23 migration comment 가 이 결정을 authoritative 로 기록.
 
 ---
 
@@ -107,8 +117,12 @@ pub struct BillingEventRow {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// ISSUE 23 — denormalized projection of `audit_log.actor_user_id`
+    /// (audit_log = source of truth). Nullable; see §1.5 + migration.
+    pub actor_user_id: Option<Uuid>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_billing_event(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -117,6 +131,7 @@ pub async fn insert_billing_event(
     source_event_id: Option<Uuid>,
     model: Option<&str>,
     provider: Option<&str>,
+    actor_user_id: Option<Uuid>, // ISSUE 23
 ) -> Result<(), sqlx::Error>;
 
 pub async fn query_billing_events(
@@ -142,6 +157,11 @@ let ins = crate::billing::insert_billing_event(
     None, // TASK 12.2+에서 chat audit_log UUID를 threading
     None, // model — TASK 12.2에서 enforcer가 컨텍스트로 받음
     None, // provider — 동일
+    None, // actor_user_id — ISSUE 23 chat path passes None
+          // because QuotaToken doesn't carry user_id yet.
+          // ISSUE 24 adds `user_id: Option<Uuid>` to QuotaToken
+          // sourced from ctx.actor_user_id; then this flips to
+          // `token.user_id`.
 ).await;
 if let Err(e) = ins {
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
@@ -150,6 +170,16 @@ if let Err(e) = ins {
 ```
 
 **Why no threading of model/provider/source_event_id now**: `QuotaEnforcer` trait는 현재 `actual_cost_cents: i64`만 받는다. TASK 12.2에서 이 trait 시그니처를 확장하면서 동시에 tool / action 이벤트 경로도 추가. 한 번의 wire change로 3가지 값을 threading — 한 TASK 한 wire change.
+
+**Per-path `actor_user_id` nullability contract (ISSUE 23)**:
+
+| 경로 | source | 현재 값 | ISSUE 24 이후 |
+|------|--------|---------|---------------|
+| chat | `PgQuotaEnforcer::record_post` (이 §) | `None` | `Some(token.user_id)` — `QuotaToken` 확장 |
+| tool | `handlers.rs` tool billing | `Some(ctx.actor_user_id)` ✅ | unchanged |
+| action | `action_service::emit_action_billing` | `None` — `AuthenticatedContext.user_id` 가 api_key_id placeholder 라 security review 가 반전 | `Some(actor.real_user_id)` — `AuthenticatedContext` 에 `real_user_id` 필드 추가 |
+
+Harness Gate 7k.6b (PR #271) 이 per-kind population 을 직접 Postgres query 로 assert: chat=NULL + tool≥1 NOT NULL + action=NULL.
 
 ---
 
