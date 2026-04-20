@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — integer-cent billing ledger (ISSUE 12)
 
 > **담당**: @xaas-platform-lead
-> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution column shipped (PR #271 / 0.5.15)** — `actor_user_id` + tenant-first composite index + `insert_billing_event(pool, event)` struct signature (refactored from the original 8-arg flat call to `BillingEventInsert` with 3 typed constructors via PR #279) + **ISSUE 24 end-to-end threading shipped (PR #289 / 0.5.16)** — chat + tool + action `billing_events` all populate `actor_user_id` with the real user UUID via `QuotaToken.user_id` (chat) + `TenantContext.actor_user_id` (tool) + `AuthenticatedContext.real_user_id` (action). Harness Gate 7k.6b-identity asserts the three converge to a single UUID per request. ISSUE 25 is the type-confusion hardening follow-up (full `AuthenticatedContext` rename + audit_log contamination fix + billing-insert SLO counter). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
+> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution column shipped (PR #271 / 0.5.15)** — `actor_user_id` + tenant-first composite index + `insert_billing_event(pool, event)` struct signature (refactored from the original 8-arg flat call to `BillingEventInsert` with 3 typed constructors via PR #279) + **ISSUE 24 end-to-end threading shipped (PR #289 / 0.5.16)** — chat + tool + action `billing_events` all populate `actor_user_id` with the real user UUID via `QuotaToken.user_id` (chat) + `TenantContext.actor_user_id` (tool) + `AuthenticatedContext.real_user_id` (action). Harness Gate 7k.6b-identity asserts the three converge to a single UUID per request. **ISSUE 25 `AuthenticatedContext.user_id` → `api_key_id` rename + audit_log contamination fix shipped (PR #293 / 0.5.17)** — the legacy misnamed field now carries its true name; 6 `action_service.rs` audit sinks + 3 sibling sites emit `actor.real_user_id.unwrap_or(actor.api_key_id)` fallback. ISSUE 26 (billing-insert SLO counter) + ISSUE 27 (`real_user_id` → `user_id` rename completion) are the remaining observability + DX follow-ups. TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
 > **작성일**: 2026-04-19
 > **관련 크레이트**: `gadgetron-xaas` (새 `billing` 모듈), `gadgetron-gateway`, `gadgetron-cli`
 > **Phase**: [P2] — extends Phase 1 quota infrastructure (`phase1.md`)
@@ -325,16 +325,20 @@ UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건
 // Signature trail: original flat-call (pre-PR-#279) → dropped always-None
 // actor_user_id parameter (PR #280 / post-ISSUE-23) → reintroduced via
 // ISSUE 24 (PR #289 / v0.5.16) now that AuthenticatedContext.real_user_id
-// carries the real user id. The parameter is explicitly actor.real_user_id,
-// NOT actor.user_id — the legacy user_id field is an api_key_id placeholder
-// with a rustdoc "DO NOT READ for new user-identity logic" warning. Full
-// rename pending ISSUE 25.
+// carries the real user id → ISSUE 25 (PR #293 / v0.5.17) renamed the
+// legacy AuthenticatedContext.user_id field to api_key_id (what it
+// actually is — an api_key_id placeholder that lived under the wrong
+// name). Call sites now use actor.real_user_id.unwrap_or(actor.api_key_id)
+// fallback: real user UUID preferred, api_key_id fallback for legacy
+// keys pre-dating the ISSUE-14 backfill. ISSUE 27 will finish the rename
+// (real_user_id → user_id) so the fallback reads as
+// actor.user_id.unwrap_or(actor.api_key_id).
 fn emit_action_billing(
     pool: Option<&sqlx::PgPool>,
     tenant_id: Uuid,
     audit_event_id: Uuid,
     gadget_name: Option<String>,
-    actor_user_id: Option<Uuid>,   // pass actor.real_user_id, NOT actor.user_id
+    actor_user_id: Option<Uuid>,   // actor.real_user_id.unwrap_or(actor.api_key_id)
 ) {
     let Some(pool) = pool else { return; };
     let pool = pool.clone();
