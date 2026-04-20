@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — tenant self-service implementation plan (ISSUE 14)
 
 > **담당**: @xaas-platform-lead
-> **상태**: ISSUE 14 ✅ CLOSED (PR #246 / v0.5.7). ISSUE 15 ✅ CLOSED (PR #248 / v0.5.8). ISSUE 16 ✅ CLOSED (PR #259 / v0.5.9). ISSUE 17 ✅ CLOSED (PR #260 / v0.5.10). ISSUE 19 ✅ CLOSED (PR #262 / v0.5.11). ISSUE 20 ✅ CLOSED (PR #263 / v0.5.12). ISSUE 21 TASK 21.1 (pg audit_log consumer) ✅ CLOSED (PR #267 / v0.5.13). ISSUE 22 TASK 22.1 (admin `/audit/log` query endpoint) ✅ CLOSED (PR #269 / v0.5.14). 남은 스코프: **ISSUE 18** web UI 로그인 폼 (하나만 남음).
+> **상태**: ISSUE 14 ✅ CLOSED (PR #246 / v0.5.7). ISSUE 15 ✅ CLOSED (PR #248 / v0.5.8). ISSUE 16 ✅ CLOSED (PR #259 / v0.5.9). ISSUE 17 ✅ CLOSED (PR #260 / v0.5.10). ISSUE 19 ✅ CLOSED (PR #262 / v0.5.11). ISSUE 20 ✅ CLOSED (PR #263 / v0.5.12). ISSUE 21 TASK 21.1 (pg audit_log consumer) ✅ CLOSED (PR #267 / v0.5.13). ISSUE 22 TASK 22.1 (admin `/audit/log` query endpoint) ✅ CLOSED (PR #269 / v0.5.14). ISSUE 23 (`billing_events.actor_user_id` column + tool/action emitters populate) ✅ CLOSED (PR #271 / v0.5.15). 남은 스코프: **ISSUE 18** web UI 로그인 폼 (하나만 남음).
 > **작성일**: 2026-04-19
 > **설계 출처**: `docs/design/phase2/08-identity-and-users.md` (approved 2026-04-18)
 > **이 문서**: 상위 설계(08) → 구체적 마이그레이션/엔드포인트/TASK 분해로 브리징

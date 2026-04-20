@@ -79,7 +79,7 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
 
 ## 7. 현재 상태
 
-- **Workspace version**: `0.5.14` — full per-ISSUE / per-TASK shipping history lives in [`docs/ROADMAP.md`](../ROADMAP.md). Summary below.
+- **Workspace version**: `0.5.15` — full per-ISSUE / per-TASK shipping history lives in [`docs/ROADMAP.md`](../ROADMAP.md). Summary below.
 - **활성 EPIC 목록**:
   - **EPIC 1** Workbench MVP — **CLOSED** `v0.3.0` (PR #208, ISSUE 1–4).
   - **EPIC 2** Agent autonomy — **CLOSED** `v0.4.0` (PR #209, ISSUE 5–7).
@@ -97,6 +97,7 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
   - **ISSUE 20** TenantContext → AuditEntry plumbing ✅ (PR #263 / 0.5.12) — `TenantContext` gains `actor_*` fields populated by `tenant_context_middleware` from `ValidatedKey`; chat handler's 3 `AuditEntry` literals now read ctx fields. Cookie sessions (`Uuid::nil()` sentinel) resolve `actor_api_key_id = None`; Bearer callers get `Some(key_id)`.
   - **ISSUE 21** pg `audit_log` consumer ✅ (PR #267 / 0.5.13) — `run_audit_log_writer` drains the `AuditWriter` mpsc and INSERTs rows into `audit_log` using the ISSUE 19/20 actor columns; tracing line still fires; nil-tenant-id skip guards the 401 auth-failure sentinel. Harness 129 → 131 (Gate 7v.7 +2).
   - **ISSUE 22** admin `/audit/log` query endpoint ✅ (PR #269 / 0.5.14) — new Management-scoped `GET /api/v1/web/workbench/admin/audit/log` with `actor_user_id` + `since` + `limit` filters; tenant pinned from ctx. Harness 131 → 133 (Gate 7v.8 +2).
+  - **ISSUE 23** `billing_events.actor_user_id` column ✅ (PR #271 / 0.5.15) — new migration adds nullable `actor_user_id` + index; `insert_billing_event` trait widened; `BillingEventRow` projection extended; `query_billing_events` SELECT updated. Tool + action emitters populate from `ValidatedKey.user_id` / `TenantContext`; chat emitter passes `None` pending ISSUE 24 which widens `QuotaToken` + `QuotaEnforcer` trait. FK intentionally skipped (multiple heterogeneous callers; best-effort telemetry; LEFT JOIN users at read time).
   - **ISSUE 18** ⏳ web UI login form (React/Tailwind in `gadgetron-web`) — last remaining multi-user gate item.
 - **EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. TASKs 12.3/12.4/12.5 + ISSUE 13 ship **post-1.0** as patch / minor bumps once market pull justifies. EPIC 4 close → `0.5.x` → **`v1.0.0`** (major bump because API stabilizes).
 - **다음 minor bump**: EPIC 4 (Multi-tenant XaaS) close 시 `v1.0.0` (first production release, major bump because API stabilizes). EPIC 5 (Cluster platform) close 시 `v2.0.0` (post-1.0). 0.5.x patch bumps will accumulate per-ISSUE within EPIC 4 in the meantime.
