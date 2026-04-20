@@ -865,6 +865,131 @@ Seven signals that catch most real production failures. Each row gives the signa
 - **No pre-packaged Grafana dashboard** — the LogQL/SQL recipes above are the primitives; operators assemble panels to taste.
 - **No built-in trace export (OTel)** — `tracing` is captured but not forwarded to OTLP today. Adding an `opentelemetry-otlp` exporter in `telemetry.rs` is a one-commit addition for operators who need distributed traces.
 
+### 8. Post-deploy acceptance smoke test
+
+`gadgetron doctor` covers pre-boot sanity (config + DB + provider reachability + `/health`). It does NOT prove end-to-end correctness — `/v1/chat/completions` round-trips, scope enforcement, billing + audit persistence. Run the acceptance script below after initial install, after every §6 upgrade, after every §5.4 restore, and after any `gadgetron.toml` change that edited providers or scopes.
+
+The script returns non-zero on the first failure — wire it into your deploy pipeline's post-cutover gate, or run manually as a 30-second sanity check.
+
+```sh
+#!/usr/bin/env bash
+# save as scripts/smoke.sh, chmod +x
+
+set -euo pipefail
+
+GAD="${GAD:-http://127.0.0.1:8080}"
+KEY_USER="${KEY_USER:?set to an OpenAiCompat-scope gad_live_... key}"
+KEY_MGMT="${KEY_MGMT:?set to a Management-scope gad_live_... key}"
+MODEL="${MODEL:-gpt-4o-mini}"   # or whatever you configured
+FAILED=0
+
+check() { printf "  %-48s" "$1:"; }
+ok()    { echo "PASS"; }
+fail()  { echo "FAIL — $1"; FAILED=$((FAILED+1)); }
+
+echo "Gadgetron acceptance smoke @ $GAD"
+echo
+
+# --- 1. Liveness + readiness --------------------------------------------------
+check "GET /health returns 200"
+curl -fsS "$GAD/health" >/dev/null && ok || fail "gadgetron process is not live"
+
+check "GET /ready returns 200"
+curl -fsS "$GAD/ready" >/dev/null && ok || fail "database pool is unhealthy"
+
+# --- 2. Model discovery -------------------------------------------------------
+check "GET /v1/models includes $MODEL"
+MODELS=$(curl -fsS "$GAD/v1/models" -H "Authorization: Bearer $KEY_USER" | jq -r '.data[].id')
+echo "$MODELS" | grep -qx "$MODEL" && ok || fail "configured model '$MODEL' not surfaced by any provider"
+
+# --- 3. Auth rejection sanity ------------------------------------------------
+check "wrong key returns 401"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$GAD/v1/chat/completions" \
+  -H "Authorization: Bearer gad_live_definitely_not_real_key_0000000" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"hi"}]}')
+[ "$STATUS" = "401" ] && ok || fail "expected 401, got $STATUS"
+
+check "OpenAiCompat key on /admin returns 403"
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+  "$GAD/api/v1/web/workbench/admin/billing/events?limit=1" \
+  -H "Authorization: Bearer $KEY_USER")
+[ "$STATUS" = "403" ] && ok || fail "scope enforcement broken — expected 403, got $STATUS"
+
+# --- 4. Chat round-trip (non-streaming) --------------------------------------
+check "POST /v1/chat/completions returns 200 + content"
+RESP=$(curl -fsS "$GAD/v1/chat/completions" \
+  -H "Authorization: Bearer $KEY_USER" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"reply only with the word OK"}],"max_tokens":8}')
+CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // empty')
+[ -n "$CONTENT" ] && ok || fail "empty response content — upstream provider issue; see RUST_LOG=gadgetron_provider=debug"
+
+# --- 5. Streaming round-trip --------------------------------------------------
+check "POST /v1/chat/completions stream reaches [DONE]"
+STREAM=$(curl -fsS -N "$GAD/v1/chat/completions" \
+  -H "Authorization: Bearer $KEY_USER" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"one word"}],"max_tokens":4,"stream":true}')
+echo "$STREAM" | grep -q "^data: \[DONE\]" && ok || fail "stream truncated — upstream hung or provider returned SSE error"
+
+# --- 6. Persistence sanity ---------------------------------------------------
+# The chat above should have produced an audit_log row AND a billing_events row.
+# Wait briefly for fire-and-forget writes to settle.
+sleep 2
+
+check "audit_log grew by ≥1 row in the last minute"
+AUDIT_COUNT=$(psql "$GADGETRON_DATABASE_URL" -tAc \
+  "SELECT COUNT(*) FROM audit_log WHERE timestamp > NOW() - INTERVAL '1 minute'")
+[ "${AUDIT_COUNT:-0}" -ge 1 ] && ok || fail "audit writer not persisting — check RUST_LOG=gadgetron_audit"
+
+check "billing_events grew by ≥1 chat row in the last minute"
+BILL_COUNT=$(psql "$GADGETRON_DATABASE_URL" -tAc \
+  "SELECT COUNT(*) FROM billing_events WHERE event_kind = 'chat' AND created_at > NOW() - INTERVAL '1 minute'")
+[ "${BILL_COUNT:-0}" -ge 1 ] && ok || fail "billing enforcer not persisting — check the PgQuotaEnforcer pool wiring"
+
+# --- 7. Optional: Penny registration ----------------------------------------
+# Uncomment if your deployment expects penny in /v1/models
+# check "Penny registered (model=penny available)"
+# echo "$MODELS" | grep -qx penny && ok || fail "[knowledge] invalid; see RUST_LOG=knowledge_config"
+
+# --- 8. Optional: cookie-session login (ISSUE 15/16) ------------------------
+# Uncomment + fill if you want to smoke the cookie-auth path. Requires
+# a provisioned user + password; see manual/multiuser.md §2.
+# USER_EMAIL="smoke@example.com"; USER_PW="..."
+# check "POST /api/v1/auth/login returns 200 + cookie"
+# CODE=$(curl -sS -c /tmp/smoke.jar -o /dev/null -w '%{http_code}' \
+#   -H 'Content-Type: application/json' \
+#   -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$USER_PW\"}" \
+#   "$GAD/api/v1/auth/login")
+# [ "$CODE" = "200" ] && ok || fail "cookie-session login broken"
+
+echo
+if [ "$FAILED" -gt 0 ]; then
+  echo "FAIL — $FAILED check(s) failed"; exit 1
+else
+  echo "OK — all acceptance checks passed"; exit 0
+fi
+```
+
+**Wiring into a deploy pipeline** (systemd `ExecStartPost` pattern for automatic post-boot verification):
+
+```ini
+# /etc/systemd/system/gadgetron.service.d/acceptance.conf
+[Service]
+ExecStartPost=/bin/bash -c 'sleep 5 && GAD=http://127.0.0.1:8080 KEY_USER=$GAD_KEY_USER KEY_MGMT=$GAD_KEY_MGMT /usr/local/bin/gadgetron-smoke || systemctl stop gadgetron'
+```
+
+The `systemctl stop` on failure gives the LB's `/ready` probe a clear 503 signal and lets `Restart=on-failure` retry a fixed number of times before giving up — preventing a broken deploy from staying up silently.
+
+**What the smoke test does NOT cover** — keep these in your post-cutover manual sweep:
+
+- `/web` + `/web/wiki` + `/web/dashboard` browser render (needs a headless browser; use the harness Playwright gates as the in-repo reference)
+- Penny tool-call round-trip (needs `claude` subprocess + MCP; long-lived and has its own `manual/evaluation.md` harness for that)
+- Bundle marketplace install/uninstall (`api-reference.md §Bundle operator recipes` covers the 5-step flow)
+- SearXNG / web.search path (set `KEY_USER` to a SearXNG-enabled tenant and probe `eval/run_eval.py --scenario web-search-direct-query`)
+- Full auth flow including cookie-session + scope-synthesis (only 401/403 smoke in step 3 — the full matrix is in the harness)
+
 ---
 
 ## Troubleshooting install issues
