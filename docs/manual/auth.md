@@ -282,6 +282,180 @@ curl -sS -b /tmp/gad-cookies.txt \
   http://localhost:8080/api/v1/auth/whoami
 ```
 
+#### Session management operator recipes
+
+The recipes below require direct Postgres access (`psql -U gadgetron`). All
+SQL is runnable against the `user_sessions` table described in the schema
+section above.
+
+---
+
+**1. List all active sessions for a user**
+
+"Active" means `revoked_at IS NULL`. "Valid" means active AND `expires_at >
+NOW()`. This query returns both so operators can see near-expiry sessions.
+
+```sql
+-- Replace <user-id> with the target UUID.
+SELECT
+    id,
+    created_at,
+    expires_at,
+    last_active_at,
+    user_agent,
+    ip_address,
+    CASE
+        WHEN expires_at > NOW() THEN 'valid'
+        ELSE 'expired-but-not-revoked'
+    END AS status
+FROM user_sessions
+WHERE user_id = '<user-id>'        -- idx_sessions_user_active is used here
+  AND revoked_at IS NULL
+ORDER BY created_at DESC;
+```
+
+> Each row corresponds to one browser or device. A user who logged in from
+> three browsers will have three rows.
+
+---
+
+**2. Force-logout a user across all devices**
+
+Login always inserts a NEW `user_sessions` row. It never rotates or deletes
+the prior row. Both the old and the new cookie stay valid until explicitly
+revoked. To kick a user off all devices, revoke every active row at once.
+
+```sql
+-- Revoke all active sessions for a user. Safe to re-run (idempotent).
+UPDATE user_sessions
+SET    revoked_at = NOW()
+WHERE  user_id    = '<user-id>'
+  AND  revoked_at IS NULL;
+
+-- Verify: should return 0 rows after the UPDATE above.
+SELECT id, created_at, last_active_at
+FROM   user_sessions
+WHERE  user_id    = '<user-id>'
+  AND  revoked_at IS NULL;
+```
+
+After revocation, any in-flight request that carries one of the old cookies
+will receive a `401` on the next middleware validation hit. The user must
+re-authenticate to obtain a new cookie.
+
+---
+
+**3. Investigate a suspected compromised session**
+
+Work through the following steps in order.
+
+a. **Locate the session row.** If you have the raw cookie value, hash it and
+   look up directly:
+
+```sql
+-- cookie_hash is stored as a hex-encoded SHA-256. Compute the hash first,
+-- then query. Replace <hex-hash> with the actual hash.
+SELECT id, user_id, created_at, expires_at, last_active_at,
+       user_agent, ip_address, revoked_at
+FROM   user_sessions
+WHERE  cookie_hash = '<hex-hash>';
+```
+
+If you do not have the cookie value, triangulate by user identity and
+fingerprint:
+
+```sql
+SELECT id, cookie_hash, created_at, expires_at, last_active_at,
+       user_agent, ip_address
+FROM   user_sessions
+WHERE  user_id    = '<user-id>'
+  AND  user_agent LIKE '%<partial-ua>%'   -- optional
+  AND  created_at > NOW() - interval '7 days'
+ORDER  BY created_at DESC;
+```
+
+b. **Pull audit log activity for that session.** There is no foreign key from
+   `audit_log` to `user_sessions`. Cross-reference by time window and user.
+   Cookie-session requests are identified by the sentinel
+   `api_key_id = '00000000-0000-0000-0000-000000000000'`.
+
+```sql
+-- Replace timestamps from the session row you found in step (a).
+SELECT al.id, al.timestamp, al.action, al.resource_type, al.resource_id,
+       al.outcome, al.ip_address
+FROM   audit_log al
+WHERE  al.actor_user_id = '<user-id>'
+  AND  al.api_key_id    = '00000000-0000-0000-0000-000000000000'  -- web UI only
+  AND  al.timestamp     BETWEEN '<session.created_at>' AND COALESCE('<session.revoked_at>', '<session.expires_at>')
+ORDER  BY al.timestamp ASC;
+```
+
+c. **Revoke the session and rotate API keys.** Revoke the suspicious session
+   row first, then revoke any API keys owned by that user if the audit log
+   shows key issuance or unusual API activity.
+
+```sql
+-- Revoke the single suspicious session.
+UPDATE user_sessions
+SET    revoked_at = NOW()
+WHERE  id         = '<session-id>'
+  AND  revoked_at IS NULL;
+```
+
+---
+
+**4. Session expiry cleanup**
+
+The validation query already excludes expired rows (`expires_at > NOW()`), so
+stale rows have no effect on runtime behavior. Cleanup is pure disk-space
+hygiene. Keep revoked-but-within-TTL rows for at least the audit retention
+window before deleting them.
+
+```sql
+-- Delete sessions that expired more than 30 days ago.
+-- Adjust the interval to match your audit retention policy.
+DELETE FROM user_sessions
+WHERE  expires_at < NOW() - interval '30 days';
+```
+
+> Do not delete rows where `expires_at > NOW() - interval '30 days'` but
+> `revoked_at IS NOT NULL`. Those rows may still be referenced in audit
+> cross-joins for recent incidents.
+
+---
+
+**5. Verify session-fixation protection**
+
+The ISSUE 15 design contract requires that every login creates a new
+`user_sessions` row with a fresh `cookie_hash`. To confirm this has not
+regressed on a live deployment:
+
+```bash
+# Log in twice as the same user and capture both Set-Cookie headers.
+curl -sS -c /tmp/cookies-a.txt -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"test-password"}' | jq .session_id
+
+curl -sS -c /tmp/cookies-b.txt -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"test-password"}' | jq .session_id
+```
+
+Then confirm the database holds two distinct rows with different hashes:
+
+```sql
+-- Both rows should appear, with different id and cookie_hash values.
+SELECT id, created_at, cookie_hash
+FROM   user_sessions
+WHERE  user_id    = (SELECT id FROM users WHERE username = 'alice')
+  AND  revoked_at IS NULL
+ORDER  BY created_at DESC
+LIMIT  5;
+```
+
+If both rows share the same `cookie_hash`, the INSERT-only contract has
+regressed and must be investigated before the next release.
+
 **Shipped in ISSUE 16 (v0.5.9 / PR #259)**:
 
 - Unified middleware that accepts Bearer OR cookie on the same path — `auth_middleware` now covers `/v1/*` + `/api/v1/web/workbench/*` + `/api/v1/xaas/*` for both authentication surfaces. See the "Relationship to Bearer auth" bullet above for the full fallback chain.
