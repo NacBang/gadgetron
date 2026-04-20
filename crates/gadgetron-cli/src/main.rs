@@ -62,6 +62,9 @@ struct AppStateParts {
     activity_bus: gadgetron_core::activity_bus::ActivityBus,
     penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
     tool_audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
+    /// ISSUE 26 — process-local billing insert failure counter shared
+    /// with the chat enforcer, tool handler, and action service.
+    billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,6 +1566,7 @@ fn build_knowledge_service(
 /// service captures activity events as no-ops. When no registry is
 /// supplied, direct actions fall back to the synthetic result path (no
 /// real Gadget dispatch).
+#[allow(clippy::too_many_arguments)]
 fn build_workbench(
     knowledge_service: Option<Arc<gadgetron_knowledge::service::KnowledgeService>>,
     candidate_coordinator: Option<
@@ -1573,6 +1577,7 @@ fn build_workbench(
     catalog_path: Option<String>,
     bundles_dir: Option<String>,
     bundle_signing: gadgetron_core::config::BundleSigningConfig,
+    billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
     use gadgetron_core::agent::tools::GadgetDispatcher;
     use gadgetron_core::audit::{ActionAuditSink, NoopActionAuditSink};
@@ -1647,9 +1652,16 @@ fn build_workbench(
         audit_sink,
         Some(approval_store.clone()),
     );
+    // ISSUE 26: share the billing failure counter with the action
+    // service so emit_action_billing's error arm increments the same
+    // Arc that the chat enforcer + tool handler do.
     let action_svc: Arc<dyn WorkbenchActionService> = match billing_pool {
-        Some(pool) => Arc::new(action_svc_impl.with_pg_pool(pool)),
-        None => Arc::new(action_svc_impl),
+        Some(pool) => Arc::new(
+            action_svc_impl
+                .with_pg_pool(pool)
+                .with_billing_failures(billing_failures),
+        ),
+        None => Arc::new(action_svc_impl.with_billing_failures(billing_failures)),
     };
 
     Some(Arc::new(GatewayWorkbenchService {
@@ -1763,6 +1775,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         activity_bus,
         penny_registry,
         tool_audit_sink,
+        billing_failures,
     } = parts;
 
     AppState {
@@ -1787,6 +1800,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         gadget_dispatcher: penny_registry
             .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>),
         tool_audit_sink,
+        billing_failures,
     }
 }
 
@@ -1847,13 +1861,18 @@ async fn init_serve_runtime(
         }
     }
 
+    let billing_failures_for_enforcer =
+        Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new());
     let base_enforcer: SharedQuotaEnforcer = if let Some(pool) = pg_pool.clone() {
         use gadgetron_xaas::quota::enforcer::PgQuotaEnforcer;
         tracing::info!(
             target: "quota.pg",
             "PgQuotaEnforcer wired — record_post increments quota_configs + emits billing_events"
         );
-        Arc::new(PgQuotaEnforcer::new(pool))
+        Arc::new(PgQuotaEnforcer::new(
+            pool,
+            Arc::clone(&billing_failures_for_enforcer),
+        ))
     } else {
         tracing::info!(
             target: "quota.pg",
@@ -1930,6 +1949,7 @@ async fn init_serve_runtime(
         config.web.catalog_path.clone(),
         config.web.bundles_dir.clone(),
         config.web.bundle_signing.clone(),
+        Arc::clone(&billing_failures_for_enforcer),
     );
 
     let agent_config = Arc::new(config.agent.clone());
@@ -1995,6 +2015,7 @@ async fn init_serve_runtime(
         activity_bus,
         penny_registry: penny_registry.clone(),
         tool_audit_sink,
+        billing_failures: Arc::clone(&billing_failures_for_enforcer),
     });
     let tui_thread = spawn_tui_thread(tui_tx.as_ref());
 
@@ -4004,6 +4025,7 @@ wiki_max_page_bytes = 1048576
             None,
             None,
             Default::default(),
+            std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
         );
         assert!(
             workbench.is_some(),
@@ -4055,6 +4077,7 @@ wiki_max_page_bytes = 1048576
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
             penny_registry: None,
             tool_audit_sink: Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
         });
 
         // PSL-1c field-presence assertions (spec §5).
@@ -4102,9 +4125,18 @@ wiki_max_page_bytes = 1048576
             "knowledge_service must be None"
         );
 
-        // build_workbench(None, None, None, None, None, None, Default::default()) → Some (degraded-mode projection —
+        // build_workbench(None, None, None, None, None, None, Default::default(), std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new())) → Some (degraded-mode projection —
         // always wired so the endpoint returns a degraded bootstrap rather than 404).
-        let workbench = build_workbench(None, None, None, None, None, None, Default::default());
+        let workbench = build_workbench(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Default::default(),
+            std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
+        );
         assert!(
             workbench.is_some(),
             "workbench is always Some (degraded mode) even without knowledge service"

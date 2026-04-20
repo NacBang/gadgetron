@@ -807,6 +807,23 @@ pub async fn list_billing_events(
     Ok(Json(BillingEventsResponse { events, returned }))
 }
 
+/// `GET /api/v1/web/workbench/admin/billing/insert-failures` —
+/// process-local counter of billing-event INSERT failures per
+/// `BillingEventKind` (ISSUE 26). **Management scope** (shares the
+/// RBAC gate with `/admin/billing/events` because operators already
+/// have Management to read the ledger).
+///
+/// Operators poll this for their SLO alert — any non-zero value
+/// indicates the chat / tool / action ledger is diverging from the
+/// `quota_configs` usage counters. The counter is in-memory and
+/// resets on restart; long-horizon reconciliation is TASK 12.4 scope.
+pub async fn admin_billing_insert_failures(
+    State(state): State<AppState>,
+    axum::Extension(_ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Json<gadgetron_xaas::billing::BillingFailureSnapshot> {
+    Json(state.billing_failures.snapshot())
+}
+
 // ---------------------------------------------------------------------------
 // ISSUE 14 TASK 14.3 — admin user CRUD
 // ---------------------------------------------------------------------------
@@ -1528,6 +1545,10 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/quota/status", get(get_quota_status))
         // ISSUE 12 TASK 12.1 — billing events ledger query.
         .route("/admin/billing/events", get(list_billing_events))
+        .route(
+            "/admin/billing/insert-failures",
+            get(admin_billing_insert_failures),
+        )
         // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
         .route("/events/ws", get(events_ws_handler))
         // ISSUE 8 TASK 8.2 — admin catalog hot-reload.
@@ -2448,6 +2469,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         }
     }
 

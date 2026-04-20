@@ -177,6 +177,14 @@ pub struct AppState {
     /// can query `WHERE owner_id IS NOT NULL` to pick out cross-session
     /// callers. `NoopGadgetAuditEventSink` when Postgres is not wired.
     pub tool_audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
+    /// ISSUE 26 — process-local billing insert failure counter.
+    /// Incremented by all 3 billing emission sites (chat enforcer,
+    /// tool handler spawn, action_service::emit_action_billing)
+    /// when `insert_billing_event` returns Err. Exposed via
+    /// `GET /api/v1/web/workbench/admin/billing/insert-failures`
+    /// (Management scope). Resets on restart — long-horizon
+    /// reconciliation is TASK 12.4 scope.
+    pub billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -488,6 +496,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         }
     }
 
@@ -512,6 +523,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         }
     }
 
@@ -853,6 +867,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -934,6 +951,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         };
 
         let app = build_router(state);

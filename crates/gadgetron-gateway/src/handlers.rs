@@ -641,6 +641,7 @@ pub async fn invoke_tool_handler(
         });
     if billing_is_success {
         if let Some(pool) = state.pg_pool.clone() {
+            let billing_failures = std::sync::Arc::clone(&state.billing_failures);
             tokio::spawn(async move {
                 if let Err(e) = gadgetron_xaas::billing::insert_billing_event(
                     &pool,
@@ -652,6 +653,7 @@ pub async fn invoke_tool_handler(
                 )
                 .await
                 {
+                    billing_failures.increment(gadgetron_xaas::billing::BillingEventKind::Tool);
                     tracing::warn!(
                         target: "billing",
                         tenant_id = %billing_tenant,
@@ -982,6 +984,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         }
     }
 
@@ -1396,6 +1401,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         }
     }
 

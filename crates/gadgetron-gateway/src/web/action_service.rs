@@ -79,6 +79,12 @@ pub struct InProcessWorkbenchActionService {
     /// audit_event_id). When `None` (tests, no-DB deploys), billing is
     /// a no-op — audit still fires through `audit_sink`.
     pub pg_pool: Option<sqlx::PgPool>,
+    /// ISSUE 26 — process-local billing insert failure counter,
+    /// shared with the chat enforcer + tool handler. Incremented
+    /// when `emit_action_billing`'s `insert_billing_event` call
+    /// returns Err. `None` in tests that don't exercise billing
+    /// failure observability.
+    pub billing_failures: Option<Arc<gadgetron_xaas::billing::BillingFailureCounter>>,
 }
 
 impl InProcessWorkbenchActionService {
@@ -142,6 +148,7 @@ impl InProcessWorkbenchActionService {
             audit_sink,
             approval_store,
             pg_pool: None,
+            billing_failures: None,
         }
     }
 
@@ -149,6 +156,18 @@ impl InProcessWorkbenchActionService {
     /// Builder chain so existing `new_full` callers don't break.
     pub fn with_pg_pool(mut self, pool: sqlx::PgPool) -> Self {
         self.pg_pool = Some(pool);
+        self
+    }
+
+    /// Attach the process-local billing failure counter (ISSUE 26).
+    /// Production callers pass the same `Arc<BillingFailureCounter>`
+    /// that lives on `AppState.billing_failures` so the counter is
+    /// shared across chat, tool, and action emitters.
+    pub fn with_billing_failures(
+        mut self,
+        billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
+    ) -> Self {
+        self.billing_failures = Some(billing_failures);
         self
     }
 }
@@ -470,6 +489,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             });
         emit_action_billing(
             self.pg_pool.as_ref(),
+            self.billing_failures.as_ref(),
             actor_tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
@@ -571,6 +591,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             });
         emit_action_billing(
             self.pg_pool.as_ref(),
+            self.billing_failures.as_ref(),
             actor.tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
@@ -606,6 +627,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
 /// for legacy api_keys pre-ISSUE-14 backfill.
 fn emit_action_billing(
     pool: Option<&sqlx::PgPool>,
+    billing_failures: Option<&Arc<gadgetron_xaas::billing::BillingFailureCounter>>,
     tenant_id: Uuid,
     audit_event_id: Uuid,
     gadget_name: Option<String>,
@@ -615,6 +637,7 @@ fn emit_action_billing(
         return;
     };
     let pool = pool.clone();
+    let failures = billing_failures.map(Arc::clone);
     tokio::spawn(async move {
         if let Err(e) = gadgetron_xaas::billing::insert_billing_event(
             &pool,
@@ -627,6 +650,9 @@ fn emit_action_billing(
         )
         .await
         {
+            if let Some(f) = failures {
+                f.increment(gadgetron_xaas::billing::BillingEventKind::Action);
+            }
             tracing::warn!(
                 target: "billing",
                 tenant_id = %tenant_id,

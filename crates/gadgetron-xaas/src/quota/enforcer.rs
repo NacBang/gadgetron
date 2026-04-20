@@ -93,11 +93,22 @@ impl QuotaEnforcer for InMemoryQuotaEnforcer {
 /// next check will reflect the post-increment state).
 pub struct PgQuotaEnforcer {
     pool: sqlx::PgPool,
+    /// ISSUE 26 — process-local counter incremented when
+    /// `insert_billing_event` returns Err. Shared across the chat
+    /// enforcer, tool handler, and action service via
+    /// `AppState.billing_failures`.
+    billing_failures: std::sync::Arc<crate::billing::BillingFailureCounter>,
 }
 
 impl PgQuotaEnforcer {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn new(
+        pool: sqlx::PgPool,
+        billing_failures: std::sync::Arc<crate::billing::BillingFailureCounter>,
+    ) -> Self {
+        Self {
+            pool,
+            billing_failures,
+        }
     }
 }
 
@@ -191,6 +202,8 @@ impl QuotaEnforcer for PgQuotaEnforcer {
         )
         .await;
         if let Err(e) = ins {
+            self.billing_failures
+                .increment(crate::billing::BillingEventKind::Chat);
             tracing::warn!(
                 target: "billing",
                 tenant_id = %token.tenant_id,

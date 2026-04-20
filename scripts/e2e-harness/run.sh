@@ -2290,6 +2290,39 @@ else
   fail "admin/billing/events OpenAiCompat: expected 403, got $BILLING_403_CODE" ""
 fi
 
+# Gate 7k.8 — billing_insert_failures counter surface (ISSUE 26).
+# Happy-path harness never induces an insert failure (PgQuotaEnforcer
+# + action service talk to a working Postgres), so all three kinds
+# should read zero. The gate pins the endpoint shape + response body
+# so future changes to `BillingFailureSnapshot` serde surface as a
+# harness regression, not a silent operator-surface break.
+log "=== Gate 7k.8: admin/billing/insert-failures (ISSUE 26) ==="
+FAILURES_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/billing/insert-failures" 2>&1 || true)"
+if echo "$FAILURES_RESP" \
+   | jq -e '(.chat | type == "number") and (.tool | type == "number") and (.action | type == "number")' \
+   >/dev/null 2>&1; then
+  FAIL_TOTAL="$(echo "$FAILURES_RESP" | jq '.chat + .tool + .action' 2>/dev/null || echo -1)"
+  if [ "${FAIL_TOTAL:-0}" -eq 0 ]; then
+    pass "admin/billing/insert-failures shape + zero-count happy path ($FAILURES_RESP)"
+  else
+    fail "admin/billing/insert-failures: harness had $FAIL_TOTAL insert failure(s) — investigate pg/billing path" \
+      "$FAILURES_RESP"
+  fi
+else
+  fail "admin/billing/insert-failures shape regression" "$(echo "$FAILURES_RESP" | head -c 400)"
+fi
+
+# Gate 7k.9 — RBAC: OpenAiCompat key must get 403 on the failures surface.
+FAILURES_403_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/billing/insert-failures" 2>&1 || true)"
+if [ "$FAILURES_403_CODE" = "403" ]; then
+  pass "admin/billing/insert-failures via OpenAiCompat key → 403 (RBAC enforced)"
+else
+  fail "admin/billing/insert-failures OpenAiCompat: expected 403, got $FAILURES_403_CODE" ""
+fi
+
 # -------------------------------------------------------------------
 # Gate 7k.6b — billing_events.actor_user_id population per kind (ISSUE 24)
 # -------------------------------------------------------------------

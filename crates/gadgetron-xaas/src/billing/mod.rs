@@ -6,5 +6,7 @@
 //! the request.
 
 pub mod events;
+pub mod failures;
 
 pub use events::{insert_billing_event, BillingEventInsert, BillingEventKind, BillingEventRow};
+pub use failures::{BillingFailureCounter, BillingFailureSnapshot};
