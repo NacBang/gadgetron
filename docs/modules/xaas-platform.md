@@ -633,14 +633,16 @@ CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
 ```rust
 // PgQuotaEnforcer::record_post (after quota_configs UPDATE).
 // Struct-based API (PR #279 refactor) + ISSUE 24 (PR #289 / v0.5.16) user_id
-// threading. QuotaToken now carries an Option<Uuid> user_id which the enforcer
-// feeds into BillingEventInsert::chat via .with_actor_user(..). Tool path
-// continues to use ctx.actor_user_id from TenantContext (ISSUE 17/23). Action
-// path regained its actor_user_id parameter (reintroduced in PR #289 after
-// PR #280 dropped the always-None variant) and both call sites pass
-// actor.real_user_id — explicitly NOT actor.user_id (that legacy field is
-// an api_key_id placeholder; rustdoc marks it "DO NOT READ for new user-
-// identity logic" pending ISSUE 25 rename).
+// threading + ISSUE 25 (PR #293 / v0.5.17) AuthenticatedContext.user_id →
+// api_key_id rename. QuotaToken now carries an Option<Uuid> user_id which the
+// enforcer feeds into BillingEventInsert::chat via .with_actor_user(..). Tool
+// path continues to use ctx.actor_user_id from TenantContext (ISSUE 17/23).
+// Action path regained its actor_user_id parameter (reintroduced in PR #289
+// after PR #280 dropped the always-None variant) and both call sites pass
+// actor.real_user_id.unwrap_or(actor.api_key_id) — real user UUID preferred,
+// api_key_id fallback for legacy keys pre-dating the ISSUE-14 backfill.
+// ISSUE 27 finishes the rename (real_user_id → user_id) so the fallback
+// reads as actor.user_id.unwrap_or(actor.api_key_id).
 let ins = crate::billing::insert_billing_event(
     &self.pool,
     crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents)
