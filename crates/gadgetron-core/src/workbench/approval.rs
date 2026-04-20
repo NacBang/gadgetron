@@ -82,7 +82,10 @@ impl ApprovalRequest {
             action_id: action_id.into(),
             gadget_name,
             args,
-            requested_by_user_id: actor.user_id,
+            // ISSUE 25: prefer real user id; fall back to api_key_id for
+            // legacy keys pre-ISSUE-14 backfill. Pre-rename this read
+            // actor.user_id (api_key_id placeholder) directly.
+            requested_by_user_id: actor.real_user_id.unwrap_or(actor.api_key_id),
             tenant_id: actor.tenant_id,
             state: ApprovalState::Pending,
             created_at: chrono::Utc::now(),
@@ -195,7 +198,10 @@ mod tests {
         assert_eq!(req.action_id, "wiki-write");
         assert_eq!(req.gadget_name.as_deref(), Some("wiki.write"));
         assert_eq!(req.state, ApprovalState::Pending);
-        assert_eq!(req.requested_by_user_id, actor.user_id);
+        assert_eq!(
+            req.requested_by_user_id,
+            actor.real_user_id.unwrap_or(actor.api_key_id)
+        );
         assert_eq!(req.tenant_id, actor.tenant_id);
         assert!(req.resolved_at.is_none());
         assert!(req.resolved_by_user_id.is_none());

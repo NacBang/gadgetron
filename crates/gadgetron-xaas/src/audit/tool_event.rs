@@ -184,7 +184,7 @@ fn captured_actor(ev: &CapturedActivityEvent) -> AuthenticatedContext {
     // here — CapturedActivityEvent doesn't carry the owning user_id
     // as a separate field yet; adding it is ISSUE 25 scope.
     AuthenticatedContext {
-        user_id: ev.actor_user_id,
+        api_key_id: ev.actor_user_id,
         tenant_id: ev.tenant_id,
         real_user_id: None,
     }
