@@ -366,6 +366,19 @@ post-ISSUE-18 on `project_multiuser_login_google`.
 - **ISSUE 22 ✅ admin audit_log query endpoint** (v0.5.14, closed 2026-04-19 / PR #269)
   - TASK 22.1 ✅ — new `GET /api/v1/web/workbench/admin/audit/log` Management-scoped handler (`web/workbench.rs`). `?actor_user_id=<uuid>&since=<iso>&limit=<1..=500>` (default 100). `query_audit_log(pool, tenant_id, actor_user_id, since, limit)` in `gadgetron-xaas::audit::writer` uses 4 prepared-statement shapes (no dynamic SQL concat); tenant always pinned from ctx so cross-tenant reads are impossible regardless of query params. Response `{rows, returned}` with `AuditLogRow` projection mirroring schema + ISSUE 14 actor columns. Harness Gate 7v.8 pins shape + OpenAiCompat → 403. Harness 131 → 133 PASS.
   - Follow-ups tracked separately (not blocking v1.0.0): pagination cursor for `> 500` rows, filter-by-status / model / request_id, `billing_events` user_id plumbing for per-user spend reports.
+- **ISSUE 23 ✅ `billing_events.actor_user_id` per-user attribution** (v0.5.15, closed 2026-04-20 / PR #271)
+  - TASK 23.1 ✅ — migration `20260420000005_billing_events_actor_user_id.sql` adds nullable `actor_user_id UUID` + tenant-first composite index `(tenant_id, actor_user_id, created_at DESC)` forcing per-user spend queries to pin tenant. FK intentionally skipped (multiple heterogeneous callers; best-effort telemetry; operators `LEFT JOIN users` at read time per [`manual/api-reference.md §Per-user spend report`](manual/api-reference.md)).
+  - TASK 23.2 ✅ — `insert_billing_event` trait widened + `BillingEventRow` projection extended + `query_billing_events` SELECT updated. Per-path nullability contract:
+    - **chat** (`PgQuotaEnforcer::record_post`): `None` — `QuotaToken` doesn't carry `user_id` yet (closes under ISSUE 24).
+    - **tool** (`handlers.rs` tool billing emission): `Some(ctx.actor_user_id)` — `TenantContext` already carries `ValidatedKey.user_id` from ISSUE 20.
+    - **action** (`action_service::emit_action_billing`): `None` — `AuthenticatedContext.user_id` is an api_key_id placeholder at the workbench layer. 3-specialist pre-publish security review flipped this from `Some(actor.user_id)` to `None` to avoid contaminating the ledger with api_key_ids typed as user_ids. PR #280 later dropped the always-None parameter per YAGNI; ISSUE 24 reintroduces it against a distinct `real_user_id` field.
+  - Harness Gate 7k.6b (ISSUE 23) pins per-kind contract via direct Postgres query: `chat IS NULL` + `tool IS NOT NULL` + `action IS NULL`. Gate 13 regex-fix bundled. Harness 133 → 137 PASS.
+  - Refactor trail: PR #279 collapsed the 8-arg `insert_billing_event` flat call into `BillingEventInsert` struct + 3 typed constructors (`chat`/`tool`/`action`) + `.with_actor_user(..)` optional builder — no wire change. PR #280 dropped the always-None `actor_user_id` parameter from `emit_action_billing` per YAGNI.
+- **ISSUE 24 ⏳ thread real `user_id` through `QuotaToken` + `AuthenticatedContext`** (planned, post-v0.5.15; not a `v1.0.0` gate)
+  - Goal: populate the currently-NULL `actor_user_id` on chat + action `billing_events` rows from ISSUE 23.
+  - Sketch: `QuotaToken` gains `user_id: Option<Uuid>` sourced from `ctx.actor_user_id` at `QuotaEnforcer::check_pre`; `AuthenticatedContext` gains a distinct `real_user_id` separate from the existing `user_id` field (which stays an api_key_id placeholder for backward compat); both call sites then emit `BillingEventInsert::{chat,action}(..).with_actor_user(Some(real_user_id))` — the `emit_action_billing` parameter removed by PR #280 gets reintroduced at this boundary.
+  - Gate 7k.6b assertions flip from `chat IS NULL` + `action IS NULL` to `chat ≥ 1` + `action ≥ 1` non-NULL after landing.
+  - Billing-attribution follow-up only. Does NOT gate `v1.0.0` (per EPIC 4 close formula above).
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).
