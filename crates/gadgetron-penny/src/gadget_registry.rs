@@ -321,6 +321,7 @@ fn resolve_write_mode(name: &str, cfg: &AgentConfig) -> GadgetMode {
         "infra" => w.infra_write,
         "scheduler" => w.scheduler_write,
         "provider" => w.provider_mutate,
+        "server" => w.server_admin,
         _ => w.default_mode,
     }
 }

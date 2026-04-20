@@ -735,6 +735,14 @@ pub struct WriteGadgetsConfig {
     /// `infra.add_provider`, `infra.remove_provider`.
     #[serde(default)]
     pub provider_mutate: GadgetMode,
+
+    /// server-monitor bundle write tools (`server.add`, `server.remove`).
+    /// Defaults to `Auto` so the demo "register a host" flow works out
+    /// of the box; operators wanting an approval card before a new
+    /// host lands in the inventory can set this to `Ask` (P2B) or
+    /// `Never` (disable completely).
+    #[serde(default = "default_server_admin_mode")]
+    pub server_admin: GadgetMode,
 }
 
 fn default_write_mode() -> GadgetMode {
@@ -743,6 +751,12 @@ fn default_write_mode() -> GadgetMode {
 /// Convenience: wiki_write defaults to Auto for single-user desktops (§4 of
 /// 04-gadget-registry.md notes this as the common choice).
 fn default_wiki_write_mode() -> GadgetMode {
+    GadgetMode::Auto
+}
+/// server-monitor is a local-operator surface (register one's own fleet),
+/// not a Penny-driven public API, so Auto by default matches the demo
+/// UX. Operators on shared hosts should pin `server_admin = "ask"`.
+fn default_server_admin_mode() -> GadgetMode {
     GadgetMode::Auto
 }
 
@@ -754,6 +768,7 @@ impl Default for WriteGadgetsConfig {
             infra_write: GadgetMode::Ask,
             scheduler_write: GadgetMode::Ask,
             provider_mutate: GadgetMode::Ask,
+            server_admin: default_server_admin_mode(),
         }
     }
 }
