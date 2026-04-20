@@ -52,7 +52,7 @@
 #   ./scripts/e2e-harness/run.sh --quick          # skip cargo test
 #   ./scripts/e2e-harness/run.sh --no-screenshot  # CI-friendly
 
-set -u
+set -uo pipefail
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -2290,6 +2290,52 @@ else
   fail "admin/billing/events OpenAiCompat: expected 403, got $BILLING_403_CODE" ""
 fi
 
+# -------------------------------------------------------------------
+# Gate 7k.6b — billing_events.actor_user_id population per kind (ISSUE 23)
+# -------------------------------------------------------------------
+# The ISSUE 23 contract threads `actor_user_id` into three call sites
+# with DIFFERENT nullability guarantees:
+#   * chat   → NULL  (QuotaToken doesn't carry user_id until ISSUE 24)
+#   * tool   → NON-NULL  (ctx.actor_user_id from ValidatedKey.user_id)
+#   * action → NULL  (AuthenticatedContext.user_id is an api_key_id
+#                     placeholder in workbench; ISSUE 24 fixes)
+# Security review on ISSUE 23 enforced action→NULL to avoid
+# contaminating the ledger with api_key_ids typed as user_ids.
+# Go direct to Postgres — `BillingEventRow` doesn't (yet) flatten
+# `actor_user_id` into the admin JSON response, so the SQL layer is
+# the lowest reliable assertion surface.
+log "=== Gate 7k.6b: billing_events.actor_user_id per-kind (ISSUE 23) ==="
+ACTOR_CHAT_NONNULL="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c "SELECT COUNT(*)::int FROM billing_events
+      WHERE event_kind = 'chat' AND actor_user_id IS NOT NULL" \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+ACTOR_TOOL_NONNULL="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c "SELECT COUNT(*)::int FROM billing_events
+      WHERE event_kind = 'tool' AND actor_user_id IS NOT NULL" \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+ACTOR_ACTION_NONNULL="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c "SELECT COUNT(*)::int FROM billing_events
+      WHERE event_kind = 'action' AND actor_user_id IS NOT NULL" \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+if [ "${ACTOR_CHAT_NONNULL:-0}" -eq 0 ]; then
+  pass "billing_events chat rows: actor_user_id IS NULL (ISSUE 24 will populate)"
+else
+  fail "billing_events chat rows: ${ACTOR_CHAT_NONNULL} unexpectedly non-NULL (chat path should pass None pre-ISSUE-24)" ""
+fi
+if [ "${ACTOR_TOOL_NONNULL:-0}" -ge 1 ]; then
+  pass "billing_events tool rows: actor_user_id populated (count=${ACTOR_TOOL_NONNULL})"
+else
+  fail "billing_events tool rows: actor_user_id NULL (expected Some(ctx.actor_user_id) from ValidatedKey.user_id)" ""
+fi
+if [ "${ACTOR_ACTION_NONNULL:-0}" -eq 0 ]; then
+  pass "billing_events action rows: actor_user_id IS NULL (AuthenticatedContext.user_id is api_key_id pre-ISSUE-24)"
+else
+  fail "billing_events action rows: ${ACTOR_ACTION_NONNULL} unexpectedly non-NULL — action path regressed to Some(actor.user_id)" ""
+fi
+
 log "=== Gate 8b: audit trail for non-streaming happy path ==="
 sleep 0.3  # audit writer is async; let the entry land
 AUDIT_OK_LINE="$(sed "$STRIP_ANSI" "$GAD_LOG" \
@@ -2915,8 +2961,14 @@ if [ "$QUICK" -eq 0 ]; then
   # real harness is the one you're reading.
   cargo test --workspace 2>&1 | tee "$ART_DIR/cargo-test.log" >/dev/null || true
 
+  # The regex is deliberately strict: `^test <name> ... FAILED$`.
+  # A loose `^test .* FAILED` matches the cargo summary line
+  # `test result: FAILED. 0 passed; 7 failed; ...` and inflates
+  # NON_INFRA_FAIL. The `[^[:space:]]+` after `test ` binds only
+  # to individual test names, and the `$` anchor rejects the
+  # summary prefix.
   NON_INFRA_FAIL="$(
-    grep -E '^test .* FAILED' "$ART_DIR/cargo-test.log" \
+    grep -E '^test [^[:space:]]+ \.\.\. FAILED$' "$ART_DIR/cargo-test.log" \
       | grep -v 'e2e_' \
       | wc -l | tr -d ' '
   )"
@@ -2924,7 +2976,7 @@ if [ "$QUICK" -eq 0 ]; then
     pass "cargo test --workspace clean (pgvector e2e tolerated)"
   else
     fail "cargo test --workspace" \
-      "$(grep -E '^test .* FAILED' "$ART_DIR/cargo-test.log" | grep -v 'e2e_' | head -10)"
+      "$(grep -E '^test [^[:space:]]+ \.\.\. FAILED$' "$ART_DIR/cargo-test.log" | grep -v 'e2e_' | head -10)"
   fi
 else
   skip "Gate 13 cargo test (--quick)"

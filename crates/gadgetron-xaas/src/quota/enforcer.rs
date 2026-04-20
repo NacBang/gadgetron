@@ -173,6 +173,11 @@ impl QuotaEnforcer for PgQuotaEnforcer {
             None, // source_event_id threaded through in a follow-up
             None,
             None,
+            // actor_user_id (ISSUE 23) — QuotaToken doesn't carry user_id
+            // today; threading it would extend the QuotaEnforcer trait
+            // and QuotaToken struct. For now chat path lands user=NULL;
+            // tool + action paths (which have ctx directly) populate it.
+            None,
         )
         .await;
         if let Err(e) = ins {

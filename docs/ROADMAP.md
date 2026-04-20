@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.14** (post-ISSUE 22 close — admin audit_log query endpoint + actor_user_id filter)
+**Current version: 0.5.15** (post-ISSUE 23 close — billing_events.actor_user_id column + tool/action sites populate it)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
