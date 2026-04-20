@@ -620,13 +620,12 @@ fn emit_action_billing(
     tokio::spawn(async move {
         if let Err(e) = gadgetron_xaas::billing::insert_billing_event(
             &pool,
-            tenant_id,
-            gadgetron_xaas::billing::BillingEventKind::Action,
-            0,
-            Some(audit_event_id),
-            gadget_name.as_deref(),
-            None,
-            actor_user_id,
+            gadgetron_xaas::billing::BillingEventInsert::action(
+                tenant_id,
+                audit_event_id,
+                gadget_name,
+            )
+            .with_actor_user(actor_user_id),
         )
         .await
         {

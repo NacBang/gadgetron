@@ -165,19 +165,15 @@ impl QuotaEnforcer for PgQuotaEnforcer {
         // succeeded, and the operator sees the failure in tracing.
         // Tool / action events get hooked up in later TASKs through
         // their own audit sinks.
+        // actor_user_id (ISSUE 23) defaults to None here — QuotaToken
+        // doesn't carry user_id today; threading it would extend the
+        // QuotaEnforcer trait and QuotaToken struct. For now chat path
+        // lands user=NULL; tool + action paths (which have ctx directly)
+        // populate it via `.with_actor_user(..)` on their own
+        // BillingEventInsert.
         let ins = crate::billing::insert_billing_event(
             &self.pool,
-            token.tenant_id,
-            crate::billing::BillingEventKind::Chat,
-            actual_cost_cents,
-            None, // source_event_id threaded through in a follow-up
-            None,
-            None,
-            // actor_user_id (ISSUE 23) — QuotaToken doesn't carry user_id
-            // today; threading it would extend the QuotaEnforcer trait
-            // and QuotaToken struct. For now chat path lands user=NULL;
-            // tool + action paths (which have ctx directly) populate it.
-            None,
+            crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents),
         )
         .await;
         if let Err(e) = ins {
