@@ -621,6 +621,7 @@ pub async fn invoke_tool_handler(
     // Fire-and-forget to match the audit sink's non-blocking contract.
     let billing_tenant = ctx.tenant_id;
     let billing_gadget = name.clone();
+    let billing_actor_user_id = ctx.actor_user_id;
     let billing_is_success = matches!(outcome, GadgetCallOutcome::Success);
     state
         .tool_audit_sink
@@ -646,6 +647,7 @@ pub async fn invoke_tool_handler(
                     None,
                     Some(&billing_gadget),
                     None,
+                    billing_actor_user_id,
                 )
                 .await
                 {

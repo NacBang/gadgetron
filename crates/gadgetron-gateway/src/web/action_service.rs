@@ -473,6 +473,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             actor_tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
+            Some(actor.user_id),
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -573,6 +574,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             actor.tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
+            Some(actor.user_id),
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -598,6 +600,7 @@ fn emit_action_billing(
     tenant_id: Uuid,
     audit_event_id: Uuid,
     gadget_name: Option<String>,
+    actor_user_id: Option<Uuid>,
 ) {
     let Some(pool) = pool else {
         return;
@@ -612,6 +615,7 @@ fn emit_action_billing(
             Some(audit_event_id),
             gadget_name.as_deref(),
             None,
+            actor_user_id,
         )
         .await
         {

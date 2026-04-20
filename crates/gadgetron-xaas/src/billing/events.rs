@@ -34,11 +34,21 @@ pub struct BillingEventRow {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Owning user (ISSUE 23). NULL for legacy events predating the
+    /// `20260420000005_billing_events_actor_user_id.sql` migration,
+    /// and for callers whose `ValidatedKey.user_id` is None (legacy
+    /// api_keys pre-ISSUE-14 backfill).
+    pub actor_user_id: Option<Uuid>,
 }
 
 /// Insert a single billing event. Fire-and-forget: callers
 /// typically `tokio::spawn` this or run it inside a broader
 /// `record_post` that already logs DB failures.
+///
+/// `actor_user_id` (ISSUE 23) is the owning user id from the caller's
+/// `TenantContext`. NULL is always acceptable (column is nullable);
+/// populated rows enable per-user spend queries without a join.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_billing_event(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -47,12 +57,13 @@ pub async fn insert_billing_event(
     source_event_id: Option<Uuid>,
     model: Option<&str>,
     provider: Option<&str>,
+    actor_user_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO billing_events
-            (tenant_id, event_kind, source_event_id, cost_cents, model, provider)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (tenant_id, event_kind, source_event_id, cost_cents, model, provider, actor_user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(tenant_id)
@@ -61,6 +72,7 @@ pub async fn insert_billing_event(
     .bind(cost_cents)
     .bind(model)
     .bind(provider)
+    .bind(actor_user_id)
     .execute(pool)
     .await
     .map(|_| ())
@@ -80,7 +92,7 @@ pub async fn query_billing_events(
             sqlx::query_as::<_, BillingEventRow>(
                 r#"
                 SELECT id, tenant_id, event_kind, source_event_id, cost_cents,
-                       model, provider, created_at
+                       model, provider, created_at, actor_user_id
                 FROM billing_events
                 WHERE tenant_id = $1 AND created_at >= $2
                 ORDER BY created_at DESC
@@ -97,7 +109,7 @@ pub async fn query_billing_events(
             sqlx::query_as::<_, BillingEventRow>(
                 r#"
                 SELECT id, tenant_id, event_kind, source_event_id, cost_cents,
-                       model, provider, created_at
+                       model, provider, created_at, actor_user_id
                 FROM billing_events
                 WHERE tenant_id = $1
                 ORDER BY created_at DESC
