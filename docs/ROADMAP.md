@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.17** (post-ISSUE 25 close — AuthenticatedContext.user_id renamed to api_key_id; action audit sinks emit real_user_id instead of api_key_id placeholder, closing the audit_log contamination flagged by ISSUE 23 security review)
+**Current version: 0.5.18** (post-ISSUE 26 close — process-local `BillingFailureCounter` + `GET /admin/billing/insert-failures` Management-scope endpoint; closes the security-review-flagged observability gap where fire-and-forget billing INSERT errors logged to tracing but had no in-memory signal for SLO alerts)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —

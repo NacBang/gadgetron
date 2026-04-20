@@ -153,6 +153,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         }
     }
 
@@ -228,6 +231,9 @@ mod tests {
             tool_catalog: None,
             gadget_dispatcher: None,
             tool_audit_sink: std::sync::Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink),
+            billing_failures: std::sync::Arc::new(
+                gadgetron_xaas::billing::BillingFailureCounter::new(),
+            ),
         };
         let app = build_router(state);
 
