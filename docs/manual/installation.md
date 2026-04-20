@@ -632,6 +632,123 @@ FROM audit_log;
 
 A clean restore shows zero rows for the first three queries. A non-zero `null_actor` count in the last query is expected for system-generated events.
 
+### 6. Upgrade and rolling deploy
+
+**Upgrade model.** Each Gadgetron release bundles up to three things that move together: the binary, `gadgetron.toml` additions, and a `migrations/` directory in-tree at `crates/gadgetron-xaas/migrations/`. On `gadgetron serve` boot the binary runs `sqlx::migrate!(...)` against the configured pool (`crates/gadgetron-cli/src/main.rs:761`, `:799`, `:1428`); sqlx tracks applied migrations in a `_sqlx_migrations` table so the call is idempotent — re-running a start against an already-migrated schema is a no-op. Migrations are **forward-only** on trunk — there is no `down.sql`, so schema rollback = PITR restore (see §5).
+
+#### 6.1 In-place upgrade (single node, minute-scale downtime)
+
+Acceptable for internal deployments where a 30–90 second `/health` outage is fine.
+
+```sh
+# 1. Snapshot the current state (in case the new binary fails or a migration
+#    misbehaves). Reuse the §5.2 daily backup recipe — skip only if the last
+#    scheduled dump is younger than ~1 hour.
+sudo -u postgres pg_dump -Fc gadgetron > "/backup/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+# 2. Fetch and build the target revision. Keep the old binary on disk until
+#    post-start verification passes — the rollback recipe needs it.
+cd /opt/gadgetron
+sudo -u gadgetron git fetch origin
+sudo -u gadgetron git checkout <target-tag-or-sha>
+sudo -u gadgetron cargo build --release
+
+# 3. Stop the old process. systemd stops are graceful: the gateway drains
+#    in-flight chat + 5-second audit flush (see §1 systemd unit).
+sudo systemctl stop gadgetron
+
+# 4. Atomically swap the binary. Avoid `cp` over a running target — the
+#    `install` invocation is rename-based so /usr/local/bin/gadgetron stays
+#    consistent if anything reads it mid-swap.
+sudo install -m 755 /opt/gadgetron/target/release/gadgetron /usr/local/bin/gadgetron
+
+# 5. Start. The first boot runs any new migrations before opening the listen
+#    socket — no need to run a separate `sqlx migrate` step.
+sudo systemctl start gadgetron
+
+# 6. Confirm the new version started and migrations applied.
+/usr/local/bin/gadgetron --version
+curl -fsS http://localhost:8080/health
+psql "$GADGETRON_DATABASE_URL" -tAc \
+  "SELECT version, description FROM _sqlx_migrations ORDER BY version DESC LIMIT 5"
+```
+
+The last `psql` should show the newest migration files from the target revision's `crates/gadgetron-xaas/migrations/` — if the top entry is still the previous version's latest, migrations didn't run (pool wiring issue or server didn't actually restart).
+
+#### 6.2 Rolling upgrade (behind a load balancer)
+
+For zero-downtime deployments with two or more Gadgetron instances behind a TCP or HTTP LB. The schema-compatibility window is small but real: v(N) and v(N+1) must both run against the v(N+1) schema for the overlap period when one node has upgraded and the other hasn't.
+
+**Preflight rule**: only safe when the target migration is **additive** (new table, new nullable column, new index). Column drops, type changes, and NOT-NULL additions without a default BREAK the old-binary pods reading the schema — those releases require §6.3 drain-all instead. The commit message for each migration calls out which kind it is; when in doubt, read the `.sql` file.
+
+```sh
+# Per-node, one at a time:
+
+# 1. Mark this node unhealthy so the LB stops sending new traffic. If using
+#    the §4.2 authenticated smoke probe as an LB health check, flip to the
+#    "drain" response via a flag file or control endpoint — or just force
+#    /health to 503 by stopping. Real-world: most LBs check every 2-5s, so
+#    wait for 2 probe intervals before step 2.
+touch /var/lib/gadgetron/DRAIN   # consumed by your LB's custom health check
+sleep 10
+
+# 2. Stop the old binary. Drain period covered by systemd TimeoutStopSec.
+sudo systemctl stop gadgetron
+
+# 3. Swap + start (same as §6.1 steps 4-5). The first node of the batch
+#    triggers the migration; subsequent nodes see idempotent no-ops.
+sudo install -m 755 /opt/gadgetron/target/release/gadgetron /usr/local/bin/gadgetron
+sudo systemctl start gadgetron
+
+# 4. Post-start verification. Wait for /health and /ready BOTH to return 200
+#    (the 503 window on /ready during pgvector pool warm-up is typically
+#    under 2 seconds but spikes on slow disks).
+until curl -fsS http://localhost:8080/health && curl -fsS http://localhost:8080/ready; do
+  sleep 1
+done
+
+# 5. Re-advertise to the LB.
+rm /var/lib/gadgetron/DRAIN
+
+# 6. Repeat steps 1-5 on the next node only after this one is serving traffic
+#    for at least one LB probe cycle — premature rollover leaves zero healthy
+#    nodes if the new binary has a cold-start bug.
+```
+
+**During the window when node-A is on v(N+1) and node-B is still on v(N)**, both talk to the v(N+1) schema. v(N) writes to tables it doesn't know about are impossible (old code doesn't reference new tables); v(N) reads from widened columns are fine as long as the widening was additive — a new nullable column is invisible to v(N)'s `SELECT col_a, col_b` projections.
+
+#### 6.3 Drain-all upgrade (for breaking schema changes)
+
+When the release notes mark a migration as breaking (column drop, non-null backfill, type change), take every node down before migrating:
+
+```sh
+# 1. Backup (same as §6.1 step 1 — mandatory here, not optional).
+# 2. Drain LB (all nodes).
+# 3. Stop all gadgetron instances.
+# 4. Upgrade binary on ONE node and start — this node runs the migration.
+# 5. Verify migration applied and /health is 200.
+# 6. Upgrade + start remaining nodes (no re-migration; _sqlx_migrations now records the run).
+# 7. Un-drain LB.
+```
+
+The all-nodes-down window is usually 1-2 minutes dominated by the migration itself. Pre-benchmark long-running migrations against a backup-restored staging copy to bound the downtime — a `CREATE INDEX` on a 10M-row table can take minutes; a `CLUSTER` command scales with table size.
+
+#### 6.4 Rollback (downgrade binary)
+
+Rollback is always a binary swap paired with (sometimes) a schema restore. The decision tree:
+
+- **New binary crashes on start but no migration landed** (common with a bad config-validator change): reinstate the previous binary — `sudo install -m 755 /usr/local/bin/gadgetron.prev /usr/local/bin/gadgetron && sudo systemctl start gadgetron`. Keep a copy at `gadgetron.prev` as part of the §6.1 swap so this is always available for one-step rollback.
+- **New binary started and a migration applied, but runtime is broken**: the migration is already committed and is forward-only. Rolling back the binary alone works IF the previous version is schema-forward-compatible with the new migration (the additive case from §6.2). If not, restore the §6.1 pre-upgrade backup following the §5.4 recipe, then install the previous binary.
+- **Migration itself failed mid-way**: sqlx wraps each `.sql` file in a transaction, so a failed migration rolls back its own partial state — the `_sqlx_migrations` row is NOT inserted. The next start will retry the same migration. If the migration can never succeed (bad SQL or pre-existing data incompatible), fix the `.sql` file and redeploy, OR skip the migration by inserting its version into `_sqlx_migrations` manually (`INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time) VALUES (...)` — only under vendor guidance; use with care).
+
+#### 6.5 Configuration file changes
+
+`gadgetron.toml` additions are additive by design — older binaries ignore fields they don't know. Removals are rare and are called out in the release notes with a minimum-supported-binary floor. After editing `gadgetron.toml`:
+
+- **Full reload** requires a restart. `gadgetron serve` reads the config once at startup; there is no SIGHUP for the TOML path.
+- **Catalog-only reload** (`[web].catalog_path` / `[web].bundles_dir` pointee changes): `POST /api/v1/web/workbench/admin/reload-catalog` or `kill -HUP <pid>` — see [api-reference.md §POST /admin/reload-catalog](api-reference.md). No process restart needed.
+- **Provider-table changes** (new `[providers.x]` block): full restart. Live-add of a provider is NOT supported on trunk.
+
 ---
 
 ## Troubleshooting install issues
