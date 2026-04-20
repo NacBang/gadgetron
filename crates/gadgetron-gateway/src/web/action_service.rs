@@ -468,12 +468,20 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 outcome: ActionAuditOutcome::Success,
                 elapsed_ms: start_instant.elapsed().as_millis() as u64,
             });
+        // actor_user_id = None (pre-ISSUE-24). `AuthenticatedContext`
+        // at this layer carries `user_id = ctx.api_key_id` (see
+        // `workbench.rs:~509/554/1433`), so writing `Some(actor.user_id)`
+        // would contaminate `billing_events.actor_user_id` with
+        // api_key_ids indistinguishable from real users.id at query
+        // time. ISSUE 24 adds a real user_id field to
+        // `AuthenticatedContext`; then this goes to
+        // `Some(actor.real_user_id)`. Security review on ISSUE 23.
         emit_action_billing(
             self.pg_pool.as_ref(),
             actor_tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
-            Some(actor.user_id),
+            None,
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -569,12 +577,15 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 outcome: ActionAuditOutcome::Success,
                 elapsed_ms: start_instant.elapsed().as_millis() as u64,
             });
+        // actor_user_id = None; see the invoke-path comment above for
+        // the `AuthenticatedContext.user_id = api_key_id` legacy and
+        // the ISSUE 24 follow-up.
         emit_action_billing(
             self.pg_pool.as_ref(),
             actor.tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
-            Some(actor.user_id),
+            None,
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),

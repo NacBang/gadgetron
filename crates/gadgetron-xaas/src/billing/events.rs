@@ -34,10 +34,20 @@ pub struct BillingEventRow {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Owning user (ISSUE 23). NULL for legacy events predating the
-    /// `20260420000005_billing_events_actor_user_id.sql` migration,
-    /// and for callers whose `ValidatedKey.user_id` is None (legacy
-    /// api_keys pre-ISSUE-14 backfill).
+    /// Owning user (ISSUE 23). Denormalized projection of
+    /// `audit_log.actor_user_id` for query-ergonomic per-user spend
+    /// reports — NOT the source of truth (audit_log is). Invoice
+    /// materializer SHOULD prefer the audit_log join when both are
+    /// present.
+    ///
+    /// NULL for:
+    ///   * legacy events pre-dating the
+    ///     `20260420000005_billing_events_actor_user_id.sql` migration
+    ///   * chat path (QuotaToken doesn't thread user_id until ISSUE 24)
+    ///   * action path (AuthenticatedContext.user_id is api_key_id
+    ///     placeholder until ISSUE 24; see security review)
+    ///   * callers whose `ValidatedKey.user_id` is None (legacy
+    ///     api_keys pre-ISSUE-14 backfill)
     pub actor_user_id: Option<Uuid>,
 }
 
