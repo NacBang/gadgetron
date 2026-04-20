@@ -19,10 +19,44 @@ use gadgetron_web::ServiceConfig;
 use tower::ServiceBuilder;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-/// Single-line CSP header. Must not contain newlines — `HeaderValue::from_static`
-/// panics on control characters at const construction time. The test
-/// `csp_string_has_no_newlines` locks this in. Appendix B of the design doc shows
-/// the human-readable layout; THIS const is the authoritative byte sequence.
+/// Base CSP directives — everything except the optional
+/// `upgrade-insecure-requests` tail, which is appended dynamically by
+/// `build_csp()` based on `WebConfig.upgrade_insecure_requests`.
+///
+/// **Why the tail is optional**: the `upgrade-insecure-requests` directive
+/// tells browsers to upgrade HTTP subresource fetches to HTTPS. Useful
+/// behind a TLS terminator; **actively breaks** plain-HTTP deployments
+/// because Chrome's enforcement fires SSL against a server that doesn't
+/// speak TLS (operator-reported regression 2026-04-20 — every asset
+/// fetch returned ERR_SSL_PROTOCOL_ERROR, page rendered unstyled).
+/// Default OFF; production-behind-TLS opts in via
+/// `[web].upgrade_insecure_requests = true`.
+///
+/// Single-line. No newlines — `HeaderValue::from_str` would reject them.
+/// The `build_csp_has_no_newlines` test locks this in.
+const CSP_BASE: &str = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; \
+    frame-src 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; \
+    style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+    connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; media-src 'self'; \
+    object-src 'none'";
+
+/// Build the CSP header value for a given `WebConfig`. Appends
+/// `upgrade-insecure-requests` only when the operator opts in.
+pub fn build_csp(web: &WebConfig) -> String {
+    if web.upgrade_insecure_requests {
+        format!("{CSP_BASE}; upgrade-insecure-requests")
+    } else {
+        CSP_BASE.to_string()
+    }
+}
+
+/// Legacy alias — kept as a stable public string for callers that
+/// needed the full CSP before the config knob landed. Equivalent to
+/// `build_csp(&WebConfig { upgrade_insecure_requests: true, .. })`.
+///
+/// **Do NOT use in production code** — `apply_web_headers` takes
+/// the config and uses `build_csp` instead. This exists only for
+/// external tests / doc examples that want the "strict" CSP string.
 pub const CSP: &str = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; \
     frame-src 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; \
     style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
@@ -46,11 +80,18 @@ pub fn translate_config(web: &WebConfig) -> ServiceConfig {
 /// Used only by the `/web/*` subtree mount point. `/v1/*` API responses are NOT
 /// wrapped by this layer — that is a deliberate scoping decision documented in §8
 /// of the design doc.
-pub fn apply_web_headers(router: Router) -> Router {
+///
+/// CSP is built from `build_csp(web)` so the `upgrade-insecure-requests`
+/// directive is only emitted when the operator opts in. See the
+/// `CSP_BASE` doc-comment for the regression context.
+pub fn apply_web_headers(router: Router, web: &WebConfig) -> Router {
+    let csp = build_csp(web);
+    let csp_header = HeaderValue::from_str(&csp)
+        .expect("CSP string contains only ASCII printable chars; unreachable");
     let stack = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::if_not_present(
             CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CSP),
+            csp_header,
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
             X_CONTENT_TYPE_OPTIONS,
@@ -73,11 +114,13 @@ mod tests {
 
     #[test]
     fn csp_string_has_no_newlines() {
-        // HeaderValue::from_static panics on embedded control characters.
+        // HeaderValue::from_str rejects embedded control characters.
         assert!(!CSP.contains('\n'));
         assert!(!CSP.contains('\r'));
-        // Exercise the panic surface at test time.
+        assert!(!CSP_BASE.contains('\n'));
+        assert!(!CSP_BASE.contains('\r'));
         let _ = HeaderValue::from_static(CSP);
+        let _ = HeaderValue::from_str(CSP_BASE).unwrap();
     }
 
     #[test]
@@ -85,14 +128,36 @@ mod tests {
         // Next.js uses inline scripts for hydration data. Strict script-src
         // with trusted-types breaks rendering. Re-evaluate when design doc
         // lands with approved relaxations.
-        assert!(CSP.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval'"));
+        assert!(CSP_BASE.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval'"));
     }
 
     #[test]
     fn csp_contains_strict_script_src() {
-        assert!(CSP.contains("script-src 'self'"));
-        assert!(CSP.contains("connect-src 'self'"));
-        assert!(CSP.contains("frame-ancestors 'none'"));
+        assert!(CSP_BASE.contains("script-src 'self'"));
+        assert!(CSP_BASE.contains("connect-src 'self'"));
+        assert!(CSP_BASE.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn build_csp_omits_upgrade_by_default() {
+        let web = WebConfig::default();
+        let csp = build_csp(&web);
+        assert!(
+            !csp.contains("upgrade-insecure-requests"),
+            "default CSP must NOT contain upgrade-insecure-requests — \
+             that directive breaks plain-HTTP deployments. got: {csp}"
+        );
+    }
+
+    #[test]
+    fn build_csp_includes_upgrade_when_opted_in() {
+        let mut web = WebConfig::default();
+        web.upgrade_insecure_requests = true;
+        let csp = build_csp(&web);
+        assert!(
+            csp.contains("upgrade-insecure-requests"),
+            "opt-in CSP must contain upgrade-insecure-requests. got: {csp}"
+        );
     }
 
     #[test]

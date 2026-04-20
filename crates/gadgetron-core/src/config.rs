@@ -147,6 +147,25 @@ pub struct WebConfig {
     /// an unsigned manifest, the request is rejected before any IO.
     #[serde(default)]
     pub bundle_signing: BundleSigningConfig,
+    /// Emit the `upgrade-insecure-requests` CSP directive on `/web`
+    /// responses. When `true`, browsers loading the page over HTTPS
+    /// auto-upgrade HTTP subresource requests to HTTPS (defense-in-
+    /// depth on top of mixed-content blocking).
+    ///
+    /// **Default: `false`** — safe for both plain-HTTP deployments
+    /// (binary exposed directly on `http://host:port/web` without
+    /// a TLS proxy) and HTTPS deployments. When a browser with
+    /// HTTPS-First Mode or the `upgrade-insecure-requests` directive
+    /// hits a plain-HTTP server, every subresource request SSL-
+    /// errors and the page renders fully unstyled (operator-reported
+    /// regression 2026-04-20).
+    ///
+    /// **Set `true` in production behind a TLS-terminating reverse
+    /// proxy** (Nginx, Caddy per `manual/installation.md §Production
+    /// deployment`). The proxy handles TLS; the CSP directive then
+    /// hardens subresource loading against accidental HTTP fallback.
+    #[serde(default)]
+    pub upgrade_insecure_requests: bool,
 }
 
 /// Ed25519 trust-anchor configuration for bundle installation
@@ -184,6 +203,13 @@ impl Default for WebConfig {
             catalog_path: None,
             bundles_dir: None,
             bundle_signing: BundleSigningConfig::default(),
+            // Default OFF. Operator running the binary on plain HTTP
+            // (dev, LAN, no reverse proxy) would otherwise see every
+            // /web subresource fail with ERR_SSL_PROTOCOL_ERROR
+            // because Chrome's upgrade-insecure-requests enforcement
+            // tries HTTPS against a server that only speaks HTTP.
+            // Production TLS deployments opt in via config.
+            upgrade_insecure_requests: false,
         }
     }
 }

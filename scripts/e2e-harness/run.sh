@@ -2871,6 +2871,65 @@ check_web_header 'x-content-type-options' 'nosniff'
 check_web_header 'referrer-policy' 'no-referrer'
 check_web_header 'permissions-policy' 'camera=\(\)'
 
+# Gate 11b.5 — CSP must NOT include upgrade-insecure-requests by default.
+# Plain-HTTP harness runs against http://127.0.0.1:8080; if the directive
+# leaks back into the default CSP, every browser subresource fetch would
+# be upgraded to https:// and fail with ERR_SSL_PROTOCOL_ERROR (observed
+# 2026-04-20 on a LAN deployment that had the directive hardcoded).
+if echo "$WEB_HEADERS_LC" | grep -qE '^content-security-policy:.*upgrade-insecure-requests'; then
+  fail "/web CSP contains upgrade-insecure-requests with default config" \
+    "this breaks plain-HTTP deployments; opt-in via [web].upgrade_insecure_requests = true"
+else
+  pass "/web CSP default omits upgrade-insecure-requests (plain-HTTP safe)"
+fi
+
+# -----------------------------------------------------------------------
+# Gate 11g — /web asset consistency (operator-reported 2026-04-20)
+# -----------------------------------------------------------------------
+#
+# The landing HTML references CSS + JS bundles by hashed filename
+# (e.g. `/web/_next/static/css/<hash>.css`). If `web/dist/` holds a
+# stale index.html whose hashes no longer match the emitted assets,
+# every asset request 404s at runtime → fully unstyled page + empty-
+# button icons (operator bug report, 2026-04-20).
+#
+# `build_logic::verify_asset_consistency()` catches this at compile
+# time now, but the harness still runs an end-to-end probe: GET
+# /web, extract every `/web/_next/static/...` reference, curl each
+# one, assert 200 + non-empty body. Belt + suspenders — if a new
+# embed / asset-serving path ever bypasses the build-time check,
+# the harness is the second line of defense.
+log "=== Gate 11g: /web asset consistency (runtime probe) ==="
+ASSET_REFS="$(echo "$WEB_RESP" \
+  | grep -oE '/web/_next/static/[A-Za-z0-9/_.-]+' \
+  | sort -u)"
+if [ -z "$ASSET_REFS" ]; then
+  fail "Gate 11g: /web landing HTML references no /web/_next/static assets" \
+    "(HTML may be the fallback page; check web-ui feature flag + build logs)"
+else
+  ASSET_FAIL_COUNT=0
+  ASSET_TOTAL=0
+  while IFS= read -r ASSET_PATH; do
+    ASSET_TOTAL=$((ASSET_TOTAL + 1))
+    # HEAD request — sufficient to prove the asset exists + is served
+    # with a non-404 status. Content-Type verification lives in a
+    # future follow-up ISSUE if MIME drift becomes a real problem.
+    ASSET_CODE="$(curl -fsS -o /dev/null -w '%{http_code}' \
+      "$GAD_BASE$ASSET_PATH" 2>&1 || true)"
+    if [ "$ASSET_CODE" != "200" ]; then
+      ASSET_FAIL_COUNT=$((ASSET_FAIL_COUNT + 1))
+      echo "  FAIL asset $ASSET_PATH → HTTP $ASSET_CODE" \
+        >> "$ART_DIR/gate-11g-missing-assets.txt"
+    fi
+  done <<< "$ASSET_REFS"
+  if [ "$ASSET_FAIL_COUNT" -eq 0 ]; then
+    pass "Gate 11g: all $ASSET_TOTAL /web asset references resolve to 200"
+  else
+    fail "Gate 11g: $ASSET_FAIL_COUNT of $ASSET_TOTAL /web asset references 404/5xx" \
+      "see $ART_DIR/gate-11g-missing-assets.txt — rebuild web/dist with clean cache per crates/gadgetron-web/README.md §Asset consistency"
+  fi
+fi
+
 # Screenshot strategy (preference order):
 #   1. If --no-screenshot: skip.
 #   2. If $B is exported (gstack /browse skill warmed up): use that.
