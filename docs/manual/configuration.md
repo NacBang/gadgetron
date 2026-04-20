@@ -395,6 +395,89 @@ burst = 120
 
 **Defaults safety.** `burst = 0` is deliberately interpreted as "match `requests_per_minute`" rather than "no burst allowed" — the latter would make any traffic faster than exactly one-per-interval trip 429 on the very first extra request. Matching `requests_per_minute` means a fresh tenant can absorb one full minute of traffic before backing off to the steady-state rate, which is what most client SDKs already assume.
 
+#### Production tuning recipes
+
+##### Picking values for your deployment
+
+| Deployment | `requests_per_minute` | `burst` | Notes |
+|---|---|---|---|
+| Single-user laptop / dev | `0` (disabled) | -- | No multi-tenant concurrency to protect. Disable quota entirely. |
+| Small team (1-20 users) | `120` | `120` | 2 req/sec steady state. Burst matches rpm so the bucket absorbs one full minute of traffic before exhausting. This is the default. |
+| SaaS tenant, interactive | `300` | `600` | 5 req/sec steady. burst = 2x rpm lets a tenant send a quick 600-request experiment before the limiter engages, then recovers at 5/sec. Use the 2x burst idiom for interactive workloads where users paste large context or run parallel tool calls. |
+| High-throughput / batch API | `6000` | `600` | 100 req/sec steady with a 6-second burst window. Batch jobs do not trip the limiter immediately, but sustained overconsumption is caught within seconds. |
+
+##### Understanding the refill rate
+
+The bucket refills at `requests_per_minute / 60` tokens per second, not once per minute. This distinction matters for bursty callers.
+
+Concrete examples:
+
+- `rpm = 60`: refill rate is 1 token/sec. After one request lands the next token is ready in 1 second.
+- `rpm = 120`: refill rate is 2 tokens/sec. A 120-token burst exhausts in 60 seconds and recovers at 2 tokens/sec.
+- `rpm = 600`: refill rate is 10 tokens/sec. A caller that waits 150 ms after a 429 gets exactly 1 new token.
+
+The exact formula applied at each consume() call:
+
+```
+tokens = min(tokens + elapsed_secs x (rpm / 60), burst)
+```
+
+If a tenant is rejected, the minimum wait before the next token is ready is:
+
+```
+ceil((1.0 - current_tokens) / (rpm / 60))   # seconds, rounded up to u32
+```
+
+This value is returned in the `retry_after_seconds` field of the 429 response body.
+
+##### Observing rate-limit rejections
+
+There is no Prometheus counter or audit_log row for rate-limit events today. Use tracing output until metrics instrumentation lands (tracked as a post-v1.0 follow-up).
+
+Find the top offenders in a running deployment:
+
+```sh
+grep quota.rate_limit gadgetron.log | jq '.tenant_id' | sort | uniq -c | sort -rn
+```
+
+Each rate-limit rejection emits one structured log line with target: quota.rate_limit and a retry_after_seconds field.
+
+Distinguish rate-limit rejections from cost-quota rejections:
+
+```sh
+# Rate-limit path (per-minute token bucket)
+grep "quota.rate_limit" gadgetron.log
+
+# Cost-quota path (daily spend ceiling)
+grep "quota.pg.*daily_used_cents" gadgetron.log
+```
+
+Both produce HTTP 429 responses. The tracing target is the only machine-readable discriminator today.
+
+##### Common tuning mistakes
+
+- **burst smaller than client batch size.** Setting burst = 1 trips a 429 on the very first parallel retry from any SDK that fires two requests in the same millisecond. Set burst to at least the maximum expected concurrent request count from a single tenant.
+
+- **Misreading the refill as per-minute.** rpm = 60, burst = 60 does not give a tenant 60 free requests per minute in a lump. The 60 tokens are distributed as 1/sec. Sustained traffic at 1 req/sec works fine; any caller that sends 10 requests in the first second hits a 429 after the first request exhausts the remaining bucket. Size burst to match the realistic peak burst window, not the per-minute quota.
+
+- **No env-var override.** There is no GADGETRON_QUOTA_RATE_LIMIT_* environment variable today. Production CI and container deployments must template the TOML directly. Factor this into your config-management pipeline.
+
+- **Expecting rejections in audit_log.** Rate-limit rejects are filtered before the audit hook runs. Querying audit_log for 429s will return zero rows. Use the tracing grep above.
+
+##### Scale math
+
+Each tenant token-bucket state is one DashMap entry of roughly 100-150 bytes (one `f64` tokens field + one `Instant` last-refill timestamp + `Uuid` key + DashMap shard + slot overhead). Memory cost at scale:
+
+| Tenants | Approximate heap |
+|---|---|
+| 10 000 | ~1.5 MB |
+| 100 000 | ~15 MB |
+| 1 000 000 | ~100-150 MB |
+
+The shard count is the DashMap default and is not tunable via config. If you observe lock contention at very high tenant counts, file an issue, as this is a known limitation noted in docs/design/xaas/phase1.md (Q-1).
+
+Process restart resets all buckets. There is no cross-process persistence for rate-limit state. Tenants get a fresh full-burst allowance after every restart.
+
 ---
 
 ### `[auth.bootstrap]`
