@@ -319,19 +319,26 @@ UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건
 추가하고 `new_full` 생성자에 파라미터로 받는다. CLI 초기화에서 wire.
 
 ```rust
-// action_service.rs — direct success @ ~line 447 이후:
-if let Some(pool) = self.pg_pool.as_ref() {
+// action_service.rs — both success paths delegate to a private helper
+// (PR #280 refactor; emit_action_billing signature after dropping the
+// always-None actor_user_id parameter — ISSUE 24 will reintroduce it
+// sourced from AuthenticatedContext.real_user_id):
+fn emit_action_billing(
+    pool: Option<&sqlx::PgPool>,
+    tenant_id: Uuid,
+    audit_event_id: Uuid,
+    gadget_name: Option<String>,
+) {
+    let Some(pool) = pool else { return; };
     let pool = pool.clone();
-    let tenant_id = actor_tenant_id;
-    let gadget_name = Some(descriptor.gadget_name.clone());
-    let actor_user_id = actor.actor_user_id;
     tokio::spawn(async move {
         let _ = gadgetron_xaas::billing::insert_billing_event(
             &pool,
             gadgetron_xaas::billing::BillingEventInsert::action(
                 tenant_id, audit_event_id, gadget_name,
-            )
-            .with_actor_user(actor_user_id),
+            ),
+            // No .with_actor_user(..) — action path writes NULL by
+            // design until ISSUE 24 (see doc comment on the helper).
         ).await;
     });
 }
