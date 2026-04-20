@@ -122,16 +122,31 @@ pub struct BillingEventRow {
     pub actor_user_id: Option<Uuid>,
 }
 
-#[allow(clippy::too_many_arguments)]
+// Owned, 'static-safe insert payload — callers can move into
+// tokio::spawn closures without lifetime gymnastics.
+#[derive(Debug, Clone)]
+pub struct BillingEventInsert {
+    pub tenant_id: Uuid,
+    pub kind: BillingEventKind,
+    pub cost_cents: i64,
+    pub source_event_id: Option<Uuid>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub actor_user_id: Option<Uuid>, // ISSUE 23
+}
+
+impl BillingEventInsert {
+    // Typed constructors encode the kind + default cost invariant.
+    pub fn chat(tenant_id: Uuid, cost_cents: i64) -> Self;
+    pub fn tool(tenant_id: Uuid, gadget_name: String) -> Self;
+    pub fn action(tenant_id: Uuid, audit_event_id: Uuid, gadget_name: Option<String>) -> Self;
+    // Optional-field builders.
+    pub fn with_actor_user(self, actor_user_id: Option<Uuid>) -> Self;
+}
+
 pub async fn insert_billing_event(
     pool: &PgPool,
-    tenant_id: Uuid,
-    kind: BillingEventKind,
-    cost_cents: i64,
-    source_event_id: Option<Uuid>,
-    model: Option<&str>,
-    provider: Option<&str>,
-    actor_user_id: Option<Uuid>, // ISSUE 23
+    event: BillingEventInsert,
 ) -> Result<(), sqlx::Error>;
 
 pub async fn query_billing_events(
@@ -149,19 +164,13 @@ pub async fn query_billing_events(
 ```rust
 // crates/gadgetron-xaas/src/quota/enforcer.rs PgQuotaEnforcer::record_post
 // (after the existing UPDATE quota_configs …)
+// ISSUE 24 will flip chat to `.with_actor_user(Some(token.user_id))`
+// once QuotaToken carries user_id. Today the typed constructor
+// defaults all optionals (source_event_id, model, provider,
+// actor_user_id) to None.
 let ins = crate::billing::insert_billing_event(
     &self.pool,
-    token.tenant_id,
-    crate::billing::BillingEventKind::Chat,
-    actual_cost_cents,
-    None, // TASK 12.2+에서 chat audit_log UUID를 threading
-    None, // model — TASK 12.2에서 enforcer가 컨텍스트로 받음
-    None, // provider — 동일
-    None, // actor_user_id — ISSUE 23 chat path passes None
-          // because QuotaToken doesn't carry user_id yet.
-          // ISSUE 24 adds `user_id: Option<Uuid>` to QuotaToken
-          // sourced from ctx.actor_user_id; then this flips to
-          // `token.user_id`.
+    crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents),
 ).await;
 if let Err(e) = ins {
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
@@ -273,15 +282,10 @@ Response 200:
 #### 시그니처 및 호출 지점
 
 ```rust
-// 변경 없음 — 12.1에 이미 들어있음:
+// 현재 시그니처 (struct-based after the 0.5.16 refactor — §3 참조):
 pub async fn insert_billing_event(
     pool: &PgPool,
-    tenant_id: Uuid,
-    kind: BillingEventKind,
-    cost_cents: i64,
-    source_event_id: Option<Uuid>,
-    model: Option<&str>,
-    provider: Option<&str>,
+    event: BillingEventInsert,
 ) -> Result<(), sqlx::Error>;
 ```
 
@@ -291,11 +295,13 @@ pub async fn insert_billing_event(
 if matches!(outcome, GadgetCallOutcome::Success) {
     if let Some(pool) = state.pg_pool.clone() {
         let tenant_id = ctx.tenant_id;
-        let model = name.clone();
+        let gadget_name = name.clone();
+        let actor_user_id = ctx.actor_user_id;
         tokio::spawn(async move {
             let _ = gadgetron_xaas::billing::insert_billing_event(
-                &pool, tenant_id, BillingEventKind::Tool,
-                0, None, Some(&model), None,
+                &pool,
+                gadgetron_xaas::billing::BillingEventInsert::tool(tenant_id, gadget_name)
+                    .with_actor_user(actor_user_id),
             ).await;
         });
     }
@@ -317,12 +323,15 @@ UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건
 if let Some(pool) = self.pg_pool.as_ref() {
     let pool = pool.clone();
     let tenant_id = actor_tenant_id;
-    let model = descriptor.gadget_name.clone();
-    let source_event_id = Some(audit_event_id);
+    let gadget_name = Some(descriptor.gadget_name.clone());
+    let actor_user_id = actor.actor_user_id;
     tokio::spawn(async move {
         let _ = gadgetron_xaas::billing::insert_billing_event(
-            &pool, tenant_id, BillingEventKind::Action,
-            0, source_event_id, model.as_deref(), None,
+            &pool,
+            gadgetron_xaas::billing::BillingEventInsert::action(
+                tenant_id, audit_event_id, gadget_name,
+            )
+            .with_actor_user(actor_user_id),
         ).await;
     });
 }

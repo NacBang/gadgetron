@@ -631,21 +631,16 @@ CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
 **Hot-path 통합** (`crates/gadgetron-xaas/src/quota/enforcer.rs`):
 
 ```rust
-// PgQuotaEnforcer::record_post (after quota_configs UPDATE)
+// PgQuotaEnforcer::record_post (after quota_configs UPDATE).
+// Struct-based API (v0.5.16 refactor) — typed constructor encodes
+// kind + default cost invariant. ISSUE 24 will flip chat to
+// `.with_actor_user(Some(token.user_id))` once QuotaToken carries
+// user_id. Tool + action paths already use `.with_actor_user(..)`
+// today (tool from ctx.actor_user_id, action defers to ISSUE 24
+// when AuthenticatedContext gets a real user id field).
 let ins = crate::billing::insert_billing_event(
     &self.pool,
-    token.tenant_id,
-    crate::billing::BillingEventKind::Chat,
-    actual_cost_cents,
-    None, None, None, // source_event_id / model / provider — TASK 12.2
-    None,             // actor_user_id — ISSUE 23 passes None from chat path
-                      // because QuotaToken doesn't thread user_id yet.
-                      // ISSUE 24 adds `user_id: Option<Uuid>` to
-                      // `QuotaToken` and sources it from
-                      // `ctx.actor_user_id`; tool + action paths populate
-                      // today (tool via `ctx.actor_user_id`, action will
-                      // populate once `AuthenticatedContext` carries a
-                      // real user id).
+    crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents),
 ).await;
 if let Err(e) = ins {
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,

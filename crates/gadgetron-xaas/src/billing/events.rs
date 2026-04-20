@@ -51,23 +51,97 @@ pub struct BillingEventRow {
     pub actor_user_id: Option<Uuid>,
 }
 
+/// Owned, `'static`-safe insert payload for `insert_billing_event`.
+/// Replaces the pre-v0.5.16 8-arg flat parameter list. Owned `String`
+/// fields (not `&str`) so callers can move the struct into a
+/// `tokio::spawn` closure without lifetime gymnastics — the tool +
+/// action paths already do this.
+///
+/// Use one of the typed constructors (`chat`, `tool`, `action`) to
+/// encode the kind + default cost invariant; then layer the
+/// `with_*` builders for the optional fields. The direct struct
+/// literal form is intentionally pub'd so new paths can extend
+/// the shape without going through a constructor.
+#[derive(Debug, Clone)]
+pub struct BillingEventInsert {
+    pub tenant_id: Uuid,
+    pub kind: BillingEventKind,
+    pub cost_cents: i64,
+    pub source_event_id: Option<Uuid>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub actor_user_id: Option<Uuid>,
+}
+
+impl BillingEventInsert {
+    /// Chat event — enforcer hot-path. `cost_cents` is the live
+    /// request cost from `record_post`. Optional fields (including
+    /// `actor_user_id`) default to NULL; ISSUE 24 will populate
+    /// `actor_user_id` from `QuotaToken.user_id` once that field
+    /// lands.
+    pub fn chat(tenant_id: Uuid, cost_cents: i64) -> Self {
+        Self {
+            tenant_id,
+            kind: BillingEventKind::Chat,
+            cost_cents,
+            source_event_id: None,
+            model: None,
+            provider: None,
+            actor_user_id: None,
+        }
+    }
+
+    /// Tool invocation (`/v1/tools/{name}/invoke`). `cost_cents = 0`
+    /// today — the invoice materializer (TASK 12.3, deferred)
+    /// attributes cost at aggregation time from the underlying
+    /// model call. `gadget_name` is stored in the `model` column,
+    /// not a dedicated slot — legacy mapping matches the pre-refactor
+    /// call at `handlers.rs`. ISSUE 24 queues the real model
+    /// identifier into its own field.
+    pub fn tool(tenant_id: Uuid, gadget_name: String) -> Self {
+        Self {
+            tenant_id,
+            kind: BillingEventKind::Tool,
+            cost_cents: 0,
+            source_event_id: None,
+            model: Some(gadget_name),
+            provider: None,
+            actor_user_id: None,
+        }
+    }
+
+    /// Direct / approved action terminal. `source_event_id` pins
+    /// the row to the `audit_log` event the action emitted —
+    /// operator reconciliation JOINs on this. Same legacy
+    /// `gadget_name → model` mapping as `tool`.
+    pub fn action(tenant_id: Uuid, audit_event_id: Uuid, gadget_name: Option<String>) -> Self {
+        Self {
+            tenant_id,
+            kind: BillingEventKind::Action,
+            cost_cents: 0,
+            source_event_id: Some(audit_event_id),
+            model: gadget_name,
+            provider: None,
+            actor_user_id: None,
+        }
+    }
+
+    /// Set `actor_user_id` (ISSUE 23). NULL is always acceptable
+    /// (column is nullable); populated rows enable per-user spend
+    /// queries without a join. See `billing_events` migration
+    /// comment for the FK-less rationale.
+    pub fn with_actor_user(mut self, actor_user_id: Option<Uuid>) -> Self {
+        self.actor_user_id = actor_user_id;
+        self
+    }
+}
+
 /// Insert a single billing event. Fire-and-forget: callers
 /// typically `tokio::spawn` this or run it inside a broader
 /// `record_post` that already logs DB failures.
-///
-/// `actor_user_id` (ISSUE 23) is the owning user id from the caller's
-/// `TenantContext`. NULL is always acceptable (column is nullable);
-/// populated rows enable per-user spend queries without a join.
-#[allow(clippy::too_many_arguments)]
 pub async fn insert_billing_event(
     pool: &PgPool,
-    tenant_id: Uuid,
-    kind: BillingEventKind,
-    cost_cents: i64,
-    source_event_id: Option<Uuid>,
-    model: Option<&str>,
-    provider: Option<&str>,
-    actor_user_id: Option<Uuid>,
+    event: BillingEventInsert,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -76,13 +150,13 @@ pub async fn insert_billing_event(
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
-    .bind(tenant_id)
-    .bind(kind.as_str())
-    .bind(source_event_id)
-    .bind(cost_cents)
-    .bind(model)
-    .bind(provider)
-    .bind(actor_user_id)
+    .bind(event.tenant_id)
+    .bind(event.kind.as_str())
+    .bind(event.source_event_id)
+    .bind(event.cost_cents)
+    .bind(event.model)
+    .bind(event.provider)
+    .bind(event.actor_user_id)
     .execute(pool)
     .await
     .map(|_| ())

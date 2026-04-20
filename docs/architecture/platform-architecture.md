@@ -383,9 +383,10 @@ Client
   │  `usage_day DATE DEFAULT CURRENT_DATE` column]
   │
   │ [crate: gadgetron-xaas] — EPIC 4 TASK 12.1 / PR #236 / v0.5.5
-  │ [fn: billing::insert_billing_event(pool, tenant_id, kind,
-  │      cost_cents, source_event_id, model, provider)
-  │      -> Result<(), sqlx::Error>]
+  │ [fn: billing::insert_billing_event(pool, event) -> Result<(), sqlx::Error>
+  │      — `event: BillingEventInsert` (struct; kind + cost via
+  │      typed constructors `chat`/`tool`/`action`, optional
+  │      fields via `.with_actor_user(..)`)]
   │   PgQuotaEnforcer 경로에서만 실행 (record_post UPDATE 직후).
   │   PostgreSQL INSERT INTO billing_events
   │       (tenant_id, event_kind, source_event_id, cost_cents, model, provider)

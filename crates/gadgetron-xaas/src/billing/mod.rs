@@ -7,4 +7,4 @@
 
 pub mod events;
 
-pub use events::{insert_billing_event, BillingEventKind, BillingEventRow};
+pub use events::{insert_billing_event, BillingEventInsert, BillingEventKind, BillingEventRow};

@@ -641,13 +641,11 @@ pub async fn invoke_tool_handler(
             tokio::spawn(async move {
                 if let Err(e) = gadgetron_xaas::billing::insert_billing_event(
                     &pool,
-                    billing_tenant,
-                    gadgetron_xaas::billing::BillingEventKind::Tool,
-                    0,
-                    None,
-                    Some(&billing_gadget),
-                    None,
-                    billing_actor_user_id,
+                    gadgetron_xaas::billing::BillingEventInsert::tool(
+                        billing_tenant,
+                        billing_gadget.clone(),
+                    )
+                    .with_actor_user(billing_actor_user_id),
                 )
                 .await
                 {
