@@ -125,3 +125,82 @@ test("panels don't collapse unexpectedly during chat message flow", async ({
   await expect(page.getByTestId("chat-column")).toBeVisible();
   await expect(page.getByTestId("evidence-pane")).toBeVisible();
 });
+
+// ROADMAP ISSUE 29 TASK 29.6 — clicking between Chat / Wiki / Dashboard
+// through the LeftRail must keep the shell chrome (StatusStrip + LeftRail)
+// mounted. Before the route-group refactor the shell unmounted on every
+// navigation, so the chat thread state was lost when the operator clicked
+// Dashboard mid-generation.
+test("shell chrome persists across Chat → Wiki → Dashboard navigation", async ({
+  page,
+}) => {
+  // Mock the workbench endpoints hit by wiki + dashboard so navigation
+  // doesn't stall on 401s. These responses don't need to be realistic —
+  // we're asserting DOM persistence, not page content.
+  await page.route("**/workbench/actions/wiki-list", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ result: { payload: { pages: [] } } }),
+    });
+  });
+  await page.route("**/workbench/usage/summary", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        window_hours: 24,
+        chat: {
+          requests: 0,
+          errors: 0,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_cost_cents: 0,
+          avg_latency_ms: 0,
+        },
+        actions: {
+          total: 0,
+          success: 0,
+          error: 0,
+          pending_approval: 0,
+          avg_elapsed_ms: 0,
+        },
+        tools: { total: 0, errors: 0 },
+      }),
+    });
+  });
+
+  // Record the initial StatusStrip / LeftRail DOM handles. If the shell
+  // remounts on navigation these handles detach; the re-query will
+  // return fresh nodes. We assert the *same* handles stay attached.
+  const initialShell = await page.getByTestId("workbench-shell").elementHandle();
+  expect(initialShell).not.toBeNull();
+
+  // Chat → Wiki
+  await page.getByTestId("nav-tab-wiki").click();
+  await page.waitForURL(/\/wiki/);
+  await expect(page.getByTestId("workbench-shell")).toBeVisible();
+  await expect(page.getByTestId("left-rail")).toBeVisible();
+  await expect(page.getByTestId("wiki-header")).toBeVisible();
+
+  // Wiki → Dashboard
+  await page.getByTestId("nav-tab-dashboard").click();
+  await page.waitForURL(/\/dashboard/);
+  await expect(page.getByTestId("workbench-shell")).toBeVisible();
+  await expect(page.getByTestId("left-rail")).toBeVisible();
+  await expect(page.getByTestId("dashboard-header")).toBeVisible();
+
+  // Dashboard → Chat
+  await page.getByTestId("nav-tab-chat").click();
+  await page.waitForURL(/\/web\/?$/);
+  await expect(page.getByTestId("workbench-shell")).toBeVisible();
+  await expect(page.getByTestId("left-rail")).toBeVisible();
+  await expect(page.getByTestId("chat-header")).toBeVisible();
+
+  // The initial workbench-shell element handle must still be attached —
+  // route transitions inside the (shell) route group do not remount it.
+  const persisted = await initialShell!.evaluate(
+    (el) => el.isConnected,
+  );
+  expect(persisted).toBe(true);
+});

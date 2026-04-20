@@ -1,27 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Toaster, toast } from "sonner";
-import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
-import { Textarea } from "../components/ui/textarea";
-import { Card, CardContent } from "../components/ui/card";
+import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
+import { useAuth } from "../../lib/auth-context";
+import { safeRandomUUID } from "../../lib/uuid";
 
 // ---------------------------------------------------------------------------
-// /web/wiki — standalone workbench page that drives the four gadget-backed
-// actions shipped in PR #176 (knowledge-search, wiki-list, wiki-read,
-// wiki-write) through the same `/api/v1/web/workbench/actions/:id` HTTP
-// surface the SDK E2E harness exercises.
-//
-// Deliberately single-purpose — no chat, no Penny, no assistant runtime.
-// The goal is to prove the server is a usable product from a browser:
-// sign in, list pages, open one, edit + save, search for it.
-//
-// Static export friendly (Next.js `output: "export"`) — everything here
-// runs on the client, talks to the same origin, and never needs SSR.
+// /web/wiki — wiki workbench page. Runs inside `(shell)/layout.tsx`,
+// which owns the shared chrome (StatusStrip, LeftRail, EvidencePane)
+// and the API-key auth gate. This component supplies only the wiki
+// page-header + search bar + the 3-column body (Pages | Content |
+// Search hits).
 // ---------------------------------------------------------------------------
 
 function getApiBase(): string {
@@ -29,9 +23,6 @@ function getApiBase(): string {
   const meta = document.querySelector<HTMLMetaElement>(
     'meta[name="gadgetron-api-base"]',
   );
-  // The chat page uses `/v1` (OpenAI-compat base). Workbench routes are
-  // namespaced under `/api/v1/web/workbench`. We derive the workbench
-  // base from the chat base so both pages honour the same override.
   const chatBase = meta?.content || "/v1";
   return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
@@ -40,13 +31,9 @@ type ActionResponse = {
   result?: {
     status?: string;
     payload?: {
-      // wiki.list (service.list returns Vec<String>) → {"pages": ["name1", ...]}.
-      // Defensively accept `[{name}]` shape too for future-proofing.
       pages?: Array<string | { name?: string }>;
-      // wiki.get → {"name", "content"}
       name?: string;
       content?: string;
-      // wiki.search → {"query", "hits": [{...}]}
       hits?: Array<{ name?: string; snippet?: string; score?: number }>;
     };
   };
@@ -57,7 +44,7 @@ async function invokeAction(
   actionId: string,
   args: Record<string, unknown>,
 ): Promise<ActionResponse> {
-  const ciid = crypto.randomUUID();
+  const ciid = safeRandomUUID();
   const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
     method: "POST",
     headers: {
@@ -73,28 +60,8 @@ async function invokeAction(
   return (await res.json()) as ActionResponse;
 }
 
-function useApiKey(): [string | null, (k: string) => void, () => void] {
-  const [key, setKey] = useState<string | null>(null);
-  useEffect(() => {
-    const stored = localStorage.getItem("gadgetron_api_key");
-    if (stored) setKey(stored);
-  }, []);
-  const save = useCallback((k: string) => {
-    localStorage.setItem("gadgetron_api_key", k);
-    setKey(k);
-  }, []);
-  const clear = useCallback(() => {
-    localStorage.removeItem("gadgetron_api_key");
-    setKey(null);
-  }, []);
-  return [key, save, clear];
-}
-
-// ---------------------------------------------------------------------------
-
 export default function WikiWorkbenchPage() {
-  const [apiKey, saveKey, clearKey] = useApiKey();
-  const [keyInput, setKeyInput] = useState("");
+  const { apiKey } = useAuth();
 
   const [pages, setPages] = useState<string[]>([]);
   const [pagesError, setPagesError] = useState<string | null>(null);
@@ -120,9 +87,6 @@ export default function WikiWorkbenchPage() {
     try {
       const resp = await invokeAction(apiKey, "wiki-list", {});
       const payload = resp.result?.payload;
-      // wiki.list (KnowledgeService.list → Vec<String>) returns
-      // `{pages: ["name1", "name2"]}`. Fall back to {name} shape if a
-      // future provider wraps it — this keeps the client forward-compatible.
       const names: string[] = Array.isArray(payload?.pages)
         ? payload!.pages!
             .map((p) => (typeof p === "string" ? p : p?.name))
@@ -217,84 +181,19 @@ export default function WikiWorkbenchPage() {
     setEditing(true);
   }, []);
 
-  // -------- derived state ---------------------------------------------------
   const pageListMemo = useMemo(() => pages, [pages]);
 
-  // -------- render: auth gate ----------------------------------------------
-  if (!apiKey) {
-    return (
-      <div
-        className="flex min-h-screen items-center justify-center bg-zinc-950 p-6"
-        data-testid="wiki-auth-gate"
-      >
-        <Card className="w-full max-w-md border-zinc-800 bg-zinc-900">
-          <CardContent className="flex flex-col gap-4 p-6">
-            <div>
-              <h1 className="text-sm font-semibold text-zinc-200">
-                Gadgetron Wiki Workbench
-              </h1>
-              <p className="mt-1 text-xs text-zinc-500">
-                Paste the API key generated by{" "}
-                <code className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-[11px] text-zinc-400">
-                  gadgetron key create
-                </code>
-                . Stored in localStorage only.
-              </p>
-            </div>
-            <Input
-              type="password"
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              placeholder="gad_live_..."
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && keyInput.trim()) {
-                  saveKey(keyInput.trim());
-                  setKeyInput("");
-                }
-              }}
-              className="border-zinc-700 bg-zinc-800 font-mono text-xs text-zinc-200 placeholder:text-zinc-600"
-            />
-            <Button
-              onClick={() => {
-                if (keyInput.trim()) {
-                  saveKey(keyInput.trim());
-                  setKeyInput("");
-                }
-              }}
-              className="w-full"
-            >
-              Sign in
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  // -------- render: main layout ---------------------------------------------
   return (
-    <div
-      className="flex h-screen flex-col bg-zinc-950 text-zinc-100"
-      data-testid="wiki-workbench"
-    >
-      {/*
-        Sonner toast host. `theme="dark"` matches the zinc-950 surround.
-        `richColors` + per-call description let save / error toasts
-        render with semantic fill (green/red) + secondary text. The
-        hidden `<section data-sonner-toaster>` in the DOM is what the
-        harness Gate 11f waits for after a wiki-write.
-      */}
+    <>
       <Toaster theme="dark" richColors position="bottom-right" />
-      {/* Header */}
-      <header className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4">
+
+      {/* Page header — title + actions. Sign-out moved into the shell's
+       * settings dialog so it lives in one place across all pages. */}
+      <header
+        className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
+        data-testid="wiki-header"
+      >
         <div className="flex items-center gap-3">
-          <Link
-            href="/"
-            data-testid="wiki-back-to-workbench"
-            className="text-[11px] text-zinc-500 transition-colors hover:text-zinc-300"
-          >
-            ← Workbench
-          </Link>
           <span className="text-xs font-semibold text-zinc-300">
             Wiki Workbench
           </span>
@@ -318,14 +217,6 @@ export default function WikiWorkbenchPage() {
             className="h-6 px-2 text-[11px]"
           >
             Refresh
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={clearKey}
-            className="h-6 px-2 text-[11px] text-red-400 hover:text-red-300"
-          >
-            Sign out
           </Button>
         </div>
       </header>
@@ -376,7 +267,7 @@ export default function WikiWorkbenchPage() {
             )}
             {!loadingPages && !pagesError && pageListMemo.length === 0 && (
               <div className="px-3 py-2 text-[11px] text-zinc-600">
-                No pages. Use "+ New page" to create one.
+                No pages. Use &quot;+ New page&quot; to create one.
               </div>
             )}
             {pageListMemo.map((name) => (
@@ -486,14 +377,6 @@ export default function WikiWorkbenchPage() {
                   prose-hr:border-zinc-700"
                 data-testid="wiki-content-readonly"
               >
-                {/*
-                  react-markdown + remark-gfm renders the wiki page as
-                  real markdown. If content happens to be plain text or
-                  the parser ever throws, <ReactMarkdown> still emits a
-                  text node — readers see something either way. We keep
-                  the `data-testid` so Gate 11d / 11e still locates the
-                  read-only view.
-                */}
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {content}
                 </ReactMarkdown>
@@ -546,6 +429,6 @@ export default function WikiWorkbenchPage() {
           </div>
         </aside>
       </div>
-    </div>
+    </>
   );
 }

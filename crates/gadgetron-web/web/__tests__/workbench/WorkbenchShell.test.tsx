@@ -6,6 +6,13 @@ import { WorkbenchShell } from "../../app/components/shell/workbench-shell";
 // Mocks
 // ---------------------------------------------------------------------------
 
+// LeftRail derives its active tab from next/navigation's usePathname()
+// after ISSUE 29. Vitest has no Next.js router context, so stub the
+// hook to "/" (chat tab).
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
+}));
+
 const localStorageMock = (() => {
   let store: Record<string, string> = {};
   return {
