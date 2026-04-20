@@ -1442,10 +1442,29 @@ async fn init_database_runtime(use_no_db: bool) -> Result<DatabaseRuntime> {
     })
 }
 
-fn init_audit_runtime() -> (Arc<AuditWriter>, tokio::task::JoinHandle<()>) {
+fn init_audit_runtime(
+    pg_pool: Option<sqlx::PgPool>,
+) -> (Arc<AuditWriter>, tokio::task::JoinHandle<()>) {
     let (audit_writer, audit_rx) = AuditWriter::new(4_096);
     let audit_writer = Arc::new(audit_writer);
-    let audit_handle = tokio::spawn(audit_consumer_loop(audit_rx));
+    // ISSUE 21 — prefer the pg consumer when a pool is wired so audit
+    // rows actually persist. Fallback to the tracing-only consumer in
+    // no-db mode (legacy behavior for harness smoke + dev loops).
+    let audit_handle = if let Some(pool) = pg_pool {
+        tracing::info!(
+            target: "audit",
+            "run_audit_log_writer wired — AuditEntry → audit_log row INSERTs"
+        );
+        tokio::spawn(gadgetron_xaas::audit::writer::run_audit_log_writer(
+            audit_rx, pool,
+        ))
+    } else {
+        tracing::info!(
+            target: "audit",
+            "no Postgres pool — audit stays in tracing channel only (no persistence)"
+        );
+        tokio::spawn(audit_consumer_loop(audit_rx))
+    };
     (audit_writer, audit_handle)
 }
 
@@ -1859,7 +1878,7 @@ async fn init_serve_runtime(
     } else {
         base_enforcer
     };
-    let (audit_writer, audit_handle) = init_audit_runtime();
+    let (audit_writer, audit_handle) = init_audit_runtime(pg_pool.clone());
     let tui_tx = init_tui_channel(tui_enabled);
     // ISSUE 5 TASK 5.3: build the ActivityBus HERE (one shared handle
     // for the whole process) so Penny's GadgetAuditEventWriter and

@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.12** (post-ISSUE 20 close — TenantContext + AuditEntry actor fields populated from ValidatedKey)
+**Current version: 0.5.13** (post-ISSUE 21 close — pg audit_log consumer drains AuditWriter mpsc into DB rows with actor_* columns)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —
