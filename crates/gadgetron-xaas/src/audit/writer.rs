@@ -91,6 +91,82 @@ impl AuditWriter {
     }
 }
 
+/// Async pg consumer task — pulls `AuditEntry` off the receiver and
+/// INSERTs one row per entry into `audit_log`. ISSUE 21 / PR follow-up.
+/// Exits cleanly when the channel closes (all writers dropped).
+///
+/// Errors are logged as `warn` but never propagated — audit loss is
+/// preferable to a crash loop in the writer that would drop every
+/// subsequent entry too. Mirrors `run_action_audit_writer`.
+///
+/// Columns: reuses the ISSUE 14 TASK 14.1 `actor_user_id` +
+/// `actor_api_key_id` additions so a cookie-session caller (ISSUE 16
+/// → nil-sentinel `api_key_id`) persists with `actor_api_key_id =
+/// NULL` and the Bearer caller gets the real key id.
+pub async fn run_audit_log_writer(
+    mut rx: tokio::sync::mpsc::Receiver<AuditEntry>,
+    pool: sqlx::PgPool,
+) {
+    while let Some(entry) = rx.recv().await {
+        // Keep the legacy tracing line — a downstream scraper / the
+        // e2e harness's gadgetron.log audit-presence gates still read
+        // these. The pg INSERT is a side effect of the same event.
+        tracing::info!(
+            target: "audit",
+            tenant_id = %entry.tenant_id,
+            api_key_id = %entry.api_key_id,
+            request_id = %entry.request_id,
+            status = entry.status.as_str(),
+            input_tokens = entry.input_tokens,
+            output_tokens = entry.output_tokens,
+            latency_ms = entry.latency_ms,
+            "audit"
+        );
+        // Skip pg INSERT when the caller is unauthenticated
+        // (emit_auth_failure_audit uses Uuid::nil() for tenant_id +
+        // api_key_id). The tracing line above is sufficient for SOC2
+        // CC6.7 attestation on the 401 path; a real row would violate
+        // the audit_log_tenant_id_fkey FK against tenants(id).
+        if entry.tenant_id == uuid::Uuid::nil() {
+            continue;
+        }
+        let result = sqlx::query(
+            r#"
+            INSERT INTO audit_log (
+                id, tenant_id, api_key_id, request_id, model, provider,
+                status, input_tokens, output_tokens, cost_cents, latency_ms,
+                actor_user_id, actor_api_key_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            "#,
+        )
+        .bind(entry.event_id)
+        .bind(entry.tenant_id)
+        .bind(entry.api_key_id)
+        .bind(entry.request_id)
+        .bind(entry.model.as_deref())
+        .bind(entry.provider.as_deref())
+        .bind(entry.status.as_str())
+        .bind(entry.input_tokens)
+        .bind(entry.output_tokens)
+        .bind(entry.cost_cents)
+        .bind(entry.latency_ms)
+        .bind(entry.actor_user_id)
+        .bind(entry.actor_api_key_id)
+        .execute(&pool)
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(
+                target: "audit",
+                event_id = %entry.event_id,
+                error = %e,
+                "failed to persist audit_log row (continuing)"
+            );
+        }
+    }
+    tracing::info!(target: "audit", "audit_log writer exiting — channel closed");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

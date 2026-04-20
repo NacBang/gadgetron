@@ -1666,6 +1666,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 7v.7 — audit_log pg consumer writes rows (ISSUE 21)
+# ---------------------------------------------------------------------------
+#
+# This gate runs AFTER chat Gate 9 further down the file (moved there
+# because audit rows for /v1/chat/completions don't land until those
+# gates execute). The placeholder here is intentionally empty — see the
+# real check at the post-Gate-9 position.
+
+# ---------------------------------------------------------------------------
 # Gate 7v.5 — web UI cookie-session login (ISSUE 15 TASK 15.1)
 # ---------------------------------------------------------------------------
 #
@@ -2415,6 +2424,39 @@ if [ -n "$AUDIT_ERR_LINE" ]; then
 else
   fail "Drop-guard Err: no error-status audit line in gadgetron.log" \
     "(grep 'audit.*status=\"error\"' on the ANSI-stripped log comes up empty)"
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 7v.7 — audit_log pg consumer writes rows (ISSUE 21)
+# ---------------------------------------------------------------------------
+#
+# Chat Gates 8 + 9 + 9b just fired one non-streaming Ok, one streaming
+# Ok (with Drop-guard amendment), and one streaming Err — each landed
+# AuditEntry rows in the mpsc channel. `run_audit_log_writer` drains
+# those into `audit_log` INSERTs. Gate 7v.7 verifies the consumer
+# actually persists + carries ISSUE 19/20 actor_* columns.
+log "=== Gate 7v.7: audit_log pg consumer (ISSUE 21) ==="
+sleep 2
+AUDIT_ROW_COUNT="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c 'SELECT COUNT(*)::int FROM audit_log' 2>/dev/null | tr -d '[:space:]' || echo -1)"
+if [ "${AUDIT_ROW_COUNT:-0}" -ge 1 ]; then
+  pass "audit_log has rows after chat traffic (count=$AUDIT_ROW_COUNT)"
+else
+  fail "audit_log empty after chat traffic — run_audit_log_writer not persisting" ""
+fi
+
+# At least one row should carry a non-NULL actor_api_key_id
+# (Bearer caller path — TEST_API_KEY + MGMT_API_KEY have real key_ids
+# after ISSUE 17 backfill; ISSUE 20 threads them through ctx).
+AUDIT_ACTOR_COUNT="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c 'SELECT COUNT(*)::int FROM audit_log WHERE actor_api_key_id IS NOT NULL' \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+if [ "${AUDIT_ACTOR_COUNT:-0}" -ge 1 ]; then
+  pass "audit_log carries actor_api_key_id for Bearer calls (count=$AUDIT_ACTOR_COUNT)"
+else
+  fail "audit_log actor_api_key_id NULL for all rows — ISSUE 20 plumbing regressed" ""
 fi
 
 # ---------------------------------------------------------------------------
