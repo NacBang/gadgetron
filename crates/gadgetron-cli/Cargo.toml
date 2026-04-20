@@ -17,6 +17,7 @@ gadgetron-xaas = { workspace = true }
 gadgetron-tui = { workspace = true }
 gadgetron-penny = { workspace = true }
 gadgetron-knowledge = { workspace = true }
+gadgetron-bundle-server-monitor = { path = "../../plugins/plugin-server-monitor" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

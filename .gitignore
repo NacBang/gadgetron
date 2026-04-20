@@ -12,6 +12,9 @@
 # Local operator config — copy gadgetron.example.toml and customize.
 /gadgetron.toml
 
+# Local build env — holds per-host paths + sandbox secrets for demo.sh.
+/.buildenv
+
 # Tool-specific session state and native subagent adapters.
 # Per AGENTS.md the project is tool-independent — adapters stay user-level
 # (e.g. ~/.claude/agents/) and do not ship in the repo.

@@ -537,7 +537,7 @@ pub async fn approve_action(
     let resp = action_svc
         .resume_approval(&actor, &ctx.scopes, approved)
         .await?;
-    publish_action_activity(&state, &actor, &action_id, &resp);
+    publish_action_activity(&state, &actor, &action_id, &resp, None);
     Ok(Json(resp))
 }
 
@@ -1471,10 +1471,11 @@ pub async fn invoke_action(
         // keys pre-ISSUE-14 backfill.
         real_user_id: ctx.actor_user_id,
     };
+    let arguments_summary = truncate_args_for_activity(&request.args);
     let resp = action_svc
         .invoke(&actor, &ctx.scopes, &action_id, request)
         .await?;
-    publish_action_activity(&state, &actor, &action_id, &resp);
+    publish_action_activity(&state, &actor, &action_id, &resp, arguments_summary);
     Ok(Json(resp))
 }
 
@@ -1487,6 +1488,7 @@ fn publish_action_activity(
     actor: &AuthenticatedContext,
     action_id: &str,
     resp: &InvokeWorkbenchActionResponse,
+    arguments_summary: Option<String>,
 ) {
     let Some(audit_event_id) = resp.result.audit_event_id else {
         return;
@@ -1505,8 +1507,34 @@ fn publish_action_activity(
             outcome: outcome.to_string(),
             error_code: None,
             elapsed_ms: 0,
+            arguments_summary,
         },
     );
+}
+
+/// Render an action/tool argument JSON into a short one-line preview
+/// (≤200 chars). Keeps the live bus payload bounded regardless of
+/// how verbose the caller's args happen to be. `null` / empty-object
+/// arguments yield `None` so the evidence pane can skip the line
+/// rather than render an empty string.
+pub fn truncate_args_for_activity(args: &serde_json::Value) -> Option<String> {
+    if args.is_null() {
+        return None;
+    }
+    if let serde_json::Value::Object(map) = args {
+        if map.is_empty() {
+            return None;
+        }
+    }
+    let rendered = serde_json::to_string(args).ok()?;
+    const MAX: usize = 200;
+    if rendered.chars().count() <= MAX {
+        Some(rendered)
+    } else {
+        let mut out: String = rendered.chars().take(MAX).collect();
+        out.push('…');
+        Some(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2240,7 +2268,16 @@ async fn events_ws_session(
             recv = rx.recv() => {
                 match recv {
                     Ok(event) => {
-                        if event.tenant_id() != tenant_id {
+                        // Deliver to this subscriber when the event tenant
+                        // matches OR when the event tenant is nil — the Penny
+                        // tool-call emission path (`session.rs::emit_tool_audit_if_needed`)
+                        // hardcodes `tenant_id: None` because `LlmProvider::chat_stream`
+                        // does not yet thread TenantContext. Treating nil as
+                        // "deliver to all authenticated subscribers" keeps the
+                        // evidence pane live until that threading lands.
+                        if event.tenant_id() != tenant_id
+                            && event.tenant_id() != Uuid::nil()
+                        {
                             continue;
                         }
                         let Ok(text) = serde_json::to_string(&event) else {

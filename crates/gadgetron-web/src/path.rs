@@ -37,9 +37,10 @@ pub fn validate_and_decode(raw: &str) -> Result<String, ()> {
     }
 
     // ASCII-only allowlist (SEC-W-B8). Rejects fullwidth dots and all non-ASCII input.
+    // Parentheses `(` `)` permitted for Next.js route-group segments (`app/(shell)/…`).
     if !decoded
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'(' | b')'))
     {
         return Err(());
     }

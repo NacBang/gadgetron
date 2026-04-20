@@ -1,0 +1,272 @@
+//! Mode C bootstrap — operator supplies sudo user + password *once*, we
+//! turn the target into a permanently key-authenticated NOPASSWD state.
+//!
+//! Order matters:
+//!
+//! 1. Generate fresh ed25519 keypair on *this* host.
+//! 2. Password-SSH into the target.
+//! 3. Append our public key to `~/.ssh/authorized_keys` (create + chmod as
+//!    needed).
+//! 4. Drop a `/etc/sudoers.d/gadgetron-monitor` line granting the user
+//!    NOPASSWD **only** for the four binaries we invoke during polling
+//!    (`dcgmi`, `smartctl`, `ipmitool`, `nvidia-smi`). We *never* grant
+//!    blanket root access.
+//! 5. Run `apt-get update` + package install via `sudo -S` (password piped
+//!    through stdin — still the one-shot secret, not the new NOPASSWD
+//!    entry, because that entry is scoped to the four monitoring binaries
+//!    and can't run `apt-get`).
+//! 6. Conditionally install DCGM when `nvidia-smi` is detected.
+//! 7. Re-verify connectivity with key-only auth and fail closed if it
+//!    doesn't work — we refuse to persist a half-bootstrapped host.
+//! 8. Caller zeroizes the password immediately after `run_bootstrap`
+//!    returns.
+//!
+//! All scripts are assembled as single-line strings and piped through
+//! `bash -lc` so one SSH round-trip does the whole step. This cuts
+//! latency on slow links and reduces the number of `sudo -S` prompts.
+
+use serde::Serialize;
+
+use crate::ssh::{exec, exec_with_password, CmdOutput, SshError, SshTarget};
+
+/// What we did on the target. Returned by `server.add` and surfaced
+/// verbatim in the UI so operators can sanity-check.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct BootstrapReport {
+    pub installed_pkgs: Vec<String>,
+    pub skipped_pkgs: Vec<String>,
+    pub gpu_detected: bool,
+    pub dcgm_enabled: bool,
+    pub key_installed: bool,
+    pub sudoers_installed: bool,
+    pub notes: Vec<String>,
+}
+
+/// Run the full bootstrap. `password` and `sudo_password` are consumed
+/// as `&str` references — the caller owns the backing storage and is
+/// responsible for zeroizing after return.
+pub async fn run_bootstrap(
+    target_pw: &SshTarget,
+    password: &str,
+    sudo_password: &str,
+    public_key: &str,
+) -> Result<BootstrapReport, SshError> {
+    let mut report = BootstrapReport::default();
+
+    // Step 1 — push our pubkey into authorized_keys (idempotent).
+    let pk_escaped = shell_escape_single(public_key);
+    let install_key = format!(
+        "umask 077; mkdir -p ~/.ssh && \
+         touch ~/.ssh/authorized_keys && \
+         chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && \
+         grep -qxF {pk} ~/.ssh/authorized_keys || echo {pk} >> ~/.ssh/authorized_keys",
+        pk = pk_escaped,
+    );
+    let out = exec_with_password(target_pw, password, &install_key).await?;
+    expect_ok(&out, "install authorized_keys")?;
+    report.key_installed = true;
+
+    // Step 2 — drop NOPASSWD sudoers for the four monitoring binaries.
+    // visudo is used via `-cf` so a typo never leaves a broken file.
+    let sudoers_body = format!(
+        "{user} ALL=(root) NOPASSWD: /usr/bin/dcgmi, /usr/sbin/smartctl, /usr/bin/ipmitool, /usr/bin/nvidia-smi\n",
+        user = target_pw.user,
+    );
+    let sudoers_esc = shell_escape_single(&sudoers_body);
+    let install_sudoers = format!(
+        "set -e; \
+         TMP=$(mktemp) && printf '%s' {body} > \"$TMP\" && \
+         chmod 0440 \"$TMP\" && \
+         echo {spw} | sudo -S -p '' /usr/sbin/visudo -cf \"$TMP\" >/dev/null && \
+         echo {spw} | sudo -S -p '' install -m 0440 -o root -g root \"$TMP\" /etc/sudoers.d/gadgetron-monitor && \
+         rm -f \"$TMP\"",
+        body = sudoers_esc,
+        spw = shell_escape_single(sudo_password),
+    );
+    let out = exec_with_password(target_pw, password, &install_sudoers).await?;
+    expect_ok(&out, "install sudoers")?;
+    report.sudoers_installed = true;
+
+    // Step 3 — apt-get install baseline packages.
+    let (pkgs, script) = build_apt_install_script(sudo_password);
+    let out = exec_with_password(target_pw, password, &script).await?;
+    if !out.ok() {
+        report
+            .notes
+            .push(format!("apt install baseline failed: {}", out.stderr.trim()));
+        return Err(SshError::Bootstrap(format!(
+            "apt-get install failed (code {}): {}",
+            out.code,
+            out.stderr.trim()
+        )));
+    }
+    for p in &pkgs {
+        report.installed_pkgs.push(p.clone());
+    }
+
+    // Step 4 — detect NVIDIA, install DCGM if appropriate.
+    let probe = exec_with_password(target_pw, password, "command -v nvidia-smi").await?;
+    if probe.ok() && !probe.stdout.trim().is_empty() {
+        report.gpu_detected = true;
+        let dcgm_script = build_dcgm_install_script(sudo_password);
+        let out = exec_with_password(target_pw, password, &dcgm_script).await?;
+        if out.ok() {
+            report.dcgm_enabled = true;
+            report.installed_pkgs.push("datacenter-gpu-manager".into());
+        } else {
+            report.notes.push(format!(
+                "DCGM install failed; falling back to nvidia-smi ({}) ",
+                out.stderr.trim()
+            ));
+        }
+    } else {
+        report.skipped_pkgs.push("datacenter-gpu-manager".into());
+        report.notes.push("no NVIDIA GPU detected".into());
+    }
+
+    // Step 5 — verify key-only login works now.
+    let verify_cmd = "echo __gsm_ready__";
+    let verify = exec(
+        &SshTarget {
+            // We intentionally do NOT carry the password into the
+            // verification path — if key-only auth isn't working now,
+            // we want to know before we persist.
+            ..target_pw.clone()
+        },
+        verify_cmd,
+    )
+    .await?;
+    if !verify.ok() || !verify.stdout.contains("__gsm_ready__") {
+        return Err(SshError::Bootstrap(format!(
+            "post-bootstrap key-only login failed; refusing to persist. stderr: {}",
+            verify.stderr.trim()
+        )));
+    }
+    Ok(report)
+}
+
+/// Sanity-check during Mode A/B: confirm the supplied key can actually
+/// connect and we have sudo (via the NOPASSWD entry or pre-existing
+/// rights). Returns `Ok` with notes if sudo is missing — the caller may
+/// still register the host but only stats that don't need sudo will
+/// succeed.
+pub async fn verify_key_only(target: &SshTarget) -> Result<BootstrapReport, SshError> {
+    let mut report = BootstrapReport {
+        key_installed: true,
+        ..Default::default()
+    };
+    let out = exec(target, "echo __gsm_ready__ && command -v nvidia-smi || true").await?;
+    if !out.ok() || !out.stdout.contains("__gsm_ready__") {
+        return Err(SshError::Bootstrap(format!(
+            "SSH with key failed: {}",
+            out.stderr.trim()
+        )));
+    }
+    if out.stdout.contains("nvidia-smi") {
+        report.gpu_detected = true;
+    }
+    let sudo_probe = exec(target, "sudo -n -l /usr/bin/dcgmi 2>/dev/null").await?;
+    if !sudo_probe.ok() {
+        report.notes.push(
+            "NOPASSWD sudo for /usr/bin/dcgmi / smartctl / ipmitool not detected — sudo-gated \
+             metrics will be reported as unavailable"
+                .into(),
+        );
+    }
+    Ok(report)
+}
+
+fn build_apt_install_script(sudo_pw: &str) -> (Vec<String>, String) {
+    let pkgs = vec![
+        "lm-sensors".to_string(),
+        "smartmontools".to_string(),
+        "ipmitool".to_string(),
+    ];
+    let pkg_args = pkgs.join(" ");
+    let spw = shell_escape_single(sudo_pw);
+    let script = format!(
+        "set -e; export DEBIAN_FRONTEND=noninteractive; \
+         echo {spw} | sudo -S -p '' apt-get update -qq && \
+         echo {spw} | sudo -S -p '' apt-get install -y -qq --no-install-recommends {pkgs}",
+        pkgs = pkg_args,
+    );
+    (pkgs, script)
+}
+
+fn build_dcgm_install_script(sudo_pw: &str) -> String {
+    let spw = shell_escape_single(sudo_pw);
+    // distro-scoped cuda-keyring (Ubuntu 22.04 default; adjust as needed
+    // when Debian/22-only operators surface).
+    let keyring_url = "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb";
+    format!(
+        "set -e; export DEBIAN_FRONTEND=noninteractive; \
+         if ! dpkg-query -W -f='${{Status}}' datacenter-gpu-manager 2>/dev/null | grep -q 'install ok installed'; then \
+           TMP=$(mktemp --suffix=.deb); curl -fsSL {url} -o \"$TMP\" && \
+           echo {spw} | sudo -S -p '' dpkg -i \"$TMP\" && \
+           echo {spw} | sudo -S -p '' apt-get update -qq && \
+           echo {spw} | sudo -S -p '' apt-get install -y -qq --no-install-recommends datacenter-gpu-manager && \
+           rm -f \"$TMP\"; \
+         fi; \
+         echo {spw} | sudo -S -p '' systemctl enable --now nv-hostengine",
+        url = keyring_url,
+    )
+}
+
+fn expect_ok(out: &CmdOutput, label: &str) -> Result<(), SshError> {
+    if out.ok() {
+        Ok(())
+    } else {
+        Err(SshError::Bootstrap(format!(
+            "{label} failed (code {}): {}",
+            out.code,
+            out.stderr.trim()
+        )))
+    }
+}
+
+/// Safe single-quote escaping for bash. `'foo'bar'` → `'foo'\''bar'`.
+fn shell_escape_single(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_escape_handles_single_quotes() {
+        assert_eq!(shell_escape_single("ab'cd"), "'ab'\\''cd'");
+        assert_eq!(shell_escape_single("plain"), "'plain'");
+        assert_eq!(shell_escape_single(""), "''");
+    }
+
+    #[test]
+    fn apt_install_script_contains_all_pkgs() {
+        let (pkgs, script) = build_apt_install_script("PW");
+        assert!(pkgs.contains(&"lm-sensors".to_string()));
+        assert!(script.contains("lm-sensors"));
+        assert!(script.contains("smartmontools"));
+        assert!(script.contains("ipmitool"));
+        // Password is escaped inside single quotes, not inline.
+        assert!(script.contains("'PW'"));
+        assert!(!script.contains("echo PW"));
+    }
+
+    #[test]
+    fn dcgm_script_is_idempotent_via_dpkg_query() {
+        let script = build_dcgm_install_script("x");
+        assert!(script.contains("dpkg-query -W"));
+        assert!(script.contains("datacenter-gpu-manager"));
+        assert!(script.contains("nv-hostengine"));
+    }
+}

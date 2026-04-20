@@ -169,6 +169,26 @@ export default function WikiWorkbenchPage() {
     }
   }, [apiKey, searchQuery]);
 
+  // Deep-link support: Evidence pane emits `/web/wiki?page=<name>` and
+  // `/web/wiki?q=<query>`. Prime the matching action once per mount and
+  // clear the query so a manual refresh doesn't re-trigger.
+  const deeplinkHandled = useMemo(() => ({ done: false }), []);
+  useEffect(() => {
+    if (!apiKey || deeplinkHandled.done || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const pageParam = params.get("page");
+    const qParam = params.get("q");
+    if (!pageParam && !qParam) return;
+    deeplinkHandled.done = true;
+    if (pageParam) {
+      void openPage(pageParam);
+    }
+    if (qParam) {
+      setSearchQuery(qParam);
+    }
+    window.history.replaceState(null, "", window.location.pathname);
+  }, [apiKey, deeplinkHandled, openPage]);
+
   // -------- new-page shortcut -----------------------------------------------
   const newPage = useCallback(() => {
     const name = window.prompt(
