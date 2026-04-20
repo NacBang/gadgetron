@@ -2459,6 +2459,32 @@ else
   fail "audit_log actor_api_key_id NULL for all rows — ISSUE 20 plumbing regressed" ""
 fi
 
+# -------------------------------------------------------------------
+# Gate 7v.8 — admin/audit/log query endpoint (ISSUE 22)
+# -------------------------------------------------------------------
+# Operators read the same audit rows (ISSUE 21 persisted) via the new
+# Management-scoped HTTP endpoint. Handler pins tenant_id from the
+# caller's context; even if a caller spoofs `?actor_user_id=OTHER`,
+# rows from another tenant never leak.
+AUDIT_HTTP_RESP="$(curl -fsS -H "Authorization: Bearer $MGMT_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/audit/log?limit=10" 2>&1 || true)"
+AUDIT_HTTP_COUNT="$(echo "$AUDIT_HTTP_RESP" | jq '.rows | length' 2>/dev/null || echo -1)"
+if [ "${AUDIT_HTTP_COUNT:-0}" -ge 1 ]; then
+  pass "GET /admin/audit/log returns rows (count=$AUDIT_HTTP_COUNT)"
+else
+  fail "admin/audit/log shape regressed" "$(echo "$AUDIT_HTTP_RESP" | head -c 400)"
+fi
+
+# OpenAiCompat caller must get 403 on /admin/audit/log (Management scope).
+AUDIT_HTTP_RBAC="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $TEST_API_KEY" \
+  "$GAD_BASE/api/v1/web/workbench/admin/audit/log" 2>&1 || true)"
+if [ "$AUDIT_HTTP_RBAC" = "403" ]; then
+  pass "admin/audit/log RBAC — OpenAiCompat key → 403"
+else
+  fail "admin/audit/log RBAC regressed — expected 403, got $AUDIT_HTTP_RBAC" ""
+fi
+
 # ---------------------------------------------------------------------------
 # Gate 10 — <gadgetron_shared_context> injected into provider messages
 # ---------------------------------------------------------------------------
