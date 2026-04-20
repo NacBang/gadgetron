@@ -468,20 +468,11 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 outcome: ActionAuditOutcome::Success,
                 elapsed_ms: start_instant.elapsed().as_millis() as u64,
             });
-        // actor_user_id = None (pre-ISSUE-24). `AuthenticatedContext`
-        // at this layer carries `user_id = ctx.api_key_id` (see
-        // `workbench.rs:~509/554/1433`), so writing `Some(actor.user_id)`
-        // would contaminate `billing_events.actor_user_id` with
-        // api_key_ids indistinguishable from real users.id at query
-        // time. ISSUE 24 adds a real user_id field to
-        // `AuthenticatedContext`; then this goes to
-        // `Some(actor.real_user_id)`. Security review on ISSUE 23.
         emit_action_billing(
             self.pg_pool.as_ref(),
             actor_tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
-            None,
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -577,15 +568,11 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                 outcome: ActionAuditOutcome::Success,
                 elapsed_ms: start_instant.elapsed().as_millis() as u64,
             });
-        // actor_user_id = None; see the invoke-path comment above for
-        // the `AuthenticatedContext.user_id = api_key_id` legacy and
-        // the ISSUE 24 follow-up.
         emit_action_billing(
             self.pg_pool.as_ref(),
             actor.tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
-            None,
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -606,12 +593,23 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
 /// today — dispatcher doesn't surface cost yet; invoice materializer
 /// (TASK 12.3) applies per-kind pricing at query time. No-op when
 /// `pool` is `None` (test / no-DB deploys).
+///
+/// **`actor_user_id` is always NULL here, intentionally.** ISSUE 23's
+/// security review flipped this from `Some(actor.user_id)` to `None`
+/// because `AuthenticatedContext.user_id` at the workbench layer is
+/// sourced from `ctx.api_key_id` (see `workbench.rs:~509/554/1433`),
+/// so writing `Some(actor.user_id)` would contaminate
+/// `billing_events.actor_user_id` with api_key_ids indistinguishable
+/// from real users.id at query time. ISSUE 24 adds a real `user_id`
+/// field to `AuthenticatedContext` and will reintroduce an
+/// `actor_user_id` parameter here sourced from `actor.real_user_id`.
+/// Until then, both call sites get the typed-constructor's default
+/// NULL via `BillingEventInsert::action(..)` with no `.with_actor_user`.
 fn emit_action_billing(
     pool: Option<&sqlx::PgPool>,
     tenant_id: Uuid,
     audit_event_id: Uuid,
     gadget_name: Option<String>,
-    actor_user_id: Option<Uuid>,
 ) {
     let Some(pool) = pool else {
         return;
@@ -624,8 +622,7 @@ fn emit_action_billing(
                 tenant_id,
                 audit_event_id,
                 gadget_name,
-            )
-            .with_actor_user(actor_user_id),
+            ),
         )
         .await
         {
