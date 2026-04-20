@@ -1834,7 +1834,7 @@ Management-scoped read over tenant-pinned `audit_log` rows, shipped in **ISSUE 2
 
 Rows are returned newest-first. The response shape is `{rows: Vec<AuditLogRow>, returned: N}` where `returned` is the number of rows actually emitted after filters and limit clamp.
 
-Implementation note: `query_audit_log(pool, tenant_id, actor_user_id, since, limit)` lives in `crates/gadgetron-xaas/src/audit/writer.rs:130`. It uses four prepared-statement shapes, one per `(actor_user_id, since)` permutation, instead of string-building SQL at runtime. The WHERE clause is always tenant-pinned, and there is no dynamic SQL concatenation.
+Implementation note: `query_audit_log(pool, tenant_id, actor_user_id, since, limit)` lives in `crates/gadgetron-xaas/src/audit/writer.rs`. It uses `sqlx::QueryBuilder` to assemble the WHERE clause from compile-time SQL literals plus `push_bind` for every user-controllable value (`tenant_id`, `actor_user_id`, `since`, `limit`). Placeholders are allocated positionally by the builder — no manual `$N` indexing — so counter drift on future filters is structurally impossible. `QueryBuilder` also forbids `format!` on the fragment stream, so splicing a value directly into the SQL string is compile-time prevented. The tenant pin is unconditional (first bind). Earlier releases used four explicit prepared-statement shapes, one per `(actor_user_id, since)` permutation; the builder form was greenlit by security-compliance-lead review for refactor-cycle #3 because no SQLi property was lost.
 
 **Example:**
 ```bash

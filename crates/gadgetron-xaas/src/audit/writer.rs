@@ -126,7 +126,20 @@ pub struct AuditLogRow {
 
 /// Query `audit_log` rows newest-first, tenant-pinned. `actor_user_id`
 /// filter narrows to a single user when set (otherwise returns all
-/// rows for the tenant). `limit` already clamped by the handler.
+/// rows for the tenant). `limit` already clamped by the handler
+/// (`[1, 500]`, see `workbench.rs` admin audit log handler).
+///
+/// **SQLi defense.** The SQL fragments below are compile-time string
+/// literals. Every user-controllable value (`tenant_id` / `actor_user_id`
+/// / `since` / `limit`) flows through `QueryBuilder::push_bind`, which
+/// allocates the `$N` placeholder positionally at build time and routes
+/// the value through sqlx's prepared-statement bind machinery.
+/// `QueryBuilder` forbids `format!` on the fragment stream, so a future
+/// contributor cannot accidentally splice a value into the SQL string
+/// itself. Tenant pin is unconditional ($1). Reviewed by
+/// security-compliance-lead for refactor-cycle #3 (greenlit
+/// Option B over manual `${idx}` counters because counter drift is
+/// structurally impossible here).
 pub async fn query_audit_log(
     pool: &sqlx::PgPool,
     tenant_id: uuid::Uuid,
@@ -134,67 +147,21 @@ pub async fn query_audit_log(
     since: Option<chrono::DateTime<chrono::Utc>>,
     limit: i64,
 ) -> Result<Vec<AuditLogRow>, sqlx::Error> {
-    // 4 query shapes — avoid dynamic SQL concatenation to keep
-    // prepared statements + predictable bindings.
-    match (actor_user_id, since) {
-        (None, None) => {
-            sqlx::query_as::<_, AuditLogRow>(
-                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
-                      request_id, model, provider, status,
-                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
-               FROM audit_log WHERE tenant_id = $1
-               ORDER BY timestamp DESC LIMIT $2"#,
-            )
-            .bind(tenant_id)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        }
-        (Some(u), None) => {
-            sqlx::query_as::<_, AuditLogRow>(
-                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
-                      request_id, model, provider, status,
-                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
-               FROM audit_log WHERE tenant_id = $1 AND actor_user_id = $2
-               ORDER BY timestamp DESC LIMIT $3"#,
-            )
-            .bind(tenant_id)
-            .bind(u)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        }
-        (None, Some(s)) => {
-            sqlx::query_as::<_, AuditLogRow>(
-                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
-                      request_id, model, provider, status,
-                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
-               FROM audit_log WHERE tenant_id = $1 AND timestamp >= $2
-               ORDER BY timestamp DESC LIMIT $3"#,
-            )
-            .bind(tenant_id)
-            .bind(s)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        }
-        (Some(u), Some(s)) => {
-            sqlx::query_as::<_, AuditLogRow>(
-                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
-                      request_id, model, provider, status,
-                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
-               FROM audit_log
-               WHERE tenant_id = $1 AND actor_user_id = $2 AND timestamp >= $3
-               ORDER BY timestamp DESC LIMIT $4"#,
-            )
-            .bind(tenant_id)
-            .bind(u)
-            .bind(s)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
+                  request_id, model, provider, status,
+                  input_tokens, output_tokens, cost_cents, latency_ms, timestamp
+           FROM audit_log WHERE tenant_id = "#,
+    );
+    qb.push_bind(tenant_id);
+    if let Some(u) = actor_user_id {
+        qb.push(" AND actor_user_id = ").push_bind(u);
     }
+    if let Some(s) = since {
+        qb.push(" AND timestamp >= ").push_bind(s);
+    }
+    qb.push(" ORDER BY timestamp DESC LIMIT ").push_bind(limit);
+    qb.build_query_as::<AuditLogRow>().fetch_all(pool).await
 }
 
 pub async fn run_audit_log_writer(
