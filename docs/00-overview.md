@@ -1,6 +1,6 @@
 # Gadgetron — 전체 설계 개요
 
-> **버전**: `0.5.14` — Phase 2 EPIC 1 + EPIC 2 + **EPIC 3 모두 CLOSED** (tag `v0.5.0`); **EPIC 4 Multi-tenant XaaS ACTIVE** (2026-04-20 승격, `v1.0.0` target). 요약은 아래 bullet list, full breakdown 은 [`docs/ROADMAP.md`](ROADMAP.md).
+> **버전**: `0.5.15` — Phase 2 EPIC 1 + EPIC 2 + **EPIC 3 모두 CLOSED** (tag `v0.5.0`); **EPIC 4 Multi-tenant XaaS ACTIVE** (2026-04-20 승격, `v1.0.0` target). 요약은 아래 bullet list, full breakdown 은 [`docs/ROADMAP.md`](ROADMAP.md).
 >
 > **EPIC 1–3 shipping**:
 >
@@ -22,10 +22,12 @@
 > - **ISSUE 20** TenantContext → AuditEntry plumbing ✅ (PR #263 / 0.5.12) — `TenantContext` gains `actor_*` fields populated by `tenant_context_middleware` from `ValidatedKey`; chat handler's 3 `AuditEntry` literals now read ctx fields. Cookie sessions (`Uuid::nil()` sentinel) resolve `actor_api_key_id = None`; Bearer callers get `Some(key_id)`.
 > - **ISSUE 21** pg `audit_log` consumer ✅ (PR #267 / 0.5.13) — `run_audit_log_writer` async consumer spawned from `init_audit_runtime` drains the `AuditWriter` mpsc and INSERTs each `AuditEntry` row into `audit_log` using the ISSUE 19/20 actor columns. Nil-tenant-id skip guards the 401 auth-failure sentinel. Tracing log still fires per event so harness log-scrapes stay intact. Harness Gate 7v.7 (2 gates: persistence + actor_api_key_id end-to-end).
 > - **ISSUE 22** admin `GET /admin/audit/log` query endpoint ✅ (PR #269 / 0.5.14) — new Management-scoped handler + `AuditLogRow` projection; `?actor_user_id=<uuid>&since=<iso>&limit=<1..=500>` filters; tenant pinned from ctx. Completes the persistence → query loop. Harness Gate 7v.8 (shape + OpenAiCompat 403).
+> - **ISSUE 23** `billing_events.actor_user_id` + per-user spend query shape ✅ (PR #271 / 0.5.15) — append-only ledger gains owning-user column; tenant-first composite index `(tenant_id, actor_user_id, created_at DESC)` forces tenant-pinned queries. Per-path nullability: chat = NULL (QuotaToken doesn't thread user_id yet → ISSUE 24), tool = Some(`ctx.actor_user_id`), action = NULL (AuthenticatedContext.user_id is api_key_id placeholder pre-ISSUE-24). Harness Gate 7k.6b (per-kind assertion via direct Postgres query). Security review (3 specialist agents) flipped action path to NULL pre-publish to avoid contaminating the ledger with api_key_ids typed as user_ids.
+> - **ISSUE 24** thread real user_id through `QuotaToken` + `AuthenticatedContext` ⏳ planned — closes the chat + action paths' NULL `actor_user_id` from ISSUE 23. Sketch: `QuotaToken` gains `user_id: Option<Uuid>` sourced from `ctx.actor_user_id` at `check_pre`; `AuthenticatedContext` gains a distinct `real_user_id` separate from the existing `user_id` (which stays an api_key_id placeholder for backward compat). Gate 7k.6b assertions flip to `chat≥1` + `action≥1` non-NULL after landing.
 > - **ISSUE 12.3 / 12.4 / 12.5** (invoice materialization, reconciliation, Stripe ingest) DEFERRED with ISSUE 13 as commercialization layer — post-1.0 patch / minor bumps once market pull justifies.
 >
-> **Harness**: 133 PASS, 0 FAIL (Gate 7v.6 added in PR #259; PRs #260 + #262 + #263 behavior-preserving; Gate 7v.7 +2 in PR #267 = 131; Gate 7v.8 +2 in PR #269 = 133).
-> **EPIC 4 close-for-1.0**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 (web UI login form) remains** on the multi-user track.
+> **Harness**: 137 PASS, 0 FAIL (Gate 7v.6 added in PR #259; PRs #260 + #262 + #263 behavior-preserving; Gate 7v.7 +2 in PR #267 = 131; Gate 7v.8 +2 in PR #269 = 133; Gate 7k.6b +3 + Gate 13 regex-fix +1 in PR #271 = 137).
+> **EPIC 4 close-for-1.0**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 (web UI login form) remains** on the multi-user track (ISSUE 24 is a billing-attribution follow-up, not a v1.0.0 gate).
 > **EPIC 5** (Cluster platform) PLANNED post-1.0 → `v2.0.0`.
 > **이전 tag**: `v0.5.0` (EPIC 3 closure, 2026-04-20), `v0.4.0` (EPIC 2 closure, 2026-04-19), `v0.3.0` (EPIC 1 closure, 2026-04-19), `v0.1.0-phase1` (역사).
 > **버저닝 정책**: [`docs/process/06-versioning-policy.md`](process/06-versioning-policy.md)

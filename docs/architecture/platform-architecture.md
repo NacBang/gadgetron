@@ -270,6 +270,10 @@ Client
   │      consumer that INSERTs rows to `audit_log` using the
   │      actor columns, and ISSUE 22 / PR #269 added the
   │      Management-scoped `GET /admin/audit/log` read endpoint.
+  │      ISSUE 23 / PR #271 (v0.5.15) extended the same per-user
+  │      affordance to `billing_events.actor_user_id` (tool path
+  │      populated; chat + action paths queued for ISSUE 24 once
+  │      `QuotaToken` + `AuthenticatedContext` carry real user_id).
   │      Cookie → `actor_api_key_id = None` (nil sentinel);
   │      Bearer → `Some(key_id)`; both set `actor_user_id` from
   │      `ValidatedKey.user_id`. `--no-db` falls back to
