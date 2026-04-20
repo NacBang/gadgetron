@@ -296,11 +296,12 @@ curl -sS -b /tmp/gad-cookies.txt \
 
 **Shipped in ISSUE 19 (v0.5.11 / PR #262) + ISSUE 20 (v0.5.12 / PR #263)**:
 
-- `AuditEntry` struct gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>` (ISSUE 19, structural), then `TenantContext` populates them from `ValidatedKey` (ISSUE 20) so the chat handler's audit rows carry user + api-key attribution. Cookie sessions use `actor_api_key_id = None` (distinguishes from Bearer callers via the nil-sentinel on `ValidatedKey.api_key_id`).
+- **ISSUE 19 (struct shape)**: `AuditEntry` gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>`. 7 call sites across the workspace (tests, bench fixtures, chat handler, stream_end_guard, auth-fail audit, scope-denial audit) updated; defaults to `None` until ISSUE 20 wires the values.
+- **ISSUE 20 (plumbing)**: `TenantContext` gains `actor_user_id` + `actor_api_key_id`, populated by `tenant_context_middleware` from `ValidatedKey.user_id` and the non-nil-sentinel `ValidatedKey.api_key_id`. Chat handler's 3 `AuditEntry` literals (non-stream Ok, stream Ok+dispatch, stream Ok+spawn) now read ctx fields. Cookie-session callers (ISSUE 16, `api_key_id = Uuid::nil()` sentinel) resolve to `actor_api_key_id = None`; Bearer callers with backfilled `api_keys.user_id` get `Some(key_id)`. No new harness gate at this stage — chat audit stays tracing-only until the pg consumer lands in ISSUE 21.
 
 **Deferred to ISSUE 21**:
 
-- pg consumer: background task drains the `AuditWriter` mpsc into `audit_log` rows using the new `actor_*` columns (migration already landed in ISSUE 14 TASK 14.1). Until this ships, audit entries stay in the tracing channel only. Same treatment planned for `billing_events` rows. Harness gate extension pins `actor_user_id` non-NULL for cookie-auth + backfilled-user-id paths.
+- Background task spawned from `init_serve_runtime` drains the `AuditWriter` mpsc channel and writes rows to `audit_log` using the new `actor_user_id` + `actor_api_key_id` columns (migration already added in ISSUE 14 TASK 14.1 — columns exist but are unused until this TASK). New operator query endpoint `GET /api/v1/web/workbench/admin/audit/log` (Management-scoped, newest-first, filter params). Harness gate extension pins `actor_user_id` non-NULL on cookie-auth rows + `actor_api_key_id` non-NULL on Bearer-with-backfilled-user-id rows. Same treatment planned for `billing_events` rows.
 
 **Post-ISSUE-18 roadmap** (tracked separately on `project_multiuser_login_google`):
 
