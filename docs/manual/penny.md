@@ -188,6 +188,108 @@ Penny 런타임이 읽는 설정 블록은 아래와 같습니다. 각 필드의
 
 ---
 
+## 운영 튜닝 레시피
+
+Penny는 Claude Code subprocess 풀을 관리하므로, 다중 사용자 · 다중 동시 요청 환경에서는 몇 가지 튜닝 knob 이 직접 latency + 자원 사용에 영향을 줍니다. [configuration.md §`[agent]`](configuration.md#agent) 가 canonical reference — 본 섹션은 운영자가 실제로 언제 어떻게 조정하는지를 다룹니다.
+
+### 동시성 풀 사이징 (`max_concurrent_subprocesses`)
+
+기본값 `4`. Claude Code subprocess 하나당 대략:
+
+- **RSS 메모리**: 150–250 MB (Claude Code Node.js + allowed-tools + MCP stdio)
+- **CPU**: 요청 활성 상태에서 0.2–0.5 core (주로 JSON serialize/deserialize + HTTP I/O 대기)
+- **spawn cost**: 100–300 ms (warm disk / hot path) — 요청 첫 발행 시 observable
+
+동시성 상한 선택:
+
+| 시나리오 | 권장 `max_concurrent_subprocesses` | 근거 |
+|---|---|---|
+| 로컬 dev / 단일 사용자 | `4` (기본) | 한 번에 하나만 요청 + 버퍼 3 정도면 끊김 없이 여러 탭 운영 가능 |
+| 2–5 명 팀 내부용 | `8–12` | 팀 피크시간 동시 요청 ~3–5 * 적정 버퍼 |
+| 20+ 사용자 production | `16–32` | 범위 상한 (32). CPU/RAM으로 풀 확장 한계가 먼저 온다 |
+| CI eval runner | `2–4` | 시나리오는 순차 실행이므로 과도한 풀 불필요 |
+
+**풀이 고갈되면** 요청은 subprocess 슬롯이 반환될 때까지 차단됩니다 (실패 아님). Dashboard 에서 `penny_subprocess` tracing 의 spawn→exit 간격이 급증한다면 풀 상한에 걸려 있는 신호 — `max_concurrent_subprocesses` 를 올리거나 동시 요청 수를 줄이십시오.
+
+### 요청 타임아웃 (`request_timeout_secs`)
+
+기본값 `300`. Claude Code subprocess 전체 wall-clock 상한. 초과하면 subprocess 는 `SIGTERM` 후 강제 종료되고 클라이언트는 `penny_timeout` 500 을 받습니다 (`manual/api-reference.md §Penny / Wiki error bodies`).
+
+올려야 하는 경우:
+- **긴 웹 조사 체인** (`web.search` → `wiki.write` → 또 다른 `web.search`). 5–8 단계 체인이 7–10 분 걸릴 수 있음 → `600` 정도로.
+- **wiki 대량 리오가나이제이션** (`wiki.rename` 을 여러 페이지 연쇄). `900` 이상 상한.
+
+유지해야 하는 경우:
+- **일반 채팅 / 단일 wiki 편집** — 300s 가 정상 범위. 올리면 실패한 요청이 subprocess 슬롯을 오래 붙들고 있어 풀 활용도가 떨어짐.
+
+타임아웃은 reverse-proxy 의 `proxy_read_timeout` 보다 **작아야** 합니다 — Nginx 기본 60s 는 Penny 300s 보다 짧으므로 `installation.md §2 Nginx TLS termination` recipe 의 `proxy_read_timeout 900s;` 설정이 꼭 필요합니다. 불일치하면 LB 가 중간 chunk 를 잘라버리고 SSE 가 `stream_interrupted` 로 바뀝니다.
+
+### 세션 스토어 용량 (`session_ttl_secs`, `session_store_max_entries`)
+
+기본값 `session_ttl_secs = 86400` (24h) + `session_store_max_entries = 10000`.
+
+- **LRU 정책**: `max_entries` 초과 시 가장 오래 안 쓰인 세션이 퇴출. 사용자가 예전 대화 스크롤로 돌아가면 Claude Code 가 stateless fallback 으로 재시작 (세션 복구 불가).
+- **메모리 footprint**: 항목당 ~500 B–2 KB (세션 ID + UUID + timestamp + conversation metadata). 10000 entry ≈ 5–20 MB — 거의 제약 아님.
+
+튜닝 포인트:
+- **팀 규모 증가**: `max_entries` 를 50000–200000 까지 올릴 수 있음. 메모리 증가는 선형이지만 여전히 작음 (100 MB 수준).
+- **세션 당 긴 사용**: `session_ttl_secs` 를 `604800` (7 days) 까지 올리면 "어제 대화 이어서" 패턴이 복원됨. 대신 stale 세션 점유율이 늘어나 LRU 회전율이 감소.
+- **aggressive 회전 (compliance)**: `session_ttl_secs` 를 `3600` (1h) 로 낮추면 idle session 잔존 시간이 줄어 GDPR-친화적. 사용자는 빈번히 새 세션으로 재시작해야 함.
+
+### Brain mode 전환 recipe
+
+**`claude_max` → `external_anthropic`** (CI / multi-tenant 격리 / API key 비용 제어용):
+
+```toml
+# 변경 전:
+# [agent.brain]
+# mode = "claude_max"
+
+# 변경 후:
+[agent.brain]
+mode = "external_anthropic"
+external_anthropic_api_key_env = "ANTHROPIC_API_KEY"   # 기본값
+```
+
+이후 `ANTHROPIC_API_KEY` 환경변수 주입 → `systemctl restart gadgetron`. `claude login` OAuth 세션은 재사용 안 됨 — 비용 집계는 이제 Anthropic API key dashboard 기준.
+
+**`claude_max` → `external_proxy`** (LiteLLM 등 사내 gateway 경유 시):
+
+```toml
+[agent.brain]
+mode = "external_proxy"
+external_base_url = "http://127.0.0.1:4000/v1"
+# external_anthropic_api_key_env = "PROXY_API_KEY"    # 선택 — proxy 가 API key 필요 시
+```
+
+주의: proxy 가 `POST /messages` endpoint 를 Anthropic compatible shape 로 노출해야 함. LiteLLM 은 `model_list` config 에 `provider: anthropic` + custom routing 필요.
+
+**검증 방법 (모든 brain mode 전환 후)**:
+
+```sh
+# 서버 재시작 후 Penny 가 예상 brain endpoint 를 hit 하는지 확인
+RUST_LOG=info,penny_subprocess=debug,penny_session=debug \
+  ./target/release/gadgetron serve
+
+# 다른 터미널에서:
+curl -fsS http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $GADGETRON_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"penny","messages":[{"role":"user","content":"reply OK"}]}' | jq .
+```
+
+서버 로그에서 `ANTHROPIC_BASE_URL=<예상 값>` 이 `penny_subprocess` 타겟에 찍히는지 확인. 값이 기본 `api.anthropic.com` 이면 config 변경이 반영 안 됨 — 파일 경로 / cwd 확인 후 재시작.
+
+### Cold-start latency
+
+첫 Penny 요청 시 ~500ms–1.5s 의 subprocess spawn cost 가 한 번 발생합니다. `/web/dashboard` 또는 operator monitoring 에서 첫 요청의 p99 가 비정상적으로 길어 보이는 주 원인 — `max_concurrent_subprocesses` 를 올려도 cold-start 는 slot-당 한 번 발생하므로 트래픽 burst 초반 한 번은 관찰됨.
+
+pre-warm 은 on trunk 없음. burst 대응은:
+1. **유지 트래픽 유지** — 로컬 health-probe loop (`curl /health` 가 아니라 `curl /v1/chat/completions ... penny` ping) 이 subprocess 를 warm 상태로 유지. 단, 이는 Anthropic API cost 발생.
+2. **Autoscaling** 이 가능한 환경 (K8s HPA) 은 `max_concurrent_subprocesses` 를 여유있게 설정하고 pod replicas 를 스케일 — cold subprocess 는 새 pod 당 한 번만 발생.
+
+---
+
 ## 트러블슈팅
 
 > **연산자용 와이어 레벨 참조**: 아래 표는 증상→원인→대응 매핑입니다. 실제 HTTP 응답 바디의 정확한 JSON 형태(OpenAI-shaped envelope, `message` / `type` / `code` 필드, 각 코드별 HTTP status)는 [api-reference.md §Penny / Wiki error bodies](api-reference.md#penny--wiki-error-bodies-examples)에서 예시와 함께 확인할 수 있습니다. 클라이언트 SDK를 구현하거나 자동화된 에러 매칭을 작성한다면 그쪽을 먼저 보십시오.

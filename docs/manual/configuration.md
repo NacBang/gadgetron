@@ -182,6 +182,68 @@ default_strategy = {type = "round_robin"}
 
 `router.fallbacks` and `router.costs` are also accepted but are for advanced routing configuration not covered in this manual. Leave them absent to use defaults.
 
+#### Strategy selection recipes
+
+Which of the six to pick isn't obvious from a one-line description. Operator-focused trade-offs:
+
+| Strategy | Pick when | Avoid when |
+|---|---|---|
+| `round_robin` (default) | Two+ equivalent providers (e.g. dual OpenAI API keys for quota split); no cost or latency preference. | Providers have different costs or reliability profiles — you're leaving savings or uptime on the table. |
+| `cost_optimal` | Mixed cloud + local providers where you want cheap-first dispatch. OpenAI GPT-4o vs local vLLM gemma4 — the cost-optimal picks vLLM until it fails. | All providers are same-priced (round_robin is equivalent and simpler). Cost data stale (see §Observing routing decisions below). |
+| `latency_optimal` | Interactive / user-facing traffic where P99 response time drives UX. Typical: web chat UI with a mix of fast (local) + slow (cloud multi-modal) providers. | Batch / background workloads — latency doesn't matter; round_robin or cost_optimal save money. |
+| `quality_optimal` | High-stakes production where error-rate minimization dominates. Evicts flapping providers fast. | Dev / stage environments where occasional upstream errors are expected — you'll pin traffic to the single healthiest provider and lose diversity. |
+| `fallback` | Clear primary + explicit backups. Classic pattern: `chain = ["openai", "anthropic", "local-vllm"]` — cascade on 5xx or timeout. | Flat equivalent providers — fallback creates artificial preference order and the last entries go untested until the primary dies. |
+| `weighted` | Gradual traffic shift during provider migration or A/B test. `weights = {openai = 0.8, anthropic = 0.2}` for a 20% canary. | Steady-state — weights drift from operator intent as providers fail; round_robin or cost_optimal are self-correcting. |
+
+**Cross-reference**: the six strategies' full behavioral specs live in `modules/gateway-routing.md §4 라우팅 전략` — including eviction thresholds, window sizes, and tie-break rules. This recipe only covers "which do I pick."
+
+##### Observing routing decisions at runtime
+
+When traffic isn't landing where you expect, scope the log target to `gadgetron_router`:
+
+```sh
+RUST_LOG=info,gadgetron_router=debug /usr/local/bin/gadgetron serve
+```
+
+Each chat dispatch emits a `RoutingDecision` span at `debug` with the chosen provider + the reason (round-robin index / cost table row / latency window avg / error-rate window / fallback position / weight roll). Tails through `journalctl -u gadgetron.service` grep `routing_decision=` for just the decision line.
+
+The `/web/dashboard` tile (ISSUE 4 / v0.2.7) also shows the **last 100 requests' provider choice** in the Requests panel — good for spot-checking that a policy change took effect without digging into logs.
+
+##### Edge cases + safety
+
+- **Single provider** — every strategy degenerates to "send to the one provider". No round-robin cycle, no fallback chain exercise, no weight roll. Provider outages surface as plain 502 `provider_error` with no retry (see `troubleshooting.md §HTTP 502 Bad Gateway — provider error`).
+- **All providers failing** — every strategy eventually returns 503 `routing_failure` (`manual/api-reference.md §Error codes`). `fallback` exhausts its chain first; `cost_optimal` / `latency_optimal` / `quality_optimal` cycle the live-metric table until every provider is evicted; `round_robin` + `weighted` blind-retry once per provider.
+- **Weighted with a removed provider** — if you delete a `[providers.x]` block but forget to drop `x` from `weights`, startup fails with `config_error` at `gadgetron_config` target. The validator enforces the `weights` keys are a subset of `[providers.*]` names. Conversely, adding a new provider without a weight entry silently excludes it from weighted traffic — add the key explicitly.
+- **Fallback chain with a removed provider** — same validator check applies to the `chain` array. Names must all exist in `[providers.*]`.
+
+##### Migration pattern — switching strategies
+
+Strategies are config-only — no migration, no DB change. But the validator cache (`ArcSwap<AppConfig>` isn't hot-swappable on trunk — see `installation.md §6.5 Configuration file changes`) means a strategy change requires a full `gadgetron serve` restart.
+
+Safe rollover pattern behind a load balancer:
+
+```sh
+# 1. Stage the new config on one node only. Keep the old TOML at
+#    /etc/gadgetron/gadgetron.toml.old as rollback.
+sudo cp /etc/gadgetron/gadgetron.toml /etc/gadgetron/gadgetron.toml.old
+sudo vim /etc/gadgetron/gadgetron.toml   # change default_strategy
+
+# 2. Drain LB → restart → observe the RoutingDecision log on this
+#    node for 5-10 minutes. Compare provider-choice distribution
+#    vs expectation.
+sudo systemctl restart gadgetron
+
+# 3. If rollout looks right, replicate the config to remaining
+#    nodes one at a time (see installation.md §6.2 Rolling upgrade).
+#
+# 4. If not, restore + restart on this node; no rolling needed
+#    since the fleet is still on the old config.
+sudo cp /etc/gadgetron/gadgetron.toml.old /etc/gadgetron/gadgetron.toml
+sudo systemctl restart gadgetron
+```
+
+The restart is brief (a few seconds on a warm binary — in-flight requests drain gracefully per the systemd unit's `TimeoutStopSec`), and the LB's `/ready` probe sees the 503 window clearly. No connection-pool flush or DB migration is involved — routing is pure in-memory policy.
+
 ---
 
 ### `[providers]`

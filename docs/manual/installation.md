@@ -632,6 +632,152 @@ FROM audit_log;
 
 A clean restore shows zero rows for the first three queries. A non-zero `null_actor` count in the last query is expected for system-generated events.
 
+#### 5.5 Wiki git operations
+
+The wiki is a local git repo at `[knowledge].wiki_path`. Every `wiki.write` / `wiki.rename` / `wiki.delete` commits automatically when `wiki_autocommit = true` (default). That makes the repo a first-class persistence layer: tar backups (§5.2) capture state but not the collaboration shape — the shape comes from pushing to a remote and having multiple writers pull. The recipes below cover daily git ops on the wiki beyond the tar snapshot path.
+
+**Understand what's in the repo.** `wiki_path` carries:
+- `.md` pages at any nesting depth (operator-authored + Penny-authored + seed)
+- `_archived/<YYYY-MM-DD>/` directories from `wiki.delete` soft-deletes
+- `.git/` with the full commit history + config + per-commit `wiki_git_author` identity
+
+**What's NOT in the repo** — the pgvector `wiki_chunks` index. That's a read-through cache; `gadgetron reindex` rebuilds it from the `.md` state at any point.
+
+##### Push to a remote (backup + collaboration)
+
+```sh
+# One-time: add a remote pointing at the backup/collab server.
+cd "$wiki_path"
+sudo -u gadgetron git remote add origin git@internal-git:gadgetron/team-wiki.git
+sudo -u gadgetron git push -u origin main   # or whatever branch name autocommit used
+
+# Recurring: push after each wiki_autocommit — wire as a systemd timer.
+cat > /etc/systemd/system/gadgetron-wiki-push.service <<'UNIT'
+[Unit]
+Description=Push gadgetron wiki to remote
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=gadgetron
+WorkingDirectory=/var/lib/gadgetron/wiki
+ExecStart=/usr/bin/git push origin main
+UNIT
+
+cat > /etc/systemd/system/gadgetron-wiki-push.timer <<'TIMER'
+[Unit]
+Description=Push gadgetron wiki every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+TIMER
+
+sudo systemctl enable --now gadgetron-wiki-push.timer
+```
+
+Branch name is whatever `git init` defaulted to when `wiki_autocommit` first fired (usually `main` or `master` depending on the host's git version). Check with `git branch --show-current` in `wiki_path`.
+
+##### Pull external edits in
+
+If another server + Gadgetron instance pushes to the same remote, pull their changes into the local repo. `gadgetron serve` reads from the filesystem lazily, so a pull that only adds files doesn't require a restart — but the pgvector index won't see new pages until `gadgetron reindex` runs.
+
+```sh
+# 1. Pull (in a systemd timer or manually)
+sudo -u gadgetron git -C /var/lib/gadgetron/wiki pull --ff-only origin main
+
+# 2. Reindex so semantic search sees the new pages
+sudo -u gadgetron /usr/local/bin/gadgetron reindex \
+  --config /etc/gadgetron/gadgetron.toml
+```
+
+**`--ff-only`** is critical — it refuses to auto-merge divergent histories and surfaces the conflict for manual resolution. The conflict resolution recipe is below.
+
+##### Divergent histories (conflict resolution)
+
+When two Gadgetron instances both wrote to the same page between pull cycles, `--ff-only` refuses to merge and prints `Not possible to fast-forward, aborting.`. You'll get a conflict on the `.md` file.
+
+```sh
+cd "$wiki_path"
+
+# 1. See the diverging commits
+git log --oneline --graph --all -20
+
+# 2. Attempt the merge. It will stop with conflict markers in the
+#    divergent .md file(s).
+sudo -u gadgetron git pull --no-ff origin main
+
+# 3. Resolve each conflicted file by editing. Conflict markers are
+#    standard <<<<<<< / ======= / >>>>>>>. The wiki is Markdown —
+#    conflict markers are NOT legal Markdown and will break rendering,
+#    so resolve before any reader encounters the page.
+vim some-page.md
+
+# 4. Mark resolved + complete the merge
+sudo -u gadgetron git add some-page.md
+sudo -u gadgetron git commit --no-edit
+
+# 5. Re-push the merged head
+sudo -u gadgetron git push origin main
+
+# 6. Reindex to refresh pgvector
+sudo -u gadgetron /usr/local/bin/gadgetron reindex \
+  --config /etc/gadgetron/gadgetron.toml
+```
+
+**Preventing conflicts in the first place** — route all wiki writes through a single Gadgetron instance. The wiki is not designed for concurrent multi-master writes; the git repo makes conflict resolution possible but operationally expensive. For teams with multiple Gadgetron deployments, promote one as the write-primary and point others at it via `[agent]` + `[knowledge]` config (replicate the TOML, not the wiki state).
+
+##### Recovering from `.git` corruption
+
+Symptom: `wiki.write` fails with `wiki_conflict` (see `manual/penny.md §트러블슈팅`) even when no other writer is active, and `git status` in `wiki_path` returns `fatal: bad object HEAD`.
+
+Fastest recovery path: `tar` backup from §5.2 contains the full `.git/` tree, so restore + resume:
+
+```sh
+# 1. Stop gadgetron to release wiki file locks
+sudo systemctl stop gadgetron
+
+# 2. Move the broken wiki aside (don't delete until you've verified
+#    the restore — corrupt .git might still have salvageable objects)
+sudo -u gadgetron mv /var/lib/gadgetron/wiki /var/lib/gadgetron/wiki.broken
+
+# 3. Restore the most recent tar backup (§5.2 recipe output)
+sudo -u gadgetron tar -xzf /backup/wiki-20260420-120000.tar.gz \
+  -C /var/lib/gadgetron
+
+# 4. Verify the restored git state
+sudo -u gadgetron git -C /var/lib/gadgetron/wiki status
+
+# 5. If a remote exists, fetch + reset to the remote head — this
+#    pulls in any writes that happened AFTER the backup timestamp.
+sudo -u gadgetron git -C /var/lib/gadgetron/wiki fetch origin
+sudo -u gadgetron git -C /var/lib/gadgetron/wiki reset --hard origin/main
+
+# 6. Start + reindex
+sudo systemctl start gadgetron
+sudo -u gadgetron /usr/local/bin/gadgetron reindex \
+  --config /etc/gadgetron/gadgetron.toml
+
+# 7. If the restore verified successfully, remove the broken copy
+sudo -u gadgetron rm -rf /var/lib/gadgetron/wiki.broken
+```
+
+**No-backup recovery**: if neither a tar backup nor a remote exists, salvage the `.md` files directly — they're plain Markdown on disk regardless of `.git/` state. Copy them out, `rm -rf wiki/.git`, `git init` + `git add` + initial commit, and resume. History is lost but content survives.
+
+##### Wiki audit + reindex interplay after git ops
+
+`gadgetron wiki audit` scans for stale pages (`_archived/` older than 90 days by default) and pages missing frontmatter. Run after every bulk git operation — merge commits may bring in `.md` files without the frontmatter shape the workbench expects:
+
+```sh
+sudo -u gadgetron /usr/local/bin/gadgetron wiki audit \
+  --config /etc/gadgetron/gadgetron.toml
+```
+
+`gadgetron reindex` is the companion: it rebuilds the pgvector `wiki_chunks` index from the current `.md` filesystem state. Default is incremental (diffs against the index); use `--full` after a `git reset --hard` or tar restore where the index may be ahead of the actual filesystem.
+
 ### 6. Upgrade and rolling deploy
 
 **Upgrade model.** Each Gadgetron release bundles up to three things that move together: the binary, `gadgetron.toml` additions, and a `migrations/` directory in-tree at `crates/gadgetron-xaas/migrations/`. On `gadgetron serve` boot the binary runs `sqlx::migrate!(...)` against the configured pool (`crates/gadgetron-cli/src/main.rs:761`, `:799`, `:1428`); sqlx tracks applied migrations in a `_sqlx_migrations` table so the call is idempotent — re-running a start against an already-migrated schema is a no-op. Migrations are **forward-only** on trunk — there is no `down.sql`, so schema rollback = PITR restore (see §5).

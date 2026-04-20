@@ -1307,3 +1307,141 @@ For end-to-end streaming latency (dispatch entry `latency_ms` is not useful for 
 - **Client-side timing** — measure `time.perf_counter()` around the OpenAI SDK call
 
 To correlate both entries for a single stream: `WHERE request_id = '<id>' ORDER BY created_at`.
+
+---
+
+## Tracing one request end-to-end (`x-request-id` forensics)
+
+Every authenticated response carries an `x-request-id: <uuid>` header (`request_id_middleware`, layer 3 of `auth.md §Middleware stack order`). That UUID is the key to stitching together what happened across logs, audit tables, and billing events. Use this recipe when a user says "my request from 14:22 hit a 500, what happened?" — they bring the request_id, you bring the trace.
+
+### 1. Capture the request_id
+
+Client-side, the response header is `x-request-id`. `curl -i` or `-D -` (dump headers) shows it:
+
+```sh
+curl -i -fsS http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"penny","messages":[{"role":"user","content":"hi"}]}' \
+  | head -20
+# Look for: x-request-id: 9b28e79a-...
+```
+
+SDK clients can read the header from the response object:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="gad_live_...")
+with client.with_raw_response.chat.completions.create(
+    model="penny", messages=[{"role":"user","content":"hi"}]
+) as resp:
+    print(resp.headers["x-request-id"])
+```
+
+On error responses the header is still present — it's set by layer 3, which runs before auth/scope/handler logic.
+
+### 2. Find it in the server journal
+
+Gadgetron's tracing spans include `request_id` as a field. Grep the systemd journal / Loki stream:
+
+```sh
+# systemd journal
+sudo journalctl -u gadgetron.service --since '1 hour ago' \
+  | grep 9b28e79a | less
+
+# Loki / LogQL
+{unit="gadgetron.service"} |= "9b28e79a"
+```
+
+You'll see span entries for every middleware layer + handler that touched the request. `gadgetron_audit` target lines show the terminal audit shape; `gadgetron_provider` lines show what the upstream returned; `penny_subprocess` lines show subprocess spawn → exit if the handler routed to Penny.
+
+For forensic depth, restart the tail in a repro with scoped verbose logging per `§RUST_LOG cheat sheet`: `RUST_LOG=info,gadgetron_provider=debug,gadgetron_audit=debug,penny_subprocess=debug`.
+
+### 3. Find it in `audit_log`
+
+`AuditEntry.request_id` indexes every chat request Gadgetron processed. `audit_log_request_idx` (from `20260411000004_audit_log.sql`) makes this lookup O(log n):
+
+```sql
+SELECT id, tenant_id, actor_user_id, actor_api_key_id,
+       model, provider, status, input_tokens, output_tokens,
+       cost_cents, latency_ms, timestamp
+FROM audit_log
+WHERE request_id = '9b28e79a-...'
+ORDER BY timestamp;
+```
+
+**Streaming requests produce two rows** (dispatch + amendment) with the same `request_id` but distinct `id` per `§Audit log latency_ms interpretation` above. If `status` on the amendment row is `"error"`, the stream terminated badly — join to the tracing journal to find why.
+
+**No rows** = request didn't reach the audit writer. Common cases:
+- Pre-authentication failure (layer 4 emitted 401 via `emit_auth_failure_audit` with `tenant_id = nil`, which `run_audit_log_writer` skips to avoid FK violation per ISSUE 21 guard). Journal still has the span; look there.
+- Handler predates ISSUE 21 audit writer wiring (pre-v0.5.13 snapshots)
+- `--no-db` deployment — audit goes to tracing only, not pg
+
+### 4. Find it in `billing_events`
+
+For `action` event_kind, the `source_event_id` column holds the `audit_log.request_id` (set in `action_service.rs emit_action_billing`). For `chat` and `tool`, `source_event_id` is NULL today — join via `audit_log.request_id` → `billing_events.created_at` window instead:
+
+```sql
+-- For action rows (clean join via source_event_id)
+SELECT b.id, b.event_kind, b.cost_cents, b.actor_user_id,
+       b.created_at
+FROM billing_events b
+WHERE b.source_event_id = '9b28e79a-...';
+
+-- For chat/tool rows (created_at window — the billing emit fires
+-- within ~ms of the audit write in the same handler; widen the
+-- window to 2s to catch fire-and-forget latency)
+SELECT b.id, b.event_kind, b.cost_cents, b.actor_user_id,
+       b.created_at
+FROM billing_events b
+JOIN audit_log a ON a.tenant_id = b.tenant_id
+WHERE a.request_id = '9b28e79a-...'
+  AND b.created_at BETWEEN a.timestamp AND a.timestamp + INTERVAL '2 seconds';
+```
+
+### 5. Combined end-to-end query
+
+One query that reconstructs the request's journey across all three persistence tables:
+
+```sql
+WITH target AS (SELECT '9b28e79a-...'::uuid AS request_id)
+SELECT
+  'audit_log' AS source, a.timestamp, a.status, a.model,
+  a.cost_cents, a.latency_ms,
+  a.actor_user_id, a.actor_api_key_id
+FROM audit_log a, target
+WHERE a.request_id = target.request_id
+UNION ALL
+SELECT
+  'billing_events', b.created_at, b.event_kind, b.model,
+  b.cost_cents, NULL,
+  b.actor_user_id, NULL
+FROM billing_events b
+JOIN audit_log a ON a.tenant_id = b.tenant_id
+  AND b.created_at BETWEEN a.timestamp AND a.timestamp + INTERVAL '2 seconds'
+CROSS JOIN target
+WHERE a.request_id = target.request_id
+ORDER BY timestamp;
+```
+
+Returns every row across `audit_log` + `billing_events` that this request produced, ordered by timestamp. Paste into `psql`, scan for anomalies (status='error', unexpected actor_user_id, cost_cents spike).
+
+### 6. When `x-request-id` is absent from the response
+
+If the client reports no `x-request-id` header on the failure, the response is from **before layer 3** — usually:
+- **Nginx / Caddy rejected the request** before forwarding to Gadgetron (upstream TLS / body-size limit at reverse proxy). The header shows the proxy's own request id if it has one, not Gadgetron's.
+- **TCP connection refused** — Gadgetron isn't running on the target port, or systemd is restarting it.
+- **Layer 1/2 (`map_response(openai_shape_413)` / `RequestBodyLimitLayer` / `TraceLayer`)** fired first. The 413 rewrite happens **before** `request_id_middleware`, so an oversized-body 413 lacks a Gadgetron request_id — the reverse-proxy access log is the primary forensic source.
+
+When the client has only a wall-clock timestamp (no request_id), widen the audit_log scan:
+
+```sql
+-- Every audit row for a tenant in a 2-minute window
+SELECT id, request_id, status, model, actor_user_id, timestamp
+FROM audit_log
+WHERE tenant_id = '<tenant_uuid>'
+  AND timestamp BETWEEN '2026-04-20T14:21:00Z' AND '2026-04-20T14:23:00Z'
+ORDER BY timestamp;
+```
+
+Cross-reference with the client's timestamp + Bearer key prefix (first 16 chars of the raw key, which the client usually knows) to pinpoint the right row.
