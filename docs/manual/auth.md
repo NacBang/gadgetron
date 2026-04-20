@@ -489,3 +489,167 @@ regressed and must be investigated before the next release.
 - The `api_keys.key_hash` column stores only the SHA-256 hash. Even with direct database access, the original key cannot be recovered from the hash.
 - Auth failures (401) are audited to the structured audit channel. In the current implementation, audit entries are written to tracing logs; PostgreSQL persistence remains future work.
 - Cookie-session: `user_sessions.cookie_hash` follows the same SHA-256-only discipline as `api_keys.key_hash`. `users.password_hash` stores argon2id PHC string (not recoverable; incremental cost tuning possible via argon2 parameters in `crates/gadgetron-xaas/src/auth.rs`).
+
+---
+
+## Audit log retention and tenant lifecycle (operator responsibility)
+
+Gadgetron persists audit + billing rows **indefinitely**. No automatic purge job exists on trunk (verified: zero references to `purge_audit_log`, `DELETE FROM audit_log`, or a retention-sweep task in `crates/gadgetron-xaas/`; deferred to P2B per [`04-mcp-tool-registry.md:512`](../design/phase2/04-mcp-tool-registry.md)). At 100 chat requests/minute that is ~52M `audit_log` rows/year, plus the sibling `tool_audit_events`, `action_audit_events`, `billing_events`, `activity_events`, and `knowledge_candidates` tables. This is fine for small single-tenant deployments but becomes a disk-pressure + query-latency problem at scale, and it intersects with GDPR Art. 17 erasure obligations. Operators own retention.
+
+### Measuring growth
+
+Inspect the top-5 offenders by disk size per tenant:
+
+```sql
+SELECT
+    relname AS table,
+    pg_size_pretty(pg_total_relation_size(c.oid)) AS size,
+    (SELECT COUNT(*) FROM pg_stat_user_tables WHERE relname = c.relname) AS populated,
+    n_live_tup AS rows
+FROM pg_class c
+JOIN pg_stat_user_tables s ON s.relid = c.oid
+WHERE relname IN (
+    'audit_log', 'tool_audit_events', 'action_audit_events',
+    'billing_events', 'activity_events', 'knowledge_candidates',
+    'user_sessions'
+)
+ORDER BY pg_total_relation_size(c.oid) DESC;
+```
+
+Per-tenant `audit_log` breakdown:
+
+```sql
+SELECT tenant_id, COUNT(*) AS rows,
+       MIN(timestamp) AS oldest, MAX(timestamp) AS newest
+FROM audit_log
+GROUP BY tenant_id
+ORDER BY rows DESC
+LIMIT 20;
+```
+
+### Time-based `audit_log` pruning
+
+The `audit_log_tenant_ts_idx` composite index (`(tenant_id, timestamp DESC)`) supports cheap time-range scans. Archive-then-delete with `VACUUM` is the safe default — a naive `DELETE` without `VACUUM` leaves the rows as dead tuples and the table keeps its old disk footprint until autovacuum catches up.
+
+```sh
+# 1. Export the slice you're about to delete (one file per month; compresses well).
+CUTOFF="2026-01-01T00:00:00Z"
+psql "$GADGETRON_DATABASE_URL" -c "\COPY (
+    SELECT * FROM audit_log WHERE timestamp < '$CUTOFF'
+) TO '/backup/audit_log-pre-$CUTOFF.csv' WITH (FORMAT csv, HEADER true)"
+gzip "/backup/audit_log-pre-$CUTOFF.csv"
+
+# 2. Delete the rows.
+psql "$GADGETRON_DATABASE_URL" -c \
+    "DELETE FROM audit_log WHERE timestamp < '$CUTOFF'"
+
+# 3. Reclaim disk. VACUUM FULL rewrites the table (takes a lock) — use it once
+#    after a large purge, not for incremental trims. Everyday maintenance: just
+#    let autovacuum run.
+psql "$GADGETRON_DATABASE_URL" -c "VACUUM (VERBOSE, ANALYZE) audit_log"
+# For major reclaim after the first-ever purge:
+# psql "$GADGETRON_DATABASE_URL" -c "VACUUM FULL audit_log"   -- locks the table
+```
+
+Apply the same pattern to `tool_audit_events` (`created_at` column), `action_audit_events` (`created_at`), `billing_events` (`created_at`). Compliance floor is operator-set — common choice is 90 days for chat/tool audit and 7 years for `billing_events` if invoices depend on them.
+
+### Full tenant deletion (order matters)
+
+A plain `DELETE FROM tenants WHERE id = $1` will **fail** on a populated tenant — the FK cascade coverage is mixed:
+
+| Table | `tenant_id` FK behavior | Blocks tenant DELETE? |
+|---|---|---|
+| `api_keys` | `ON DELETE CASCADE` | no |
+| `quota_configs` | `ON DELETE CASCADE` | no |
+| `billing_events` | `ON DELETE CASCADE` | no |
+| `audit_log` | no clause (→ `NO ACTION`) | **yes** — must pre-delete |
+| `users` | no clause | **yes** |
+| `teams` | no clause | **yes** |
+| `tool_audit_events` | `tenant_id TEXT`, no FK | no (no constraint) |
+| `action_audit_events` | `tenant_id TEXT`, no FK | no |
+
+Also note `api_keys.user_id REFERENCES users(id)` carries no CASCADE — dropping `users` before nullifying/deleting those keys fails with FK violation.
+
+**Correct deletion sequence:**
+
+```sql
+BEGIN;
+
+-- 1. Archive (optional, but strongly recommended — the tenant row itself
+--    and its cascaded descendants go first; audit_log + users + teams go
+--    explicitly). Export before this transaction if you need the data.
+
+-- 2. Free api_keys.user_id FK so users can be deleted.
+UPDATE api_keys
+   SET user_id = NULL
+ WHERE tenant_id = :tenant_id;
+
+-- 3. audit_log has no cascade — delete explicitly.
+DELETE FROM audit_log WHERE tenant_id = :tenant_id;
+
+-- 4. teams has no cascade (tenant_id), but team_members cascades off team_id.
+DELETE FROM teams WHERE tenant_id = :tenant_id;
+
+-- 5. users has no cascade (tenant_id), but user_sessions + team_members
+--    cascade off user_id so dropping users clears them.
+DELETE FROM users WHERE tenant_id = :tenant_id;
+
+-- 6. Drop the tenant. api_keys + quota_configs + billing_events cascade
+--    off tenant_id automatically.
+DELETE FROM tenants WHERE id = :tenant_id;
+
+COMMIT;
+```
+
+The `tool_audit_events` / `action_audit_events` rows remain after this — they reference `tenant_id` as plain `TEXT` without a constraint. If the tenant is being deleted for GDPR erasure (not just offboarding), also:
+
+```sql
+DELETE FROM tool_audit_events   WHERE tenant_id = :tenant_id::text;
+DELETE FROM action_audit_events WHERE tenant_id = :tenant_id::text;
+```
+
+### Per-user erasure (GDPR Art. 17)
+
+No built-in `gadgetron user erase <user_id>` subcommand on trunk. The operator procedure preserves the tenant and sibling users while zeroing the deleted user's audit trail. Mind the mixed nullability across the six audit tables:
+
+| Table | user-attribution column | type | nullable | FK to `users(id)` |
+|---|---|---|---|---|
+| `audit_log` | `actor_user_id` | UUID | yes | yes (blocks naive user DELETE) |
+| `billing_events` | `actor_user_id` | UUID | yes | **no** (ISSUE 23 intentional) |
+| `tool_audit_events` | `owner_id` | TEXT | yes | no |
+| `action_audit_events` | `actor_user_id` | TEXT | **NO** | no |
+| `activity_events` | `actor_user_id` | UUID | **NO** | no |
+| `knowledge_candidates` | `actor_user_id` | UUID | **NO** | no |
+
+Three of the six tables carry `NOT NULL` actor columns and one carries a real FK — a simple `DELETE FROM users WHERE id = :user_id` FAILS unless all references are handled first.
+
+```sql
+BEGIN;
+
+-- 1. Free api_keys owned by the user (no cascade on api_keys.user_id).
+DELETE FROM api_keys WHERE user_id = :user_id;
+
+-- 2. Zero the user's audit attribution on nullable columns (preserves
+--    tenant-level stats; severs the PII link — typical Art. 17 posture
+--    of "forget the person, keep the statistics"). The audit_log FK
+--    accepts NULL so this also unblocks step 4.
+UPDATE audit_log         SET actor_user_id = NULL WHERE actor_user_id = :user_id;
+UPDATE billing_events    SET actor_user_id = NULL WHERE actor_user_id = :user_id;
+UPDATE tool_audit_events SET owner_id      = NULL WHERE owner_id      = :user_id::text;
+
+-- 3. NOT NULL columns — must DELETE or rewrite. DELETE is simpler but
+--    loses the row from tenant-level aggregates. Pick one strategy per
+--    table and document it in your compliance log. Representative delete:
+DELETE FROM action_audit_events  WHERE actor_user_id  = :user_id::text;
+DELETE FROM activity_events      WHERE actor_user_id  = :user_id;
+DELETE FROM knowledge_candidates WHERE actor_user_id  = :user_id;
+-- (Alternative — rewrite to a reserved "deleted-user" sentinel UUID so
+--  tenant-level counts stay intact. Requires pre-creating the sentinel.)
+
+-- 4. Delete the user. user_sessions + team_members cascade off user_id.
+DELETE FROM users WHERE id = :user_id;
+
+COMMIT;
+```
+
+The nullable/`NOT NULL` split is a known schema asymmetry — it pre-dates the formal erasure contract and hasn't been reconciled on trunk. File an ISSUE against EPIC 4 if your deployment needs uniform nullability; the current pragmatic path is DELETE for the three `NOT NULL` tables. If the operator needs a cryptographic shred instead of a delete, add a hashing step before the UPDATE — but Gadgetron does not ship a helper for it on trunk.
