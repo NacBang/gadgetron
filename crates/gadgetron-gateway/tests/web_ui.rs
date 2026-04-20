@@ -68,9 +68,12 @@ fn make_state() -> AppState {
 
 #[tokio::test]
 async fn apply_web_headers_sets_csp_on_web_subtree() {
-    let web_router = apply_web_headers(gadgetron_web::service(&translate_config(
-        &WebConfig::default(),
-    )));
+    // Opt-in to upgrade-insecure-requests so the emitted CSP matches the
+    // legacy `CSP` const string. Default config omits that directive now
+    // (safe for plain-HTTP deployments — see build_csp doc-comment).
+    let mut web = WebConfig::default();
+    web.upgrade_insecure_requests = true;
+    let web_router = apply_web_headers(gadgetron_web::service(&translate_config(&web)), &web);
     let server = TestServer::new(web_router).unwrap();
 
     let resp = server.get("/").await;
@@ -84,9 +87,8 @@ async fn apply_web_headers_sets_csp_on_web_subtree() {
 
 #[tokio::test]
 async fn apply_web_headers_sets_nosniff_and_referrer_policy() {
-    let web_router = apply_web_headers(gadgetron_web::service(&translate_config(
-        &WebConfig::default(),
-    )));
+    let web = WebConfig::default();
+    let web_router = apply_web_headers(gadgetron_web::service(&translate_config(&web)), &web);
     let server = TestServer::new(web_router).unwrap();
     let resp = server.get("/").await;
     assert_eq!(

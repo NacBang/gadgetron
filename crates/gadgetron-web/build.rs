@@ -74,6 +74,11 @@ fn emit_rerun_triggers(web_dir: &Path) {
         "package-lock.json",
         ".nvmrc",
         "next.config.mjs",
+        // The project ships `next.config.ts` on trunk, but historically some
+        // branches carried `.mjs`. Watch both so the build re-triggers
+        // regardless of extension — missing a config change silently
+        // compiles against stale Next.js output.
+        "next.config.ts",
         "tailwind.config.ts",
         "postcss.config.mjs",
         "tsconfig.json",

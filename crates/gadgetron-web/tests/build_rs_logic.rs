@@ -113,3 +113,81 @@ fn build_rs_fallback_index_contains_gadgetron_title() {
     assert!(!html.to_ascii_lowercase().contains("open webui"));
     assert!(!html.to_ascii_lowercase().contains("open-webui"));
 }
+
+// ---------------------------------------------------------------------------
+// verify_asset_consistency — stale-hash detection (operator bug 2026-04-20)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verify_asset_consistency_passes_when_refs_match() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dist = tmp.path().to_path_buf();
+    fs::create_dir_all(dist.join("_next/static/css")).unwrap();
+    fs::write(dist.join("_next/static/css/abc123.css"), "/* css */").unwrap();
+    fs::write(
+        dist.join("index.html"),
+        r#"<link rel="stylesheet" href="/web/_next/static/css/abc123.css">"#,
+    )
+    .unwrap();
+    build_logic::verify_asset_consistency(&dist).expect("refs match, must pass");
+}
+
+#[test]
+fn verify_asset_consistency_fails_on_stale_css_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dist = tmp.path().to_path_buf();
+    fs::create_dir_all(dist.join("_next/static/css")).unwrap();
+    fs::write(dist.join("_next/static/css/NEW_HASH.css"), "/* new */").unwrap();
+    fs::write(
+        dist.join("index.html"),
+        r#"<link href="/web/_next/static/css/STALE_HASH.css">"#,
+    )
+    .unwrap();
+    let err = build_logic::verify_asset_consistency(&dist).expect_err("stale hash must fail");
+    assert!(err.contains("STALE_HASH.css"), "names missing asset: {err}");
+    assert!(
+        err.contains("cargo clean -p gadgetron-web"),
+        "includes fix recipe: {err}"
+    );
+}
+
+#[test]
+fn verify_asset_consistency_scans_multiple_html_pages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dist = tmp.path().to_path_buf();
+    fs::create_dir_all(dist.join("_next/static/chunks")).unwrap();
+    fs::write(dist.join("_next/static/chunks/shared.js"), "/* shared */").unwrap();
+    fs::write(
+        dist.join("index.html"),
+        r#"<script src="/web/_next/static/chunks/shared.js"></script>"#,
+    )
+    .unwrap();
+    fs::write(
+        dist.join("wiki.html"),
+        r#"<script src="/web/_next/static/chunks/wiki-MISSING.js"></script>"#,
+    )
+    .unwrap();
+    let err = build_logic::verify_asset_consistency(&dist).expect_err("wiki miss");
+    assert!(err.contains("wiki-MISSING.js"));
+    assert!(!err.contains("shared.js"));
+}
+
+#[test]
+fn verify_asset_consistency_ignores_non_html_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dist = tmp.path().to_path_buf();
+    fs::create_dir_all(dist.join("_next/static/css")).unwrap();
+    fs::write(dist.join("_next/static/css/real.css"), "/* real */").unwrap();
+    fs::write(
+        dist.join("index.html"),
+        r#"<link href="/web/_next/static/css/real.css">"#,
+    )
+    .unwrap();
+    // A JSON manifest referencing a missing asset must NOT trip the check.
+    fs::write(
+        dist.join("build-manifest.json"),
+        r#"{"notes": "/web/_next/static/css/ghost.css renamed"}"#,
+    )
+    .unwrap();
+    build_logic::verify_asset_consistency(&dist).expect("non-HTML skipped");
+}
