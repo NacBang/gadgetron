@@ -49,6 +49,102 @@ Gadgetron v0.2.0 — System Check
 
 ---
 
+## Deeper provider verification (beyond `gadgetron doctor`)
+
+`gadgetron doctor`'s provider check is a 5-second **TCP + HTTP reachability probe** — it does a bare `GET` against the configured endpoint and treats any HTTP response (2xx/3xx/4xx/5xx) as `[PASS]`. Only connection refused / DNS failure / timeout register as `[FAIL]` (`crates/gadgetron-cli/src/main.rs::check_provider_reachable:2677-2706`).
+
+That covers "is the server alive?" but NOT:
+
+- whether the provider **serves any models** (empty `GET /v1/models`)
+- whether the **API key authenticates** (401 is a `PASS` here)
+- whether the **model name you configured actually exists** on the remote side
+- whether **Gadgetron's routing lands on the right provider** for a given model
+
+When `doctor` is green but `POST /v1/chat/completions` returns 503 `no_suitable_provider` or upstream 401/404, run the deeper probes below.
+
+### A. Verify each provider serves the models you expect
+
+OpenAI-compatible providers (`openai`, `vllm`, `sglang`, `ollama`) all speak `GET /v1/models`. Probe each **directly** (bypasses Gadgetron so you see the raw upstream truth):
+
+```sh
+# OpenAI (requires real key — shows models your key has access to)
+curl -fsS https://api.openai.com/v1/models \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  | jq -r '.data[].id' | sort | head -20
+
+# vLLM / SGLang (no auth by default — the process serves exactly what was launched with --model)
+curl -fsS http://10.100.1.5:8100/v1/models  | jq -r '.data[].id'   # vLLM example
+curl -fsS http://10.100.1.110:30000/v1/models | jq -r '.data[].id' # SGLang example
+
+# Ollama (no auth; model list comes from /api/tags, NOT /v1/models)
+curl -fsS http://localhost:11434/api/tags | jq -r '.models[].name'
+```
+
+**Anthropic and Gemini do NOT expose a self-describing models endpoint.** For Anthropic, authenticate a one-token probe against `/v1/messages` instead:
+
+```sh
+curl -fsS https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
+  | jq '.id, .model, .stop_reason'
+```
+
+A 401 means your `ANTHROPIC_API_KEY` is wrong or was revoked. A 404 on `model` means the model ID changed (Anthropic sunsets old snapshot names). A 200 with a valid `id` means the provider + key + model triplet works.
+
+### B. Confirm Gadgetron discovers the same list
+
+Once the upstream is confirmed, verify Gadgetron sees it. `GET /v1/models` through Gadgetron aggregates every configured provider's model list:
+
+```sh
+curl -fsS http://localhost:8080/v1/models \
+  -H "Authorization: Bearer $GADGETRON_KEY" \
+  | jq -r '.data[].id' | sort
+```
+
+If the aggregated list is missing a model that the direct probe (step A) returned:
+
+- **vLLM / SGLang**: the process is typed as `vllm`/`sglang` but no `models` field exists in TOML — this is the intended discovery path. If the list comes up empty, check the vLLM / SGLang server is healthy and its `--served-model-name` / `--model` arg matches what you expect.
+- **OpenAI / Anthropic / Gemini**: the `models` array in the TOML is the gatekeeper — Gadgetron exposes ONLY what you enumerate there, not the full OpenAI catalog. Add the missing id to `[providers.<name>] models = [...]` and reload.
+- **Ollama**: runtime discovery via `/api/tags`; if empty, `ollama pull <model>` first.
+
+### C. Send a real chat through Gadgetron and check routing
+
+The roundtrip catches routing misconfiguration that A and B can't:
+
+```sh
+MODEL="gpt-4o-mini"   # or claude-sonnet-4-5 / penny / whatever you configured
+
+curl -fsS http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $GADGETRON_KEY" \
+  -H "content-type: application/json" \
+  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"reply only with OK\"}],\"max_tokens\":4}" \
+  | jq '.choices[0].message.content, .model, .usage'
+```
+
+Common observable failures:
+
+| Response | Meaning | Fix |
+|---|---|---|
+| HTTP 503 `{"error":{"code":"no_suitable_provider",...}}` | No configured provider declares this `model` id. | Add the model to the provider's `models` array (OpenAI/Anthropic/Gemini) or serve it on vLLM/SGLang/Ollama. |
+| HTTP 401 `{"error":{"code":"invalid_api_key"}}` | Your Gadgetron `$GADGETRON_KEY` (not the upstream key) is wrong. | Mint a fresh key: `gadgetron key create`. |
+| HTTP 200, `.choices[0].message.content` is empty or `null` | Upstream 4xx/5xx that Gadgetron normalized silently. | `RUST_LOG=gadgetron_provider=debug gadgetron serve` and re-send; the upstream body is logged at `debug` level. |
+| HTTP 200 but `.model` differs from `$MODEL` | Gadgetron rewrote the model id (provider alias mapping, `penny` → brain model). | Expected for `penny`; unexpected for direct model ids — check `[router]` configuration. |
+| Connection hangs for 60+ seconds | Upstream is accepting TCP but never responding (vLLM OOM, SGLang compile loop). | Check upstream logs + resource pressure (`nvidia-smi`, `/proc/meminfo`). |
+
+### D. Common provider gotchas `doctor` never surfaces
+
+- **vLLM `--served-model-name`**: vLLM serves under whatever string you pass here, which often differs from the HuggingFace repo id. If your TOML has no `models` field (correct for vLLM), Gadgetron uses what vLLM advertises. If clients request the HuggingFace name but vLLM was launched with a short alias, chat returns 503.
+- **`${ENV_VAR}` expansion**: `api_key = "${OPENAI_API_KEY}"` is expanded at config load time. If the env var is unset, the field is an empty string, not an error — upstream then 401s. Verify with `echo $OPENAI_API_KEY` before `gadgetron serve` and after sourcing the shell init file your service unit uses.
+- **Anthropic model snapshot drift**: `claude-3-5-sonnet-20241022` is sunset; configs pinned to it return 404. Update `models = [...]` to `claude-sonnet-4-5` / `claude-opus-4-5` and reload.
+- **Ollama port confusion**: the default is `11434`, not `11343` or `8000`. The `/v1/models` endpoint exists but returns OpenAI-shape; `/api/tags` is the native shape. Gadgetron uses `/api/tags` internally.
+- **SGLang reasoning models**: GLM-5.1 and similar return a `reasoning_content` field in the response. Gadgetron forwards it; your client must read it — don't assume `choices[0].message.content` is the whole answer.
+
+If none of the above pins the issue, capture upstream traffic under `RUST_LOG=gadgetron_provider=debug,gadgetron_router=debug` and file the observed response shape.
+
+---
+
 ## Server startup errors
 
 ### "GADGETRON_DATABASE_URL is not set"
