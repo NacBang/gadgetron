@@ -1013,6 +1013,49 @@ pub async fn revoke_my_key_handler(
 }
 
 // ---------------------------------------------------------------------------
+// ISSUE 22 — admin audit_log query
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListAuditLogQuery {
+    pub actor_user_id: Option<uuid::Uuid>,
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListAuditLogResponse {
+    pub rows: Vec<gadgetron_xaas::audit::writer::AuditLogRow>,
+    pub returned: usize,
+}
+
+/// `GET /api/v1/web/workbench/admin/audit/log` — Management-scoped
+/// tenant-pinned audit log query. Newest-first. Caller's tenant
+/// always pinned by handler; `actor_user_id` + `since` + `limit`
+/// (default 100, clamped `[1, 500]`) are optional narrowing filters.
+pub async fn list_audit_log_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Query(query): axum::extract::Query<ListAuditLogQuery>,
+) -> Result<Json<ListAuditLogResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "admin audit log query")?;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let rows = gadgetron_xaas::audit::writer::query_audit_log(
+        pool,
+        ctx.tenant_id,
+        query.actor_user_id,
+        query.since,
+        limit,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!("audit log query: {e}")))
+    })?;
+    let returned = rows.len();
+    Ok(Json(ListAuditLogResponse { rows, returned }))
+}
+
+// ---------------------------------------------------------------------------
 // ISSUE 14 TASK 14.5 — teams + team_members CRUD
 // ---------------------------------------------------------------------------
 
@@ -1510,6 +1553,8 @@ pub fn workbench_routes() -> Router<AppState> {
             "/admin/teams/{team_id}/members/{user_id}",
             axum::routing::delete(remove_team_member_handler),
         )
+        // ISSUE 22 — admin audit_log query endpoint.
+        .route("/admin/audit/log", get(list_audit_log_handler))
 }
 
 // ---------------------------------------------------------------------------

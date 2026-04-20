@@ -103,6 +103,100 @@ impl AuditWriter {
 /// `actor_api_key_id` additions so a cookie-session caller (ISSUE 16
 /// → nil-sentinel `api_key_id`) persists with `actor_api_key_id =
 /// NULL` and the Bearer caller gets the real key id.
+/// Projection row for `GET /api/v1/web/workbench/admin/audit/log`
+/// (ISSUE 22). Mirrors the `audit_log` table schema — one row per
+/// billable / auditable event.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct AuditLogRow {
+    pub id: uuid::Uuid,
+    pub tenant_id: uuid::Uuid,
+    pub api_key_id: uuid::Uuid,
+    pub actor_user_id: Option<uuid::Uuid>,
+    pub actor_api_key_id: Option<uuid::Uuid>,
+    pub request_id: uuid::Uuid,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub status: String,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub cost_cents: i64,
+    pub latency_ms: i32,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Query `audit_log` rows newest-first, tenant-pinned. `actor_user_id`
+/// filter narrows to a single user when set (otherwise returns all
+/// rows for the tenant). `limit` already clamped by the handler.
+pub async fn query_audit_log(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+    actor_user_id: Option<uuid::Uuid>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    limit: i64,
+) -> Result<Vec<AuditLogRow>, sqlx::Error> {
+    // 4 query shapes — avoid dynamic SQL concatenation to keep
+    // prepared statements + predictable bindings.
+    match (actor_user_id, since) {
+        (None, None) => {
+            sqlx::query_as::<_, AuditLogRow>(
+                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
+                      request_id, model, provider, status,
+                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
+               FROM audit_log WHERE tenant_id = $1
+               ORDER BY timestamp DESC LIMIT $2"#,
+            )
+            .bind(tenant_id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(u), None) => {
+            sqlx::query_as::<_, AuditLogRow>(
+                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
+                      request_id, model, provider, status,
+                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
+               FROM audit_log WHERE tenant_id = $1 AND actor_user_id = $2
+               ORDER BY timestamp DESC LIMIT $3"#,
+            )
+            .bind(tenant_id)
+            .bind(u)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (None, Some(s)) => {
+            sqlx::query_as::<_, AuditLogRow>(
+                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
+                      request_id, model, provider, status,
+                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
+               FROM audit_log WHERE tenant_id = $1 AND timestamp >= $2
+               ORDER BY timestamp DESC LIMIT $3"#,
+            )
+            .bind(tenant_id)
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        (Some(u), Some(s)) => {
+            sqlx::query_as::<_, AuditLogRow>(
+                r#"SELECT id, tenant_id, api_key_id, actor_user_id, actor_api_key_id,
+                      request_id, model, provider, status,
+                      input_tokens, output_tokens, cost_cents, latency_ms, timestamp
+               FROM audit_log
+               WHERE tenant_id = $1 AND actor_user_id = $2 AND timestamp >= $3
+               ORDER BY timestamp DESC LIMIT $4"#,
+            )
+            .bind(tenant_id)
+            .bind(u)
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+    }
+}
+
 pub async fn run_audit_log_writer(
     mut rx: tokio::sync::mpsc::Receiver<AuditEntry>,
     pool: sqlx::PgPool,
