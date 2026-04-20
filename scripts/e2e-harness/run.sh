@@ -2291,20 +2291,36 @@ else
 fi
 
 # -------------------------------------------------------------------
-# Gate 7k.6b — billing_events.actor_user_id population per kind (ISSUE 23)
+# Gate 7k.6b — billing_events.actor_user_id population per kind (ISSUE 24)
 # -------------------------------------------------------------------
-# The ISSUE 23 contract threads `actor_user_id` into three call sites
-# with DIFFERENT nullability guarantees:
-#   * chat   → NULL  (QuotaToken doesn't carry user_id until ISSUE 24)
-#   * tool   → NON-NULL  (ctx.actor_user_id from ValidatedKey.user_id)
-#   * action → NULL  (AuthenticatedContext.user_id is an api_key_id
-#                     placeholder in workbench; ISSUE 24 fixes)
-# Security review on ISSUE 23 enforced action→NULL to avoid
-# contaminating the ledger with api_key_ids typed as user_ids.
-# Go direct to Postgres — `BillingEventRow` doesn't (yet) flatten
-# `actor_user_id` into the admin JSON response, so the SQL layer is
-# the lowest reliable assertion surface.
-log "=== Gate 7k.6b: billing_events.actor_user_id per-kind (ISSUE 23) ==="
+# ISSUE 24 threaded `user_id` into all three call sites so every kind
+# now carries the owning user's real id (`ValidatedKey.user_id` →
+# `TenantContext.actor_user_id`):
+#   * chat   → NON-NULL  (QuotaToken.user_id from ctx.actor_user_id)
+#   * tool   → NON-NULL  (ctx.actor_user_id, unchanged since ISSUE 23)
+#   * action → NON-NULL  (AuthenticatedContext.real_user_id from ctx)
+# Pre-ISSUE-24 contract (chat NULL + action NULL) is archived in git
+# history — see PR #271 / Gate 7k.6b initial assertions + PR #283-era
+# Gate flip.
+#
+# PRECONDITION: the harness test key goes through ISSUE 14 TASK 14.1
+# backfill, so `api_keys.user_id IS NOT NULL`. If that invariant ever
+# regresses (a new migration that silently NULLs the column, or an
+# ephemeral DB that skips the backfill), every chat/action row here
+# lands NULL and all three assertions below fail — with a failure
+# message that looks identical to "ISSUE 24 not implemented". The
+# explicit precondition check disambiguates. Run BEFORE the flipped
+# count assertions.
+log "=== Gate 7k.6b: billing_events.actor_user_id per-kind (ISSUE 24) ==="
+API_KEY_USER_ID_NONNULL="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c "SELECT COUNT(*)::int FROM api_keys WHERE user_id IS NOT NULL" \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+if [ "${API_KEY_USER_ID_NONNULL:-0}" -ge 1 ]; then
+  pass "precondition: api_keys rows carry user_id (count=${API_KEY_USER_ID_NONNULL}, ISSUE 14 TASK 14.1 backfill landed)"
+else
+  fail "precondition regression: api_keys.user_id NULL for all rows — chat/action attribution cannot populate; ISSUE 14 backfill did not run" ""
+fi
 ACTOR_CHAT_NONNULL="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
   exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
   -c "SELECT COUNT(*)::int FROM billing_events
@@ -2320,20 +2336,37 @@ ACTOR_ACTION_NONNULL="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
   -c "SELECT COUNT(*)::int FROM billing_events
       WHERE event_kind = 'action' AND actor_user_id IS NOT NULL" \
   2>/dev/null | tr -d '[:space:]' || echo -1)"
-if [ "${ACTOR_CHAT_NONNULL:-0}" -eq 0 ]; then
-  pass "billing_events chat rows: actor_user_id IS NULL (ISSUE 24 will populate)"
+if [ "${ACTOR_CHAT_NONNULL:-0}" -ge 1 ]; then
+  pass "billing_events chat rows: actor_user_id populated (count=${ACTOR_CHAT_NONNULL})"
 else
-  fail "billing_events chat rows: ${ACTOR_CHAT_NONNULL} unexpectedly non-NULL (chat path should pass None pre-ISSUE-24)" ""
+  fail "billing_events chat rows: actor_user_id NULL — ISSUE 24 QuotaToken.user_id threading regressed" ""
 fi
 if [ "${ACTOR_TOOL_NONNULL:-0}" -ge 1 ]; then
   pass "billing_events tool rows: actor_user_id populated (count=${ACTOR_TOOL_NONNULL})"
 else
   fail "billing_events tool rows: actor_user_id NULL (expected Some(ctx.actor_user_id) from ValidatedKey.user_id)" ""
 fi
-if [ "${ACTOR_ACTION_NONNULL:-0}" -eq 0 ]; then
-  pass "billing_events action rows: actor_user_id IS NULL (AuthenticatedContext.user_id is api_key_id pre-ISSUE-24)"
+if [ "${ACTOR_ACTION_NONNULL:-0}" -ge 1 ]; then
+  pass "billing_events action rows: actor_user_id populated (count=${ACTOR_ACTION_NONNULL})"
 else
-  fail "billing_events action rows: ${ACTOR_ACTION_NONNULL} unexpectedly non-NULL — action path regressed to Some(actor.user_id)" ""
+  fail "billing_events action rows: actor_user_id NULL — ISSUE 24 AuthenticatedContext.real_user_id threading regressed" ""
+fi
+
+# Gate 7k.6b-identity — cross-kind identity convergence (ISSUE 24).
+# Harness traffic is single-user, single-tenant. All non-NULL
+# `actor_user_id` values MUST resolve to exactly ONE UUID. Divergence
+# indicates one of the three paths is sourcing from the wrong field
+# (e.g., chat threads `token.user_id` correctly but action regresses
+# to `actor.user_id` which is the api_key_id placeholder).
+DISTINCT_ACTORS="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c "SELECT COUNT(DISTINCT actor_user_id)::int FROM billing_events
+      WHERE actor_user_id IS NOT NULL" \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+if [ "${DISTINCT_ACTORS:-0}" -eq 1 ]; then
+  pass "billing_events cross-kind identity: exactly 1 distinct actor_user_id (ISSUE 24 per-path sourcing aligned)"
+else
+  fail "billing_events cross-kind identity: expected 1 distinct actor_user_id, got ${DISTINCT_ACTORS} — one or more paths sourcing from wrong field" ""
 fi
 
 log "=== Gate 8b: audit trail for non-streaming happy path ==="

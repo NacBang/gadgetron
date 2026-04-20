@@ -506,8 +506,15 @@ pub async fn approve_action(
         ))
     })?;
     let actor = AuthenticatedContext {
+        // Legacy api_key_id placeholder for backward compat with the
+        // audit sink event types (ISSUE 25 will rename this).
         user_id: ctx.api_key_id,
         tenant_id: ctx.tenant_id,
+        // ISSUE 24: real owning user id from ValidatedKey.user_id
+        // via TenantContext.actor_user_id. Some(..) for real users
+        // (cookie sessions + backfilled api_keys); None for legacy
+        // keys pre-ISSUE-14 backfill.
+        real_user_id: ctx.actor_user_id,
     };
     let approved = store
         .mark_approved(approval_id, &actor)
@@ -551,8 +558,15 @@ pub async fn deny_action(
         ))
     })?;
     let actor = AuthenticatedContext {
+        // Legacy api_key_id placeholder for backward compat with the
+        // audit sink event types (ISSUE 25 will rename this).
         user_id: ctx.api_key_id,
         tenant_id: ctx.tenant_id,
+        // ISSUE 24: real owning user id from ValidatedKey.user_id
+        // via TenantContext.actor_user_id. Some(..) for real users
+        // (cookie sessions + backfilled api_keys); None for legacy
+        // keys pre-ISSUE-14 backfill.
+        real_user_id: ctx.actor_user_id,
     };
     let denied = store
         .mark_denied(approval_id, &actor, body.reason)
@@ -1430,8 +1444,15 @@ pub async fn invoke_action(
     // `actor.user_id = api_key_id` is the placeholder identity until a
     // real user table lands; `actor.tenant_id` is the real tenant.
     let actor = AuthenticatedContext {
+        // Legacy api_key_id placeholder for backward compat with the
+        // audit sink event types (ISSUE 25 will rename this).
         user_id: ctx.api_key_id,
         tenant_id: ctx.tenant_id,
+        // ISSUE 24: real owning user id from ValidatedKey.user_id
+        // via TenantContext.actor_user_id. Some(..) for real users
+        // (cookie sessions + backfilled api_keys); None for legacy
+        // keys pre-ISSUE-14 backfill.
+        real_user_id: ctx.actor_user_id,
     };
     let resp = action_svc
         .invoke(&actor, &ctx.scopes, &action_id, request)

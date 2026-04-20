@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.15** (post-ISSUE 23 close — billing_events.actor_user_id column + tool/action sites populate it)
+**Current version: 0.5.16** (post-ISSUE 24 close — chat + action billing rows now populate actor_user_id via QuotaToken.user_id + AuthenticatedContext.real_user_id plumbing)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —

@@ -7,14 +7,23 @@ use uuid::Uuid;
 pub struct QuotaToken {
     pub tenant_id: Uuid,
     pub estimated_cost_cents: i64,
+    /// Owning user id (ISSUE 24). Threaded from the handler via
+    /// `QuotaEnforcer::check_pre` → sourced from
+    /// `TenantContext.actor_user_id` (`ValidatedKey.user_id`).
+    /// `None` for legacy api_keys pre-ISSUE-14 backfill; otherwise
+    /// `Some(real_users_id)`. `PgQuotaEnforcer::record_post` reads
+    /// this and populates `billing_events.actor_user_id` so chat
+    /// rows carry the owning user for per-user spend queries.
+    pub user_id: Option<Uuid>,
     used: std::sync::atomic::AtomicBool,
 }
 
 impl QuotaToken {
-    pub fn new(tenant_id: Uuid, estimated_cost_cents: i64) -> Self {
+    pub fn new(tenant_id: Uuid, estimated_cost_cents: i64, user_id: Option<Uuid>) -> Self {
         Self {
             tenant_id,
             estimated_cost_cents,
+            user_id,
             used: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -30,9 +39,15 @@ impl QuotaToken {
 
 #[async_trait]
 pub trait QuotaEnforcer: Send + Sync {
+    /// `user_id` (ISSUE 24) is the owning user id from the caller's
+    /// `TenantContext.actor_user_id`. `None` is always acceptable
+    /// (landing as NULL on `billing_events.actor_user_id` for
+    /// legacy api_keys); `Some(..)` enables per-user spend queries
+    /// without a join.
     async fn check_pre(
         &self,
         tenant_id: Uuid,
+        user_id: Option<Uuid>,
         snapshot: &QuotaSnapshot,
     ) -> Result<QuotaToken, GadgetronError>;
 
@@ -46,12 +61,13 @@ impl QuotaEnforcer for InMemoryQuotaEnforcer {
     async fn check_pre(
         &self,
         tenant_id: Uuid,
+        user_id: Option<Uuid>,
         snapshot: &QuotaSnapshot,
     ) -> Result<QuotaToken, GadgetronError> {
         if snapshot.remaining_daily_cents() <= 0 {
             return Err(GadgetronError::QuotaExceeded { tenant_id });
         }
-        Ok(QuotaToken::new(tenant_id, 0))
+        Ok(QuotaToken::new(tenant_id, 0, user_id))
     }
 
     async fn record_post(&self, token: &QuotaToken, _actual_cost_cents: i64) {
@@ -90,6 +106,7 @@ impl QuotaEnforcer for PgQuotaEnforcer {
     async fn check_pre(
         &self,
         tenant_id: Uuid,
+        user_id: Option<Uuid>,
         snapshot: &QuotaSnapshot,
     ) -> Result<QuotaToken, GadgetronError> {
         // The middleware already pre-fetched the snapshot at request
@@ -101,7 +118,7 @@ impl QuotaEnforcer for PgQuotaEnforcer {
         if snapshot.remaining_daily_cents() <= 0 {
             return Err(GadgetronError::QuotaExceeded { tenant_id });
         }
-        Ok(QuotaToken::new(tenant_id, 0))
+        Ok(QuotaToken::new(tenant_id, 0, user_id))
     }
 
     async fn record_post(&self, token: &QuotaToken, actual_cost_cents: i64) {
@@ -163,17 +180,14 @@ impl QuotaEnforcer for PgQuotaEnforcer {
         // append-only record of activity, not just paid activity.
         // Failures log but don't propagate — the request already
         // succeeded, and the operator sees the failure in tracing.
-        // Tool / action events get hooked up in later TASKs through
-        // their own audit sinks.
-        // actor_user_id (ISSUE 23) defaults to None here — QuotaToken
-        // doesn't carry user_id today; threading it would extend the
-        // QuotaEnforcer trait and QuotaToken struct. For now chat path
-        // lands user=NULL; tool + action paths (which have ctx directly)
-        // populate it via `.with_actor_user(..)` on their own
-        // BillingEventInsert.
+        // ISSUE 24 threads `token.user_id` (sourced from
+        // `ctx.actor_user_id` at the handler's check_pre call) into
+        // `actor_user_id` so chat rows populate owning-user
+        // attribution alongside tool + action paths.
         let ins = crate::billing::insert_billing_event(
             &self.pool,
-            crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents),
+            crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents)
+                .with_actor_user(token.user_id),
         )
         .await;
         if let Err(e) = ins {
@@ -218,6 +232,7 @@ impl QuotaEnforcer for RateLimitedQuotaEnforcer {
     async fn check_pre(
         &self,
         tenant_id: Uuid,
+        user_id: Option<Uuid>,
         snapshot: &QuotaSnapshot,
     ) -> Result<QuotaToken, GadgetronError> {
         if let Err(rl) = self.limiter.consume(tenant_id) {
@@ -229,7 +244,7 @@ impl QuotaEnforcer for RateLimitedQuotaEnforcer {
             );
             return Err(GadgetronError::QuotaExceeded { tenant_id });
         }
-        self.inner.check_pre(tenant_id, snapshot).await
+        self.inner.check_pre(tenant_id, user_id, snapshot).await
     }
 
     async fn record_post(&self, token: &QuotaToken, actual_cost_cents: i64) {
@@ -255,7 +270,7 @@ mod tests {
         let enforcer = InMemoryQuotaEnforcer;
         let tid = Uuid::new_v4();
         let snapshot = make_snapshot(5_000);
-        let token = enforcer.check_pre(tid, &snapshot).await.unwrap();
+        let token = enforcer.check_pre(tid, None, &snapshot).await.unwrap();
         assert_eq!(token.tenant_id, tid);
         assert!(!token.was_used());
     }
@@ -265,7 +280,7 @@ mod tests {
         let enforcer = InMemoryQuotaEnforcer;
         let tid = Uuid::new_v4();
         let snapshot = make_snapshot(0);
-        let err = enforcer.check_pre(tid, &snapshot).await.unwrap_err();
+        let err = enforcer.check_pre(tid, None, &snapshot).await.unwrap_err();
         match err {
             GadgetronError::QuotaExceeded { tenant_id } => assert_eq!(tenant_id, tid),
             _ => panic!("expected QuotaExceeded"),
@@ -277,7 +292,7 @@ mod tests {
         let enforcer = InMemoryQuotaEnforcer;
         let tid = Uuid::new_v4();
         let snapshot = make_snapshot(-100);
-        assert!(enforcer.check_pre(tid, &snapshot).await.is_err());
+        assert!(enforcer.check_pre(tid, None, &snapshot).await.is_err());
     }
 
     #[tokio::test]
@@ -285,7 +300,7 @@ mod tests {
         let enforcer = InMemoryQuotaEnforcer;
         let tid = Uuid::new_v4();
         let snapshot = make_snapshot(5_000);
-        let token = enforcer.check_pre(tid, &snapshot).await.unwrap();
+        let token = enforcer.check_pre(tid, None, &snapshot).await.unwrap();
         assert!(!token.was_used());
         enforcer.record_post(&token, 100).await;
         assert!(token.was_used());
@@ -293,7 +308,27 @@ mod tests {
 
     #[tokio::test]
     async fn quota_token_tracks_estimated_cost() {
-        let token = QuotaToken::new(Uuid::new_v4(), 250);
+        let token = QuotaToken::new(Uuid::new_v4(), 250, None);
         assert_eq!(token.estimated_cost_cents, 250);
+    }
+
+    #[tokio::test]
+    async fn check_pre_threads_user_id_into_token() {
+        // ISSUE 24 pins the trait-level contract: `check_pre` MUST
+        // copy its `user_id` argument into the returned token so
+        // `record_post` (a future call site) can route it into
+        // `billing_events.actor_user_id`. A future implementor that
+        // drops the field silently regresses chat-path per-user
+        // attribution — this test makes that regression fail at
+        // `cargo test` time, before the harness runs.
+        let enforcer = InMemoryQuotaEnforcer;
+        let tid = Uuid::new_v4();
+        let uid = Uuid::new_v4();
+        let snapshot = make_snapshot(5_000);
+        let token = enforcer.check_pre(tid, Some(uid), &snapshot).await.unwrap();
+        assert_eq!(token.user_id, Some(uid));
+        // And None-in round-trips to None-out.
+        let token_anon = enforcer.check_pre(tid, None, &snapshot).await.unwrap();
+        assert_eq!(token_anon.user_id, None);
     }
 }
