@@ -79,7 +79,7 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
 
 ## 7. 현재 상태
 
-- **Workspace version**: `0.5.18` — full per-ISSUE / per-TASK shipping history lives in [`docs/ROADMAP.md`](../ROADMAP.md). Summary below.
+- **Workspace version**: `0.5.19` — full per-ISSUE / per-TASK shipping history lives in [`docs/ROADMAP.md`](../ROADMAP.md). Summary below.
 - **활성 EPIC 목록**:
   - **EPIC 1** Workbench MVP — **CLOSED** `v0.3.0` (PR #208, ISSUE 1–4).
   - **EPIC 2** Agent autonomy — **CLOSED** `v0.4.0` (PR #209, ISSUE 5–7).
@@ -101,8 +101,9 @@ EPIC closure 태그만 공식 릴리스입니다. 모두 `vX.Y.Z` 형식 (suffix
   - **ISSUE 24** thread real `user_id` through `QuotaToken` + `AuthenticatedContext` ✅ (PR #289 / 0.5.16) — `QuotaToken.user_id` + `AuthenticatedContext.real_user_id` plumbed; chat + tool + action `billing_events` all populate `actor_user_id` (Gate 7k.6b identity assertion confirms convergence to single UUID per request). Harness 137 → 139 (Gate 3.5 precondition + Gate 7k.6b-identity).
   - **ISSUE 25** `AuthenticatedContext.user_id` → `api_key_id` rename + audit_log contamination fix ✅ (PR #293 / 0.5.17) — 6 action_service.rs audit sinks + 3 sibling sites emit `actor.real_user_id.unwrap_or(actor.api_key_id)` fallback. Harness 139 → 140 (Gate 7v.7 `audit_log.actor_user_id populated` +1). `real_user_id` → `user_id` rename deferred to ISSUE 27; billing-insert SLO counter deferred to ISSUE 26.
   - **ISSUE 26** billing-insert SLO counter + `/admin/billing/insert-failures` endpoint ✅ (PR #299 / 0.5.18) — `BillingFailureCounter` process-local `AtomicU64` per `BillingEventKind`, `Arc`-shared across 3 emission sites. Management-scope `GET /admin/billing/insert-failures` returns `{"chat":0,"tool":0,"action":0}` shape. Harness 140 → 142 (Gate 7k.8 shape + Gate 7k.9 RBAC).
-  - **ISSUE 27** `AuthenticatedContext.real_user_id` → `user_id` rename ⏳ planned — DX cleanup. Not a `v1.0.0` gate.
+  - **ISSUE 27** `/metrics` Prometheus scrape surface ✅ (PR #301 / 0.5.19) — `GET /metrics` (unauthenticated, network-boundary trust model) emits Prometheus text format exposing `gadgetron_billing_insert_failures_total{kind="chat|tool|action"}`. Consumes the `Arc<BillingFailureCounter>` wired by ISSUE 26. Harness Gate 7p (+2 assertions: content-type spec + HELP/TYPE/sample shape). Pivot from the pre-shipping `real_user_id` → `user_id` rename placeholder (that rename is a DX cleanup that can ship post-v1.0.0 whenever a larger AuthenticatedContext pass happens).
+  - **ISSUE 28** ⏳ operator-report triage (see [`docs/ROADMAP.md`](../ROADMAP.md) for the current scope — intake via PR #300).
   - **ISSUE 18** ⏳ web UI login form (React/Tailwind in `gadgetron-web`) — last remaining multi-user gate item.
-- **EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 remains on the v1.0.0 track** (ISSUE 27 `real_user_id` rename completion is a DX follow-up). TASKs 12.3/12.4/12.5 + ISSUE 13 ship **post-1.0** as patch / minor bumps once market pull justifies. EPIC 4 close → `0.5.x` → **`v1.0.0`** (major bump because API stabilizes).
+- **EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 remains on the v1.0.0 track** (ISSUE 28 triage and any post-ship follow-ups are not gate items). TASKs 12.3/12.4/12.5 + ISSUE 13 ship **post-1.0** as patch / minor bumps once market pull justifies. EPIC 4 close → `0.5.x` → **`v1.0.0`** (major bump because API stabilizes).
 - **다음 minor bump**: EPIC 4 (Multi-tenant XaaS) close 시 `v1.0.0` (first production release, major bump because API stabilizes). EPIC 5 (Cluster platform) close 시 `v2.0.0` (post-1.0). 0.5.x patch bumps will accumulate per-ISSUE within EPIC 4 in the meantime.
 - **이전 tag**: `v0.5.0` (EPIC 3 closure, 2026-04-20), `v0.4.0` (EPIC 2 closure, 2026-04-19), `v0.3.0` (EPIC 1 closure, 2026-04-19), `v0.1.0-phase1` (역사적).
