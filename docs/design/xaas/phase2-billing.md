@@ -1,7 +1,7 @@
 # gadgetron-xaas Phase 2 — integer-cent billing ledger (ISSUE 12)
 
 > **담당**: @xaas-platform-lead
-> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution shipped (PR #271 / 0.5.15)** — `actor_user_id` column + tenant-first composite index + 8-arg `insert_billing_event`. ISSUE 24 is the queued follow-up that threads real `user_id` through `QuotaToken` + `AuthenticatedContext` so chat + action paths populate the column (tool path populates today). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
+> **상태**: TASK 12.1 shipped (PR #236 / 0.5.5) + TASK 12.2 shipped (PR #241 / 0.5.6, tool + action emission — ISSUE 12 closed at telemetry scope) + **ISSUE 23 per-user attribution shipped (PR #271 / 0.5.15)** — `actor_user_id` column + tenant-first composite index + `insert_billing_event(pool, event)` struct signature (refactored from the original 8-arg flat call to `BillingEventInsert` with 3 typed constructors via PR #279). ISSUE 24 is the queued follow-up that threads real `user_id` through `QuotaToken` + `AuthenticatedContext` so chat + action paths populate the column (tool path populates today). TASKs 12.3 (invoice materialization), 12.4 (counter/ledger reconciliation), 12.5 (Stripe ingest) DEFERRED per 2026-04-20 commercialization-layer direction — designed in this doc (§6–§8), not scheduled into an active ISSUE.
 > **작성일**: 2026-04-19
 > **관련 크레이트**: `gadgetron-xaas` (새 `billing` 모듈), `gadgetron-gateway`, `gadgetron-cli`
 > **Phase**: [P2] — extends Phase 1 quota infrastructure (`phase1.md`)
@@ -282,7 +282,7 @@ Response 200:
 #### 시그니처 및 호출 지점
 
 ```rust
-// 현재 시그니처 (struct-based after the 0.5.16 refactor — §3 참조):
+// 현재 시그니처 (struct-based after the PR #279 refactor — §3 참조):
 pub async fn insert_billing_event(
     pool: &PgPool,
     event: BillingEventInsert,
@@ -319,19 +319,26 @@ UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건
 추가하고 `new_full` 생성자에 파라미터로 받는다. CLI 초기화에서 wire.
 
 ```rust
-// action_service.rs — direct success @ ~line 447 이후:
-if let Some(pool) = self.pg_pool.as_ref() {
+// action_service.rs — both success paths delegate to a private helper
+// (PR #280 refactor; emit_action_billing signature after dropping the
+// always-None actor_user_id parameter — ISSUE 24 will reintroduce it
+// sourced from AuthenticatedContext.real_user_id):
+fn emit_action_billing(
+    pool: Option<&sqlx::PgPool>,
+    tenant_id: Uuid,
+    audit_event_id: Uuid,
+    gadget_name: Option<String>,
+) {
+    let Some(pool) = pool else { return; };
     let pool = pool.clone();
-    let tenant_id = actor_tenant_id;
-    let gadget_name = Some(descriptor.gadget_name.clone());
-    let actor_user_id = actor.actor_user_id;
     tokio::spawn(async move {
         let _ = gadgetron_xaas::billing::insert_billing_event(
             &pool,
             gadgetron_xaas::billing::BillingEventInsert::action(
                 tenant_id, audit_event_id, gadget_name,
-            )
-            .with_actor_user(actor_user_id),
+            ),
+            // No .with_actor_user(..) — action path writes NULL by
+            // design until ISSUE 24 (see doc comment on the helper).
         ).await;
     });
 }

@@ -503,6 +503,135 @@ readinessProbe:
 
 > **Note**: `ExecStartPost` in the systemd unit above already blocks service startup until `/ready` returns `200`.
 
+### 5. Backup and restore
+
+#### 5.1 State inventory
+
+Gadgetron's persistent state spans three storage areas.
+
+**PostgreSQL tables** (all require backup — none are cache or ephemeral):
+
+| Domain | Tables |
+|---|---|
+| Identity | `tenants`, `users`, `teams`, `team_members`, `user_sessions`, `api_keys` |
+| Quota / billing | `quota_configs`, `billing_events` |
+| Audit | `audit_log`, `action_audit_events`, `tool_audit_events` |
+| Knowledge | `wiki_pages`, `wiki_chunks`, `activity_events`, `knowledge_candidates`, `candidate_decisions` |
+
+> **Warning** The `wiki_chunks` table stores vector embeddings in a column that requires the `pgvector` extension (`CREATE EXTENSION vector`). Any restore target that does not have this extension installed will fail during migration replay. Install the extension package (e.g. `postgresql-16-pgvector` on Debian/Ubuntu) on the target host before restoring.
+
+**Filesystem state**:
+
+- **Wiki git repo** — path set by `[knowledge] wiki_path` in `gadgetron.toml`. Every page write auto-commits with message `auto-commit: <path> <iso8601-utc>`. Back up the full directory including `.git/`, or push to a backup remote.
+- **Bundles directory** — path set by `[web] bundles_dir` (optional). Contains `bundle.toml` manifests for operator-installed bundles. Include in backup if the key is configured.
+
+#### 5.2 Daily backup (no downtime required)
+
+`pg_dump -Fc` produces a consistent snapshot without locking writers. Git operations are atomic per file. Both are safe to run while `gadgetron serve` is live.
+
+```sh
+# 1. PostgreSQL dump in custom format, compression level 6
+pg_dump -Fc -Z 6 "" > /backup/gadgetron-$(date +%Y%m%d-%H%M%S).dump
+
+# 2. Wiki git repo (choose one)
+#    a) tar the full directory (simpler, no remote needed)
+tar -czf /backup/wiki-$(date +%Y%m%d-%H%M%S).tar.gz \
+  -C "$(dirname "$wiki_path")" "$(basename "$wiki_path")"
+#    b) push to a backup remote (preferred when a remote is configured)
+git -C "$wiki_path" push
+
+# 3. Bundles directory (only when [web] bundles_dir is set)
+tar -czf /backup/bundles-$(date +%Y%m%d-%H%M%S).tar.gz \
+  -C "$(dirname "$bundles_dir")" "$(basename "$bundles_dir")"
+```
+
+Schedule with a systemd timer or cron. Retain at least seven daily dumps.
+
+#### 5.3 Cold backup for bit-perfect consistency
+
+Stop the server before dumping when you need a byte-exact snapshot, for example before a major schema migration or a schema-drift investigation.
+
+```sh
+systemctl stop gadgetron
+pg_dump -Fc -Z 6 "$GADGETRON_DATABASE_URL" > /backup/gadgetron-cold-$(date +%Y%m%d-%H%M%S).dump
+tar -czf /backup/wiki-cold-$(date +%Y%m%d-%H%M%S).tar.gz \
+  -C "$(dirname "$wiki_path")" "$(basename "$wiki_path")"
+systemctl start gadgetron
+```
+
+Downtime is typically under 30 seconds for databases up to a few gigabytes.
+
+#### 5.4 Restore and post-restore validation
+
+**Requirements on the target host**: PostgreSQL 16, the `pgvector` extension package installed, and a reachable Gadgetron config at `/etc/gadgetron/gadgetron.toml`.
+
+**Restore sequence**:
+
+```sh
+# 1. Create the target database (pgvector server package must already be
+#    installed at the cluster / container level — pgvector/pgvector:pg16
+#    ships it; Debian/Ubuntu hosts need `postgresql-NN-pgvector`).
+createdb gadgetron
+
+# 2. Install the vector extension INSIDE the target database.
+#    Extensions are per-database in PostgreSQL, so this must run against
+#    `gadgetron`, not `postgres`. Without it, pg_restore step 3 fails on
+#    the `CREATE EXTENSION vector` statement in the dump.
+psql -d gadgetron -c "CREATE EXTENSION IF NOT EXISTS vector"
+
+# 3. Restore the dump
+pg_restore --if-exists --clean -d gadgetron /backup/gadgetron-*.dump
+
+# 4. Restore the wiki repo
+mkdir -p "$wiki_path"
+tar -xzf /backup/wiki-*.tar.gz -C "$(dirname "$wiki_path")"
+
+# 5. Restore bundles (only if [web] bundles_dir is configured)
+tar -xzf /backup/bundles-*.tar.gz -C "$(dirname "$bundles_dir")"
+
+# 6. Start gadgetron
+systemctl start gadgetron
+```
+
+**Post-restore validation**:
+
+Gadgetron has no automated consistency checker for post-restore state. Run the following checks manually.
+
+```sh
+# Connectivity and config
+gadgetron doctor --config /etc/gadgetron/gadgetron.toml
+
+# Wiki page state (stale pages, missing frontmatter)
+gadgetron wiki audit --config /etc/gadgetron/gadgetron.toml
+```
+
+Check for foreign-key orphans that CASCADE rules might have left behind:
+
+```sql
+-- api_keys pointing to deleted users
+SELECT k.id, k.user_id FROM api_keys k
+  LEFT JOIN users u ON k.user_id = u.id
+  WHERE u.id IS NULL AND k.user_id IS NOT NULL;
+
+-- user_sessions pointing to deleted users (CASCADE should prevent this)
+SELECT s.id, s.user_id FROM user_sessions s
+  LEFT JOIN users u ON s.user_id = u.id
+  WHERE u.id IS NULL;
+
+-- team_members pointing to missing teams or users
+SELECT m.team_id, m.user_id FROM team_members m
+  LEFT JOIN teams t ON m.team_id = t.id
+  LEFT JOIN users u ON m.user_id = u.id
+  WHERE t.id IS NULL OR u.id IS NULL;
+
+-- audit_log actor coverage
+SELECT COUNT(*) FILTER (WHERE actor_user_id IS NULL) AS null_actor,
+       COUNT(*) AS total
+FROM audit_log;
+```
+
+A clean restore shows zero rows for the first three queries. A non-zero `null_actor` count in the last query is expected for system-generated events.
+
 ---
 
 ## Troubleshooting install issues
