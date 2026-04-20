@@ -1782,6 +1782,248 @@ Non-zero `drift_cents` is expected when the ledger INSERT failed but the counter
 
 ---
 
+### GET /api/v1/web/workbench/admin/audit/log
+
+Management-scoped read over tenant-pinned `audit_log` rows, shipped in **ISSUE 22 TASK 22.1 / PR #269 / v0.5.14**; handler: `list_audit_log_handler` in `crates/gadgetron-gateway/src/web/workbench.rs:1036`.
+
+**Scope:** `Management`. `OpenAiCompat` keys get `403 forbidden` (type `permission_error`) via `scope_guard_middleware`, so `/api/v1/web/workbench/admin/audit/log` is an operator endpoint, not a tenant self-service endpoint.
+
+**Tenant boundary.** The handler always WHERE-pins `tenant_id` to `ctx.tenant_id` before calling the query helper. There is no `tenant_id` query parameter, so the caller cannot widen or override the tenant scope from the URL. Cross-tenant reads are impossible by construction. A Management key for tenant A sees only tenant A rows, even if the operator knows another tenant UUID.
+
+**Query parameters** (all optional):
+
+| Name | Type | Default | Meaning |
+|------|------|---------|---------|
+| `actor_user_id` | UUID | unbounded | Narrow to rows attributed to a single user. Useful when a tenant has multiple admins or mixed cookie-session and Bearer traffic. |
+| `since` | ISO-8601 timestamp | unbounded | Lower bound on `timestamp` (`>=` semantics, inclusive). Paging forward with the last-seen timestamp will re-read the boundary row; use `id` or `request_id` client-side for dedup when paginating through bursty traffic. |
+| `limit` | integer | `100` | Clamped to `1..=500` at the handler. Values below `1` clip to `1`, values above `500` clip to `500`. |
+
+Rows are returned newest-first. The response shape is `{rows: Vec<AuditLogRow>, returned: N}` where `returned` is the number of rows actually emitted after filters and limit clamp.
+
+Implementation note: `query_audit_log(pool, tenant_id, actor_user_id, since, limit)` lives in `crates/gadgetron-xaas/src/audit/writer.rs:130`. It uses four prepared-statement shapes, one per `(actor_user_id, since)` permutation, instead of string-building SQL at runtime. The WHERE clause is always tenant-pinned, and there is no dynamic SQL concatenation.
+
+**Example:**
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "http://localhost:8080/api/v1/web/workbench/admin/audit/log?limit=5"
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "rows": [
+    {
+      "id": "f4a88a62-7d89-4e28-b5b9-0b59b31b2d2c",
+      "tenant_id": "4c7b47aa-7284-4658-86a4-831828f91f1f",
+      "api_key_id": "00000000-0000-0000-0000-000000000000",
+      "actor_user_id": "e61d1784-9cc3-46c8-aab0-5a14d7fb0f16",
+      "actor_api_key_id": null,
+      "request_id": "7dba0b98-39aa-45f3-9c07-f9fb47f43795",
+      "model": "gpt-4o-mini",
+      "provider": "openai",
+      "status": "ok",
+      "input_tokens": 182,
+      "output_tokens": 49,
+      "cost_cents": 7,
+      "latency_ms": 421,
+      "timestamp": "2026-04-19T09:12:03.441Z"
+    }
+  ],
+  "returned": 1
+}
+```
+
+- `rows` is an array of `AuditLogRow` projections. The handler emits the newest rows first, so `rows[0]` is the latest matching row at read time.
+- `returned` is the actual row count in this response. It can be smaller than `limit` when the tenant has fewer matching rows or when the filter narrows the result set.
+- `id` is the audit row UUID primary key. It identifies the persisted audit record itself, not the HTTP request lifecycle as a whole.
+- `tenant_id` is the tenant foreign key pinned by the handler. It is present in every row, but the caller cannot change it through the query string.
+- `api_key_id` is never `null`. This field records the request-path credential marker that entered the audit pipeline.
+- `api_key_id = 00000000-0000-0000-0000-000000000000` is the cookie-session sentinel from ISSUE 16. It means the request came through the session-cookie path, not a real Bearer API key row.
+- `api_key_id` holding any non-nil UUID means the row came from a Bearer credential path. For those rows, the UUID is the request credential recorded at emit time.
+- `actor_user_id` is the owning user UUID when the request identity was plumbed through `ValidatedKey.user_id`. This is the main field to use when you want "activity by user" rather than "activity by key".
+- `actor_user_id = null` is expected for legacy API keys that predate the ISSUE 14 TASK 14.1 ownership backfill. It does not mean the audit row is malformed.
+- `actor_api_key_id` is the real `api_keys.id` for Bearer callers when the key survived validation and the tenant context preserved the concrete key identity.
+- `actor_api_key_id = null` is expected for cookie-session callers. `tenant_context_middleware` converts the nil-sentinel cookie path into `None` here, so operators do not have to string-match on the sentinel to understand the caller type.
+- `api_key_id` and `actor_api_key_id` intentionally differ. `api_key_id` is the path marker, always present, while `actor_api_key_id` is the real persisted API key owner handle and is absent on cookie-session traffic.
+- `api_key_id = 00000000-0000-0000-0000-000000000000` plus `actor_api_key_id = null` is the normal cookie-session combination.
+- `api_key_id != 00000000-0000-0000-0000-000000000000` plus non-null `actor_api_key_id` is the normal Bearer combination.
+- `request_id` is the HTTP request correlation UUID. Multiple audit rows can share one `request_id`, so use `id` when you need the audit row identity and `request_id` when you need to correlate related request work.
+- `model` is the resolved model id when the write path knew it, for example `gpt-4o-mini`. It can be `null` when the upstream emit site did not set a model.
+- `provider` is the resolved provider string when available, for example `openai`. It can be `null` for rows emitted by code paths that did not populate provider metadata.
+- `status` is the write-side status string persisted by the audit writer. As of v0.5.14 the common values are `ok`, `error`, and `stream_interrupted`.
+- `input_tokens` is the integer input token count persisted for the audited request.
+- `output_tokens` is the integer output token count persisted for the audited request.
+- `cost_cents` is the integer-cent cost attributed to the audited request at write time. This is the same unit used elsewhere in the XaaS billing and quota surfaces.
+- `latency_ms` is the request latency in milliseconds as recorded by the write path.
+- `timestamp` is the UTC write timestamp used for newest-first ordering and `since` filtering.
+
+**Errors:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `forbidden` | 403 | Caller's API key scope is not `Management`. `OpenAiCompat` callers fail in `scope_guard_middleware` before the handler runs; response `type` is `permission_error`. |
+| `config_error` | 400 | Either (a) `pg_pool` is not wired (for example `--no-db` mode or missing `database_url`) — the handler calls `require_pg_pool(&state, "admin audit log query")` and fails before any SQL executes; or (b) SQL execution failed and the handler mapped the `sqlx` error to `GadgetronError::Config` with message prefix `audit log query: ...`. Both collapse to HTTP 400 because `WorkbenchHttpError::Core(GadgetronError::Config(_))` → `http_status_code() = 400` (`crates/gadgetron-core/src/error.rs:535`). No-db vs SQL-failure distinguishable by reading the `error.message` body field. |
+| `n/a` | 4xx | Axum query deserialization rejected the URL before the handler ran, for example malformed `actor_user_id` (non-UUID) or `since` (non-ISO-8601) or a non-integer `limit`. |
+
+Malformed `actor_user_id` also fails in the query deserializer path because the field is typed as UUID, but the common operator mistakes seen during manual testing are malformed `since` and non-integer `limit`.
+
+#### Operator recipes
+
+**Who accessed this tenant in the last hour?**
+
+Use `since` to narrow the window, then extract unique `actor_user_id` values from the returned rows. This shows known user identities; legacy-key rows with `actor_user_id = null` are omitted by the `jq` filter.
+
+```bash
+GAD="http://localhost:8080"
+MGMT_KEY="gad_live_your_management_key"
+SINCE=$(
+  python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+PY
+)
+
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?since=$SINCE&limit=500" \
+  | jq -r '.rows[] | .actor_user_id // empty' \
+  | sort -u
+```
+
+If you also want request counts per user, replace the final `jq` pipeline with:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?since=$SINCE&limit=500" \
+  | jq -r '.rows[] | .actor_user_id // empty' \
+  | sort \
+  | uniq -c \
+  | sort -nr
+```
+
+**All chat completions by alice**
+
+When you already know Alice's user UUID, combine `actor_user_id` and `since` in the same request. `audit_log` is the chat audit persistence surface after ISSUE 21, so this endpoint is the direct operator read path for recent chat completions attributed to that user.
+
+```bash
+GAD="http://localhost:8080"
+MGMT_KEY="gad_live_your_management_key"
+ALICE_USER_ID="e61d1784-9cc3-46c8-aab0-5a14d7fb0f16"
+SINCE="2026-04-20T00:00:00Z"
+
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?actor_user_id=$ALICE_USER_ID&since=$SINCE&limit=500" \
+  | jq '.rows[] | {
+      timestamp,
+      request_id,
+      model,
+      provider,
+      status,
+      input_tokens,
+      output_tokens,
+      cost_cents,
+      latency_ms
+    }'
+```
+
+If you need only successful rows, add `select(.status == "ok")` in the `jq` filter:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  "$GAD/api/v1/web/workbench/admin/audit/log?actor_user_id=$ALICE_USER_ID&since=$SINCE&limit=500" \
+  | jq '.rows[]
+        | select(.status == "ok")
+        | {timestamp, request_id, model, input_tokens, output_tokens, cost_cents}'
+```
+
+**Cross-reference audit_log with billing_events**
+
+For bulk reconciliation or incident response, SQL is faster than paginating both HTTP endpoints. The join key below is `audit_log.request_id = billing_events.source_event_id`, which lets you line up request-correlated audit rows with any billing rows that carried the same source event UUID.
+
+```sql
+SELECT
+  al.request_id,
+  al.timestamp AS audit_timestamp,
+  al.actor_user_id,
+  al.model AS audit_model,
+  al.provider AS audit_provider,
+  al.status,
+  al.input_tokens,
+  al.output_tokens,
+  al.cost_cents AS audit_cost_cents,
+  be.id AS billing_event_id,
+  be.event_kind,
+  be.cost_cents AS billing_cost_cents,
+  be.created_at AS billing_created_at
+FROM audit_log al
+JOIN billing_events be
+  ON be.source_event_id = al.request_id
+WHERE al.tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+ORDER BY al.timestamp DESC
+LIMIT 100;
+```
+
+Use `LEFT JOIN` instead of `JOIN` when you want to find audit rows that do not yet have a correlated billing row:
+
+```sql
+SELECT
+  al.request_id,
+  al.timestamp,
+  al.status,
+  al.cost_cents,
+  be.id AS billing_event_id
+FROM audit_log al
+LEFT JOIN billing_events be
+  ON be.source_event_id = al.request_id
+WHERE al.tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+  AND al.timestamp >= now() - interval '1 day'
+ORDER BY al.timestamp DESC;
+```
+
+**Cookie-vs-Bearer breakdown**
+
+`api_key_id` is the fast discriminator for caller path. Cookie-session rows use the nil sentinel, Bearer rows use any non-nil UUID. `IS DISTINCT FROM` is used below so the Bearer branch stays correct even if future schema changes ever allow nullable intermediate projections.
+
+```sql
+SELECT
+  'cookie' AS caller_type,
+  COUNT(*) AS rows,
+  COUNT(actor_user_id) AS rows_with_user_id,
+  COUNT(actor_api_key_id) AS rows_with_real_key_id
+FROM audit_log
+WHERE tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+  AND api_key_id = '00000000-0000-0000-0000-000000000000'
+
+UNION ALL
+
+SELECT
+  'bearer' AS caller_type,
+  COUNT(*) AS rows,
+  COUNT(actor_user_id) AS rows_with_user_id,
+  COUNT(actor_api_key_id) AS rows_with_real_key_id
+FROM audit_log
+WHERE tenant_id = '4c7b47aa-7284-4658-86a4-831828f91f1f'
+  AND api_key_id IS DISTINCT FROM '00000000-0000-0000-0000-000000000000';
+```
+
+For a recent-window breakdown instead of all-time tenant history, add a timestamp predicate to both branches:
+
+```sql
+AND timestamp >= now() - interval '7 days'
+```
+
+**Harness coverage.** Gate 7v.8 covers both scope enforcement and happy-path reads. The harness first lands at least one `audit_log` row through the ISSUE 21 `run_audit_log_writer` path by making an earlier chat completion, then asserts that a Management key gets HTTP 200 with `.rows.length >= 1`. The same gate also calls this endpoint with an `OpenAiCompat` key and expects HTTP 403.
+
+**Design reference.** Identity and audit-field background lives in [`docs/design/phase2/08-identity-and-users.md`](../design/phase2/08-identity-and-users.md) and the shipped version chain is tracked in [`docs/ROADMAP.md`](../ROADMAP.md). Follow-ups that are tracked but not blocking `v1.0.0` include cursor-based pagination for result sets larger than 500 rows, additional filters such as `status`, `model`, and `request_id`, and `billing_events` user-id plumbing for easier cross-surface joins.
+
+After ISSUE 21, `audit_log` is the canonical persistence target for chat audit rows. The write path is `run_audit_log_writer`, which is separate from this read-only endpoint; `GET /api/v1/web/workbench/admin/audit/log` only projects rows that have already been persisted.
+
+---
+
 ### Tenant self-service endpoints (ISSUE 14 — v0.5.7)
 
 Landed by PR #246. Spec: [`docs/design/phase2/08-identity-and-users.md`](../design/phase2/08-identity-and-users.md) §2.6.
