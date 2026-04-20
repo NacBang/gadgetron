@@ -25,6 +25,8 @@
 //! `bash -lc` so one SSH round-trip does the whole step. This cuts
 //! latency on slow links and reduces the number of `sudo -S` prompts.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 
 use crate::ssh::{exec, exec_with_password, CmdOutput, SshError, SshTarget};
@@ -50,6 +52,7 @@ pub async fn run_bootstrap(
     password: &str,
     sudo_password: &str,
     public_key: &str,
+    private_key_path: &PathBuf,
 ) -> Result<BootstrapReport, SshError> {
     let mut report = BootstrapReport::default();
 
@@ -124,18 +127,19 @@ pub async fn run_bootstrap(
         report.notes.push("no NVIDIA GPU detected".into());
     }
 
-    // Step 5 — verify key-only login works now.
+    // Step 5 — verify key-only login works now. We need a fresh
+    // `SshTarget` with `key_path: Some(...)` — the `target_pw` parameter
+    // used for password auth has `key_path: None`, which would make
+    // `exec()` omit `-i` + `BatchMode=yes` and let the client fall back
+    // to password prompts. With no TTY attached to the gadgetron daemon
+    // that scenario hangs → 3 failed attempts → "Permission denied" —
+    // NOT because the key is wrong, but because it was never tried.
+    let target_key = SshTarget {
+        key_path: Some(private_key_path.clone()),
+        ..target_pw.clone()
+    };
     let verify_cmd = "echo __gsm_ready__";
-    let verify = exec(
-        &SshTarget {
-            // We intentionally do NOT carry the password into the
-            // verification path — if key-only auth isn't working now,
-            // we want to know before we persist.
-            ..target_pw.clone()
-        },
-        verify_cmd,
-    )
-    .await?;
+    let verify = exec(&target_key, verify_cmd).await?;
     if !verify.ok() || !verify.stdout.contains("__gsm_ready__") {
         return Err(SshError::Bootstrap(format!(
             "post-bootstrap key-only login failed; refusing to persist. stderr: {}",

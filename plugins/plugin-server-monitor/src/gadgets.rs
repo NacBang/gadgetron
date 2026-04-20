@@ -155,9 +155,15 @@ impl ServerMonitorProvider {
                     key_path: None, // password mode
                     known_hosts: known_hosts.clone(),
                 };
-                let report = run_bootstrap(&target_pw, ssh_pw.as_str(), sudo_pw.as_str(), &pubkey)
-                    .await
-                    .map_err(|e| GadgetError::Execution(format!("bootstrap: {e}")))?;
+                let report = run_bootstrap(
+                    &target_pw,
+                    ssh_pw.as_str(),
+                    sudo_pw.as_str(),
+                    &pubkey,
+                    &key_path,
+                )
+                .await
+                .map_err(|e| GadgetError::Execution(format!("bootstrap: {e}")))?;
                 // Passwords go out of scope here — OneShotSecret::drop wipes them.
                 let target_key = SshTarget {
                     key_path: Some(key_path.clone()),
