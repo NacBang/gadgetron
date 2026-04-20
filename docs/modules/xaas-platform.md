@@ -641,14 +641,21 @@ CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
 // after PR #280 dropped the always-None variant) and both call sites pass
 // actor.real_user_id.unwrap_or(actor.api_key_id) — real user UUID preferred,
 // api_key_id fallback for legacy keys pre-dating the ISSUE-14 backfill.
-// ISSUE 27 finishes the rename (real_user_id → user_id) so the fallback
-// reads as actor.user_id.unwrap_or(actor.api_key_id).
+// ISSUE 26 (PR #299 / v0.5.18) added `BillingFailureCounter` — the
+// `self.billing_failures.increment(BillingEventKind::Chat)` call below
+// is the in-memory SLO tripwire that pairs with the tracing log.
+// ISSUE 27 (PR #301 / v0.5.19) surfaced the counter via `GET /metrics`
+// Prometheus scrape. `real_user_id` → `user_id` rename was originally
+// planned as ISSUE 27 but pivoted to observability; the rename DX
+// cleanup is a post-v1.0.0 follow-up whenever a larger
+// `AuthenticatedContext` pass happens.
 let ins = crate::billing::insert_billing_event(
     &self.pool,
     crate::billing::BillingEventInsert::chat(token.tenant_id, actual_cost_cents)
         .with_actor_user(token.user_id),
 ).await;
 if let Err(e) = ins {
+    self.billing_failures.increment(crate::billing::BillingEventKind::Chat);
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
         "failed to persist billing_events row — counter ahead of ledger until reconciled");
 }
@@ -664,7 +671,14 @@ if let Err(e) = ins {
 
 - **chat** (`PgQuotaEnforcer::record_post`, 이 §5.8): `Some(token.user_id)` — `QuotaToken::new(tenant, cost, user_id)` 가 `ctx.actor_user_id` 를 운반 (ISSUE 24 TASK 24.1 / PR #289).
 - **tool** (`handlers.rs` tool billing emission): `Some(ctx.actor_user_id)` — `TenantContext` 가 middleware 에서 `ValidatedKey.user_id` 를 이미 운반 (ISSUE 20/23).
-- **action** (`action_service::emit_action_billing`): `Some(actor.real_user_id)` — `AuthenticatedContext.real_user_id` 필드 (ISSUE 24 TASK 24.2 / PR #289) 로 threading. 주의: legacy `actor.user_id` 는 여전히 api_key_id placeholder 이며 rustdoc "DO NOT READ for new user-identity logic" 경고가 붙어 있음. Full rename `user_id` → `api_key_id` + `real_user_id` → `user_id` 는 ISSUE 25 로 deferred — 그때까지 두 field 모두 `Option<Uuid>` 로 존재.
+- **action** (`action_service::emit_action_billing`): `actor.real_user_id.unwrap_or(actor.api_key_id)` — `AuthenticatedContext.real_user_id` 필드 (ISSUE 24 TASK 24.2 / PR #289) 로 threading. ISSUE 25 (PR #293 / v0.5.17) 가 legacy `AuthenticatedContext.user_id` → `api_key_id` 로 rename 완료 + action audit sinks 가 `actor.real_user_id.unwrap_or(actor.api_key_id)` fallback 을 emit 하도록 수정 — real user UUID 우선, pre-ISSUE-14 backfill 이전의 legacy api_key 에 대해서만 api_key_id fallback.
+
+**Observability (ISSUE 26 + 27)**. INSERT 실패는 `BillingFailureCounter::increment(kind)` 로 process-local `AtomicU64` 를 올리고 (`Arc`-shared across 3 emission sites), 운영자는 두 surface 로 scrape 가능:
+
+- **`GET /admin/billing/insert-failures`** (ISSUE 26 / PR #299 / v0.5.18) — Management scope JSON `{"chat":N,"tool":N,"action":N}`.
+- **`GET /metrics`** (ISSUE 27 / PR #301 / v0.5.19) — unauthenticated Prometheus text format 0.0.4, emits `gadgetron_billing_insert_failures_total{kind="chat|tool|action"}`. Standard Grafana/Prometheus scrape path — no per-scrape API key rotation needed. Trust model: network-boundary isolation (operator's Prometheus runs inside the same network as gadgetron; reverse proxy blocks public reach).
+
+Counter is process-local — restarts reset it. Long-horizon ledger-vs-counter reconciliation stays TASK 12.4 scope.
 
 FK 가 없는 이유는 migration comment 에 명시: heterogeneous caller 로 인한 silent insert failure 위험 회피 (best-effort telemetry). 운영자 reconciliation 쿼리는 read time 에 `LEFT JOIN users(id) ON ... AND b.tenant_id = u.tenant_id` 로 병합하면 된다. 실제 per-user 지출 SQL template 은 [`manual/api-reference.md §Per-user spend report`](../manual/api-reference.md) 참고.
 
