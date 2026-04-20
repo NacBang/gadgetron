@@ -262,6 +262,247 @@ Related: `docs/manual/web.md` (Web UI setup), `docs/design/phase2/03-gadgetron-w
 
 Docker support is planned for a future sprint. No official image has been published yet.
 
+## Production deployment
+
+### 1. systemd service unit
+
+Use a dedicated system account and keep runtime data out of `/etc`.
+
+1. Create the system user:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin gadgetron
+```
+
+2. Create the config and data directories:
+
+```bash
+sudo install -d -m 0755 /etc/gadgetron
+sudo install -d -o gadgetron -g gadgetron -m 0755 /var/lib/gadgetron
+sudo install -d -o gadgetron -g gadgetron -m 0755 /var/lib/gadgetron/wiki
+```
+
+3. Use this file layout:
+
+- `/etc/gadgetron/gadgetron.toml`, config file
+- `/etc/gadgetron/gadgetron.env`, `EnvironmentFile` holding secrets
+- `/var/lib/gadgetron/wiki`, `wiki_path`, use an absolute path because `wiki_path` resolves relative to the config file directory, not the current working directory
+
+4. Write the unit file at `/etc/systemd/system/gadgetron.service`:
+
+> **Note**: systemd already uses `SIGTERM` as the default stop signal, so the unit below does not override `KillSignal`.
+
+```ini
+[Unit]
+Description=Gadgetron service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gadgetron
+Group=gadgetron
+EnvironmentFile=/etc/gadgetron/gadgetron.env
+WorkingDirectory=/var/lib/gadgetron
+ExecStart=/usr/local/bin/gadgetron serve --config /etc/gadgetron/gadgetron.toml
+ExecStartPost=/usr/bin/curl -fsS http://127.0.0.1:8080/ready
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+5. Write `/etc/gadgetron/gadgetron.toml` with an absolute wiki path:
+
+```toml
+[server]
+bind = "127.0.0.1:8080"
+
+[paths]
+wiki_path = "/var/lib/gadgetron/wiki"
+```
+
+6. Write `/etc/gadgetron/gadgetron.env` with the runtime secrets and log level:
+
+```dotenv
+GADGETRON_DATABASE_URL=postgres://gadgetron:secret@127.0.0.1:5432/gadgetron
+OPENAI_API_KEY=sk-...
+GADGETRON_ADMIN_PW=change-me
+RUST_LOG=info
+```
+
+7. Reload systemd and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now gadgetron
+sudo systemctl status gadgetron
+```
+
+8. Read the startup logs if the unit does not come up:
+
+```bash
+sudo journalctl -u gadgetron -n 200 --no-pager
+```
+
+> **Warning**: do NOT add `ExecReload=/bin/kill -HUP` unless you intend to trigger a catalog reload, not a process restart. For restarts, use `systemctl restart gadgetron`.
+
+> **Warning**: `wiki_path` in `gadgetron.toml` resolves relative to the config file directory. Use an absolute path, for example `/var/lib/gadgetron/wiki`, to avoid landing the wiki inside `/etc/gadgetron/`.
+
+### 2. Nginx TLS termination
+
+Put the public TLS endpoint and the Gadgetron routes on the same host. `/web/`, `/v1/`, and `/api/` should all terminate on one origin and forward to the same upstream.
+
+1. Install Nginx and place this server block in your site config:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name example.com;
+
+    ssl_certificate /etc/ssl/certs/example.fullchain.pem;
+    ssl_certificate_key /etc/ssl/private/example.key.pem;
+
+    proxy_cookie_flags ~ secure;
+
+    location /web/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # Required for /api/v1/web/workbench/events/ws (WebSocket
+        # upgrade). Nginx 400s the handshake without these three.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+2. Validate the config and reload Nginx:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+3. Verify that the public endpoint can reach the readiness probe:
+
+```bash
+curl -fsS https://example.com/ready
+```
+
+`proxy_cookie_flags ~ secure;` requires Nginx 1.19.8 or newer and appends `Secure` to proxied cookies.
+
+> **Note**: if you run an older Nginx, either rewrite `Set-Cookie` with a `proxy_hide_header Set-Cookie` plus `add_header Set-Cookie ...` pattern, or rely on a site-wide `Strict-Transport-Security` header and have the application emit `Secure` itself.
+
+> **Note**: `X-Forwarded-For` is forwarded for future use. The gateway does not parse it today.
+
+> **Note**: no CORS headers are needed at Nginx. All routes are served from the same origin.
+
+### 3. Caddy TLS termination
+
+Caddy can terminate TLS and provision certificates automatically. Put the public domain name in the site address and reverse proxy to the local Gadgetron listener.
+
+1. Write a `Caddyfile` like this:
+
+```caddyfile
+example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-For {remote_host}
+		header_down Set-Cookie "(?i)^(.+)$" "$1; Secure"
+	}
+}
+```
+
+2. Reload Caddy:
+
+```bash
+sudo systemctl reload caddy
+```
+
+3. Verify that Caddy can reach the upstream:
+
+```bash
+curl -fsS https://example.com/ready
+```
+
+If you already append cookie flags in the application, remove the `header_down` rewrite to avoid duplicate attributes.
+
+> **Note**: Caddy provisions and renews TLS certificates automatically when the site address is a real public domain and the server is reachable on ports 80 and 443.
+
+> **Note**: Caddy 2's `reverse_proxy` handles the WebSocket upgrade for `/api/v1/web/workbench/events/ws` automatically (no extra directive needed), unlike the explicit `proxy_http_version 1.1; Upgrade; Connection "upgrade";` triplet required by Nginx.
+
+### 4. Health probe pattern
+
+Use the shallow probes for orchestration and reserve the authenticated bootstrap path for smoke tests.
+
+| Endpoint | Meaning | Use |
+|---|---|---|
+| `GET /health` | Liveness, unconditional `200` | Kubernetes `livenessProbe`, load balancer health check |
+| `GET /ready` | Readiness, `200` when the PostgreSQL pool is up, `503` otherwise | Kubernetes `readinessProbe` |
+| `GET /api/v1/web/workbench/bootstrap` | Deeper smoke test, requires Bearer auth | Authenticated monitoring only, not Kubernetes probes |
+
+1. Check liveness:
+
+```bash
+curl -fsS http://127.0.0.1:8080/health
+```
+
+2. Check readiness:
+
+```bash
+curl -fsS http://127.0.0.1:8080/ready
+```
+
+3. Run the authenticated smoke test:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8080/api/v1/web/workbench/bootstrap
+```
+
+4. Use the shallow endpoints in Kubernetes:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 2
+  periodSeconds: 5
+```
+
+> **Note**: `ExecStartPost` in the systemd unit above already blocks service startup until `/ready` returns `200`.
+
 ---
 
 ## Troubleshooting install issues
