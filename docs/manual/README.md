@@ -39,7 +39,7 @@ This manual is the **single source of truth for what trunk actually ships today*
 
 **EPIC 4 quota pipeline** (end-to-end request flow): rate-limit check → pg cost check → dispatch → pg `record_post` (quota counter + billing_events ledger) → tenant introspection via `/quota/status` → rejections surface as structured 429 + `Retry-After: 60`.
 
-**EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 (web UI login form) remains** on the multi-user track; TASKs 12.3/12.4/12.5 + ISSUE 13 ship post-1.0 as patch / minor bumps once market pull justifies.
+**EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 (web UI login form) remains** on the multi-user track (ISSUE 24 is a billing-attribution follow-up to ISSUE 23 and is NOT a `v1.0.0` gate); TASKs 12.3/12.4/12.5 + ISSUE 13 + ISSUE 24 ship post-1.0 as patch / minor bumps once market pull justifies.
 
 If a behaviour is described here, it exists in the binary you can `cargo build` from `main`.
 
