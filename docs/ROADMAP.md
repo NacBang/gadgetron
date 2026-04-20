@@ -300,16 +300,21 @@ to the struct, 7 call sites default to `None`). ISSUE 20 TASK
 plumbing — `TenantContext` gains `actor_user_id` + `actor_api_key_id`
 populated by `tenant_context_middleware` from `ValidatedKey`;
 chat handler's 3 `AuditEntry` literals now read ctx fields).
-EPIC 4 remaining before `v1.0.0`: ISSUE 13 (HF catalog —
-DEFERRED as commercialization layer) + **ISSUE 18** (web UI
+ISSUE 21 TASK 21.1 closed via PR #267 / v0.5.13 (pg audit_log
+consumer — `run_audit_log_writer` spawned from
+`init_audit_runtime` drains the `AuditWriter` mpsc and INSERTs
+rows into `audit_log` using the ISSUE 19/20 actor columns; nil-
+tenant-id skip guards the 401 auth-failure sentinel path).
+ISSUE 22 TASK 22.1 closed via PR #269 / v0.5.14 (admin
+`GET /admin/audit/log` query endpoint — Management-scoped,
+tenant-pinned, optional `actor_user_id` + `since` filters;
+completes the persistence → query loop with harness Gates 7v.7
++ 7v.8). EPIC 4 remaining before `v1.0.0`: ISSUE 13 (HF catalog
+— DEFERRED as commercialization layer) + **ISSUE 18** (web UI
 login form in `gadgetron-web` — React/Tailwind consuming the
 `/auth/*` endpoints; see the ISSUE 18 entry below for task
-breakdown) + **ISSUE 21** (pg audit-log consumer — background
-task that drains the `AuditWriter` mpsc channel and writes
-rows to `audit_log` using the new actor columns, migration
-already
-added in ISSUE 14 TASK 14.1). Google OAuth social login tracked
-separately post-ISSUE-18 on `project_multiuser_login_google`.
+breakdown). Google OAuth social login tracked separately
+post-ISSUE-18 on `project_multiuser_login_google`.
 - **ISSUE 12 — billing event telemetry** ✅ closed at telemetry scope
   (invoicing deferred per user directive 2026-04-19 "과금과 같은 상업화는
   뒤로 미뤄도 된다")
@@ -355,9 +360,12 @@ separately post-ISSUE-18 on `project_multiuser_login_google`.
   - TASK 19.1 ✅ — `AuditEntry` gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>`. All 7 call sites across the workspace (tests, bench fixtures, chat handler, stream_end_guard, auth-fail audit, scope-denial audit) default to `None` for now. Re-scoped: the original "thread user_id through audit sinks + billing_events" plan splits into **ISSUE 20** (plumbing via TenantContext) + **ISSUE 21** (pg consumer writing audit_log). This PR lands only the struct shape so those follow-ups can do their one job each.
 - **ISSUE 20 ✅ TenantContext → AuditEntry plumbing** (v0.5.12, closed 2026-04-19)
   - TASK 20.1 ✅ — `TenantContext` gains `actor_user_id` + `actor_api_key_id` (both `Option<Uuid>`), populated by `tenant_context_middleware` from `ValidatedKey.user_id` and the non-nil-sentinel `ValidatedKey.api_key_id` respectively. Chat handler's 3 `AuditEntry` literals (non-stream Ok, stream Ok+dispatch, stream Ok+spawn) all read ctx fields. Existing 5 `TenantContext` literals (middleware fixture, test helpers) default to `None`. No new harness gate — chat audit ledger is tracing-only (no DB consumer until ISSUE 21); behavior preserved by existing 129 gates.
-- **ISSUE 21 ⏳ pg audit_log consumer** (planned, post-v0.5.12; next logical step after ISSUE 20)
-  - TASK 21.1 (planned) — new background task spawned from `init_serve_runtime` when `pg_pool.is_some()`: drains `AuditWriter`'s mpsc channel and writes rows to `audit_log` table using `actor_user_id` + `actor_api_key_id` (schema columns already added in ISSUE 14 TASK 14.1 migration — unused until now). `--no-db` deployments skip the consumer; existing tracing-log sink continues to work as fallback.
-  - TASK 21.2 (planned) — new operator query endpoint `GET /api/v1/web/workbench/admin/audit/log` (Management-scoped, newest-first, `limit.clamp(1, 500)`, optional `since`, `user_id`, `api_key_id` filter params). Harness gate extension pins `actor_user_id` non-NULL on cookie-auth rows + `actor_api_key_id` non-NULL on Bearer-with-backfilled-user-id rows; NULL tolerance preserved for legacy pre-ISSUE-14 keys.
+- **ISSUE 21 ✅ pg audit_log consumer** (v0.5.13, closed 2026-04-19 / PR #267)
+  - TASK 21.1 ✅ — `run_audit_log_writer` async consumer in `gadgetron-xaas::audit::writer` drains the `AuditWriter` mpsc and INSERTs each `AuditEntry` row into `audit_log` using the ISSUE 19 struct fields (`actor_user_id`, `actor_api_key_id`) plus the full column set. `init_audit_runtime` in `gadgetron-cli` takes `Option<PgPool>` — Some → spawn the pg writer, None → fall back to tracing-only legacy consumer. Two guards: (a) tracing line still fires for every event so harness log-scrapes (Gate 8b / 9b) keep matching — DB write is a side effect not a replacement; (b) skip pg INSERT when `entry.tenant_id == Uuid::nil()` — the `emit_auth_failure_audit` 401 path uses the nil sentinel and would violate `audit_log_tenant_id_fkey`. Harness Gate 7v.7 verifies persistence (`SELECT COUNT(*) FROM audit_log ≥ 1` after chat) + Bearer-caller `actor_api_key_id` non-NULL end-to-end. Harness 129 → 131 PASS.
+  - Query endpoint split out as ISSUE 22 (below) so each ISSUE does one job.
+- **ISSUE 22 ✅ admin audit_log query endpoint** (v0.5.14, closed 2026-04-19 / PR #269)
+  - TASK 22.1 ✅ — new `GET /api/v1/web/workbench/admin/audit/log` Management-scoped handler (`web/workbench.rs`). `?actor_user_id=<uuid>&since=<iso>&limit=<1..=500>` (default 100). `query_audit_log(pool, tenant_id, actor_user_id, since, limit)` in `gadgetron-xaas::audit::writer` uses 4 prepared-statement shapes (no dynamic SQL concat); tenant always pinned from ctx so cross-tenant reads are impossible regardless of query params. Response `{rows, returned}` with `AuditLogRow` projection mirroring schema + ISSUE 14 actor columns. Harness Gate 7v.8 pins shape + OpenAiCompat → 403. Harness 131 → 133 PASS.
+  - Follow-ups tracked separately (not blocking v1.0.0): pagination cursor for `> 500` rows, filter-by-status / model / request_id, `billing_events` user_id plumbing for per-user spend reports.
 
 Heavily cross-cuts `gadgetron-xaas` crate. Close → **tag `v1.0.0`**
 (first production-ready release — major bump because API stabilizes).

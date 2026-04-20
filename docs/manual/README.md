@@ -4,7 +4,7 @@ Gadgetron is a self-hosted Rust-native OpenAI-compatible gateway with optional P
 
 ## Source-of-truth scope
 
-This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.5.12` — three complete EPICs + ISSUE 11 + **ISSUE 12 closed at telemetry scope** + **ISSUE 14 (tenant self-service, PR #246 / 0.5.7)** + **ISSUE 15 TASK 15.1 (cookie-session login API, PR #248 / 0.5.8)** + **ISSUE 16 TASK 16.1 (unified Bearer-or-cookie auth middleware, PR #259 / 0.5.9)** + **ISSUE 17 TASK 17.1 (`ValidatedKey.user_id` plumbing, PR #260 / 0.5.10)** + **ISSUE 19 TASK 19.1 (`AuditEntry` actor fields structural, PR #262 / 0.5.11)** + **ISSUE 20 TASK 20.1 (`TenantContext` → `AuditEntry` plumbing, PR #263 / 0.5.12)** — see [auth.md §Cookie-session auth](auth.md).
+This manual is the **single source of truth for what trunk actually ships today** (workspace version `0.5.14` — three complete EPICs + ISSUE 11 + **ISSUE 12 closed at telemetry scope** + **ISSUE 14 (tenant self-service, PR #246 / 0.5.7)** + **ISSUE 15 TASK 15.1 (cookie-session login API, PR #248 / 0.5.8)** + **ISSUE 16 TASK 16.1 (unified Bearer-or-cookie auth middleware, PR #259 / 0.5.9)** + **ISSUE 17 TASK 17.1 (`ValidatedKey.user_id` plumbing, PR #260 / 0.5.10)** + **ISSUE 19 TASK 19.1 (`AuditEntry` actor fields structural, PR #262 / 0.5.11)** + **ISSUE 20 TASK 20.1 (`TenantContext` → `AuditEntry` plumbing, PR #263 / 0.5.12)** + **ISSUE 21 TASK 21.1 (pg `audit_log` consumer, PR #267 / 0.5.13)** + **ISSUE 22 TASK 22.1 (admin `GET /audit/log` query endpoint, PR #269 / 0.5.14)** — see [auth.md §Cookie-session auth](auth.md).
 **Historical context** — EPICs 1–3 (Phase 2 foundation) are all closed; EPIC 4 (Multi-tenant XaaS) is active, toward `v1.0.0`:
 
 - **EPIC 1** Workbench MVP — CLOSED `v0.3.0` (PR #208).
@@ -29,16 +29,17 @@ This manual is the **single source of truth for what trunk actually ships today*
 - **ISSUE 17** `ValidatedKey.user_id` plumbing ✅ (PR #260 / 0.5.10) — `ValidatedKey` gains `user_id: Option<Uuid>` populated by both auth paths (`PgKeyValidator::validate` SELECTs `api_keys.user_id`; cookie middleware populates from `session.user_id`). Downstream audit/billing/telemetry can attribute activity to users without an extra DB round-trip.
 - **ISSUE 19** `AuditEntry` actor fields structural ✅ (PR #262 / 0.5.11) — `AuditEntry` gains `actor_user_id: Option<Uuid>` + `actor_api_key_id: Option<Uuid>`. The 7 call sites (chat handler, stream_end_guard, auth-fail audit, scope-denial audit, test fixtures) default to `None`; populate-from-TenantContext is ISSUE 20, pg `audit_log` writer is ISSUE 21.
 - **ISSUE 20** TenantContext → AuditEntry plumbing ✅ (PR #263 / 0.5.12) — `TenantContext` gains `actor_user_id` + `actor_api_key_id` (both `Option<Uuid>`) populated by `tenant_context_middleware` from `ValidatedKey.user_id` and the non-nil `ValidatedKey.api_key_id` (cookie sessions → `None` via the `Uuid::nil()` sentinel from ISSUE 16; real API-key callers get `Some(key_id)`). Chat handler's 3 `AuditEntry` literals now read ctx fields. Remaining pg audit-log write plumbing is ISSUE 21.
+- **ISSUE 21** pg `audit_log` consumer ✅ (PR #267 / 0.5.13) — `run_audit_log_writer` async consumer spawned from `init_audit_runtime` drains the `AuditWriter` mpsc and INSERTs each `AuditEntry` into `audit_log` using the ISSUE 19/20 actor columns; tracing line still fires so harness log-scrapes stay intact; nil-tenant-id skip for the 401 auth-failure sentinel. Harness 129 → 131 PASS (Gate 7v.7).
+- **ISSUE 22** admin audit_log query endpoint ✅ (PR #269 / 0.5.14) — new `GET /api/v1/web/workbench/admin/audit/log` Management-scoped handler with optional `actor_user_id` + `since` + `limit ∈ [1, 500]` filters. Tenant always pinned from ctx. Harness 131 → 133 PASS (Gate 7v.8).
 
 **Remaining EPIC 4 work before `v1.0.0`**:
 
 - **ISSUE 18** ⏳ web UI login form (React/Tailwind in `gadgetron-web`).
-- **ISSUE 21** ⏳ pg `audit_log` consumer + `GET /admin/audit/log` query endpoint.
 - **Google OAuth** social login tracked separately post-ISSUE-18 on `project_multiuser_login_google`.
 
 **EPIC 4 quota pipeline** (end-to-end request flow): rate-limit check → pg cost check → dispatch → pg `record_post` (quota counter + billing_events ledger) → tenant introspection via `/quota/status` → rejections surface as structured 429 + `Retry-After: 60`.
 
-**EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. TASKs 12.3/12.4/12.5 + ISSUE 13 ship post-1.0 as patch / minor bumps once market pull justifies.
+**EPIC 4 close-for-1.0 formula**: ISSUE 11 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + core product surfaces (knowledge + Penny + bundle/plug + observability) meeting production bar. **Only ISSUE 18 (web UI login form) remains** on the multi-user track; TASKs 12.3/12.4/12.5 + ISSUE 13 ship post-1.0 as patch / minor bumps once market pull justifies.
 
 If a behaviour is described here, it exists in the binary you can `cargo build` from `main`.
 
