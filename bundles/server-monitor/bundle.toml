@@ -1,0 +1,103 @@
+# server-monitor — first-party bundle manifest.
+#
+# Exposes five workbench actions that map 1:1 onto the `server.*` Gadgets
+# registered by `plugins/plugin-server-monitor`. Install by pointing
+# `[web] bundles_dir = "bundles"` at the repo root (or by calling
+# `POST /api/v1/web/workbench/admin/bundles` with this file).
+#
+# Gadget wiring — each action is dispatched via `GadgetDispatcher` with
+# `source_kind = "gadget"`. The Rust provider (`ServerMonitorProvider`)
+# must be registered by the runtime for dispatch to succeed; without it,
+# the actions surface as 404 from the workbench.
+
+[bundle]
+id = "server-monitor"
+version = "0.1.0"
+
+allow_direct_actions = true
+
+# -- Views -----------------------------------------------------------------
+
+[[views]]
+id = "servers-dashboard"
+title = "Servers"
+owner_bundle = "server-monitor"
+source_kind = "activity"
+source_id = "server-monitor/recent"
+placement = "left_rail"
+renderer = "timeline"
+data_endpoint = "/api/v1/web/workbench/views/servers-dashboard/data"
+refresh_seconds = 5
+action_ids = ["server-add", "server-list", "server-remove", "server-info", "server-stats"]
+
+# -- Actions ---------------------------------------------------------------
+
+[[actions]]
+id = "server-add"
+title = "서버 등록"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.add"
+gadget_name = "server.add"
+placement = "center_main"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "새 host를 inventory에 등록합니다. password_bootstrap 모드일 때는 sudoers.d NOPASSWD + lm-sensors/DCGM 자동 설치."
+input_schema = { type = "object", properties = { host = { type = "string", minLength = 1, maxLength = 255 }, ssh_user = { type = "string", minLength = 1, maxLength = 64 }, ssh_port = { type = "integer", minimum = 1, maximum = 65535 }, auth_mode = { type = "string", enum = ["key_path", "key_paste", "password_bootstrap"] }, ssh_key_path = { type = "string" }, ssh_private_key = { type = "string" }, ssh_password = { type = "string" }, sudo_password = { type = "string" } }, required = ["host", "ssh_user", "auth_mode"], additionalProperties = false }
+
+[[actions]]
+id = "server-list"
+title = "서버 목록"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.list"
+gadget_name = "server.list"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "등록된 host 목록 + last_ok_at 타임스탬프."
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+
+[[actions]]
+id = "server-remove"
+title = "서버 삭제"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.remove"
+gadget_name = "server.remove"
+placement = "context_menu"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "inventory에서 host 삭제. key_paste/password_bootstrap 모드로 생성된 private key는 함께 제거."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" } }, required = ["id"], additionalProperties = false }
+
+[[actions]]
+id = "server-info"
+title = "서버 정보"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.info"
+gadget_name = "server.info"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "hostname/kernel/OS/CPU/RAM/GPU 모델 1회 스냅샷."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" } }, required = ["id"], additionalProperties = false }
+
+[[actions]]
+id = "server-stats"
+title = "서버 통계"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.stats"
+gadget_name = "server.stats"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "실시간 CPU/RAM/disk/temp/GPU/PSU 스냅샷. UI가 5초마다 폴링."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" } }, required = ["id"], additionalProperties = false }

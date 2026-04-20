@@ -1,0 +1,20 @@
+[package]
+name = "gadgetron-bundle-server-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Server-monitor bundle — SSH-based CPU/RAM/GPU/disk/temp/power telemetry for a fleet of Linux hosts"
+
+[dependencies]
+async-trait = { workspace = true }
+gadgetron-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs", "io-util", "rt", "macros", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

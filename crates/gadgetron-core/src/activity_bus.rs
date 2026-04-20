@@ -59,6 +59,11 @@ pub enum ActivityEvent {
         outcome: String,
         error_code: Option<String>,
         elapsed_ms: i64,
+        /// Truncated JSON of the request args (≤200 chars). `None` when
+        /// the handler emitting the event doesn't have args in scope
+        /// (approval resolves, legacy callsites).
+        #[serde(default)]
+        arguments_summary: Option<String>,
     },
     /// An approval was resolved (approve or deny). Emitted from the
     /// approval handler after `ApprovalStore::mark_*`.
@@ -90,6 +95,11 @@ pub enum ActivityEvent {
         error_code: Option<String>,
         elapsed_ms: i64,
         conversation_id: Option<String>,
+        /// Truncated JSON of the tool call input (≤200 chars). Lets
+        /// the evidence pane show *what* was asked, not just which
+        /// gadget was touched.
+        #[serde(default)]
+        arguments_summary: Option<String>,
     },
 }
 
@@ -231,6 +241,7 @@ mod tests {
             outcome: "success".into(),
             error_code: None,
             elapsed_ms: 12,
+            arguments_summary: None,
         };
         let p = ActivityEvent::ApprovalResolved {
             tenant_id: t,

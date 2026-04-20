@@ -1267,6 +1267,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gadgetron-bundle-server-monitor"
+version = "0.5.19"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gadgetron-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "gadgetron-cli"
 version = "0.5.19"
 dependencies = [
@@ -1275,6 +1290,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "gadgetron-bundle-server-monitor",
  "gadgetron-core",
  "gadgetron-gateway",
  "gadgetron-knowledge",

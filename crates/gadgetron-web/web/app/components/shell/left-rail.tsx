@@ -9,6 +9,7 @@ import {
   PanelLeft,
   FileText,
   Activity,
+  Server,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +21,7 @@ export type LeftRailTab =
   | "chat"
   | "wiki"
   | "dashboard"
+  | "servers"
   | "knowledge"
   | "bundles";
 
@@ -56,6 +58,13 @@ const NAV_ITEMS: NavItem[] = [
     href: "/dashboard",
   },
   {
+    id: "servers",
+    label: "Servers",
+    icon: <Server className="size-4" aria-hidden />,
+    functional: true,
+    href: "/servers",
+  },
+  {
     id: "knowledge",
     label: "Knowledge",
     icon: <BookOpen className="size-4" aria-hidden />,
@@ -76,6 +85,7 @@ function tabFromPathname(pathname: string | null): LeftRailTab {
   if (!pathname) return "chat";
   if (pathname.startsWith("/wiki")) return "wiki";
   if (pathname.startsWith("/dashboard")) return "dashboard";
+  if (pathname.startsWith("/servers")) return "servers";
   return "chat";
 }
 

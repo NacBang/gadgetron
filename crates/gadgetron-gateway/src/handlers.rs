@@ -565,6 +565,7 @@ pub async fn invoke_tool_handler(
         })
         .unwrap_or(AuditTier::Read);
 
+    let arguments_summary = crate::web::workbench::truncate_args_for_activity(&args_value);
     let started = std::time::Instant::now();
     let result = dispatcher.dispatch_gadget(&name, args_value).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -638,6 +639,7 @@ pub async fn invoke_tool_handler(
             claude_session_uuid: None,
             owner_id: Some(ctx.api_key_id.to_string()),
             tenant_id: Some(ctx.tenant_id.to_string()),
+            arguments_summary,
         });
     if billing_is_success {
         if let Some(pool) = state.pg_pool.clone() {

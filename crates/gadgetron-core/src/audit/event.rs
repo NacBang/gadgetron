@@ -83,6 +83,12 @@ pub enum GadgetAuditEvent {
         /// `owner_id` because a single tenant can have multiple owners
         /// (e.g., a team account with member users).
         tenant_id: Option<String>,
+        /// Truncated JSON of the tool-call arguments (≤200 chars).
+        /// Non-persisted; only used to enrich the live activity feed
+        /// so the evidence pane can show what was queried without
+        /// joining against `tool_audit_events`. `None` from legacy
+        /// callsites (tests, pre-EPIC 3 emitters).
+        arguments_summary: Option<String>,
     },
 }
 
@@ -262,6 +268,7 @@ mod tests {
             claude_session_uuid: None,
             owner_id: None,
             tenant_id: None,
+            arguments_summary: None,
         });
         // No panic, no side effect — success is defined by compile + run.
     }
@@ -282,6 +289,7 @@ mod tests {
             claude_session_uuid: Some("11111111-2222-3333-4444-555555555555".into()),
             owner_id: Some("_self".into()),
             tenant_id: Some("manycoresoft".into()),
+            arguments_summary: None,
         };
         match evt {
             GadgetAuditEvent::GadgetCallCompleted {

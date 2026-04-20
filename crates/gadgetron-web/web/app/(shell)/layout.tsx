@@ -6,6 +6,7 @@ import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { OpenAIChatTransport } from "../openai-transport";
 import { WorkbenchShell } from "../components/shell/workbench-shell";
 import { AuthProvider, useAuth } from "../lib/auth-context";
+import { EvidenceProvider } from "../lib/evidence-context";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Card, CardContent } from "../components/ui/card";
@@ -112,9 +113,11 @@ function AuthedShell({ children }: { children: ReactNode }) {
   if (!apiKey) return null;
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <WorkbenchShell>{children}</WorkbenchShell>
-    </AssistantRuntimeProvider>
+    <EvidenceProvider>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <WorkbenchShell>{children}</WorkbenchShell>
+      </AssistantRuntimeProvider>
+    </EvidenceProvider>
   );
 }
 

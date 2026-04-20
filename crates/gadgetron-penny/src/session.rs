@@ -352,16 +352,43 @@ fn emit_tool_audit_if_needed(
     conversation_id: Option<&str>,
     claude_session_uuid: Option<&str>,
 ) {
-    if let StreamJsonEvent::ToolUse { name, .. } = event {
-        let bare_name = name
-            .strip_prefix("mcp__knowledge__")
-            .unwrap_or(name.as_str());
-        let (tier, category) = match tool_metadata.get(bare_name) {
+    // Tool use arrives in two shapes on the stream-json wire:
+    //   1. Legacy top-level `StreamJsonEvent::ToolUse` — kept for
+    //      forward compat / older Claude Code versions.
+    //   2. Claude Code ≥2.1: inside `Assistant.message.content[]` as a
+    //      `ContentBlock::ToolUse`. This is the current hot path; the
+    //      legacy arm alone silently drops audits against CC 2.1+.
+    let calls: Vec<(&str, &serde_json::Value)> = match event {
+        StreamJsonEvent::ToolUse { name, input, .. } => vec![(name.as_str(), input)],
+        StreamJsonEvent::Assistant { message } => message
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                crate::stream::ContentBlock::ToolUse { name, input, .. } => {
+                    Some((name.as_str(), input))
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => return,
+    };
+    for (name, input) in calls {
+        // Claude Code sanitizes dots in MCP tool identifiers to
+        // underscores (`wiki.list` → `wiki_list` on the wire). Undo
+        // the rewrite before registry lookup so tier/category resolve
+        // instead of falling back to the "unknown" default.
+        let without_prefix = name.strip_prefix("mcp__knowledge__").unwrap_or(name);
+        let canonical = without_prefix.replace('_', ".");
+        let (tier, category) = match tool_metadata.get(canonical.as_str()) {
             Some(meta) => (meta.tier, meta.category.clone()),
-            None => (GadgetTier::Read, "unknown".to_string()),
+            None => match tool_metadata.get(without_prefix) {
+                Some(meta) => (meta.tier, meta.category.clone()),
+                None => (GadgetTier::Read, "unknown".to_string()),
+            },
         };
+        let arguments_summary = summarize_tool_input(input);
         audit_sink.send(GadgetAuditEvent::GadgetCallCompleted {
-            gadget_name: bare_name.to_string(),
+            gadget_name: canonical.clone(),
             tier,
             category,
             outcome: GadgetCallOutcome::Success,
@@ -370,7 +397,29 @@ fn emit_tool_audit_if_needed(
             claude_session_uuid: claude_session_uuid.map(|s| s.to_string()),
             owner_id: None,
             tenant_id: None,
+            arguments_summary,
         });
+    }
+}
+
+/// Render a tool-call input JSON into a short one-line preview for
+/// the evidence pane. Caps at 200 chars so the bus payload stays
+/// bounded regardless of how verbose the model's arguments get.
+fn summarize_tool_input(input: &serde_json::Value) -> Option<String> {
+    if input.is_null() {
+        return None;
+    }
+    let rendered = match input {
+        serde_json::Value::Object(map) if map.is_empty() => return None,
+        _ => serde_json::to_string(input).ok()?,
+    };
+    const MAX: usize = 200;
+    if rendered.chars().count() <= MAX {
+        Some(rendered)
+    } else {
+        let mut out: String = rendered.chars().take(MAX).collect();
+        out.push('…');
+        Some(out)
     }
 }
 
@@ -1021,6 +1070,7 @@ mod tests {
                 claude_session_uuid,
                 owner_id,
                 tenant_id,
+                arguments_summary,
             } => {
                 assert_eq!(gadget_name, "wiki.write");
                 assert_eq!(*tier, GadgetTier::Write);
@@ -1032,6 +1082,7 @@ mod tests {
                                                         // Type 1 Decision #1 regression lock — always None in P2A.
                 assert!(owner_id.is_none());
                 assert!(tenant_id.is_none());
+                assert!(arguments_summary.is_some());
             }
             #[allow(unreachable_patterns)]
             _ => panic!("unexpected GadgetAuditEvent variant"),

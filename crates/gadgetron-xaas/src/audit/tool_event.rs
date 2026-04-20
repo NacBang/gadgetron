@@ -203,6 +203,7 @@ fn gadget_audit_to_activity(event: &GadgetAuditEvent) -> Option<ActivityEvent> {
             elapsed_ms,
             conversation_id,
             tenant_id,
+            arguments_summary,
             ..
         } => {
             let (outcome_text, error_code) = match outcome {
@@ -224,6 +225,7 @@ fn gadget_audit_to_activity(event: &GadgetAuditEvent) -> Option<ActivityEvent> {
                 error_code,
                 elapsed_ms: *elapsed_ms as i64,
                 conversation_id: conversation_id.clone(),
+                arguments_summary: arguments_summary.clone(),
             })
         }
         #[allow(unreachable_patterns)]
@@ -377,6 +379,7 @@ async fn insert_gadget_event(pool: &PgPool, event: &GadgetAuditEvent) -> Result<
             claude_session_uuid,
             owner_id,
             tenant_id,
+            arguments_summary: _,
         } => {
             let (outcome_text, error_code) = match outcome {
                 GadgetCallOutcome::Success => ("success", None),
@@ -428,6 +431,7 @@ mod tests {
             claude_session_uuid: None,
             owner_id: None,
             tenant_id: None,
+            arguments_summary: None,
         }
     }
 
@@ -527,6 +531,7 @@ mod tests {
             claude_session_uuid: None,
             owner_id: Some(owner.to_string()),
             tenant_id: Some(tenant.to_string()),
+            arguments_summary: None,
         }
     }
 

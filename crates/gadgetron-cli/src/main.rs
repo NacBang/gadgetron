@@ -680,6 +680,20 @@ fn load_penny_registry_from_config(
         .register(Arc::new(provider))
         .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
 
+    // server-monitor bundle — inventory is lazy-created on first
+    // `server.add`. Registration is unconditional because the provider
+    // has no upstream config requirement. A `SshError` at this layer
+    // would only happen if `$HOME` is unreadable; we log and skip
+    // rather than aborting the whole serve path.
+    match gadgetron_bundle_server_monitor::ServerMonitorProvider::with_default_inventory() {
+        Ok(p) => builder
+            .register(Arc::new(p))
+            .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?,
+        Err(e) => {
+            tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")
+        }
+    }
+
     // Freeze against the operator's [agent] config so `dispatch()` can
     // enforce L3 defense-in-depth on any tool call that reaches this
     // registry, regardless of whether it is used in-process or via the
@@ -703,6 +717,17 @@ async fn load_penny_registry_from_config_for_gadget_serve(
     builder
         .register(Arc::new(provider))
         .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
+    // server-monitor bundle — same registration rationale as the main
+    // serve path (see `load_penny_registry_from_config`). Kept in sync
+    // so `gadgetron mcp serve` exposes the same tool surface.
+    match gadgetron_bundle_server_monitor::ServerMonitorProvider::with_default_inventory() {
+        Ok(p) => builder
+            .register(Arc::new(p))
+            .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?,
+        Err(e) => {
+            tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")
+        }
+    }
     Ok(Some(Arc::new(builder.freeze(agent_cfg))))
 }
 
@@ -1664,7 +1689,7 @@ fn build_workbench(
         None => Arc::new(action_svc_impl.with_billing_failures(billing_failures)),
     };
 
-    Some(Arc::new(GatewayWorkbenchService {
+    let svc = Arc::new(GatewayWorkbenchService {
         projection,
         actions: Some(action_svc),
         approval_store: Some(approval_store),
@@ -1672,7 +1697,28 @@ fn build_workbench(
         catalog_path,
         bundles_dir,
         bundle_signing,
-    }))
+    });
+    // Prime the catalog from `[web] bundles_dir` / `catalog_path` at
+    // startup so the operator doesn't have to SIGHUP / hit
+    // /admin/reload-catalog just to see their bundle.toml actions.
+    // A parse error at this stage is logged but non-fatal — seed_p2b
+    // stays live, matching the "don't take down the workbench on a
+    // bad edit" invariant documented on `perform_catalog_reload`.
+    match gadgetron_gateway::web::workbench::perform_catalog_reload(&svc) {
+        Ok(resp) => tracing::info!(
+            target: "workbench.admin",
+            action_count = resp.action_count,
+            view_count = resp.view_count,
+            source = %resp.source,
+            "catalog primed at startup"
+        ),
+        Err(e) => tracing::warn!(
+            target: "workbench.admin",
+            error = %format!("{e:?}"),
+            "startup catalog prime failed — falling back to seed_p2b"
+        ),
+    }
+    Some(svc)
 }
 
 /// Build the candidate capture plane, backed by Postgres when a pool is
