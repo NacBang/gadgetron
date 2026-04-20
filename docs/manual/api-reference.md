@@ -1533,6 +1533,83 @@ E2E Gate 7q.8 uninstalls a previously-installed bundle and verifies it no longer
 
 **Compose with reload.** Install + uninstall both leave the live `CatalogSnapshot` untouched. The typical operator workflow is: (1) `POST /admin/bundles` to stage, (2) `DELETE /admin/bundles/{old}` if replacing, (3) `POST /admin/reload-catalog` (or `kill -HUP <pid>`) to activate. This keeps the "snapshot swap" moment explicit — an accidental install never changes behaviour until the operator decides to reload.
 
+#### Bundle operator recipes (install → activate → verify → rollback)
+
+**Deploy a new bundle to production** (composite 5-step flow):
+
+```sh
+MGMT_KEY="gad_live_your_management_key"
+GAD="http://localhost:8080"
+
+# Stage 1: Install the manifest. Writes to disk, does NOT swap live catalog.
+BUNDLE_TOML=$(cat my-bundle.toml)
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/bundles" \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg t "$BUNDLE_TOML" '{bundle_toml: $t}')" | jq .
+# Response: {"installed":true,"bundle_id":"acme-ops","manifest_path":"...","reload_hint":"..."}
+
+# Stage 2: Verify the new bundle is on disk AND the discovery endpoint sees it.
+# (Optional — the install response already confirms manifest_path, but this
+#  cross-checks that `GET /admin/bundles` discovery agrees, catching a
+#  `bundles_dir` misconfiguration that would leave the file lying unfound.)
+curl -fsS "$GAD/api/v1/web/workbench/admin/bundles" \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  | jq '.bundles[] | select(.bundle.id == "acme-ops")'
+
+# Stage 3: Activate via reload. The live CatalogSnapshot swaps atomically.
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/reload-catalog" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq .
+# Response: {"reloaded":true,"action_count":N,"view_count":M,"source":"bundles_dir",
+#            "source_path":null,"bundles":[{id:"gadgetron-core",...},{id:"acme-ops",...}]}
+
+# Stage 4: Verify live catalog includes the new bundle's actions.
+# Cross-check reload response `action_count` against the live /actions listing
+# (same pattern as harness Gate 7q.1 — proves catalog + validators published
+#  together, no "swap happened but read path sees old pointer" regression).
+ACTIONS_FROM_RELOAD=$(curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/reload-catalog" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq .action_count)
+ACTIONS_LIVE=$(curl -fsS "$GAD/api/v1/web/workbench/actions" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq 'length')
+[ "$ACTIONS_FROM_RELOAD" = "$ACTIONS_LIVE" ] && echo "OK: catalog + read path in sync"
+
+# Stage 5 (if broken): Rollback by uninstall + reload.
+curl -fsS -X DELETE "$GAD/api/v1/web/workbench/admin/bundles/acme-ops" \
+  -H "Authorization: Bearer $MGMT_KEY"
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/reload-catalog" \
+  -H "Authorization: Bearer $MGMT_KEY" | jq .action_count
+# action_count returns to the pre-install baseline.
+```
+
+**Install a signed bundle** (when `[web.bundle_signing].require_signature = true`, see [`configuration.md §[web.bundle_signing]`](configuration.md#web-bundle_signing)):
+
+```sh
+BUNDLE_FILE=my-bundle.toml
+PRIV_KEY=signer.ed25519.key   # 32-byte raw Ed25519 private key
+
+# Sign the manifest (openssl or any Ed25519 library; the signature is over
+# the raw TOML bytes, NOT the JSON-wrapped request body)
+SIG_HEX=$(openssl pkeyutl -sign -inkey <(cat "$PRIV_KEY") \
+  -rawin -in "$BUNDLE_FILE" | xxd -p -c 9999)
+
+# Install with the signature attached
+curl -fsS -X POST "$GAD/api/v1/web/workbench/admin/bundles" \
+  -H "Authorization: Bearer $MGMT_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg t "$(cat $BUNDLE_FILE)" --arg s "$SIG_HEX" \
+    '{bundle_toml: $t, signature_hex: $s}')" | jq .
+```
+
+See the TASK 10.4 signature-policy matrix (6 branches) in this section above for when a signed install is accepted vs rejected.
+
+**Key invariants pinned by harness 7q gates**:
+
+- `reloaded == true` AND `action_count == GET /actions.length` (Gate 7q.1) — catalog + read path published together.
+- `.bundles[0].id == "gadgetron-core"` on `bundles_dir`-sourced reloads (Gate 7q.3) — first-party bundle rename trips the gate.
+- `GET /admin/bundles` `.bundles[0].action_count == 5` against the harness fixture (Gate 7q.4) — seed action-set drift detected.
+- `OpenAiCompat` → `403 scope_required` on every `/admin/*` endpoint (Gates 7q.2 / 7q.5) — scope isolation from workbench subtree.
+- Install with `id = "../etc/passwd"` → `4xx config_error` BEFORE any disk write (Gate 7q.7) — `validate_bundle_id()` path-traversal guard.
+
 ---
 
 ### GET /api/v1/web/workbench/admin/billing/events
