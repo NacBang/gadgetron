@@ -119,25 +119,15 @@ pub type KnowledgeResult<T> = std::result::Result<T, GadgetronError>;
 /// materialises.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AuthenticatedContext {
-    /// **LEGACY — api_key_id placeholder.** Populated at the gateway
-    /// boundary with `ctx.api_key_id`, NOT the owning user's real id.
-    /// This field predates the multi-user ACL layer (ISSUE 14 TASK 14.1)
-    /// and continues to exist as an api_key_id placeholder for
-    /// backward compatibility with the audit sink payload types
-    /// (`ActionAuditEvent::*.actor_user_id`).
-    ///
-    /// **DO NOT READ for new user-identity logic.** Use
-    /// [`real_user_id`](Self::real_user_id) which carries the real
-    /// user id (`ValidatedKey.user_id` → `TenantContext.actor_user_id`)
-    /// when available. ISSUE 25 tracks renaming this field to
-    /// `api_key_id` and fixing the audit_log contamination it
-    /// causes today.
+    /// The API key id that authenticated this request. Populated at
+    /// the gateway boundary with `TenantContext.api_key_id`. This is
+    /// NOT a user id — the field was previously named `user_id` (as
+    /// an api_key_id placeholder pre-multi-user); ISSUE 25 renamed
+    /// it to match its actual semantic. See `real_user_id` for the
+    /// owning-user identity.
     ///
     /// `Uuid::nil()` for system / background operations.
-    // TODO(ISSUE-25): rename to `api_key_id` + audit every read for
-    // api_key_id-vs-user_id semantics before promoting real_user_id
-    // to the canonical field.
-    pub user_id: uuid::Uuid,
+    pub api_key_id: uuid::Uuid,
     /// The tenant scope the action runs against. `Uuid::nil()` for
     /// system / background operations.
     pub tenant_id: uuid::Uuid,
@@ -148,11 +138,14 @@ pub struct AuthenticatedContext {
     ///   * system / background operations (`AuthenticatedContext::system()`)
     ///   * legacy API keys pre-dating the ISSUE 14 TASK 14.1
     ///     `api_keys.user_id` backfill
-    ///   * any path that hasn't been updated to populate this field
     ///
-    /// **Prefer this over `user_id` for billing / audit attribution**
-    /// so rows do not get contaminated with api_key_ids typed as
-    /// user_ids. See ISSUE 23 security review for the motivation.
+    /// **Prefer this over `api_key_id` for billing / audit
+    /// attribution** so rows do not get contaminated with api_key_ids
+    /// typed as user_ids. See ISSUE 23 security review for the
+    /// motivation and ISSUE 24 for the billing_events population.
+    /// Audit sinks that still need a non-NULL user_id should use
+    /// `actor.real_user_id.unwrap_or(actor.api_key_id)` as the
+    /// documented transition fallback.
     pub real_user_id: Option<uuid::Uuid>,
 }
 
@@ -164,7 +157,7 @@ impl AuthenticatedContext {
     /// is an alias.
     pub const fn system() -> Self {
         Self {
-            user_id: uuid::Uuid::nil(),
+            api_key_id: uuid::Uuid::nil(),
             tenant_id: uuid::Uuid::nil(),
             real_user_id: None,
         }
@@ -1118,15 +1111,15 @@ mod tests {
 
     #[test]
     fn authenticated_context_round_trips_populated_identity() {
-        let user = uuid::Uuid::new_v4();
+        let api_key = uuid::Uuid::new_v4();
         let tenant = uuid::Uuid::new_v4();
         let real_user = uuid::Uuid::new_v4();
         let ctx = AuthenticatedContext {
-            user_id: user,
+            api_key_id: api_key,
             tenant_id: tenant,
             real_user_id: Some(real_user),
         };
-        assert_eq!(ctx.user_id, user);
+        assert_eq!(ctx.api_key_id, api_key);
         assert_eq!(ctx.tenant_id, tenant);
         assert_eq!(ctx.real_user_id, Some(real_user));
         // Clone/Copy: the struct is Copy, so no borrow issues in loops.
@@ -1138,9 +1131,9 @@ mod tests {
     fn authenticated_context_system_sentinel_has_nil_ids() {
         let ctx = AuthenticatedContext::system();
         assert_eq!(
-            ctx.user_id,
+            ctx.api_key_id,
             uuid::Uuid::nil(),
-            "system() must carry nil user_id (legacy placeholder)"
+            "system() must carry nil api_key_id"
         );
         assert_eq!(
             ctx.tenant_id,

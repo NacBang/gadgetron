@@ -69,7 +69,7 @@ pub async fn capture_chat_completion(
     };
 
     let actor = AuthenticatedContext {
-        user_id: actor_user_id,
+        api_key_id: actor_user_id,
         tenant_id,
         // activity_capture receives actor_user_id as api_key_id
         // placeholder (see handlers.rs:271 `ctx.api_key_id`
@@ -147,7 +147,7 @@ pub async fn capture_chat_completion_error(
     };
 
     let actor = AuthenticatedContext {
-        user_id: actor_user_id,
+        api_key_id: actor_user_id,
         tenant_id,
         // activity_capture receives actor_user_id as api_key_id
         // placeholder (see handlers.rs:271 `ctx.api_key_id`

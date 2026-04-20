@@ -1,6 +1,6 @@
 # Gadgetron roadmap — EPIC / ISSUE / TASK
 
-**Current version: 0.5.16** (post-ISSUE 24 close — chat + action billing rows now populate actor_user_id via QuotaToken.user_id + AuthenticatedContext.real_user_id plumbing)
+**Current version: 0.5.17** (post-ISSUE 25 close — AuthenticatedContext.user_id renamed to api_key_id; action audit sinks emit real_user_id instead of api_key_id placeholder, closing the audit_log contamination flagged by ISSUE 23 security review)
 
 This document is the canonical plan for what ships next, how it breaks down,
 and how versions move as work completes. Keep it up to date as ISSUEs land —

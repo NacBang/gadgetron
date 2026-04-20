@@ -506,9 +506,7 @@ pub async fn approve_action(
         ))
     })?;
     let actor = AuthenticatedContext {
-        // Legacy api_key_id placeholder for backward compat with the
-        // audit sink event types (ISSUE 25 will rename this).
-        user_id: ctx.api_key_id,
+        api_key_id: ctx.api_key_id,
         tenant_id: ctx.tenant_id,
         // ISSUE 24: real owning user id from ValidatedKey.user_id
         // via TenantContext.actor_user_id. Some(..) for real users
@@ -529,7 +527,10 @@ pub async fn approve_action(
             approval_id: approved.id,
             action_id: approved.action_id.clone(),
             state: approved.state.as_str().to_string(),
-            resolved_by_user_id: approved.resolved_by_user_id.unwrap_or(actor.user_id),
+            resolved_by_user_id: approved
+                .resolved_by_user_id
+                .or(actor.real_user_id)
+                .unwrap_or(actor.api_key_id),
         },
     );
     let action_id = approved.action_id.clone();
@@ -558,9 +559,7 @@ pub async fn deny_action(
         ))
     })?;
     let actor = AuthenticatedContext {
-        // Legacy api_key_id placeholder for backward compat with the
-        // audit sink event types (ISSUE 25 will rename this).
-        user_id: ctx.api_key_id,
+        api_key_id: ctx.api_key_id,
         tenant_id: ctx.tenant_id,
         // ISSUE 24: real owning user id from ValidatedKey.user_id
         // via TenantContext.actor_user_id. Some(..) for real users
@@ -578,7 +577,10 @@ pub async fn deny_action(
             approval_id: denied.id,
             action_id: denied.action_id.clone(),
             state: denied.state.as_str().to_string(),
-            resolved_by_user_id: denied.resolved_by_user_id.unwrap_or(actor.user_id),
+            resolved_by_user_id: denied
+                .resolved_by_user_id
+                .or(actor.real_user_id)
+                .unwrap_or(actor.api_key_id),
         },
     );
     Ok(Json(DenyApprovalResponse {
@@ -1441,12 +1443,10 @@ pub async fn invoke_action(
     })?;
     // Drift-fix follow-up to PR 7: build a real AuthenticatedContext
     // from the authenticated request instead of the old system sentinel.
-    // `actor.user_id = api_key_id` is the placeholder identity until a
+    // `actor.api_key_id` is the placeholder identity until a
     // real user table lands; `actor.tenant_id` is the real tenant.
     let actor = AuthenticatedContext {
-        // Legacy api_key_id placeholder for backward compat with the
-        // audit sink event types (ISSUE 25 will rename this).
-        user_id: ctx.api_key_id,
+        api_key_id: ctx.api_key_id,
         tenant_id: ctx.tenant_id,
         // ISSUE 24: real owning user id from ValidatedKey.user_id
         // via TenantContext.actor_user_id. Some(..) for real users

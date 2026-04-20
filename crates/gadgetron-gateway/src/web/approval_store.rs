@@ -76,7 +76,8 @@ impl ApprovalStore for InMemoryApprovalStore {
         }
         entry.state = ApprovalState::Approved;
         entry.resolved_at = Some(chrono::Utc::now());
-        entry.resolved_by_user_id = Some(approver.user_id);
+        // ISSUE 25: real user preferred; api_key_id fallback for legacy keys.
+        entry.resolved_by_user_id = Some(approver.real_user_id.unwrap_or(approver.api_key_id));
         Ok(entry.clone())
     }
 
@@ -98,7 +99,8 @@ impl ApprovalStore for InMemoryApprovalStore {
         }
         entry.state = ApprovalState::Denied;
         entry.resolved_at = Some(chrono::Utc::now());
-        entry.resolved_by_user_id = Some(approver.user_id);
+        // ISSUE 25: real user preferred; api_key_id fallback for legacy keys.
+        entry.resolved_by_user_id = Some(approver.real_user_id.unwrap_or(approver.api_key_id));
         entry.deny_reason = reason;
         Ok(entry.clone())
     }
@@ -151,7 +153,10 @@ mod tests {
 
         let updated = store.mark_approved(id, &actor).await.unwrap();
         assert_eq!(updated.state, ApprovalState::Approved);
-        assert_eq!(updated.resolved_by_user_id, Some(actor.user_id));
+        assert_eq!(
+            updated.resolved_by_user_id,
+            Some(actor.real_user_id.unwrap_or(actor.api_key_id))
+        );
         assert!(updated.resolved_at.is_some());
     }
 

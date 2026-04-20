@@ -2538,6 +2538,25 @@ else
   fail "audit_log actor_api_key_id NULL for all rows — ISSUE 20 plumbing regressed" ""
 fi
 
+# ISSUE 25 guard: audit_log rows' actor_user_id column must carry the
+# real user id (ValidatedKey.user_id plumbed through TenantContext →
+# AuditEntry), NOT the api_key_id placeholder. Pre-ISSUE-25 the
+# chat handler wrote real user via ISSUE 20 plumbing, but action
+# audit sinks emitted `actor.user_id` (api_key_id placeholder) —
+# ISSUE 25 flipped those to `actor.real_user_id.unwrap_or(
+# actor.api_key_id)` so real-user rows dominate. Harness traffic
+# is single-user; expect at least 1 row with `actor_user_id =
+# real_user_id` (i.e., non-nil + matches the test key's owner).
+AUDIT_REAL_USER_COUNT="$(docker compose -f "$HARNESS_DIR/docker-compose.yml" \
+  exec -T postgres psql -qt -U gadgetron -d gadgetron_e2e \
+  -c 'SELECT COUNT(*)::int FROM audit_log WHERE actor_user_id IS NOT NULL' \
+  2>/dev/null | tr -d '[:space:]' || echo -1)"
+if [ "${AUDIT_REAL_USER_COUNT:-0}" -ge 1 ]; then
+  pass "audit_log actor_user_id populated (count=${AUDIT_REAL_USER_COUNT}, ISSUE 25 real-user threading)"
+else
+  fail "audit_log actor_user_id NULL for all rows — ISSUE 25 real_user_id plumbing regressed" ""
+fi
+
 # -------------------------------------------------------------------
 # Gate 7v.8 — admin/audit/log query endpoint (ISSUE 22)
 # -------------------------------------------------------------------
