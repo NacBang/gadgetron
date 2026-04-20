@@ -120,10 +120,13 @@ pub async fn chat_completions_handler(
         }
     };
 
-    // 2. Pre-flight quota check.
+    // 2. Pre-flight quota check. ISSUE 24 threads `ctx.actor_user_id`
+    // into the token so `PgQuotaEnforcer::record_post` can populate
+    // `billing_events.actor_user_id` for chat rows (matching the
+    // tool + action paths' per-user attribution).
     let quota_token = match state
         .quota_enforcer
-        .check_pre(ctx.tenant_id, &ctx.quota_snapshot)
+        .check_pre(ctx.tenant_id, ctx.actor_user_id, &ctx.quota_snapshot)
         .await
     {
         Ok(t) => t,

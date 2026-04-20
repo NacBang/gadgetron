@@ -71,6 +71,13 @@ pub async fn capture_chat_completion(
     let actor = AuthenticatedContext {
         user_id: actor_user_id,
         tenant_id,
+        // activity_capture receives actor_user_id as api_key_id
+        // placeholder (see handlers.rs:271 `ctx.api_key_id`
+        // assignment). Threading real_user_id through this fn's
+        // signature is orthogonal to ISSUE 24 billing scope —
+        // deferred to a future issue when activity events need
+        // real-user attribution.
+        real_user_id: None,
     };
     if let Err(e) = coordinator.capture_action(&actor, event, vec![]).await {
         tracing::warn!(
@@ -142,6 +149,13 @@ pub async fn capture_chat_completion_error(
     let actor = AuthenticatedContext {
         user_id: actor_user_id,
         tenant_id,
+        // activity_capture receives actor_user_id as api_key_id
+        // placeholder (see handlers.rs:271 `ctx.api_key_id`
+        // assignment). Threading real_user_id through this fn's
+        // signature is orthogonal to ISSUE 24 billing scope —
+        // deferred to a future issue when activity events need
+        // real-user attribution.
+        real_user_id: None,
     };
     if let Err(e) = coordinator.capture_action(&actor, event, vec![]).await {
         tracing::warn!(

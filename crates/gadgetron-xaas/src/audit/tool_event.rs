@@ -178,9 +178,15 @@ fn gadget_audit_to_captured(event: &GadgetAuditEvent) -> Option<CapturedActivity
 }
 
 fn captured_actor(ev: &CapturedActivityEvent) -> AuthenticatedContext {
+    // `ev.actor_user_id` is the CapturedActivityEvent's snapshot of
+    // the api_key_id (matches the pre-ISSUE-24 legacy semantic of
+    // `AuthenticatedContext.user_id`). `real_user_id` stays None
+    // here — CapturedActivityEvent doesn't carry the owning user_id
+    // as a separate field yet; adding it is ISSUE 25 scope.
     AuthenticatedContext {
         user_id: ev.actor_user_id,
         tenant_id: ev.tenant_id,
+        real_user_id: None,
     }
 }
 

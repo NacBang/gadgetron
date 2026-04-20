@@ -473,6 +473,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             actor_tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
+            actor.real_user_id,
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -573,6 +574,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             actor.tenant_id,
             audit_event_id,
             descriptor.gadget_name.clone(),
+            actor.real_user_id,
         );
         let result = WorkbenchActionResult {
             status: "ok".into(),
@@ -594,22 +596,20 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
 /// (TASK 12.3) applies per-kind pricing at query time. No-op when
 /// `pool` is `None` (test / no-DB deploys).
 ///
-/// **`actor_user_id` is always NULL here, intentionally.** ISSUE 23's
-/// security review flipped this from `Some(actor.user_id)` to `None`
-/// because `AuthenticatedContext.user_id` at the workbench layer is
-/// sourced from `ctx.api_key_id` (see `workbench.rs:~509/554/1433`),
-/// so writing `Some(actor.user_id)` would contaminate
-/// `billing_events.actor_user_id` with api_key_ids indistinguishable
-/// from real users.id at query time. ISSUE 24 adds a real `user_id`
-/// field to `AuthenticatedContext` and will reintroduce an
-/// `actor_user_id` parameter here sourced from `actor.real_user_id`.
-/// Until then, both call sites get the typed-constructor's default
-/// NULL via `BillingEventInsert::action(..)` with no `.with_actor_user`.
+/// **`actor_user_id` sourcing (ISSUE 24).** Callers pass
+/// `actor.real_user_id` — NOT `actor.user_id`. The legacy `user_id`
+/// field on `AuthenticatedContext` is still an api_key_id
+/// placeholder (see its rustdoc + ISSUE 25 rename tracker), so
+/// sourcing it here would re-introduce the type-confusion bug
+/// ISSUE 23 security review flagged. `real_user_id` carries the
+/// real user id via `TenantContext.actor_user_id` plumbing, `None`
+/// for legacy api_keys pre-ISSUE-14 backfill.
 fn emit_action_billing(
     pool: Option<&sqlx::PgPool>,
     tenant_id: Uuid,
     audit_event_id: Uuid,
     gadget_name: Option<String>,
+    actor_user_id: Option<Uuid>,
 ) {
     let Some(pool) = pool else {
         return;
@@ -622,7 +622,8 @@ fn emit_action_billing(
                 tenant_id,
                 audit_event_id,
                 gadget_name,
-            ),
+            )
+            .with_actor_user(actor_user_id),
         )
         .await
         {

@@ -119,26 +119,54 @@ pub type KnowledgeResult<T> = std::result::Result<T, GadgetronError>;
 /// materialises.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AuthenticatedContext {
-    /// The acting user's identity. `Uuid::nil()` for system / background
-    /// operations. Populated from [`gadgetron_core::context::TenantContext`]
-    /// at the gateway boundary (eventually — the initial promotion
-    /// threads `api_key_id` here as a placeholder until a real user
-    /// table lands).
+    /// **LEGACY — api_key_id placeholder.** Populated at the gateway
+    /// boundary with `ctx.api_key_id`, NOT the owning user's real id.
+    /// This field predates the multi-user ACL layer (ISSUE 14 TASK 14.1)
+    /// and continues to exist as an api_key_id placeholder for
+    /// backward compatibility with the audit sink payload types
+    /// (`ActionAuditEvent::*.actor_user_id`).
+    ///
+    /// **DO NOT READ for new user-identity logic.** Use
+    /// [`real_user_id`](Self::real_user_id) which carries the real
+    /// user id (`ValidatedKey.user_id` → `TenantContext.actor_user_id`)
+    /// when available. ISSUE 25 tracks renaming this field to
+    /// `api_key_id` and fixing the audit_log contamination it
+    /// causes today.
+    ///
+    /// `Uuid::nil()` for system / background operations.
+    // TODO(ISSUE-25): rename to `api_key_id` + audit every read for
+    // api_key_id-vs-user_id semantics before promoting real_user_id
+    // to the canonical field.
     pub user_id: uuid::Uuid,
     /// The tenant scope the action runs against. `Uuid::nil()` for
     /// system / background operations.
     pub tenant_id: uuid::Uuid,
+    /// The owning user's real id (ISSUE 24). Populated at the gateway
+    /// boundary from [`gadgetron_core::context::TenantContext::actor_user_id`],
+    /// which was in turn populated by the auth middleware from
+    /// `ValidatedKey.user_id` (ISSUE 17). `None` for:
+    ///   * system / background operations (`AuthenticatedContext::system()`)
+    ///   * legacy API keys pre-dating the ISSUE 14 TASK 14.1
+    ///     `api_keys.user_id` backfill
+    ///   * any path that hasn't been updated to populate this field
+    ///
+    /// **Prefer this over `user_id` for billing / audit attribution**
+    /// so rows do not get contaminated with api_key_ids typed as
+    /// user_ids. See ISSUE 23 security review for the motivation.
+    pub real_user_id: Option<uuid::Uuid>,
 }
 
 impl AuthenticatedContext {
-    /// Well-known system / background-operation sentinel — both identity
-    /// fields set to `Uuid::nil()`. Use this at internal call sites
-    /// (wiki indexing, semantic rebuild, ingest pipelines) where there
-    /// is no authenticated caller. `Default::default()` is an alias.
+    /// Well-known system / background-operation sentinel — identity
+    /// fields set to `Uuid::nil()` / `None`. Use this at internal
+    /// call sites (wiki indexing, semantic rebuild, ingest pipelines)
+    /// where there is no authenticated caller. `Default::default()`
+    /// is an alias.
     pub const fn system() -> Self {
         Self {
             user_id: uuid::Uuid::nil(),
             tenant_id: uuid::Uuid::nil(),
+            real_user_id: None,
         }
     }
 }
@@ -1072,35 +1100,68 @@ mod tests {
     // ---- AuthenticatedContext identity invariants (drift-fix PR 7) ----
 
     #[test]
-    fn authenticated_context_carries_user_and_tenant_identity() {
-        // Post-PR-7 (doc-10 promotion): the struct now carries two Uuid
-        // fields. Size should be exactly 32 bytes (16 + 16) on every
-        // supported platform — uuid::Uuid is a transparent [u8; 16].
-        assert_eq!(std::mem::size_of::<AuthenticatedContext>(), 32);
-    }
-
-    #[test]
-    fn authenticated_context_system_sentinel_has_nil_fields() {
-        let sys = AuthenticatedContext::system();
-        assert_eq!(sys.user_id, uuid::Uuid::nil());
-        assert_eq!(sys.tenant_id, uuid::Uuid::nil());
-        // Default is the same as `system()` — keeps mechanical callsites
-        // (`AuthenticatedContext::default()`) semantically identical.
-        assert_eq!(AuthenticatedContext::default(), sys);
+    fn authenticated_context_carries_user_tenant_and_real_user_identity() {
+        // ISSUE 24 added `real_user_id: Option<Uuid>`. Layout:
+        //   user_id:      Uuid          = 16 bytes
+        //   tenant_id:    Uuid          = 16 bytes
+        //   real_user_id: Option<Uuid>  = 17 bytes (16 payload +
+        //                                   1 discriminant; no padding
+        //                                   because Uuid is
+        //                                   `#[repr(transparent)] [u8; 16]`
+        //                                   with align=1)
+        // Total: 49 bytes. Pin it so a future field-reorder or
+        // alignment shift is caught — the struct is `Copy` + passed
+        // by value through hot paths, so size growth is semantically
+        // meaningful.
+        assert_eq!(std::mem::size_of::<AuthenticatedContext>(), 49);
     }
 
     #[test]
     fn authenticated_context_round_trips_populated_identity() {
         let user = uuid::Uuid::new_v4();
         let tenant = uuid::Uuid::new_v4();
+        let real_user = uuid::Uuid::new_v4();
         let ctx = AuthenticatedContext {
             user_id: user,
             tenant_id: tenant,
+            real_user_id: Some(real_user),
         };
         assert_eq!(ctx.user_id, user);
         assert_eq!(ctx.tenant_id, tenant);
+        assert_eq!(ctx.real_user_id, Some(real_user));
         // Clone/Copy: the struct is Copy, so no borrow issues in loops.
         let clone = ctx;
         assert_eq!(clone, ctx);
+    }
+
+    #[test]
+    fn authenticated_context_system_sentinel_has_nil_ids() {
+        let ctx = AuthenticatedContext::system();
+        assert_eq!(
+            ctx.user_id,
+            uuid::Uuid::nil(),
+            "system() must carry nil user_id (legacy placeholder)"
+        );
+        assert_eq!(
+            ctx.tenant_id,
+            uuid::Uuid::nil(),
+            "system() must carry nil tenant_id"
+        );
+        assert_eq!(
+            ctx.real_user_id, None,
+            "system() has no real user — must be None"
+        );
+    }
+
+    #[test]
+    fn authenticated_context_default_equals_system() {
+        // `Default` is declared alongside `system()` as a compile-time
+        // alias (see struct-level doc). Lock it down: changing `system()`
+        // without changing `Default` (or vice-versa) silently divides
+        // consumers of the two spellings.
+        assert_eq!(
+            AuthenticatedContext::default(),
+            AuthenticatedContext::system()
+        );
     }
 }

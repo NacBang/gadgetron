@@ -14,6 +14,7 @@ impl QuotaEnforcer for ExhaustedQuotaEnforcer {
     async fn check_pre(
         &self,
         tenant_id: Uuid,
+        _user_id: Option<Uuid>,
         _snapshot: &QuotaSnapshot,
     ) -> Result<QuotaToken, GadgetronError> {
         Err(GadgetronError::QuotaExceeded { tenant_id })
