@@ -602,13 +602,21 @@ CREATE TABLE IF NOT EXISTS billing_events (
     cost_cents        BIGINT       NOT NULL,
     model             TEXT,
     provider          TEXT,
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- ISSUE 23 / PR #271 / v0.5.15 — per-user attribution. Nullable,
+    -- no FK to users(id) (see migration comment for the rationale:
+    -- heterogeneous caller sources + best-effort telemetry trade-off).
+    actor_user_id     UUID
 );
 
 CREATE INDEX IF NOT EXISTS billing_events_tenant_created_idx
     ON billing_events (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS billing_events_kind_created_idx
     ON billing_events (event_kind, created_at DESC);
+-- ISSUE 23: tenant-first composite to force per-user spend queries
+-- to pin `tenant_id` (cross-tenant leakage defense).
+CREATE INDEX IF NOT EXISTS billing_events_tenant_actor_user_idx
+    ON billing_events (tenant_id, actor_user_id, created_at DESC);
 ```
 
 **설계 결정**:
@@ -630,6 +638,14 @@ let ins = crate::billing::insert_billing_event(
     crate::billing::BillingEventKind::Chat,
     actual_cost_cents,
     None, None, None, // source_event_id / model / provider — TASK 12.2
+    None,             // actor_user_id — ISSUE 23 passes None from chat path
+                      // because QuotaToken doesn't thread user_id yet.
+                      // ISSUE 24 adds `user_id: Option<Uuid>` to
+                      // `QuotaToken` and sources it from
+                      // `ctx.actor_user_id`; tool + action paths populate
+                      // today (tool via `ctx.actor_user_id`, action will
+                      // populate once `AuthenticatedContext` carries a
+                      // real user id).
 ).await;
 if let Err(e) = ins {
     tracing::warn!(target: "billing", tenant_id = %token.tenant_id, error = %e,
@@ -641,7 +657,15 @@ if let Err(e) = ins {
 
 **Public read endpoint**. `GET /api/v1/web/workbench/admin/billing/events` — Management scope (OpenAiCompat → 403 via `scope_guard_middleware`). 핸들러 `list_billing_events` 가 `ctx.tenant_id` 로 WHERE 를 고정하고, query param 은 `since` (ISO-8601 lower bound) + `limit` (1..=500, default 100) 만 받음. `event_kind` 필터는 TASK 12.2 에서 추가 예정. Cross-tenant read 는 설계상 불가능 — query param 으로 `tenant_id` 오버라이드 못함. Response shape 과 운영 레시피는 [`manual/api-reference.md §GET /api/v1/web/workbench/admin/billing/events`](../manual/api-reference.md) 를 authoritative 로 참고.
 
-**Harness 커버리지**. Gate 7k.6: 비-스트리밍 chat 직후 짧은 sleep 후 `/admin/billing/events?limit=5` 를 poll 해서 `.events[] | select(.event_kind == "chat") | length >= 1` 을 assert. `record_post` → `insert_billing_event` write path 가 harness 의 기본 `PgQuotaEnforcer` 설정에서 실제로 persist 되는지 end-to-end 증명.
+**Harness 커버리지**. Gate 7k.6: 비-스트리밍 chat 직후 짧은 sleep 후 `/admin/billing/events?limit=5` 를 poll 해서 `.events[] | select(.event_kind == "chat") | length >= 1` 을 assert. `record_post` → `insert_billing_event` write path 가 harness 의 기본 `PgQuotaEnforcer` 설정에서 실제로 persist 되는지 end-to-end 증명. Gate 7k.6b (ISSUE 23 / PR #271) 는 추가로 per-kind `actor_user_id` population contract 를 직접 Postgres query 로 assert: `chat IS NULL` (pre-ISSUE-24) + `tool IS NOT NULL` (실제 ValidatedKey.user_id 가 threading 됨) + `action IS NULL` (AuthenticatedContext.user_id 가 api_key_id placeholder 라 pre-ISSUE-24 에 NULL 선택).
+
+**ISSUE 23 per-user attribution 보강 (PR #271 / v0.5.15)**. 원장이 `actor_user_id` 를 운반하게 됨으로써, 운영자가 `/admin/billing/events` 또는 직접 SQL 로 per-user 지출 리포트를 audit_log 에 JOIN 하지 않고 만들 수 있다. 3 call site 의 null 규약:
+
+- **chat** (`PgQuotaEnforcer::record_post`, 이 §5.8): `None` — `QuotaToken` 이 아직 `user_id` 를 운반하지 않음 (ISSUE 24 확장 예정).
+- **tool** (`handlers.rs` tool billing emission): `Some(ctx.actor_user_id)` — `TenantContext` 가 middleware 에서 `ValidatedKey.user_id` 를 이미 운반.
+- **action** (`action_service::emit_action_billing`): `None` — `AuthenticatedContext.user_id` 가 workbench 레이어에서 `ctx.api_key_id` placeholder 에서 빌드됨 (legacy). Security review 가 `api_key_id` 를 `actor_user_id` 컬럼에 쓰면 audit 에서 type-confusion 버그가 됨을 flag 해 pre-publish 에 `None` 으로 반전. ISSUE 24 가 `AuthenticatedContext` 에 `real_user_id` 필드를 추가해 이 경로도 populate 하도록 확장.
+
+FK 가 없는 이유는 migration comment 에 명시: heterogeneous caller 로 인한 silent insert failure 위험 회피 (best-effort telemetry). 운영자 reconciliation 쿼리는 read time 에 `LEFT JOIN users(id) ON ... AND b.tenant_id = u.tenant_id` 로 병합하면 된다. 실제 per-user 지출 SQL template 은 [`manual/api-reference.md §Per-user spend report`](../manual/api-reference.md) 참고.
 
 **Design reference**. STRIDE threat model, SQL 스키마, trait 시그니처, reconciliation 계획: [`docs/design/xaas/phase2-billing.md`](../design/xaas/phase2-billing.md).
 
