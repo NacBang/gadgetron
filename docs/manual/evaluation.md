@@ -121,3 +121,199 @@ python3 eval/run_eval.py --no-report              # 리포트 파일 생략
 - 평가는 실제 Claude Code 서브프로세스를 띄우므로 Penny 전체 파이프라인
   (MCP stdio, SearXNG 라운드트립 포함)의 진짜 latency를 측정합니다.
   8 시나리오 전체가 로컬 맥북에서 1분대에 끝나는 것이 일반적입니다 (정확한 wall-clock은 네트워크·SearXNG 응답 시간에 따라 변동).
+
+---
+
+## CI 연동
+
+`run_eval.py` 는 regression 발생 시 exit code `1` 로 종료하므로 CI 게이트에 그대로 꽂을 수 있습니다. 아래 recipes 는 자주 쓰는 CI 플랫폼별 최소 구성입니다 — 각자의 secret 저장소 + runner 환경에 맞춰 조정하십시오.
+
+### GitHub Actions
+
+```yaml
+# .github/workflows/penny-eval.yml
+name: Penny Eval
+
+on:
+  pull_request:
+    paths:
+      - 'crates/gadgetron-penny/**'
+      - 'crates/gadgetron-knowledge/**'
+      - 'eval/**'
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    services:
+      searxng:
+        image: searxng/searxng:latest
+        ports: ['8888:8080']
+        env:
+          # minimal settings baked into the public image; adequate
+          # for the `web.search` scenarios.
+          INSTANCE_NAME: gadgetron-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: '1.80' }
+
+      - name: Build gadgetron
+        run: ./demo.sh build
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | sh
+          claude --version
+
+      - name: Provision Claude Code credentials
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # CI-safe: switch [agent.brain] to external_anthropic so the
+          # harness doesn't need interactive `claude login`. This trades
+          # the default `claude_max` OAuth session (per-developer,
+          # interactive) for a flat API key that the secret manager
+          # supplies.
+          cat > gadgetron.toml <<'TOML'
+          [server]
+          bind = "127.0.0.1:8080"
+          [agent]
+          binary = "claude"
+          request_timeout_secs = 300
+          [agent.brain]
+          mode = "external_anthropic"
+          [knowledge]
+          wiki_path = "./.gadgetron/wiki"
+          wiki_autocommit = true
+          [knowledge.search]
+          searxng_url = "http://127.0.0.1:8888"
+          timeout_secs = 10
+          TOML
+          mkdir -p .gadgetron
+
+      - name: Start gadgetron
+        run: |
+          ./target/release/gadgetron serve --no-db \
+            --config gadgetron.toml > /tmp/gadgetron.log 2>&1 &
+          echo $! > /tmp/gadgetron.pid
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health && break
+            sleep 1
+          done
+
+      - name: Mint eval key
+        run: |
+          KEY=$(./target/release/gadgetron key create | grep -oE 'gad_live_[a-f0-9]+')
+          echo "GADGETRON_API_KEY=$KEY" >> $GITHUB_ENV
+
+      - name: Run eval
+        run: python3 eval/run_eval.py
+
+      - name: Capture logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gadgetron-logs
+          path: |
+            /tmp/gadgetron.log
+            eval/reports/*.md
+
+      - name: Stop gadgetron
+        if: always()
+        run: kill $(cat /tmp/gadgetron.pid) 2>/dev/null || true
+```
+
+**키 지점**:
+- `timeout-minutes: 15` — 로컬 1분대 대비 cold-start + CI runner 지연 여유. Claude Code 가 API 키 기반으로 요청을 보내기 시작하기까지 ~30초 관찰됨.
+- `external_anthropic` brain mode 로 전환 — CI runner 에는 `claude login` interactive OAuth 가 없으므로 `ANTHROPIC_API_KEY` 를 직접 주입하는 경로가 필요.
+- `--no-db` 는 eval 이 `[knowledge]` 만 요구하고 quota/audit 영속성은 요구하지 않기 때문. Production smoke 는 [installation.md §8 Post-deploy acceptance smoke test](installation.md) 이 담당.
+- `paths:` 필터로 PR 이 Penny/knowledge/eval 쪽을 건드릴 때만 실행 — 워커 분 절약.
+- 실패 시 `gadgetron-logs` 아티팩트로 `/tmp/gadgetron.log` + `eval/reports/*.md` 를 업로드해서 로컬 재현 없이 triage.
+
+### GitLab CI
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - eval
+
+penny-eval:
+  stage: eval
+  image: rust:1.80
+  timeout: 15 minutes
+  services:
+    - name: searxng/searxng:latest
+      alias: searxng
+  variables:
+    SEARXNG_URL: 'http://searxng:8080'
+  script:
+    - ./demo.sh build
+    - curl -fsSL https://claude.ai/install.sh | sh
+    - |
+      cat > gadgetron.toml <<TOML
+      [server]
+      bind = "127.0.0.1:8080"
+      [agent]
+      binary = "claude"
+      [agent.brain]
+      mode = "external_anthropic"
+      [knowledge]
+      wiki_path = "./.gadgetron/wiki"
+      wiki_autocommit = true
+      [knowledge.search]
+      searxng_url = "$SEARXNG_URL"
+      TOML
+      mkdir -p .gadgetron
+    - ./target/release/gadgetron serve --no-db --config gadgetron.toml > /tmp/gadgetron.log 2>&1 &
+    - until curl -fsS http://127.0.0.1:8080/health; do sleep 1; done
+    - export GADGETRON_API_KEY=$(./target/release/gadgetron key create | grep -oE 'gad_live_[a-f0-9]+')
+    - python3 eval/run_eval.py
+  artifacts:
+    when: on_failure
+    paths:
+      - /tmp/gadgetron.log
+      - eval/reports/
+  only:
+    changes:
+      - 'crates/gadgetron-penny/**/*'
+      - 'crates/gadgetron-knowledge/**/*'
+      - 'eval/**/*'
+```
+
+### Providing `ANTHROPIC_API_KEY` from secrets
+
+- **GitHub Actions**: Repository → Settings → Secrets and variables → Actions → add `ANTHROPIC_API_KEY`. Referenced as `${{ secrets.ANTHROPIC_API_KEY }}` above.
+- **GitLab CI**: Settings → CI/CD → Variables → `ANTHROPIC_API_KEY` (masked, protected if using protected branches).
+- **Self-hosted runners**: hand the key via the runner's environment; treat as any other service-account credential. Rotate per `manual/auth.md §Secret + key rotation cadence`.
+
+### Debugging a failing eval run
+
+When the CI run is red, reproduce locally first:
+
+```sh
+# 1. Start the same services (pgvector optional for --no-db eval):
+docker run -d --name searxng -p 127.0.0.1:8888:8080 searxng/searxng:latest
+
+# 2. Match the CI config (external_anthropic, not claude_max):
+export ANTHROPIC_API_KEY="sk-ant-..."
+# edit gadgetron.toml to [agent.brain] mode = "external_anthropic"
+
+# 3. Start gadgetron with verbose Penny logging:
+RUST_LOG=info,penny_subprocess=debug,penny_stream=debug,wiki_search=debug \
+  ./target/release/gadgetron serve --no-db --config gadgetron.toml
+
+# 4. Re-run the specific scenario that failed:
+python3 eval/run_eval.py --scenario <failing-scenario-id>
+```
+
+See [troubleshooting.md §`RUST_LOG` cheat sheet](troubleshooting.md) for the full target catalog and production-safe filter combinations. The `eval/reports/<timestamp>.md` report that `run_eval.py` emits includes per-scenario captured output — grep for `fail` in the CI artifact to get the same context without re-running.
+
+### Keeping eval healthy
+
+- **Scenarios drift when the wiki seed changes.** The harness expects specific seed pages (see `scripts/e2e-harness/fixtures/`). When those fixtures change, `wiki-search-finds-seed` or similar keyword scenarios may shift `expected_status`. Re-baseline by running locally, inspect the new text-contains-any hits, and update `eval/scenarios.yaml`.
+- **`expected_status: failing`** is a short-lived label. Review monthly — unexpected passes (`xpass`) that sit there for weeks indicate a fixed bug that no one removed the silence marker for.
+- **CI cost control**: each eval run burns roughly `8 × (2–4K input + 300 output)` tokens against the Anthropic API with `external_anthropic`. Approximate ~$0.15–$0.35 per run at current pricing. Scope the trigger (`paths:` filter or manual dispatch) if the eval runs on every commit.
