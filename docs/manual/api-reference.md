@@ -1648,6 +1648,7 @@ curl -fsS \
       "cost_cents": 17,
       "model": null,
       "provider": null,
+      "actor_user_id": null,
       "created_at": "2026-04-20T18:12:03.441Z"
     }
   ],
@@ -1660,6 +1661,7 @@ curl -fsS \
 - `source_event_id`: currently populated **only on `action` rows** (carries the `audit_event_id` from `action_audit_events`) so invoice materialization can join ledger → action audit for line-item explanations. `chat` + `tool` rows leave it `null` today — `chat` because the enforcer emits before an audit UUID is generated, `tool` because the tool-dispatch path hasn't been threaded yet. FK-less per the Stripe-style writer-independence pattern — the ledger writer never blocks on whether the source event has been persisted.
 - `cost_cents` is the `actual_cost_cents` the enforcer already stored into `quota_configs.daily_used_cents` for `chat` rows (integer cents end-to-end per ADR-D-8). `tool` + `action` rows carry `cost_cents = 0` — emission exists for audit-trail completeness, monetary cost is only assigned at the chat terminal today. Per-action / per-tool pricing attribution lands with TASKs 12.3 (invoice materialization) / ISSUE 13 (HuggingFace catalog) — both DEFERRED as commercialization layer.
 - `model` / `provider`: **repurposed by `event_kind`**. For `chat` rows both fields are currently `null` (threading chat model + provider onto the enforcer surface is a future follow-up). For `tool` rows `model` carries the gadget name invoked (e.g., `"wiki.search"`) and `provider` stays `null`. For `action` rows `model` carries the workbench action id (e.g., `"knowledge-search"`) and `provider` stays `null`. Operator queries that want "which gadget generated this tool-event" read `model` on kind=tool rows.
+- `actor_user_id` (ISSUE 23 / PR #271 / v0.5.15): nullable UUID, populated on `tool` + `action` rows from the invoking `TenantContext.actor_user_id` (which flows from `ValidatedKey.user_id` per ISSUE 17). `chat` rows currently leave it `null` — the enforcer emit-path hasn't been widened to carry user_id yet; ISSUE 24 will thread user_id through `QuotaToken` + `QuotaEnforcer` trait. Legacy tool/action traffic predating PR #271 also surfaces `null`. Index `(actor_user_id, created_at DESC)` supports per-user spend-report queries without a cross-table join through audit. FK intentionally skipped (heterogeneous callers; best-effort telemetry); `LEFT JOIN users u ON u.id = be.actor_user_id` at read time.
 
 **Errors:**
 
@@ -1745,6 +1747,38 @@ for AUDIT_ID in $(echo "$ACTION_ROWS" | jq -r '.[].source_event_id'); do
     | jq --arg id "$AUDIT_ID" '.events[] | select(.request_id == $id)'
 done
 ```
+
+**Per-user spend report** (ISSUE 23 / PR #271 / v0.5.15 — `actor_user_id` column). Covers tool + action usage per-user today; chat rows will populate once ISSUE 24 widens `QuotaToken`:
+
+```sql
+-- Monthly tool/action events by user for a tenant
+SELECT
+  date_trunc('month', be.created_at) AS month,
+  be.actor_user_id,
+  u.email,
+  be.event_kind,
+  COUNT(*) AS events,
+  SUM(be.cost_cents) AS cents
+FROM billing_events be
+LEFT JOIN users u ON u.id = be.actor_user_id
+WHERE be.tenant_id = 'your-tenant-uuid'
+  AND be.created_at >= date_trunc('month', now()) - interval '3 months'
+  AND be.actor_user_id IS NOT NULL
+GROUP BY 1, 2, 3, 4
+ORDER BY 1 DESC, cents DESC;
+
+-- Tool events attributed to a specific user (last 7 days)
+SELECT event_kind, model AS gadget_or_action, COUNT(*) AS events, created_at::date AS day
+FROM billing_events
+WHERE tenant_id = 'your-tenant-uuid'
+  AND actor_user_id = '<alice-uuid>'
+  AND created_at >= now() - interval '7 days'
+  AND event_kind IN ('tool', 'action')
+GROUP BY event_kind, model, day
+ORDER BY day DESC, events DESC;
+```
+
+The `LEFT JOIN users` keeps rows where `actor_user_id` has been soft-deleted (email surfaces as `NULL` but the event count + total still count against historical reporting). Chat rows carry `actor_user_id = NULL` today; add `OR event_kind = 'chat'` and a separate join through `audit_log.actor_user_id` if you need to include chat in the report before ISSUE 24 lands.
 
 **Per-kind aggregation** (daily rollup — SQL directly, faster than HTTP for bulk):
 
