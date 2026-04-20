@@ -32,7 +32,7 @@ TASK 순서는 무엇인지, ISSUE 14 close까지의 패치 버전 경로.
 남은 multi-user 스코프 (post-PR-#293):
 - **ISSUE 18**: web UI 로그인 form (React/Tailwind in `gadgetron-web`) — 사용자가 `/web` 방문 시 cookie 없으면 로그인 폼으로 리다이렉트. Playwright E2E gate 7v.9 (7v.7 + 7v.8 이 ISSUE 21/22 에 선점되었으므로) 이 login → shell render → logout → back-to-form 루프를 검증 예정.
 - **ISSUE 28** (operator-bug-report follow-up, not v1.0.0 gate): `/web` pre-auth 랜딩 페이지 폴리시 — CSS/icon asset 로드 실패 (icons empty button rectangles) + 네비게이션 chrome pre-auth 에서 노출 + status-bar text concatenation bug (`semantic-pgvectorsession: --` 사이 공백 누락) + Evidence 패널 pre-auth 에서 design-doc copy 노출. ROADMAP §EPIC 4 ISSUE 28 의 4개 TASK 참조.
-- **ISSUE 27** (DX follow-up, not v1.0.0 gate): ISSUE 25 의 절반만 실행됐음 — `AuthenticatedContext.user_id` → `api_key_id` 은 landed, but the second rename `real_user_id` → `user_id` 는 split 됐다. ISSUE 27 이 그 두 번째 rename 을 마무리해서 call sites 이 `actor.user_id.unwrap_or(actor.api_key_id)` 로 읽히게 한다.
+- **ISSUE 27** ✅ CLOSED (PR #301 / v0.5.19): 원래 `real_user_id` → `user_id` rename 마무리로 계획됐으나, ISSUE 26 BillingFailureCounter 를 Prometheus `/metrics` text-format surface 로 expose 하는 방향으로 pivot. `AuthenticatedContext.real_user_id` → `user_id` rename DX cleanup 은 larger `AuthenticatedContext` pass 가 필요할 때 post-v1.0.0 으로 defer 됐음.
 - Session rotation on cookie refresh — 현재 whoami 가 `last_active_at` 만 갱신; 주기적 session token rotation 은 post-v1.0.0 보안 강화 항목.
 - Google OAuth 소셜 로그인 — `project_multiuser_login_google` 로 tracked; ISSUE 18 이후 stack up.
 

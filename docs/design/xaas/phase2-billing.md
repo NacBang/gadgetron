@@ -330,9 +330,11 @@ UUID 링크는 tool_audit_events 스키마 확장이 필요해서 별도 ADR 건
 // actually is — an api_key_id placeholder that lived under the wrong
 // name). Call sites now use actor.real_user_id.unwrap_or(actor.api_key_id)
 // fallback: real user UUID preferred, api_key_id fallback for legacy
-// keys pre-dating the ISSUE-14 backfill. ISSUE 27 will finish the rename
-// (real_user_id → user_id) so the fallback reads as
-// actor.user_id.unwrap_or(actor.api_key_id).
+// keys pre-dating the ISSUE-14 backfill. ISSUE 27 pivoted to surfacing
+// the ISSUE 26 `BillingFailureCounter` via `/metrics` (PR #301 /
+// v0.5.19) — the `real_user_id` → `user_id` rename DX cleanup that
+// used to live under ISSUE 27 is deferred post-v1.0.0 whenever a
+// larger `AuthenticatedContext` pass happens.
 fn emit_action_billing(
     pool: Option<&sqlx::PgPool>,
     tenant_id: Uuid,
