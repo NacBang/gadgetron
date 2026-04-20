@@ -208,11 +208,8 @@ fn extract_web_next_refs(content: &str, refs: &mut std::collections::BTreeSet<St
             let b = bytes[end];
             // URL path char set: alnum, `_`, `-`, `.`, `/`. Terminate on
             // quote / whitespace / tag delimiter / anything else.
-            let is_path_char = b.is_ascii_alphanumeric()
-                || b == b'_'
-                || b == b'-'
-                || b == b'.'
-                || b == b'/';
+            let is_path_char =
+                b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b'/';
             if !is_path_char {
                 break;
             }

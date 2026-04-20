@@ -143,10 +143,12 @@ fn verify_asset_consistency_fails_on_stale_css_hash() {
         r#"<link href="/web/_next/static/css/STALE_HASH.css">"#,
     )
     .unwrap();
-    let err = build_logic::verify_asset_consistency(&dist)
-        .expect_err("stale hash must fail");
+    let err = build_logic::verify_asset_consistency(&dist).expect_err("stale hash must fail");
     assert!(err.contains("STALE_HASH.css"), "names missing asset: {err}");
-    assert!(err.contains("cargo clean -p gadgetron-web"), "includes fix recipe: {err}");
+    assert!(
+        err.contains("cargo clean -p gadgetron-web"),
+        "includes fix recipe: {err}"
+    );
 }
 
 #[test]
