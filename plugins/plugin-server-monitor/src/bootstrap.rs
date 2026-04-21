@@ -56,18 +56,48 @@ pub async fn run_bootstrap(
 ) -> Result<BootstrapReport, SshError> {
     let mut report = BootstrapReport::default();
 
-    // Step 1 — push our pubkey into authorized_keys (idempotent).
+    // Step 1 — push our pubkey into authorized_keys (idempotent). We
+    // use `set -e` + explicit control-flow so an unexpected failure
+    // earlier in the pipeline can't silently swallow the append (a
+    // pure `A && B || C` chain propagates the exit status of *whatever*
+    // failed, which is harder to diagnose). The final line prints a
+    // marker we grep for so sshpass can't claim success on a
+    // half-applied state.
     let pk_escaped = shell_escape_single(public_key);
     let install_key = format!(
-        "umask 077; mkdir -p ~/.ssh && \
-         touch ~/.ssh/authorized_keys && \
-         chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && \
-         grep -qxF {pk} ~/.ssh/authorized_keys || echo {pk} >> ~/.ssh/authorized_keys",
+        "set -e; \
+         umask 077; \
+         mkdir -p ~/.ssh; \
+         chmod 700 ~/.ssh; \
+         touch ~/.ssh/authorized_keys; \
+         chmod 600 ~/.ssh/authorized_keys; \
+         if ! grep -qxF {pk} ~/.ssh/authorized_keys; then \
+           echo >> ~/.ssh/authorized_keys; \
+           echo {pk} >> ~/.ssh/authorized_keys; \
+           echo __gsm_key_appended__; \
+         else \
+           echo __gsm_key_already_present__; \
+         fi",
         pk = pk_escaped,
     );
     let out = exec_with_password(target_pw, password, &install_key).await?;
-    expect_ok(&out, "install authorized_keys")?;
+    if !out.ok()
+        || !(out.stdout.contains("__gsm_key_appended__")
+            || out.stdout.contains("__gsm_key_already_present__"))
+    {
+        return Err(SshError::Bootstrap(format!(
+            "install authorized_keys failed (code={}): stdout={:?}, stderr={:?}",
+            out.code,
+            out.stdout.trim(),
+            out.stderr.trim(),
+        )));
+    }
     report.key_installed = true;
+    if out.stdout.contains("__gsm_key_appended__") {
+        report.notes.push("authorized_keys append".into());
+    } else {
+        report.notes.push("authorized_keys already had our pubkey".into());
+    }
 
     // Step 2 — drop NOPASSWD sudoers for the four monitoring binaries.
     // visudo is used via `-cf` so a typo never leaves a broken file.
@@ -142,8 +172,11 @@ pub async fn run_bootstrap(
     let verify = exec(&target_key, verify_cmd).await?;
     if !verify.ok() || !verify.stdout.contains("__gsm_ready__") {
         return Err(SshError::Bootstrap(format!(
-            "post-bootstrap key-only login failed; refusing to persist. stderr: {}",
-            verify.stderr.trim()
+            "post-bootstrap key-only login failed (code={}, key={}): stdout={:?}, stderr={:?}",
+            verify.code,
+            private_key_path.display(),
+            verify.stdout.trim(),
+            verify.stderr.trim(),
         )));
     }
     Ok(report)

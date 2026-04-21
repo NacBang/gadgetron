@@ -119,12 +119,17 @@ impl CmdOutput {
 /// when no chips are detected; still a readable signal).
 pub async fn exec(target: &SshTarget, cmd: &str) -> Result<CmdOutput, SshError> {
     let mut argv = target.argv_base();
-    argv.extend([
-        format!("{}@{}", target.user, target.host),
-        "bash".into(),
-        "-lc".into(),
-        cmd.into(),
-    ]);
+    argv.push(format!("{}@{}", target.user, target.host));
+    // OpenSSH concatenates remote-command argv elements with a single
+    // space before handing them to the login shell on the target — any
+    // quoting from `Command::args` is lost in transit. Pass the whole
+    // shell snippet as ONE argument so bash on the remote evaluates it
+    // intact. Earlier versions split this into `bash`, `-lc`, `<cmd>`
+    // and collided: bash saw `-c echo` with `__gsm_ready__` as `$0`,
+    // echoing nothing. Keep the explicit `bash -lc` wrapper so a
+    // non-bash login shell (dash/fish) still picks up a predictable
+    // environment.
+    argv.push(format!("bash -lc {}", shell_escape_single(cmd)));
     let output = Command::new("ssh")
         .args(&argv)
         .output()
@@ -135,6 +140,21 @@ pub async fn exec(target: &SshTarget, cmd: &str) -> Result<CmdOutput, SshError> 
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code().unwrap_or(-1),
     })
+}
+
+/// Safe single-quote escaping for bash. `'foo'bar'` → `'foo'\''bar'`.
+pub(crate) fn shell_escape_single(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Password-based variant (for Mode C bootstrap only). `sshpass -e` reads
@@ -169,9 +189,9 @@ pub async fn exec_with_password(
         "-o".into(),
         "PreferredAuthentications=password".into(),
         format!("{}@{}", target.user, target.host),
-        "bash".into(),
-        "-lc".into(),
-        cmd.into(),
+        // Same joined-with-spaces rule as `exec` — push the `bash -lc
+        // <body>` wrapper as a single argv element.
+        format!("bash -lc {}", shell_escape_single(cmd)),
     ];
     let output = Command::new("sshpass")
         .args(&argv)
