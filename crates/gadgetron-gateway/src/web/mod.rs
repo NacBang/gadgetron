@@ -8,4 +8,5 @@ pub mod approval_store;
 pub mod catalog;
 pub mod projection;
 pub mod replay_cache;
+pub mod server_metrics;
 pub mod workbench;
