@@ -25,6 +25,7 @@ pub struct ServerStats {
     pub temps: Vec<TempReading>,
     pub gpus: Vec<GpuStats>,
     pub power: Option<PowerStats>,
+    pub network: Vec<NetworkStats>,
     pub uptime_secs: Option<u64>,
     pub fetched_at: chrono::DateTime<chrono::Utc>,
     pub warnings: Vec<String>,
@@ -95,6 +96,19 @@ pub struct PowerStats {
     pub gpu_watts: Option<f32>,
 }
 
+/// Per-interface network throughput. Both throughput fields are `f64`
+/// bytes/second derived from two `/proc/net/dev` samples; total counters
+/// give lifetime-since-boot values for sanity checks and cumulative
+/// graphs.
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkStats {
+    pub iface: String,
+    pub rx_bps: f64,
+    pub tx_bps: f64,
+    pub rx_bytes_total: u64,
+    pub tx_bytes_total: u64,
+}
+
 /// Hardware / OS fingerprint returned by `server.info`.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ServerInfo {
@@ -127,10 +141,15 @@ pub async fn collect_stats(target: &SshTarget) -> Result<ServerStats, SshError> 
         cat /proc/loadavg 2>/dev/null
         echo '===CPUINFO==='
         nproc 2>/dev/null
-        echo '===STAT==='
+        echo '===STAT0==='
         head -1 /proc/stat 2>/dev/null
+        echo '===NET0==='
+        cat /proc/net/dev 2>/dev/null
         sleep 0.2
+        echo '===STAT1==='
         head -1 /proc/stat 2>/dev/null
+        echo '===NET1==='
+        cat /proc/net/dev 2>/dev/null
         echo '===MEM==='
         cat /proc/meminfo 2>/dev/null
         echo '===DF==='
@@ -161,10 +180,24 @@ pub async fn collect_stats(target: &SshTarget) -> Result<ServerStats, SshError> 
     if let Some(s) = sections.get("UPTIME") {
         stats.uptime_secs = s.trim().parse::<u64>().ok();
     }
+    // STAT0 + STAT1 are two snapshots 200 ms apart — concat them so the
+    // existing `parse_cpu` delta logic still works against one string.
+    let stat_combined = format!(
+        "{}\n{}",
+        sections.get("STAT0").map(|s| s.as_str()).unwrap_or(""),
+        sections.get("STAT1").map(|s| s.as_str()).unwrap_or(""),
+    );
     stats.cpu = parse_cpu(
-        sections.get("STAT").map(|s| s.as_str()).unwrap_or(""),
+        &stat_combined,
         sections.get("LOAD").map(|s| s.as_str()).unwrap_or(""),
         sections.get("CPUINFO").map(|s| s.as_str()).unwrap_or(""),
+    );
+    // NET delta shares the same 200 ms sleep as the CPU delta so we get
+    // two telemetry deltas per SSH round-trip.
+    stats.network = parse_network(
+        sections.get("NET0").map(|s| s.as_str()).unwrap_or(""),
+        sections.get("NET1").map(|s| s.as_str()).unwrap_or(""),
+        0.2,
     );
     stats.mem = parse_mem(sections.get("MEM").map(|s| s.as_str()).unwrap_or(""));
     stats.disks = parse_df(sections.get("DF").map(|s| s.as_str()).unwrap_or(""));
@@ -480,6 +513,75 @@ fn parse_sensors(json: &str) -> Option<Vec<TempReading>> {
     Some(out)
 }
 
+fn parse_network(before: &str, after: &str, elapsed_secs: f64) -> Vec<NetworkStats> {
+    // `/proc/net/dev` layout (after a 2-line header):
+    //   Inter-|   Receive                                                |  Transmit
+    //    face | bytes    packets errs drop fifo frame compressed multicast | bytes    packets errs drop fifo colls carrier compressed
+    //     eth0: 12345678  ...
+    //       lo: 9999      ...
+    //
+    // We pull `iface`, `rx_bytes` (col 1), `tx_bytes` (col 9). Anything
+    // missing the 17 expected columns is skipped — `/proc/net/dev` is
+    // stable across kernel versions but defensive parsing never hurts.
+    let lo_before = index_net(before);
+    let lo_after = index_net(after);
+    let mut out = Vec::new();
+    for (iface, (rx_after, tx_after)) in lo_after.iter() {
+        // Skip loopback / virtual interfaces that aren't useful for
+        // operator dashboards. `docker0` / `veth*` / `br-*` pollute
+        // graphs if you're running containers on the box.
+        if iface == "lo"
+            || iface.starts_with("veth")
+            || iface.starts_with("br-")
+            || iface == "docker0"
+        {
+            continue;
+        }
+        let (rx_before, tx_before) = lo_before.get(iface).copied().unwrap_or((*rx_after, *tx_after));
+        // `rx_bytes` is u64; subtraction wraps in the rare case of a
+        // counter rollover (32-bit machines) — saturate for safety.
+        let rx_delta = rx_after.saturating_sub(rx_before) as f64;
+        let tx_delta = tx_after.saturating_sub(tx_before) as f64;
+        let rx_bps = if elapsed_secs > 0.0 { rx_delta / elapsed_secs } else { 0.0 };
+        let tx_bps = if elapsed_secs > 0.0 { tx_delta / elapsed_secs } else { 0.0 };
+        out.push(NetworkStats {
+            iface: iface.clone(),
+            rx_bps,
+            tx_bps,
+            rx_bytes_total: *rx_after,
+            tx_bytes_total: *tx_after,
+        });
+    }
+    // Sort by iface name for stable ordering (deterministic UI, easier
+    // to diff in logs).
+    out.sort_by(|a, b| a.iface.cmp(&b.iface));
+    out
+}
+
+fn index_net(dump: &str) -> std::collections::HashMap<String, (u64, u64)> {
+    let mut m = std::collections::HashMap::new();
+    for line in dump.lines() {
+        // `/proc/net/dev` header is two lines starting with `Inter-` or
+        // ` face`. Data rows start with `<whitespace><iface>:`.
+        let Some((lhs, rhs)) = line.split_once(':') else {
+            continue;
+        };
+        let iface = lhs.trim().to_string();
+        if iface.is_empty() || iface.starts_with("Inter") || iface.starts_with("face") {
+            continue;
+        }
+        let cells: Vec<&str> = rhs.split_whitespace().collect();
+        // 16 columns: 8 rx + 8 tx.
+        if cells.len() < 16 {
+            continue;
+        }
+        let rx_bytes: u64 = cells[0].parse().unwrap_or(0);
+        let tx_bytes: u64 = cells[8].parse().unwrap_or(0);
+        m.insert(iface, (rx_bytes, tx_bytes));
+    }
+    m
+}
+
 fn parse_nvsmi(csv: &str) -> Vec<GpuStats> {
     csv.lines()
         .filter(|l| !l.trim().is_empty())
@@ -674,6 +776,62 @@ mod tests {
         assert_eq!(g[0].temp_c, Some(55.0));
         assert_eq!(g[0].power_w, Some(250.5));
         assert_eq!(g[0].source, "nvidia-smi");
+    }
+
+    #[test]
+    fn parse_network_computes_bps_and_filters_virtual() {
+        let before = "\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 100000       50    0    0    0     0          0         0   100000       50    0    0    0     0       0          0
+  eth0: 1000000     400    0    0    0     0          0         0    500000     200    0    0    0     0       0          0
+ docker0: 77         1    0    0    0     0          0         0       77        1    0    0    0     0       0          0
+  veth1: 42          1    0    0    0     0          0         0       42        1    0    0    0     0       0          0
+";
+        let after = "\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 100000       50    0    0    0     0          0         0   100000       50    0    0    0     0       0          0
+  eth0: 1200000     450    0    0    0     0          0         0    600000     220    0    0    0     0       0          0
+ docker0: 77         1    0    0    0     0          0         0       77        1    0    0    0     0       0          0
+  veth1: 42          1    0    0    0     0          0         0       42        1    0    0    0     0       0          0
+";
+        let net = parse_network(before, after, 0.2);
+        // lo, docker0, veth1 filtered → only eth0.
+        assert_eq!(net.len(), 1);
+        assert_eq!(net[0].iface, "eth0");
+        // (1_200_000 - 1_000_000) / 0.2 = 1_000_000 bps.
+        assert_eq!(net[0].rx_bps, 1_000_000.0);
+        // (600_000 - 500_000) / 0.2 = 500_000 bps.
+        assert_eq!(net[0].tx_bps, 500_000.0);
+        assert_eq!(net[0].rx_bytes_total, 1_200_000);
+        assert_eq!(net[0].tx_bytes_total, 600_000);
+    }
+
+    #[test]
+    fn parse_network_handles_missing_before() {
+        // When an interface appears only in the `after` snapshot (e.g.
+        // hot-plug NIC), delta reports 0 bps rather than panicking.
+        let before = "";
+        let after = "\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+  eth0: 500        5    0    0    0     0          0         0      500        5    0    0    0     0       0          0
+";
+        let net = parse_network(before, after, 0.2);
+        assert_eq!(net.len(), 1);
+        assert_eq!(net[0].rx_bps, 0.0);
+        assert_eq!(net[0].tx_bps, 0.0);
+    }
+
+    #[test]
+    fn parse_network_counter_rollback_saturates() {
+        // Rare u64 wrap / counter reset on 32-bit kernels — saturate,
+        // don't panic.
+        let before = "  eth0: 1000 1 0 0 0 0 0 0 1000 1 0 0 0 0 0 0\n";
+        let after = "  eth0:    0 0 0 0 0 0 0 0    0 0 0 0 0 0 0 0\n";
+        let net = parse_network(before, after, 0.2);
+        assert_eq!(net[0].rx_bps, 0.0); // saturating_sub → 0 delta
     }
 
     #[test]
