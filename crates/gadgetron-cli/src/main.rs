@@ -667,6 +667,7 @@ fn resolve_existing_config_path(config_path_override: Option<PathBuf>) -> Result
 fn load_penny_registry_from_config(
     config_path: &std::path::Path,
     agent_cfg: &gadgetron_core::agent::AgentConfig,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
     let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? else {
         return Ok(None);
@@ -685,10 +686,39 @@ fn load_penny_registry_from_config(
     // has no upstream config requirement. A `SshError` at this layer
     // would only happen if `$HOME` is unreadable; we log and skip
     // rather than aborting the whole serve path.
+    //
+    // When a Postgres pool is wired, also spawn the timeseries
+    // ingestion writer so every `server.stats` call fans out into the
+    // `host_metrics` hypertable. Without a pool the bundle still works
+    // (legacy pull-only path) — the provider just keeps an empty
+    // sender slot and `try_ship` no-ops.
     match gadgetron_bundle_server_monitor::ServerMonitorProvider::with_default_inventory() {
-        Ok(p) => builder
-            .register(Arc::new(p))
-            .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?,
+        Ok(mut p) => {
+            if let Some(pool) = pg_pool {
+                let (tx, rx) = tokio::sync::mpsc::channel::<
+                    Vec<gadgetron_bundle_server_monitor::MetricSample>,
+                >(4096);
+                let counters = gadgetron_bundle_server_monitor::IngestionCounters::default();
+                p = p.with_metrics_writer(tx, counters.clone());
+                tokio::spawn(gadgetron_bundle_server_monitor::run_metrics_writer(
+                    rx, pool, counters,
+                ));
+                tracing::info!(
+                    target: "server_monitor_metrics",
+                    "metrics ingestion writer spawned — server.stats samples \
+                     will land in host_metrics hypertable",
+                );
+            } else {
+                tracing::info!(
+                    target: "server_monitor_metrics",
+                    "no Postgres pool — server-monitor runs pull-only \
+                     (no timeseries history)",
+                );
+            }
+            builder
+                .register(Arc::new(p))
+                .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?
+        }
         Err(e) => {
             tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")
         }
@@ -877,7 +907,9 @@ fn prepare_penny_router_registration(
         return Ok(None);
     }
 
-    let Some(registry) = load_penny_registry_from_config(config_path, &app_config.agent)? else {
+    let Some(registry) =
+        load_penny_registry_from_config(config_path, &app_config.agent, pg_pool.clone())?
+    else {
         return Ok(None);
     };
 
@@ -3755,6 +3787,7 @@ bind = "127.0.0.1:8080"
         let registry = load_penny_registry_from_config(
             &config_path,
             &gadgetron_core::agent::AgentConfig::default(),
+            None, // no Postgres pool in unit-test path → ingestion writer skipped
         )
         .expect("load should succeed");
         assert!(
@@ -3790,6 +3823,7 @@ wiki_max_page_bytes = 1048576
         let registry = load_penny_registry_from_config(
             &config_path,
             &gadgetron_core::agent::AgentConfig::default(),
+            None, // no Postgres pool in unit-test path → ingestion writer skipped
         )
         .expect("load should succeed")
         .expect("knowledge config should build a Penny registry");

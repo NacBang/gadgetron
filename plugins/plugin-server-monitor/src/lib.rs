@@ -46,7 +46,12 @@ pub mod bootstrap;
 pub mod collectors;
 pub mod gadgets;
 pub mod inventory;
+pub mod metrics;
 pub mod ssh;
 
 pub use gadgets::ServerMonitorProvider;
 pub use inventory::{HostRecord, InventoryStore};
+pub use metrics::{
+    run_metrics_writer, stats_to_samples, IngestionCounters, MetricSample, BATCH_MAX,
+    FLUSH_INTERVAL,
+};

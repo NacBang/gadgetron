@@ -14,11 +14,13 @@ use gadgetron_core::agent::tools::{
     GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
 };
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::bootstrap::{run_bootstrap, verify_key_only};
 use crate::collectors::{collect_info, collect_stats};
 use crate::inventory::{HostRecord, InventoryStore};
+use crate::metrics::{stats_to_samples, try_ship, IngestionCounters, MetricSample};
 use crate::ssh::{
     generate_keypair, install_pasted_key, read_pubkey, OneShotSecret, SshError, SshTarget,
 };
@@ -28,12 +30,20 @@ use crate::ssh::{
 #[derive(Clone)]
 pub struct ServerMonitorProvider {
     inventory: Arc<InventoryStore>,
+    /// Optional handle to the timeseries ingestion channel. When wired,
+    /// every successful `server.stats` fans out into a `MetricSample`
+    /// batch and `try_send`s onto the writer queue. `None` = legacy
+    /// pull-only mode (UI live, no Postgres history).
+    metrics_sender: Option<mpsc::Sender<Vec<MetricSample>>>,
+    metrics_counters: IngestionCounters,
 }
 
 impl ServerMonitorProvider {
     pub fn new(inventory: InventoryStore) -> Self {
         Self {
             inventory: Arc::new(inventory),
+            metrics_sender: None,
+            metrics_counters: IngestionCounters::default(),
         }
     }
 
@@ -42,6 +52,25 @@ impl ServerMonitorProvider {
         // Don't block startup on ensure_layout — we create lazily on
         // first write. Read path returns "no hosts" if directory missing.
         Ok(Self::new(inv))
+    }
+
+    /// Wire up the timeseries ingestion path. Caller spawns
+    /// `run_metrics_writer` separately with the matching `Receiver`.
+    /// The provider keeps a clone of the counters so `server.info` (or
+    /// a future `metrics.status` gadget) can surface enqueued / dropped
+    /// numbers without round-tripping through the writer.
+    pub fn with_metrics_writer(
+        mut self,
+        sender: mpsc::Sender<Vec<MetricSample>>,
+        counters: IngestionCounters,
+    ) -> Self {
+        self.metrics_sender = Some(sender);
+        self.metrics_counters = counters;
+        self
+    }
+
+    pub fn metrics_counters(&self) -> &IngestionCounters {
+        &self.metrics_counters
     }
 
     fn known_hosts_path(&self) -> PathBuf {
@@ -178,6 +207,18 @@ impl ServerMonitorProvider {
             }
         };
 
+        // `tenant_id` from args when supplied; otherwise nil. The
+        // workbench POST handler today doesn't propagate `TenantContext`
+        // into gadget call args (see ADR-P2A-05 §14 — gadgets are caller-
+        // identity-blind by design), so single-tenant demos default to
+        // nil and that's fine for the §16 schema. A multi-tenant deployment
+        // can either thread the value via the request body or wait for
+        // the upcoming `TenantContext` propagation work.
+        let tenant_id = args
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_else(Uuid::nil);
         let record = HostRecord {
             id,
             host: host.clone(),
@@ -186,6 +227,7 @@ impl ServerMonitorProvider {
             key_path: target.key_path.clone().unwrap_or(key_path),
             created_at: Utc::now(),
             last_ok_at: None,
+            tenant_id,
         };
         self.inventory
             .upsert(record.clone())
@@ -270,6 +312,13 @@ impl ServerMonitorProvider {
             .await
             .map_err(|e| GadgetError::Execution(format!("stats collect: {e}")))?;
         let _ = self.inventory.mark_ok(id, Utc::now()).await;
+
+        // Timeseries fan-out — never blocks the response. `try_ship`
+        // bumps `samples_dropped` if the writer queue is full and
+        // returns immediately.
+        let samples = stats_to_samples(rec.tenant_id, rec.id, &stats);
+        try_ship(self.metrics_sender.as_ref(), &self.metrics_counters, samples);
+
         ok_result(serde_json::to_value(stats).unwrap_or(json!({})))
     }
 }
