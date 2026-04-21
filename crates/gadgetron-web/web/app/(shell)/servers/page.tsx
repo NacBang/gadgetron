@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -65,7 +65,19 @@ interface ServerStats {
   warnings: string[];
 }
 
-type StatsMap = Record<string, { loading: boolean; stats?: ServerStats; error?: string }>;
+type StatsMap = Record<
+  string,
+  {
+    loading: boolean;
+    stats?: ServerStats;
+    error?: string;
+    /** Wall-clock ms of the most recent server.stats HTTP round-trip. */
+    lastFetchMs?: number;
+    /** `performance.now()` timestamp when the most recent response
+     * completed — used to compute "updated Xs ago". */
+    lastFetchedAt?: number;
+  }
+>;
 
 async function invokeAction(
   apiKey: string,
@@ -247,9 +259,13 @@ function StepRow({
 function AddHostForm({
   apiKey,
   onAdded,
+  collapsed,
+  onCollapsedChange,
 }: {
   apiKey: string;
   onAdded: () => void;
+  collapsed: boolean;
+  onCollapsedChange: (next: boolean) => void;
 }) {
   const [host, setHost] = useState("");
   const [user, setUser] = useState("");
@@ -359,6 +375,10 @@ function AddHostForm({
       setSudoPw("");
       setKeyPaste("");
       onAdded();
+      // Auto-minimize 2.5s after success so the operator can see the
+      // final ✓ row before the form collapses out of the way. Cancelled
+      // if the operator re-expanded in the meantime.
+      window.setTimeout(() => onCollapsedChange(true), 2500);
     } catch (e) {
       timers.forEach((t) => clearTimeout(t));
       // Mark the currently-running step failed; leave earlier ok, later
@@ -377,13 +397,56 @@ function AddHostForm({
     }
   };
 
+  if (collapsed) {
+    return (
+      <section
+        data-testid="server-add-form-collapsed"
+        className="flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-2"
+      >
+        <span className="text-[11px] text-zinc-500">
+          Need another server? Use the button to re-open the register form.
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => onCollapsedChange(false)}
+          data-testid="server-add-reopen"
+          className="h-6 gap-1 px-2 text-[11px]"
+        >
+          + Add server
+        </Button>
+      </section>
+    );
+  }
   return (
     <section
       data-testid="server-add-form"
       className="flex flex-col gap-3 border-b border-zinc-800 bg-zinc-950 p-4"
     >
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-200">Register a server</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-zinc-200">Register a server</h2>
+          <button
+            type="button"
+            onClick={() => onCollapsedChange(true)}
+            data-testid="server-add-minimize"
+            title="Collapse — reopen later via '+ Add server'"
+            aria-label="Collapse the register form"
+            className="rounded border border-zinc-800 px-1.5 py-px text-[10px] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+          >
+            minimize
+          </button>
+          <button
+            type="button"
+            onClick={() => onCollapsedChange(true)}
+            data-testid="server-add-close"
+            title="Close the form"
+            aria-label="Close the register form"
+            className="rounded border border-zinc-800 px-1.5 py-px font-mono text-[10px] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+          >
+            ×
+          </button>
+        </div>
         <div className="flex gap-1" role="tablist" aria-label="auth mode">
           {(["password_bootstrap", "key_paste", "key_path"] as AuthMode[]).map((m) => (
             <button
@@ -502,13 +565,24 @@ function HostCard({
   host,
   data,
   onRemove,
+  nowMs,
 }: {
   host: Host;
   data: StatsMap[string] | undefined;
   onRemove: () => void;
+  /** Tick value from the parent's `setInterval` so the "updated Xs ago"
+   * label re-renders every second without coupling the card to its
+   * own timer. */
+  nowMs: number;
 }) {
   const stats = data?.stats;
   const err = data?.error;
+  const ageS =
+    data?.lastFetchedAt != null
+      ? Math.max(0, (nowMs - data.lastFetchedAt) / 1000)
+      : null;
+  const fetchMs = data?.lastFetchMs ?? null;
+  const loading = data?.loading ?? false;
   return (
     <div
       data-testid={`host-card-${host.host}`}
@@ -599,6 +673,37 @@ function HostCard({
           </ul>
         </details>
       )}
+      <div
+        data-testid="host-card-footer"
+        className="mt-1 flex items-center justify-between gap-2 border-t border-zinc-800 pt-1 text-[10px] text-zinc-600"
+      >
+        <span className="flex items-center gap-1">
+          <span
+            aria-hidden
+            className={`inline-block size-1.5 rounded-full ${
+              loading
+                ? "bg-amber-500 animate-pulse"
+                : err
+                  ? "bg-red-500"
+                  : "bg-emerald-500"
+            }`}
+          />
+          <span className="font-mono">
+            {loading
+              ? "fetching…"
+              : ageS == null
+                ? "no data yet"
+                : ageS < 1.5
+                  ? "just now"
+                  : `updated ${ageS.toFixed(1)}s ago`}
+          </span>
+        </span>
+        {fetchMs != null && (
+          <span className="font-mono" title="Last round-trip latency (gadgetron ↔ target via SSH)">
+            fetch {fetchMs < 1000 ? `${fetchMs.toFixed(0)}ms` : `${(fetchMs / 1000).toFixed(2)}s`}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -607,11 +712,28 @@ function HostCard({
 // Page
 // ---------------------------------------------------------------------------
 
+const POLL_INTERVAL_MS = 1000;
+
 export default function ServersPage() {
   const { apiKey } = useAuth();
   const [hosts, setHosts] = useState<Host[]>([]);
   const [statsMap, setStatsMap] = useState<StatsMap>({});
   const [listError, setListError] = useState<string | null>(null);
+  // Register form auto-collapses on the first host-list render that
+  // already has hosts (fresh page load) and auto-collapses 2.5 s after
+  // a successful registration (handled inside AddHostForm).
+  const [addFormCollapsed, setAddFormCollapsed] = useState(false);
+  // `nowMs` ticks once per second so the "updated Xs ago" label on
+  // each host card stays live without per-card timers. We intentionally
+  // decouple this from `POLL_INTERVAL_MS` — the label should keep
+  // counting even if a poll skips (e.g. in-flight-guard suppression).
+  const [nowMs, setNowMs] = useState(() => (typeof performance !== "undefined" ? performance.now() : 0));
+  useEffect(() => {
+    const t = setInterval(() => {
+      setNowMs(performance.now());
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const refreshList = useCallback(async () => {
     if (!apiKey) return;
@@ -625,9 +747,20 @@ export default function ServersPage() {
     }
   }, [apiKey]);
 
+  // Per-host in-flight guard. With `POLL_INTERVAL_MS = 1000` and a
+  // typical server.stats round-trip landing in 500-800 ms (ssh handshake
+  // + `/proc/stat` delta 300 ms sleep + JSON parse), ticks can start
+  // piling up. A per-host ref flag skips a tick when the previous
+  // request for that host hasn't returned yet — preserves the "∼1 Hz
+  // telemetry" UX without driving sshd to its MaxSessions ceiling.
+  const inFlightRef = useRef<Record<string, boolean>>({});
+
   const refreshStats = useCallback(
     async (id: string) => {
       if (!apiKey) return;
+      if (inFlightRef.current[id]) return;
+      inFlightRef.current[id] = true;
+      const started = performance.now();
       setStatsMap((m) => {
         const prev = m[id];
         return {
@@ -636,18 +769,38 @@ export default function ServersPage() {
             loading: true,
             stats: prev?.stats,
             error: prev?.error,
+            lastFetchMs: prev?.lastFetchMs,
+            lastFetchedAt: prev?.lastFetchedAt,
           },
         };
       });
       try {
         const resp = await invokeAction(apiKey, "server-stats", { id });
         const parsed = unwrapPayload(resp) as ServerStats;
-        setStatsMap((m) => ({ ...m, [id]: { loading: false, stats: parsed } }));
-      } catch (e) {
+        const elapsed = performance.now() - started;
         setStatsMap((m) => ({
           ...m,
-          [id]: { loading: false, error: (e as Error).message, stats: m[id]?.stats },
+          [id]: {
+            loading: false,
+            stats: parsed,
+            lastFetchMs: elapsed,
+            lastFetchedAt: performance.now(),
+          },
         }));
+      } catch (e) {
+        const elapsed = performance.now() - started;
+        setStatsMap((m) => ({
+          ...m,
+          [id]: {
+            loading: false,
+            error: (e as Error).message,
+            stats: m[id]?.stats,
+            lastFetchMs: elapsed,
+            lastFetchedAt: m[id]?.lastFetchedAt,
+          },
+        }));
+      } finally {
+        inFlightRef.current[id] = false;
       }
     },
     [apiKey],
@@ -672,13 +825,25 @@ export default function ServersPage() {
     void refreshList();
   }, [refreshList]);
 
-  // 5-second polling loop per host.
+  // Auto-collapse the register form the first time we learn there is
+  // already at least one host — saves a click for repeat visitors.
+  const autoCollapsedOnce = useMemo(() => ({ done: false }), []);
+  useEffect(() => {
+    if (!autoCollapsedOnce.done && hosts.length > 0) {
+      autoCollapsedOnce.done = true;
+      setAddFormCollapsed(true);
+    }
+  }, [hosts.length, autoCollapsedOnce]);
+
+  // Per-host polling loop — one `server.stats` round-trip every
+  // `POLL_INTERVAL_MS`. Each call hits the target once via ssh and
+  // returns CPU / RAM / disk / temp / GPU / PSU in a single response.
   useEffect(() => {
     if (!apiKey || hosts.length === 0) return;
     hosts.forEach((h) => void refreshStats(h.id));
     const t = setInterval(() => {
       hosts.forEach((h) => void refreshStats(h.id));
-    }, 5000);
+    }, POLL_INTERVAL_MS);
     return () => clearInterval(t);
   }, [apiKey, hosts, refreshStats]);
 
@@ -696,6 +861,15 @@ export default function ServersPage() {
           <span className="text-[11px] text-zinc-600" data-testid="servers-count">
             · {hostList.length} host{hostList.length === 1 ? "" : "s"}
           </span>
+          {hostList.length > 0 && (
+            <span
+              className="rounded border border-emerald-700/40 bg-emerald-900/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-400"
+              title={`server.stats is polled every ${POLL_INTERVAL_MS / 1000}s per host`}
+              data-testid="servers-poll-badge"
+            >
+              polling · {POLL_INTERVAL_MS / 1000}s
+            </span>
+          )}
         </div>
         <Button variant="ghost" size="sm" onClick={refreshList} className="h-6 px-2 text-[11px]">
           Refresh
@@ -703,7 +877,12 @@ export default function ServersPage() {
       </header>
 
       <div className="flex flex-1 flex-col overflow-auto">
-        <AddHostForm apiKey={apiKey ?? ""} onAdded={refreshList} />
+        <AddHostForm
+          apiKey={apiKey ?? ""}
+          onAdded={refreshList}
+          collapsed={addFormCollapsed}
+          onCollapsedChange={setAddFormCollapsed}
+        />
 
         {listError && (
           <div className="m-4 rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
@@ -733,6 +912,7 @@ export default function ServersPage() {
                   host={h}
                   data={statsMap[h.id]}
                   onRemove={() => void remove(h.id, h.host)}
+                  nowMs={nowMs}
                 />
               ))}
             </div>

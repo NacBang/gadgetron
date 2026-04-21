@@ -75,6 +75,21 @@ pub struct SshTarget {
 }
 
 impl SshTarget {
+    /// Per-target ControlPath for OpenSSH connection multiplexing.
+    /// Stashed under the inventory known_hosts parent so the master
+    /// socket rotates with the bundle state dir rather than polluting
+    /// `~/.ssh/`. `%C` is a hash of host/port/user that OpenSSH fills
+    /// in, so two simultaneous polls reuse the same tunnel but a
+    /// different host gets its own socket.
+    fn control_path(&self) -> String {
+        let parent = self
+            .known_hosts
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "/tmp".into());
+        format!("{parent}/ssh-ctl-%C")
+    }
+
     pub fn argv_base(&self) -> Vec<String> {
         let mut a: Vec<String> = vec![
             "-p".into(),
@@ -89,6 +104,13 @@ impl SshTarget {
             "ServerAliveInterval=15".into(),
         ];
         if let Some(kp) = &self.key_path {
+            // ControlMaster/ControlPath/ControlPersist multiplex repeat
+            // polls over a single TCP + SSH session — at 1 Hz polling
+            // this drops per-tick cost from ~300 ms (full handshake) to
+            // ~5 ms (existing channel). `ControlPersist=60` keeps the
+            // master alive for one minute of idle, so occasional gaps
+            // don't re-handshake, but a dormant host eventually lets
+            // the socket drop instead of holding it forever.
             a.extend([
                 "-i".into(),
                 kp.display().to_string(),
@@ -96,6 +118,12 @@ impl SshTarget {
                 "IdentitiesOnly=yes".into(),
                 "-o".into(),
                 "BatchMode=yes".into(),
+                "-o".into(),
+                "ControlMaster=auto".into(),
+                "-o".into(),
+                format!("ControlPath={}", self.control_path()),
+                "-o".into(),
+                "ControlPersist=60".into(),
             ]);
         }
         a

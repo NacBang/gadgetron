@@ -129,7 +129,7 @@ pub async fn collect_stats(target: &SshTarget) -> Result<ServerStats, SshError> 
         nproc 2>/dev/null
         echo '===STAT==='
         head -1 /proc/stat 2>/dev/null
-        sleep 0.3
+        sleep 0.2
         head -1 /proc/stat 2>/dev/null
         echo '===MEM==='
         cat /proc/meminfo 2>/dev/null
@@ -215,16 +215,33 @@ pub async fn collect_stats(target: &SshTarget) -> Result<ServerStats, SshError> 
     } else {
         Some(stats.gpus.iter().filter_map(|g| g.power_w).sum::<f32>())
     };
-    let psu_watts = parse_ipmi_power(sections.get("IPMIPWR").map(|s| s.as_str()).unwrap_or(""));
+    // PSU watts: DCMI `Instantaneous power reading` is the hot path.
+    // A board that returns 0 from DCMI almost always has the fallback
+    // (`ipmitool sensor list`) also report `na` for the per-PSU POUT
+    // sensors — and that fallback costs ~4 s per call on SSIF BMCs
+    // (measured on ASUS dual-PSU boards). Running it every 1 Hz poll
+    // crushes latency, so we skip it by default and surface the
+    // unavailability warning instead. If a future operator needs the
+    // fallback, a `[server_monitor].slow_ipmi = true` config knob is
+    // the right place to opt in — not every poll.
+    let psu_watts = parse_ipmi_dcmi_power(
+        sections.get("IPMIPWR").map(|s| s.as_str()).unwrap_or(""),
+    );
     if psu_watts.is_some() || gpu_watts.is_some() {
         stats.power = Some(PowerStats {
             psu_watts,
             gpu_watts,
         });
-    } else {
-        stats
-            .warnings
-            .push("no IPMI power reading (sudo NOPASSWD ipmitool missing or no BMC)".into());
+    }
+    if psu_watts.is_none() {
+        stats.warnings.push(
+            "PSU wattage unavailable — BMC's DCMI Instantaneous Power reading is 0 W on this \
+             board. Common on motherboards that advertise DCMI compliance but don't wire the \
+             PMBus telemetry. Per-PSU POUT sensors exist in the sensor list but typically report \
+             `na`; they are NOT queried on the polling hot path because `ipmitool sensor list` \
+             costs ~4 s on SSIF BMCs."
+                .into(),
+        );
     }
 
     Ok(stats)
@@ -547,15 +564,49 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
     Ok(out_vec)
 }
 
-fn parse_ipmi_power(txt: &str) -> Option<f32> {
-    // Example line: "    Instantaneous power reading:                   123 Watts"
+fn parse_ipmi_dcmi_power(txt: &str) -> Option<f32> {
+    // Example line: "    Instantaneous power reading:                   123 Watts".
+    // Treat a reading of 0 as "BMC advertises DCMI but doesn't fill it
+    // in" — the common ASUS / SMC / Quanta failure mode. Caller then
+    // falls through to the per-PSU sensor list parser.
     for line in txt.lines() {
         if let Some(rest) = line.trim().strip_prefix("Instantaneous power reading:") {
             let num = rest.split_whitespace().next()?;
-            return num.parse::<f32>().ok();
+            let w = num.parse::<f32>().ok()?;
+            return if w > 0.0 { Some(w) } else { None };
         }
     }
     None
+}
+
+fn parse_ipmi_sensor_psu_watts(txt: &str) -> Option<f32> {
+    // `ipmitool sensor list` POUT rows look like:
+    //   "PSU1 POUT         | 420.000    | Watts      | ok    | ..."
+    //   "PSU2 POUT         | na         | Watts      | na    | ..."
+    // Sum the numeric values — boards with two PSUs split load so a
+    // single-PSU reading under-reports actual draw. `na` rows are
+    // skipped; if every row is `na` we return None.
+    let mut total = 0.0f32;
+    let mut any_value = false;
+    for line in txt.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cells.len() < 3 {
+            continue;
+        }
+        let unit = cells.get(2).copied().unwrap_or("").to_ascii_lowercase();
+        if unit != "watts" {
+            continue;
+        }
+        if let Ok(w) = cells[1].parse::<f32>() {
+            total += w;
+            any_value = true;
+        }
+    }
+    if any_value && total > 0.0 {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -626,9 +677,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_ipmi_power_extracts_watts() {
-        let s = "    Instantaneous power reading:                   123 Watts";
-        assert_eq!(parse_ipmi_power(s), Some(123.0));
-        assert_eq!(parse_ipmi_power(""), None);
+    fn parse_dcmi_returns_value_only_when_nonzero() {
+        // Real non-zero reading → propagated.
+        assert_eq!(
+            parse_ipmi_dcmi_power("    Instantaneous power reading:                   123 Watts"),
+            Some(123.0),
+        );
+        // 0 Watts from a board that advertises DCMI support but doesn't
+        // fill it in — caller expects None so it falls back to sensor
+        // list.
+        assert_eq!(
+            parse_ipmi_dcmi_power("    Instantaneous power reading:                     0 Watts"),
+            None,
+        );
+        assert_eq!(parse_ipmi_dcmi_power(""), None);
+    }
+
+    #[test]
+    fn parse_sensor_psu_watts_sums_numeric_rows() {
+        let txt = "PSU1 POUT         | 420.500    | Watts      | ok    | na        | na\n\
+                   PSU2 POUT         | na         | Watts      | na    | na        | na";
+        assert_eq!(parse_ipmi_sensor_psu_watts(txt), Some(420.5));
+        let two = "PSU1 POUT | 200.0 | Watts | ok | na | na\nPSU2 POUT | 210.0 | Watts | ok | na | na";
+        assert_eq!(parse_ipmi_sensor_psu_watts(two), Some(410.0));
+        // All na → None so UI hides the line.
+        let all_na = "PSU1 POUT | na | Watts | na | na | na\nPSU2 POUT | na | Watts | na | na | na";
+        assert_eq!(parse_ipmi_sensor_psu_watts(all_na), None);
     }
 }
