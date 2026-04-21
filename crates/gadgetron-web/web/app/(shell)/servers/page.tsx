@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { Sparkline, type SparkPoint } from "../../components/sparkline";
+import { HostDetailDrawer } from "../../components/host-detail-drawer";
 import { useAuth } from "../../lib/auth-context";
 import { safeRandomUUID } from "../../lib/uuid";
 
@@ -575,12 +576,14 @@ function HostCard({
   host,
   data,
   onRemove,
+  onOpenDetail,
   nowMs,
   apiKey,
 }: {
   host: Host;
   data: StatsMap[string] | undefined;
   onRemove: () => void;
+  onOpenDetail: () => void;
   /** Tick value from the parent's `setInterval` so the "updated Xs ago"
    * label re-renders every second without coupling the card to its
    * own timer. */
@@ -637,15 +640,26 @@ function HostCard({
             {host.ssh_user}@{host.host}:{host.ssh_port}
           </div>
         </div>
-        <button
-          type="button"
-          data-testid={`host-remove-${host.host}`}
-          onClick={onRemove}
-          className="shrink-0 rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-red-400"
-          title="Remove host"
-        >
-          remove
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            data-testid={`host-detail-${host.host}`}
+            onClick={onOpenDetail}
+            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-blue-400"
+            title="Open detail charts"
+          >
+            detail
+          </button>
+          <button
+            type="button"
+            data-testid={`host-remove-${host.host}`}
+            onClick={onRemove}
+            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-red-400"
+            title="Remove host"
+          >
+            remove
+          </button>
+        </div>
       </div>
       {err && (
         <div className="rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-[10px] text-red-300">
@@ -904,6 +918,7 @@ export default function ServersPage() {
   // already has hosts (fresh page load) and auto-collapses 2.5 s after
   // a successful registration (handled inside AddHostForm).
   const [addFormCollapsed, setAddFormCollapsed] = useState(false);
+  const [detailHost, setDetailHost] = useState<Host | null>(null);
   // `nowMs` ticks once per second so the "updated Xs ago" label on
   // each host card stays live without per-card timers. We intentionally
   // decouple this from `POLL_INTERVAL_MS` — the label should keep
@@ -1093,6 +1108,7 @@ export default function ServersPage() {
                   host={h}
                   data={statsMap[h.id]}
                   onRemove={() => void remove(h.id, h.host)}
+                  onOpenDetail={() => setDetailHost(h)}
                   nowMs={nowMs}
                   apiKey={apiKey}
                 />
@@ -1101,6 +1117,31 @@ export default function ServersPage() {
           )}
         </section>
       </div>
+      {detailHost && (
+        <HostDetailDrawer
+          open={true}
+          onClose={() => setDetailHost(null)}
+          apiKey={apiKey}
+          hostId={detailHost.id}
+          hostLabel={detailHost.host}
+          available={{
+            gpus:
+              statsMap[detailHost.id]?.stats?.gpus.map((g) => ({
+                index: g.index,
+                name: g.name,
+              })) ?? [],
+            nics:
+              statsMap[detailHost.id]?.stats?.network.map((n) => n.iface) ?? [],
+            temps:
+              statsMap[detailHost.id]?.stats?.temps.map(
+                (t) => `temp.${t.chip}.${t.label}`,
+              ) ?? [],
+          }}
+          context={{
+            totalRamBytes: statsMap[detailHost.id]?.stats?.mem?.total_bytes,
+          }}
+        />
+      )}
     </>
   );
 }
