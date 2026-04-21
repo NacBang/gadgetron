@@ -15,6 +15,11 @@ tokio = { workspace = true, features = ["process", "fs", "io-util", "rt", "macro
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# Optional — only used by the metrics ingestion worker. The bundle
+# stays runnable without a Postgres pool (legacy demo path); when a
+# pool is wired via `ServerMonitorProvider::with_metrics_writer`,
+# sqlx takes over the batch INSERT path.
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

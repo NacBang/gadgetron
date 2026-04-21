@@ -43,6 +43,14 @@ pub struct HostRecord {
     /// Updated on every successful stats / info call. `None` until the
     /// first post-registration poll succeeds.
     pub last_ok_at: Option<DateTime<Utc>>,
+    /// Owning tenant UUID — propagated onto every `host_metrics` row
+    /// for tenant-leading composite-index filtering. `Uuid::nil()` for
+    /// inventory entries written before the timeseries track existed
+    /// (defaulted via `#[serde(default)]` so old JSON files still load).
+    /// Single-tenant demos can leave it nil; multi-tenant operators
+    /// populate it at register time from the caller's `TenantContext`.
+    #[serde(default)]
+    pub tenant_id: Uuid,
 }
 
 fn default_ssh_port() -> u16 {
@@ -204,6 +212,7 @@ mod tests {
             key_path: PathBuf::from("/tmp/test-key"),
             created_at: Utc::now(),
             last_ok_at: None,
+            tenant_id: Uuid::nil(),
         }
     }
 
