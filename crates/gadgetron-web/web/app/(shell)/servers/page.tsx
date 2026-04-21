@@ -5,6 +5,7 @@ import { Toaster, toast } from "sonner";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
+import { Sparkline, type SparkPoint } from "../../components/sparkline";
 import { useAuth } from "../../lib/auth-context";
 import { safeRandomUUID } from "../../lib/uuid";
 
@@ -47,6 +48,14 @@ interface GpuStats {
   source: string;
 }
 
+interface NetworkStats {
+  iface: string;
+  rx_bps: number;
+  tx_bps: number;
+  rx_bytes_total: number;
+  tx_bytes_total: number;
+}
+
 interface ServerStats {
   cpu: { util_pct: number; load_1m: number; load_5m: number; cores: number } | null;
   mem: {
@@ -60,6 +69,7 @@ interface ServerStats {
   temps: Array<{ chip: string; label: string; celsius: number }>;
   gpus: GpuStats[];
   power: { psu_watts: number | null; gpu_watts: number | null } | null;
+  network: NetworkStats[];
   uptime_secs: number | null;
   fetched_at: string;
   warnings: string[];
@@ -566,6 +576,7 @@ function HostCard({
   data,
   onRemove,
   nowMs,
+  apiKey,
 }: {
   host: Host;
   data: StatsMap[string] | undefined;
@@ -574,6 +585,7 @@ function HostCard({
    * label re-renders every second without coupling the card to its
    * own timer. */
   nowMs: number;
+  apiKey: string | null;
 }) {
   const stats = data?.stats;
   const err = data?.error;
@@ -583,6 +595,34 @@ function HostCard({
       : null;
   const fetchMs = data?.lastFetchMs ?? null;
   const loading = data?.loading ?? false;
+
+  // Build the metric list dynamically — only ask the API for series we
+  // can actually render. CPU + Mem are always present; NIC is per-iface.
+  const sparkMetrics = useMemo(() => {
+    const m = ["cpu.util", "mem.used_bytes"];
+    const firstGpu = stats?.gpus?.[0];
+    if (firstGpu) {
+      m.push(`gpu.${firstGpu.index}.util`);
+    }
+    const firstNic = stats?.network?.[0];
+    if (firstNic) {
+      m.push(`nic.${firstNic.iface}.rx_bps`);
+    }
+    return m;
+  }, [stats?.gpus, stats?.network]);
+
+  const history = useHostMetricHistory(apiKey, host.id, sparkMetrics);
+
+  // Helpers for current-value annotations (used in sparkline labels).
+  const memPct = stats?.mem
+    ? `${((stats.mem.used_bytes / stats.mem.total_bytes) * 100).toFixed(0)}%`
+    : "—";
+  const gpu0Pct =
+    stats?.gpus?.[0]?.util_pct != null
+      ? `${stats.gpus[0].util_pct.toFixed(0)}%`
+      : "—";
+  const nic0 = stats?.network?.[0];
+  const nicCurrent = nic0 ? fmtBps(nic0.rx_bps) : "—";
   return (
     <div
       data-testid={`host-card-${host.host}`}
@@ -661,6 +701,58 @@ function HostCard({
           <span className="font-mono text-zinc-300">{fmtUptime(stats.uptime_secs)}</span>
         </div>
       )}
+      {sparkMetrics.length > 0 && (
+        <div
+          className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-zinc-800 pt-2"
+          data-testid="host-sparklines"
+        >
+          <Sparkline
+            label="cpu (5m)"
+            current={stats?.cpu ? `${stats.cpu.util_pct.toFixed(1)}%` : "—"}
+            points={history["cpu.util"] ?? []}
+            tone="blue"
+            yMin={0}
+            yMax={100}
+          />
+          <Sparkline
+            label="mem (5m)"
+            current={memPct}
+            points={
+              history["mem.used_bytes"]
+                ?.map((p) => ({
+                  ...p,
+                  // Project bytes → percent for visual normalization
+                  // when total is known; otherwise keep raw.
+                  avg: stats?.mem
+                    ? (p.avg / stats.mem.total_bytes) * 100
+                    : p.avg,
+                })) ?? []
+            }
+            tone="emerald"
+            yMin={0}
+            yMax={stats?.mem ? 100 : undefined}
+          />
+          {stats?.gpus?.[0] && (
+            <Sparkline
+              label={`gpu${stats.gpus[0].index} util (5m)`}
+              current={gpu0Pct}
+              points={history[`gpu.${stats.gpus[0].index}.util`] ?? []}
+              tone="amber"
+              yMin={0}
+              yMax={100}
+            />
+          )}
+          {nic0 && (
+            <Sparkline
+              label={`nic ${nic0.iface} rx (5m)`}
+              current={nicCurrent}
+              points={history[`nic.${nic0.iface}.rx_bps`] ?? []}
+              tone="zinc"
+              yMin={0}
+            />
+          )}
+        </div>
+      )}
       {stats?.warnings && stats.warnings.length > 0 && (
         <details className="text-[10px] text-zinc-500">
           <summary className="cursor-pointer">warnings ({stats.warnings.length})</summary>
@@ -713,6 +805,95 @@ function HostCard({
 // ---------------------------------------------------------------------------
 
 const POLL_INTERVAL_MS = 1000;
+/** History window the per-card sparklines display. 5 min × 1 Hz =
+ *  ~300 samples per series — well within the auto-tier `raw` cutoff. */
+const HISTORY_WINDOW_MS = 5 * 60 * 1000;
+/** Refresh cadence for the history fetches. We don't need to re-pull
+ *  every poll — the sparkline updates fine at 5 s. */
+const HISTORY_REFRESH_MS = 5_000;
+
+interface MetricsApiResponse {
+  metric: string;
+  unit: string | null;
+  resolution: string;
+  points: Array<{
+    ts: string;
+    avg: number;
+    min: number;
+    max: number;
+    samples: number;
+  }>;
+  refresh_lag_seconds: number;
+  dropped_frames: number;
+}
+
+async function fetchMetricHistory(
+  apiKey: string,
+  hostId: string,
+  metric: string,
+): Promise<SparkPoint[]> {
+  const to = new Date();
+  const from = new Date(to.getTime() - HISTORY_WINDOW_MS);
+  const url =
+    `${getApiBase()}/workbench/servers/${hostId}/metrics` +
+    `?metric=${encodeURIComponent(metric)}` +
+    `&from=${from.toISOString()}` +
+    `&to=${to.toISOString()}` +
+    `&bucket=auto`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) return [];
+  const body = (await res.json()) as MetricsApiResponse;
+  return body.points.map((p) => ({
+    ts: p.ts,
+    avg: p.avg,
+    min: p.min,
+    max: p.max,
+  }));
+}
+
+/** Per-host history fetcher. Returns the latest series for each
+ *  metric requested; refreshes on a separate timer from the live
+ *  `server.stats` poll so a slow `host_metrics` query never starves
+ *  the live snapshot path. */
+function useHostMetricHistory(
+  apiKey: string | null,
+  hostId: string,
+  metrics: string[],
+): Record<string, SparkPoint[]> {
+  const [series, setSeries] = useState<Record<string, SparkPoint[]>>({});
+  // Stable signature so the effect doesn't re-fire each render.
+  const metricsKey = metrics.join("|");
+  useEffect(() => {
+    if (!apiKey) return;
+    let cancelled = false;
+    const tick = async () => {
+      const next: Record<string, SparkPoint[]> = {};
+      const all = await Promise.all(
+        metrics.map(async (m) => [m, await fetchMetricHistory(apiKey, hostId, m)] as const),
+      );
+      if (cancelled) return;
+      for (const [m, pts] of all) next[m] = pts;
+      setSeries(next);
+    };
+    void tick();
+    const id = window.setInterval(tick, HISTORY_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey, hostId, metricsKey]);
+  return series;
+}
+
+function fmtBps(bps: number): string {
+  if (bps < 1024) return `${bps.toFixed(0)} B/s`;
+  if (bps < 1024 ** 2) return `${(bps / 1024).toFixed(1)} KiB/s`;
+  if (bps < 1024 ** 3) return `${(bps / 1024 ** 2).toFixed(1)} MiB/s`;
+  return `${(bps / 1024 ** 3).toFixed(2)} GiB/s`;
+}
 
 export default function ServersPage() {
   const { apiKey } = useAuth();
@@ -913,6 +1094,7 @@ export default function ServersPage() {
                   data={statsMap[h.id]}
                   onRemove={() => void remove(h.id, h.host)}
                   nowMs={nowMs}
+                  apiKey={apiKey}
                 />
               ))}
             </div>
