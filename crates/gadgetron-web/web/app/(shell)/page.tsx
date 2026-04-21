@@ -27,7 +27,7 @@ import { SlashHelpDialog } from "../components/slash-help-dialog";
 import { SlashAutocomplete } from "../components/slash-autocomplete";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
-import { Avatar, AvatarFallback } from "../components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
 import {
   Dialog,
   DialogContent,
@@ -327,6 +327,11 @@ function AssistantMessage() {
   return (
     <div className="group mb-6 flex items-start gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300">
       <Avatar className="size-7 shrink-0">
+        {/* Drop a real Penny portrait into
+         * `crates/gadgetron-web/web/public/brand/penny.png` (or .svg)
+         * to override the placeholder. The fallback renders a 'P' if
+         * the file is missing or the request fails. */}
+        <AvatarImage src="/web/brand/penny.svg" alt="Penny" />
         <AvatarFallback className="bg-zinc-800 text-zinc-400 text-[10px] font-bold">
           P
         </AvatarFallback>

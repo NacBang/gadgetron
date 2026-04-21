@@ -154,21 +154,27 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
         health.status === "blocked" && "border-red-900/40",
       )}
     >
-      {/* Gateway health */}
-      <span className="flex items-center gap-1.5" data-testid="health-indicator">
-        <StatusDot status={health.status} />
-        <span
-          className={cn(
-            health.status === "healthy" && "text-emerald-400",
-            health.status === "degraded" && "text-amber-400",
-            health.status === "blocked" && "text-red-400",
-          )}
-        >
-          {healthLabel}
+      {/* Brand: ManyCoreSoft logo + product name. Drop a real
+       * `/web/brand/manycoresoft.svg` (or .png) into
+       * `crates/gadgetron-web/web/public/brand/` to override the
+       * built-in placeholder. */}
+      <span
+        className="flex items-center gap-2"
+        data-testid="brand"
+        aria-label="ManyCoreSoft Gadgetron"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/web/brand/manycoresoft.svg"
+          alt="ManyCoreSoft"
+          width={20}
+          height={20}
+          className="block size-5 shrink-0 rounded"
+        />
+        <span className="text-sm font-semibold text-zinc-200">
+          <span className="text-zinc-400">ManyCoreSoft</span>{" "}
+          <span className="text-zinc-100">Gadgetron</span>
         </span>
-        {health.httpStatus !== null && health.status !== "healthy" && (
-          <span className="text-zinc-600">({health.httpStatus})</span>
-        )}
       </span>
 
       <span className="text-zinc-700" aria-hidden>
@@ -188,10 +194,12 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
         ))}
       </span>
 
-      {/* Spacer */}
+      {/* Spacer pushes health + (optional) session/actor to the right. */}
       <span className="flex-1" />
 
-      {/* Session / actor */}
+      {/* Session / actor — optional, only shown when explicitly passed.
+       * The "session: --" placeholder was removed because it carried no
+       * real information and added visual noise on every page. */}
       {sessionId && (
         <span className="text-zinc-600" data-testid="session-id">
           session:{" "}
@@ -203,11 +211,25 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
           actor: <span className="text-zinc-400">{actor}</span>
         </span>
       )}
-      {!sessionId && !actor && (
-        <span className="text-zinc-700" data-testid="session-placeholder">
-          session: --
+
+      {/* Gateway health is now the rightmost element — operators glance
+       * top-right (the same spot as the typical status-tray placement
+       * in macOS / Windows) for the "is the box up" signal. */}
+      <span className="flex items-center gap-1.5" data-testid="health-indicator">
+        <StatusDot status={health.status} />
+        <span
+          className={cn(
+            health.status === "healthy" && "text-emerald-400",
+            health.status === "degraded" && "text-amber-400",
+            health.status === "blocked" && "text-red-400",
+          )}
+        >
+          {healthLabel}
         </span>
-      )}
+        {health.httpStatus !== null && health.status !== "healthy" && (
+          <span className="text-zinc-600">({health.httpStatus})</span>
+        )}
+      </span>
     </div>
   );
 }
