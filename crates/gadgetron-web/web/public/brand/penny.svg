@@ -1,0 +1,30 @@
+<!-- Placeholder Penny avatar — generic detective-style cartoon icon.
+     Drop the real Penny image (preferably square PNG) at this path
+     to override. The chat bubble code references /web/brand/penny.svg
+     OR /web/brand/penny.png; whichever exists wins. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" role="img" aria-label="Penny">
+  <defs>
+    <radialGradient id="bg" cx="0.5" cy="0.4" r="0.7">
+      <stop offset="0%" stop-color="#fde68a"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </radialGradient>
+  </defs>
+  <!-- Round chat-avatar background -->
+  <circle cx="40" cy="40" r="38" fill="url(#bg)"/>
+  <!-- Hair (blonde bob) -->
+  <path d="M16 38c0-13 11-22 24-22s24 9 24 22v6c0 2-2 4-4 4h-2v-10c0-9-8-16-18-16s-18 7-18 16v10h-2c-2 0-4-2-4-4z"
+        fill="#fbbf24" stroke="#92400e" stroke-width="1.2"/>
+  <!-- Face -->
+  <ellipse cx="40" cy="46" rx="16" ry="18" fill="#fef3c7" stroke="#92400e" stroke-width="1.2"/>
+  <!-- Glasses (the "computer book" detective vibe) -->
+  <g stroke="#1f2937" stroke-width="2" fill="none">
+    <circle cx="33" cy="44" r="5"/>
+    <circle cx="47" cy="44" r="5"/>
+    <line x1="38" y1="44" x2="42" y2="44"/>
+  </g>
+  <!-- Eyes inside the lenses -->
+  <circle cx="33" cy="44" r="1.5" fill="#1f2937"/>
+  <circle cx="47" cy="44" r="1.5" fill="#1f2937"/>
+  <!-- Smile -->
+  <path d="M33 54 Q40 60 47 54" stroke="#92400e" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+</svg>
