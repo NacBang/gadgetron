@@ -1625,6 +1625,13 @@ pub fn workbench_routes() -> Router<AppState> {
         )
         // ISSUE 22 — admin audit_log query endpoint.
         .route("/admin/audit/log", get(list_audit_log_handler))
+        // §16 server-metrics timeseries — read-side surface. Tier
+        // selection auto / raw / 5s / 1m / 5m / 1h. Tenant-leading
+        // queries enforce isolation.
+        .route(
+            "/servers/{host_id}/metrics",
+            get(crate::web::server_metrics::list_server_metrics),
+        )
 }
 
 // ---------------------------------------------------------------------------
