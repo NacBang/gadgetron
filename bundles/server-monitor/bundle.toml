@@ -1,7 +1,7 @@
 # server-monitor — first-party bundle manifest.
 #
 # Exposes five workbench actions that map 1:1 onto the `server.*` Gadgets
-# registered by `plugins/plugin-server-monitor`. Install by pointing
+# registered by `bundles/server-monitor`. Install by pointing
 # `[web] bundles_dir = "bundles"` at the repo root (or by calling
 # `POST /api/v1/web/workbench/admin/bundles` with this file).
 #
@@ -101,3 +101,31 @@ destructive = false
 requires_approval = false
 knowledge_hint = "실시간 CPU/RAM/disk/temp/GPU/PSU 스냅샷. UI가 5초마다 폴링."
 input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" } }, required = ["id"], additionalProperties = false }
+
+[[actions]]
+id = "server-systemctl"
+title = "서비스 제어"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.systemctl"
+gadget_name = "server.systemctl"
+placement = "context_menu"
+kind = "mutation"
+destructive = true
+requires_approval = false
+knowledge_hint = "원격 호스트에서 systemctl (start/stop/restart/enable/disable/status). NOPASSWD sudoers 필요."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, verb = { type = "string", enum = ["start","stop","restart","reload","enable","disable","status","is-active","is-enabled"] }, unit = { type = "string", maxLength = 255 } }, required = ["id","verb","unit"], additionalProperties = false }
+
+[[actions]]
+id = "server-journal"
+title = "서버 로그"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.journal"
+gadget_name = "server.journal"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "원격 호스트의 journalctl 최근 로그. unit/priority/lines 필터 지원."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, unit = { type = "string", maxLength = 255 }, lines = { type = "integer", minimum = 10, maximum = 2000 }, priority = { type = "string" } }, required = ["id"], additionalProperties = false }

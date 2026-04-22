@@ -47,13 +47,29 @@ pub async fn auth_middleware(
     // path is the single exception.
     let token = match auth_header {
         Some(t) => t,
-        None if req.uri().path().ends_with("/events/ws") => match token_from_query(req.uri()) {
-            Some(t) => t,
-            None => {
-                emit_auth_failure_audit(&state);
-                return ApiError(GadgetronError::TenantNotFound).into_response();
+        None if req.uri().path().ends_with("/events/ws") => {
+            // WS path: Bearer header is spec-impossible from the
+            // browser so we accept `?token=…` OR a session cookie.
+            // Cookie is preferred so session-authed browsers don't
+            // need to mint an API key just to subscribe to events.
+            if let Some(cookie_token) = session_cookie_token(req.headers()) {
+                if let Some(pool) = state.pg_pool.as_ref() {
+                    if let Ok(validated_key) =
+                        validate_session_and_build_key(pool, &cookie_token).await
+                    {
+                        req.extensions_mut().insert(validated_key);
+                        return next.run(req).await;
+                    }
+                }
             }
-        },
+            match token_from_query(req.uri()) {
+                Some(t) => t,
+                None => {
+                    emit_auth_failure_audit(&state);
+                    return ApiError(GadgetronError::TenantNotFound).into_response();
+                }
+            }
+        }
         None => {
             // ISSUE 16 TASK 16.1 — when no Bearer header present, try
             // the session cookie before giving up. This lets the

@@ -73,6 +73,14 @@ impl ServerMonitorProvider {
         &self.metrics_counters
     }
 
+    /// Expose the shared inventory Arc so the background poller can
+    /// iterate the host list without duplicating storage. Both paths
+    /// (gadget call + poller) need to see add/remove immediately,
+    /// which `Arc<InventoryStore>` gives us for free.
+    pub fn inventory(&self) -> Arc<crate::inventory::InventoryStore> {
+        Arc::clone(&self.inventory)
+    }
+
     fn known_hosts_path(&self) -> PathBuf {
         self.inventory.root().join("known_hosts")
     }
@@ -91,6 +99,8 @@ impl GadgetProvider for ServerMonitorProvider {
             schema_server_remove(),
             schema_server_info(),
             schema_server_stats(),
+            schema_server_systemctl(),
+            schema_server_journal(),
         ]
     }
 
@@ -101,6 +111,8 @@ impl GadgetProvider for ServerMonitorProvider {
             "server.remove" => self.call_remove(args).await,
             "server.info" => self.call_info(args).await,
             "server.stats" => self.call_stats(args).await,
+            "server.systemctl" => self.call_systemctl(args).await,
+            "server.journal" => self.call_journal(args).await,
             other => Err(GadgetError::UnknownGadget(other.to_string())),
         }
     }
@@ -214,11 +226,20 @@ impl ServerMonitorProvider {
         // nil and that's fine for the §16 schema. A multi-tenant deployment
         // can either thread the value via the request body or wait for
         // the upcoming `TenantContext` propagation work.
+        // Prefer the caller-supplied value, else fall back to the
+        // demo/single-tenant default so new rows never land with `nil`
+        // (the read-side metric queries are scoped by tenant and would
+        // silently hide the graphs otherwise). When the workbench
+        // starts threading `TenantContext` into gadget args, the
+        // explicit value from the UI wins over this default.
+        const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
         let tenant_id = args
             .get("tenant_id")
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
-            .unwrap_or_else(Uuid::nil);
+            .unwrap_or_else(|| {
+                Uuid::parse_str(DEFAULT_TENANT).expect("literal uuid")
+            });
         let record = HostRecord {
             id,
             host: host.clone(),
@@ -300,7 +321,65 @@ impl ServerMonitorProvider {
     }
 
     async fn call_stats(&self, args: Value) -> Result<GadgetResult, GadgetError> {
+        let t_total = std::time::Instant::now();
         let id = get_uuid(&args, "id")?;
+        let t_inv = std::time::Instant::now();
+        let rec = self
+            .inventory
+            .get(id)
+            .await
+            .map_err(|e| GadgetError::Execution(format!("inventory get: {e}")))?
+            .ok_or_else(|| GadgetError::InvalidArgs(format!("no host with id {id}")))?;
+        let inv_ms = t_inv.elapsed().as_millis();
+        let target = to_target(&rec, self.known_hosts_path());
+        let t_ssh = std::time::Instant::now();
+        let stats = collect_stats(&target)
+            .await
+            .map_err(|e| GadgetError::Execution(format!("stats collect: {e}")))?;
+        let ssh_ms = t_ssh.elapsed().as_millis();
+        let t_mark = std::time::Instant::now();
+        let _ = self.inventory.mark_ok(id, Utc::now()).await;
+        let mark_ms = t_mark.elapsed().as_millis();
+
+        let t_ship = std::time::Instant::now();
+        let samples = stats_to_samples(rec.tenant_id, rec.id, &stats);
+        try_ship(self.metrics_sender.as_ref(), &self.metrics_counters, samples);
+        let ship_ms = t_ship.elapsed().as_millis();
+
+        let t_ser = std::time::Instant::now();
+        let payload = serde_json::to_value(&stats).unwrap_or(json!({}));
+        let ser_ms = t_ser.elapsed().as_millis();
+        let total_ms = t_total.elapsed().as_millis();
+        tracing::info!(
+            target: "server_monitor_timing",
+            host_id = %id,
+            host = %rec.host,
+            inv_ms,
+            ssh_ms,
+            mark_ok_ms = mark_ms,
+            ship_ms,
+            serialize_ms = ser_ms,
+            total_ms,
+            "call_stats timings"
+        );
+
+        ok_result(payload)
+    }
+
+    async fn call_systemctl(&self, args: Value) -> Result<GadgetResult, GadgetError> {
+        let id = get_uuid(&args, "id")?;
+        let verb = get_str(&args, "verb")?;
+        let unit = get_str(&args, "unit")?;
+        if !is_safe_systemctl_verb(&verb) {
+            return Err(GadgetError::InvalidArgs(format!(
+                "verb '{verb}' not in allowlist (start|stop|restart|reload|enable|disable|status|is-active|is-enabled)"
+            )));
+        }
+        if !is_safe_unit_name(&unit) {
+            return Err(GadgetError::InvalidArgs(format!(
+                "unit '{unit}' contains disallowed characters"
+            )));
+        }
         let rec = self
             .inventory
             .get(id)
@@ -308,19 +387,112 @@ impl ServerMonitorProvider {
             .map_err(|e| GadgetError::Execution(format!("inventory get: {e}")))?
             .ok_or_else(|| GadgetError::InvalidArgs(format!("no host with id {id}")))?;
         let target = to_target(&rec, self.known_hosts_path());
-        let stats = collect_stats(&target)
+        // `--no-pager` prevents status output from blocking on a pager;
+        // `--full` avoids column-width truncation that would hide useful
+        // journal snippets. Limit status output to the last ~20 lines
+        // so the return payload stays reasonable.
+        let cmd = if verb == "status" {
+            format!(
+                "sudo -n /bin/systemctl --no-pager --full --lines=20 status {unit} 2>&1 || true"
+            )
+        } else {
+            format!("sudo -n /bin/systemctl {verb} {unit} 2>&1")
+        };
+        let out = crate::ssh::exec(&target, &cmd)
             .await
-            .map_err(|e| GadgetError::Execution(format!("stats collect: {e}")))?;
-        let _ = self.inventory.mark_ok(id, Utc::now()).await;
-
-        // Timeseries fan-out — never blocks the response. `try_ship`
-        // bumps `samples_dropped` if the writer queue is full and
-        // returns immediately.
-        let samples = stats_to_samples(rec.tenant_id, rec.id, &stats);
-        try_ship(self.metrics_sender.as_ref(), &self.metrics_counters, samples);
-
-        ok_result(serde_json::to_value(stats).unwrap_or(json!({})))
+            .map_err(|e| GadgetError::Execution(format!("ssh exec: {e}")))?;
+        ok_result(json!({
+            "host": rec.host,
+            "verb": verb,
+            "unit": unit,
+            "code": out.code,
+            "stdout": out.stdout,
+            "stderr": out.stderr,
+        }))
     }
+
+    async fn call_journal(&self, args: Value) -> Result<GadgetResult, GadgetError> {
+        let id = get_uuid(&args, "id")?;
+        let unit = args
+            .get("unit")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(u) = &unit {
+            if !is_safe_unit_name(u) {
+                return Err(GadgetError::InvalidArgs(format!(
+                    "unit '{u}' contains disallowed characters"
+                )));
+            }
+        }
+        let lines = args
+            .get("lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200)
+            .clamp(10, 2000);
+        let priority = args
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let rec = self
+            .inventory
+            .get(id)
+            .await
+            .map_err(|e| GadgetError::Execution(format!("inventory get: {e}")))?
+            .ok_or_else(|| GadgetError::InvalidArgs(format!("no host with id {id}")))?;
+        let target = to_target(&rec, self.known_hosts_path());
+        // `-o short-iso` for operator-friendly timestamps, `--no-pager`
+        // so sshd doesn't block, `--lines` caps the payload size.
+        let mut cmd = format!("sudo -n /bin/journalctl --no-pager -o short-iso -n {lines}");
+        if let Some(u) = &unit {
+            cmd.push_str(&format!(" -u {u}"));
+        }
+        if let Some(p) = &priority {
+            if is_safe_priority(p) {
+                cmd.push_str(&format!(" -p {p}"));
+            }
+        }
+        cmd.push_str(" 2>&1 || true");
+        let out = crate::ssh::exec(&target, &cmd)
+            .await
+            .map_err(|e| GadgetError::Execution(format!("ssh exec: {e}")))?;
+        ok_result(json!({
+            "host": rec.host,
+            "unit": unit,
+            "lines": lines,
+            "code": out.code,
+            "output": out.stdout,
+        }))
+    }
+}
+
+fn is_safe_systemctl_verb(v: &str) -> bool {
+    matches!(
+        v,
+        "start"
+            | "stop"
+            | "restart"
+            | "reload"
+            | "enable"
+            | "disable"
+            | "status"
+            | "is-active"
+            | "is-enabled"
+    )
+}
+
+fn is_safe_unit_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | ':'))
+}
+
+fn is_safe_priority(s: &str) -> bool {
+    matches!(
+        s,
+        "emerg" | "alert" | "crit" | "err" | "warning" | "notice" | "info" | "debug"
+            | "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7"
+    )
 }
 
 fn to_target(rec: &HostRecord, known_hosts: PathBuf) -> SshTarget {
@@ -460,6 +632,57 @@ fn schema_server_stats() -> GadgetSchema {
         input_schema: json!({
             "type": "object",
             "properties": { "id": { "type": "string", "format": "uuid" } },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+        idempotent: Some(true),
+    }
+}
+
+fn schema_server_systemctl() -> GadgetSchema {
+    GadgetSchema {
+        name: "server.systemctl".into(),
+        tier: GadgetTier::Write,
+        description: "Control a systemd unit on the remote host via NOPASSWD sudo. \
+            Verbs: start | stop | restart | reload | enable | disable | status | \
+            is-active | is-enabled. Use this to (re)start nvidia-dcgm when the DCGM \
+            hostengine dies, to enable a service at boot, or to inspect unit status. \
+            Hosts registered before the 2026-04 sudoers update need a re-bootstrap."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id":   { "type": "string", "format": "uuid" },
+                "verb": {
+                    "type": "string",
+                    "enum": ["start","stop","restart","reload","enable","disable","status","is-active","is-enabled"]
+                },
+                "unit": { "type": "string", "maxLength": 255 }
+            },
+            "required": ["id","verb","unit"],
+            "additionalProperties": false
+        }),
+        idempotent: Some(false),
+    }
+}
+
+fn schema_server_journal() -> GadgetSchema {
+    GadgetSchema {
+        name: "server.journal".into(),
+        tier: GadgetTier::Read,
+        description: "Read recent journalctl lines on the remote host. Optional `unit` \
+            filter, optional `priority` (emerg|alert|crit|err|warning|notice|info|debug \
+            or 0-7). `lines` caps output (default 200, max 2000). Use this to debug a \
+            service crash, inspect kernel messages, or trace a failed systemctl call."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id":       { "type": "string", "format": "uuid" },
+                "unit":     { "type": "string", "maxLength": 255 },
+                "lines":    { "type": "integer", "minimum": 10, "maximum": 2000 },
+                "priority": { "type": "string" }
+            },
             "required": ["id"],
             "additionalProperties": false
         }),

@@ -27,6 +27,130 @@ function getApiBase(): string {
   return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
 
+// ---------------------------------------------------------------------------
+// Tree rendering — wiki page names use '/' as a hierarchical separator
+// (e.g. `ops/runbook-h100`), so we parse that into a folder tree with
+// collapsible groups. Leaves are the actual wiki pages; folders are
+// purely structural and never correspond to a stored page themselves.
+// ---------------------------------------------------------------------------
+
+type TreeNode =
+  | { kind: "folder"; name: string; path: string; children: TreeNode[] }
+  | { kind: "leaf"; name: string; path: string };
+
+function buildTree(names: string[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  for (const name of names) {
+    const parts = name.split("/").filter((s) => s.length > 0);
+    let cursor = root;
+    let prefix = "";
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      prefix = prefix ? `${prefix}/${part}` : part;
+      const isLeaf = i === parts.length - 1;
+      if (isLeaf) {
+        cursor.push({ kind: "leaf", name: part, path: name });
+      } else {
+        let folder = cursor.find(
+          (n) => n.kind === "folder" && n.name === part,
+        ) as Extract<TreeNode, { kind: "folder" }> | undefined;
+        if (!folder) {
+          folder = { kind: "folder", name: part, path: prefix, children: [] };
+          cursor.push(folder);
+        }
+        cursor = folder.children;
+      }
+    }
+  }
+  // Sort: folders first, then leaves, both alphabetically.
+  const sortNodes = (nodes: TreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const n of nodes) {
+      if (n.kind === "folder") sortNodes(n.children);
+    }
+  };
+  sortNodes(root);
+  return root;
+}
+
+function TreeBranch({
+  nodes,
+  depth,
+  selected,
+  onOpen,
+  expanded,
+  toggle,
+}: {
+  nodes: TreeNode[];
+  depth: number;
+  selected: string | null;
+  onOpen: (path: string) => void;
+  expanded: Set<string>;
+  toggle: (path: string) => void;
+}) {
+  return (
+    <>
+      {nodes.map((node) => {
+        if (node.kind === "folder") {
+          const isOpen = expanded.has(node.path);
+          return (
+            <div key={`d-${node.path}`}>
+              <button
+                type="button"
+                onClick={() => toggle(node.path)}
+                className="flex w-full items-center gap-1 truncate px-2 py-1 text-left font-mono text-[12px] text-zinc-500 hover:text-zinc-200"
+                style={{ paddingLeft: `${depth * 12 + 8}px` }}
+                data-testid={`wiki-folder-${node.path}`}
+              >
+                <span
+                  aria-hidden
+                  className="inline-block w-3 text-[10px] text-zinc-600"
+                >
+                  {isOpen ? "▾" : "▸"}
+                </span>
+                <span className="truncate">{node.name}</span>
+                <span className="ml-1 text-[10px] text-zinc-700">
+                  ({node.children.length})
+                </span>
+              </button>
+              {isOpen && (
+                <TreeBranch
+                  nodes={node.children}
+                  depth={depth + 1}
+                  selected={selected}
+                  onOpen={onOpen}
+                  expanded={expanded}
+                  toggle={toggle}
+                />
+              )}
+            </div>
+          );
+        }
+        return (
+          <button
+            key={`l-${node.path}`}
+            type="button"
+            onClick={() => onOpen(node.path)}
+            className={`flex w-full items-center gap-1 truncate px-2 py-1 text-left font-mono text-[12px] transition-colors ${
+              selected === node.path
+                ? "bg-blue-900/30 text-blue-200"
+                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+            }`}
+            style={{ paddingLeft: `${depth * 12 + 20}px` }}
+            data-testid={`wiki-page-item-${node.path}`}
+            title={node.path}
+          >
+            <span className="truncate">{node.name}</span>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 type ActionResponse = {
   result?: {
     status?: string;
@@ -40,15 +164,16 @@ type ActionResponse = {
 };
 
 async function invokeAction(
-  apiKey: string,
+  apiKey: string | null,
   actionId: string,
   args: Record<string, unknown>,
 ): Promise<ActionResponse> {
   const ciid = safeRandomUUID();
   const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
     method: "POST",
+    credentials: "include",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ args, client_invocation_id: ciid }),
@@ -81,7 +206,6 @@ export default function WikiWorkbenchPage() {
 
   // -------- wiki-list -------------------------------------------------------
   const refreshPages = useCallback(async () => {
-    if (!apiKey) return;
     setLoadingPages(true);
     setPagesError(null);
     try {
@@ -102,13 +226,12 @@ export default function WikiWorkbenchPage() {
   }, [apiKey]);
 
   useEffect(() => {
-    if (apiKey) void refreshPages();
+    void refreshPages();
   }, [apiKey, refreshPages]);
 
   // -------- wiki-read -------------------------------------------------------
   const openPage = useCallback(
     async (name: string) => {
-      if (!apiKey) return;
       setSelected(name);
       setEditing(false);
       setPageError(null);
@@ -127,7 +250,7 @@ export default function WikiWorkbenchPage() {
 
   // -------- wiki-write ------------------------------------------------------
   const savePage = useCallback(async () => {
-    if (!apiKey || !selected) return;
+    if (!selected) return;
     setSaving(true);
     setPageError(null);
     try {
@@ -151,7 +274,6 @@ export default function WikiWorkbenchPage() {
 
   // -------- knowledge-search ------------------------------------------------
   const runSearch = useCallback(async () => {
-    if (!apiKey) return;
     const q = searchQuery.trim();
     if (!q) {
       setSearchHits([]);
@@ -174,7 +296,7 @@ export default function WikiWorkbenchPage() {
   // clear the query so a manual refresh doesn't re-trigger.
   const deeplinkHandled = useMemo(() => ({ done: false }), []);
   useEffect(() => {
-    if (!apiKey || deeplinkHandled.done || typeof window === "undefined") return;
+    if (deeplinkHandled.done || typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     const pageParam = params.get("page");
     const qParam = params.get("q");
@@ -201,7 +323,52 @@ export default function WikiWorkbenchPage() {
     setEditing(true);
   }, []);
 
-  const pageListMemo = useMemo(() => pages, [pages]);
+  const pageTree = useMemo(() => buildTree(pages), [pages]);
+  // Persist which folders are expanded across reloads. Default: every
+  // top-level folder collapsed so long wikis stay scannable.
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    const raw = window.localStorage.getItem("gadgetron.wiki.tree-expanded");
+    if (!raw) return new Set();
+    try {
+      const parsed = JSON.parse(raw) as string[];
+      return Array.isArray(parsed) ? new Set(parsed) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      "gadgetron.wiki.tree-expanded",
+      JSON.stringify(Array.from(expandedFolders)),
+    );
+  }, [expandedFolders]);
+  const toggleFolder = useCallback((path: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+  // When a leaf is opened we auto-expand its ancestor folders so the
+  // selection is actually visible in the tree.
+  useEffect(() => {
+    if (!selected) return;
+    const parts = selected.split("/");
+    parts.pop();
+    if (parts.length === 0) return;
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      let prefix = "";
+      for (const p of parts) {
+        prefix = prefix ? `${prefix}/${p}` : p;
+        next.add(prefix);
+      }
+      return next;
+    });
+  }, [selected]);
 
   return (
     <>
@@ -285,26 +452,23 @@ export default function WikiWorkbenchPage() {
                 {pagesError}
               </div>
             )}
-            {!loadingPages && !pagesError && pageListMemo.length === 0 && (
+            {!loadingPages && !pagesError && pages.length === 0 && (
               <div className="px-3 py-2 text-[11px] text-zinc-600">
                 No pages. Use &quot;+ New page&quot; to create one.
               </div>
             )}
-            {pageListMemo.map((name) => (
-              <button
-                key={name}
-                type="button"
-                onClick={() => void openPage(name)}
-                className={`block w-full truncate px-3 py-1.5 text-left font-mono text-[12px] transition-colors ${
-                  selected === name
-                    ? "bg-blue-900/30 text-blue-200"
-                    : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
-                }`}
-                data-testid={`wiki-page-item-${name}`}
-              >
-                {name}
-              </button>
-            ))}
+            {!loadingPages && pages.length > 0 && (
+              <div className="py-1">
+                <TreeBranch
+                  nodes={pageTree}
+                  depth={0}
+                  selected={selected}
+                  onOpen={(path) => void openPage(path)}
+                  expanded={expandedFolders}
+                  toggle={toggleFolder}
+                />
+              </div>
+            )}
           </div>
         </aside>
 

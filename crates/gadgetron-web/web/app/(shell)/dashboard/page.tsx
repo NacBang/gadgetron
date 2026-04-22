@@ -20,12 +20,15 @@ function getApiBase(): string {
   return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
 
-function wsUrlFromHttp(httpBase: string, actorKey: string): string {
+function wsUrlFromHttp(httpBase: string, actorKey: string | null): string {
   if (typeof location === "undefined") return "";
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const host = location.host;
   const base = `${scheme}//${host}${httpBase}/workbench/events/ws`;
-  return `${base}?token=${encodeURIComponent(actorKey)}`;
+  // With a session cookie, the browser sends it automatically on the
+  // WebSocket upgrade and the gateway middleware resolves it there.
+  // Fall back to `?token=` when an API key is the only auth we have.
+  return actorKey ? `${base}?token=${encodeURIComponent(actorKey)}` : base;
 }
 
 type UsageSummary = {
@@ -64,11 +67,10 @@ export default function DashboardPage() {
   const wsRef = useRef<WebSocket | null>(null);
 
   const refreshSummary = useCallback(async () => {
-    if (!apiKey) return;
     setSummaryError(null);
     try {
       const res = await fetch(`${getApiBase()}/workbench/usage/summary`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
+        credentials: "include", headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       });
       if (!res.ok) {
         const text = await res.text();
@@ -82,12 +84,11 @@ export default function DashboardPage() {
   }, [apiKey]);
 
   useEffect(() => {
-    if (apiKey) void refreshSummary();
+    void refreshSummary();
   }, [apiKey, refreshSummary]);
 
   // Live WebSocket subscription. Reconnects on close; drops on unmount.
   useEffect(() => {
-    if (!apiKey) return;
     let closed = false;
     const connect = () => {
       if (closed) return;

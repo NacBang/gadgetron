@@ -14,8 +14,8 @@ members = [
     "crates/gadgetron-web",
     "crates/gadgetron-knowledge",
     "crates/gadgetron-penny",
-    "plugins/plugin-document-formats",
-    "plugins/plugin-server-monitor",
+    "bundles/document-formats",
+    "bundles/server-monitor",
 ]
 
 [workspace.package]

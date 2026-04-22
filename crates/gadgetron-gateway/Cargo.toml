@@ -32,6 +32,9 @@ arc-swap = { workspace = true }
 toml = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
+reqwest = { workspace = true }
+rand = { workspace = true }
+once_cell = { workspace = true }
 
 [features]
 default = ["web-ui"]

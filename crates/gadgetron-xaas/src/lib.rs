@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod billing;
+pub mod conversations;
 pub mod error;
 pub mod identity;
 pub mod identity_keys;

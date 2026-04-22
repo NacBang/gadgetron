@@ -28,7 +28,7 @@
 //!   when the `pdf` feature is not wired into
 //!   `KnowledgeGadgetProvider` (the current default — PDF lands via
 //!   `DocumentFormatsBundle` install, validated by the plugin-level
-//!   tests in `plugins/plugin-document-formats/src/pdf.rs`).
+//!   tests in `bundles/document-formats/src/pdf.rs`).
 //!
 //! # Skipping
 //!
@@ -284,7 +284,7 @@ async fn pdf_extractor_produces_pipeline_ready_output() {
     // module — a 1-page "Hello World from Gadgetron" fixture. In a
     // Bundle-driven run the extractor comes from
     // `ctx.plugs.extractors.register(..., PdfExtractor::new())` in
-    // `DocumentFormatsBundle::install` (`plugins/plugin-document-formats/src/lib.rs`),
+    // `DocumentFormatsBundle::install` (`bundles/document-formats/src/lib.rs`),
     // which `IngestPipeline` would call on a PDF-typed `ImportRequest`.
     // Re-exercising the fixture from here validates the end-to-end
     // wire shape without building a full bundle harness.

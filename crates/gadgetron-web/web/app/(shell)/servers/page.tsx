@@ -47,6 +47,12 @@ interface GpuStats {
   power_w: number | null;
   power_limit_w: number | null;
   source: string;
+  // DCGM-only. Surfaced as badges on the card.
+  mem_temp_c?: number | null;
+  ecc_dbe_total?: number | null;
+  xid_last?: number | null;
+  throttle_reasons?: number | null;
+  throttle_reason_label?: string | null;
 }
 
 interface NetworkStats {
@@ -91,14 +97,15 @@ type StatsMap = Record<
 >;
 
 async function invokeAction(
-  apiKey: string,
+  apiKey: string | null,
   actionId: string,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
     method: "POST",
+    credentials: "include",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ args, client_invocation_id: safeRandomUUID() }),
@@ -140,6 +147,73 @@ function fmtUptime(secs: number | null): string {
   const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/// Compact health badges surfaced next to the GPU label on the host
+/// card. Each badge maps to a DCGM signal that means "this GPU needs
+/// operator attention". Uses color intensity as the severity cue:
+///   - ECC DBE ≥ 1  → red (uncorrectable memory error — replace)
+///   - XID ≠ 0      → amber (driver/HW event)
+///   - Throttled    → orange (running slower than requested)
+function GpuHealthBadges({ gpu }: { gpu: GpuStats }) {
+  const badges: Array<{ text: string; tone: string; title: string }> = [];
+  if (gpu.ecc_dbe_total != null && gpu.ecc_dbe_total > 0) {
+    badges.push({
+      text: `ECC×${gpu.ecc_dbe_total}`,
+      tone: "bg-red-950/60 text-red-300 border-red-800",
+      title: `Uncorrectable ECC double-bit errors: ${gpu.ecc_dbe_total}. Consider RMA.`,
+    });
+  }
+  if (gpu.xid_last != null && gpu.xid_last > 0) {
+    badges.push({
+      text: `XID ${gpu.xid_last}`,
+      tone: "bg-amber-950/60 text-amber-300 border-amber-800",
+      title: `Most recent NVIDIA XID error: ${gpu.xid_last}`,
+    });
+  }
+  if (gpu.throttle_reason_label) {
+    // Shorthand picks the most severe reason for the badge text —
+    // HW thermal > HW power brake > SW thermal > SW power cap.
+    // Full decoded list goes in the tooltip.
+    const label = gpu.throttle_reason_label.toLowerCase();
+    let short = "THRTL";
+    if (label.includes("hw thermal")) short = "HW-THERM";
+    else if (label.includes("hw power brake")) short = "HW-PWR";
+    else if (label.includes("hw slowdown")) short = "HW-SLOW";
+    else if (label.includes("sw thermal")) short = "SW-THERM";
+    else if (label.includes("sw power")) short = "SW-PWR";
+    const tempHint =
+      gpu.temp_c != null && gpu.temp_c > 80 ? ` · temp ${gpu.temp_c}°C` : "";
+    const powerHint =
+      gpu.power_w != null &&
+      gpu.power_limit_w != null &&
+      gpu.power_w > gpu.power_limit_w * 0.95
+        ? ` · ${gpu.power_w.toFixed(0)}/${gpu.power_limit_w.toFixed(0)}W`
+        : "";
+    badges.push({
+      text: short,
+      tone: "bg-orange-950/60 text-orange-300 border-orange-800",
+      title: `Throttled: ${gpu.throttle_reason_label}${tempHint}${powerHint}\n\n` +
+        `HW thermal = die/HBM too hot (check airflow, fan curve)\n` +
+        `HW power brake = PSU/VRM current limit tripped\n` +
+        `SW thermal = driver backoff before HW threshold\n` +
+        `SW power cap = persistent power limit (nvidia-smi -pl) or policy`,
+    });
+  }
+  if (badges.length === 0) return null;
+  return (
+    <span className="flex items-center gap-1">
+      {badges.map((b) => (
+        <span
+          key={b.text}
+          title={b.title}
+          className={`rounded border px-1 py-[1px] text-[9px] font-bold uppercase tracking-wider ${b.tone}`}
+        >
+          {b.text}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function ProgressBar({
@@ -273,7 +347,7 @@ function AddHostForm({
   collapsed,
   onCollapsedChange,
 }: {
-  apiKey: string;
+  apiKey: string | null;
   onAdded: () => void;
   collapsed: boolean;
   onCollapsedChange: (next: boolean) => void;
@@ -680,11 +754,15 @@ function HostCard({
           {stats.gpus.map((g) => (
             <div key={g.index} className="flex flex-col gap-0.5">
               <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                <span className="truncate font-mono" title={g.name}>
-                  GPU {g.index} · {g.source}
+                <span className="flex items-center gap-1.5 truncate font-mono" title={g.name}>
+                  <span className="truncate">GPU {g.index} · {g.source}</span>
+                  <GpuHealthBadges gpu={g} />
                 </span>
                 <span className="font-mono text-zinc-300">
                   {g.temp_c != null ? `${g.temp_c}°C` : ""}
+                  {g.mem_temp_c != null
+                    ? ` · mem ${Math.round(g.mem_temp_c)}°C`
+                    : ""}
                   {g.power_w != null ? ` · ${g.power_w.toFixed(0)}W` : ""}
                 </span>
               </div>
@@ -784,24 +862,25 @@ function HostCard({
         className="mt-1 flex items-center justify-between gap-2 border-t border-zinc-800 pt-1 text-[10px] text-zinc-600"
       >
         <span className="flex items-center gap-1">
+          {/* Static status dot. Color reflects last poll outcome; no
+            * pulse/animate so 1 Hz polling doesn't feel like strobe
+            * lighting. Err wins over stale. */}
           <span
             aria-hidden
             className={`inline-block size-1.5 rounded-full ${
-              loading
-                ? "bg-amber-500 animate-pulse"
-                : err
-                  ? "bg-red-500"
+              err
+                ? "bg-red-500"
+                : ageS != null && ageS > 10
+                  ? "bg-amber-500"
                   : "bg-emerald-500"
             }`}
           />
           <span className="font-mono">
-            {loading
-              ? "fetching…"
-              : ageS == null
-                ? "no data yet"
-                : ageS < 1.5
-                  ? "just now"
-                  : `updated ${ageS.toFixed(1)}s ago`}
+            {ageS == null
+              ? "no data yet"
+              : ageS < 3
+                ? "live"
+                : `updated ${ageS.toFixed(0)}s ago`}
           </span>
         </span>
         {fetchMs != null && (
@@ -842,7 +921,7 @@ interface MetricsApiResponse {
 }
 
 async function fetchMetricHistory(
-  apiKey: string,
+  apiKey: string | null,
   hostId: string,
   metric: string,
 ): Promise<SparkPoint[]> {
@@ -855,7 +934,7 @@ async function fetchMetricHistory(
     `&to=${to.toISOString()}` +
     `&bucket=auto`;
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+    credentials: "include", headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
   });
   if (!res.ok) return [];
   const body = (await res.json()) as MetricsApiResponse;
@@ -880,7 +959,6 @@ function useHostMetricHistory(
   // Stable signature so the effect doesn't re-fire each render.
   const metricsKey = metrics.join("|");
   useEffect(() => {
-    if (!apiKey) return;
     let cancelled = false;
     const tick = async () => {
       const next: Record<string, SparkPoint[]> = {};
@@ -932,7 +1010,6 @@ export default function ServersPage() {
   }, []);
 
   const refreshList = useCallback(async () => {
-    if (!apiKey) return;
     try {
       setListError(null);
       const resp = await invokeAction(apiKey, "server-list", {});
@@ -953,7 +1030,6 @@ export default function ServersPage() {
 
   const refreshStats = useCallback(
     async (id: string) => {
-      if (!apiKey) return;
       if (inFlightRef.current[id]) return;
       inFlightRef.current[id] = true;
       const started = performance.now();
@@ -1004,7 +1080,6 @@ export default function ServersPage() {
 
   const remove = useCallback(
     async (id: string, host: string) => {
-      if (!apiKey) return;
       if (!window.confirm(`Remove ${host}?`)) return;
       try {
         await invokeAction(apiKey, "server-remove", { id });
@@ -1035,7 +1110,7 @@ export default function ServersPage() {
   // `POLL_INTERVAL_MS`. Each call hits the target once via ssh and
   // returns CPU / RAM / disk / temp / GPU / PSU in a single response.
   useEffect(() => {
-    if (!apiKey || hosts.length === 0) return;
+    if (hosts.length === 0) return;
     hosts.forEach((h) => void refreshStats(h.id));
     const t = setInterval(() => {
       hosts.forEach((h) => void refreshStats(h.id));

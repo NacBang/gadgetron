@@ -20,6 +20,7 @@ chrono = { workspace = true }
 # pool is wired via `ServerMonitorProvider::with_metrics_writer`,
 # sqlx takes over the batch INSERT path.
 sqlx = { workspace = true }
+once_cell = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

@@ -86,6 +86,32 @@ pub struct GpuStats {
     pub power_limit_w: Option<f32>,
     /// `"dcgm"` or `"nvidia-smi"` — lets the UI badge richer metrics.
     pub source: &'static str,
+    // DCGM-only health fields. `None` when the source is nvidia-smi or
+    // the GPU doesn't report the field. Surfaced on the server card as
+    // a red/amber badge when non-zero so operators notice hardware
+    // trouble immediately.
+    /// HBM / on-card memory temperature (°C). Separate from `temp_c`
+    /// which is the SM die temperature. HBM has its own thermal budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_temp_c: Option<f32>,
+    /// Volatile double-bit ECC error total. Any value ≥ 1 means the
+    /// GPU memory produced an UNCORRECTABLE error — workload data is
+    /// already corrupt and the card should be RMA'd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecc_dbe_total: Option<u64>,
+    /// Most recent XID error code (0 = none). Non-zero values map to
+    /// specific NVIDIA driver/HW events. Operators need to know the
+    /// MRU value; deltas go in the per-sample timeseries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xid_last: Option<u32>,
+    /// Bitmask of current clock-throttle reasons (DCGM field 112).
+    /// Non-zero while the GPU is running below its requested clocks —
+    /// explains "util=100 but no progress". Decoded label is in
+    /// `throttle_reason_label` for direct display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throttle_reasons: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throttle_reason_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -608,52 +634,179 @@ fn parse_nvsmi(csv: &str) -> Vec<GpuStats> {
                 power_w: power,
                 power_limit_w: power_lim,
                 source: "nvidia-smi",
+                mem_temp_c: None,
+                ecc_dbe_total: None,
+                xid_last: None,
+                throttle_reasons: None,
+                throttle_reason_label: None,
             })
         })
         .collect()
 }
 
+/// Cache per-host result of the DCGM health probe. DCGM is only useful
+/// when the remote has BOTH the `dcgmi` binary AND a running
+/// `nv-hostengine` daemon. When the daemon is down, `dcgmi dmon`
+/// hangs for ~5 s waiting on a localhost connect before failing over
+/// to nvidia-smi. We probe once per process-lifetime and remember the
+/// answer so subsequent `server.stats` polls skip the doomed path.
+/// Re-probe after 10 min so a freshly-started hostengine is picked up.
+static DCGM_HEALTHY: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const DCGM_RECHECK: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn dcgm_cached(host: &str) -> Option<bool> {
+    let m = DCGM_HEALTHY.lock().ok()?;
+    let (ok, when) = *m.get(host)?;
+    if when.elapsed() < DCGM_RECHECK {
+        Some(ok)
+    } else {
+        None
+    }
+}
+
+fn dcgm_cache_set(host: &str, ok: bool) {
+    if let Ok(mut m) = DCGM_HEALTHY.lock() {
+        m.insert(host.to_string(), (ok, std::time::Instant::now()));
+    }
+}
+
 async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
+    // Per-host cache: skip dcgmi entirely if we recently confirmed the
+    // hostengine is down. Cuts the poll from ~5 s to ~0.5 s on boxes
+    // that advertise DCGM but don't run `nv-hostengine`.
+    if let Some(false) = dcgm_cached(&target.host) {
+        return Ok(Vec::new());
+    }
     // `dcgmi discovery -l -j` lists GPUs; `dcgmi dmon -c 1 -e <fields>`
     // emits a single-shot sample. We use discovery first, dmon second.
     let out = exec(
         target,
-        "sudo -n /usr/bin/dcgmi dmon -c 1 -e 203,204,155,156,150,140 2>/dev/null",
+        // Wrap dcgmi in `timeout 1s` because `dcgmi dmon` blocks for
+        // its internal 5-second connect-to-localhost retry when
+        // `nv-hostengine` isn't running. 1 s is enough for a healthy
+        // host — an unhealthy one falls through to nvidia-smi on the
+        // next tick instead of stalling the whole poll.
+        //
+        // Field IDs (DCGM_FI_DEV_*) — verified against dmon 3.x:
+        //   203 GPU_UTIL (GPUTL)      204 MEM_COPY_UTIL (MCUTL)
+        //   150 GPU_TEMP (TMPTR)      140 MEMORY_TEMP (MMTMP)
+        //   155 POWER_USAGE (POWER)   160 POWER_MGMT_LIMIT (PMLMT)
+        //   112 THROTTLE_REASONS (DVCCTR)   230 XID_ERRORS (XIDER)
+        //   310 ECC_SBE_VOL_TOTAL (ESVTL)
+        //   319 ECC_DBE_VOL_TOTAL (EDVDV)
+        "timeout 1s sudo -n /usr/bin/dcgmi dmon -c 1 -e 203,204,150,140,155,160,112,230,310,319 2>/dev/null",
     )
     .await?;
     if !out.ok() || out.stdout.trim().is_empty() {
+        // Remember this host has broken DCGM so the next poll skips
+        // the doomed call right away.
+        dcgm_cache_set(&target.host, false);
         return Ok(Vec::new());
     }
-    // dmon text output is whitespace-aligned with a header line. Skip
-    // lines starting with `#` / `GPU` / empty. Column order from -e:
-    //   203 = DCGM_FI_DEV_GPU_UTIL
-    //   204 = DCGM_FI_DEV_MEM_COPY_UTIL  (unused here but keeps pairing)
-    //   155 = DCGM_FI_DEV_GPU_TEMP
-    //   156 = DCGM_FI_DEV_POWER_USAGE
-    //   150 = DCGM_FI_DEV_MEM_CLOCK      (unused)
-    //   140 = DCGM_FI_DEV_POWER_MGMT_LIMIT
+    dcgm_cache_set(&target.host, true);
+    // Parse dmon output by COLUMN NAME, not position. Newer DCGM
+    // releases (3.x+) emit columns in a stable but different order
+    // than the `-e` request, AND sometimes inject extra fields like
+    // `TOTEC` that we didn't ask for. Identifying columns by header
+    // name (GPUTL / POWER / TMPTR / …) is the only robust way.
+    //
+    // dmon output shape:
+    //   #Entity   GPUTL  MCUTL  POWER  TOTEC     TMPTR  MMTMP
+    //   ID                       W      mJ        C      C
+    //   GPU 0     0      0      59.2   2.07e+11  24     40
+    // Header row starts with `#Entity`; the unit row is the one below.
+    // Data rows start with `GPU`.
+    let mut col_names: Vec<String> = Vec::new();
     let mut out_vec = Vec::new();
     for line in out.stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("GPU") {
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            // Strip leading `#` then collect whitespace-split tokens.
+            // First token is `#Entity` or `Entity`; we care about
+            // columns AFTER the entity identifier (which is 2 tokens:
+            // `GPU <idx>`).
+            let stripped = trimmed.trim_start_matches('#').trim();
+            let tokens: Vec<&str> = stripped.split_whitespace().collect();
+            // Skip the first token (`Entity` / `Entity ID`) — the
+            // identifier column is two data cells (`GPU` + idx).
+            col_names = tokens
+                .iter()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            continue;
+        }
+        if !trimmed.starts_with("GPU") {
+            // Unit row or stray line.
             continue;
         }
         let cells: Vec<&str> = trimmed.split_whitespace().collect();
-        // Row shape: `GPU 0    <util> <memcopy> <temp> <power> <memclk> <plimit>`
-        if cells.len() < 8 || cells[0] != "GPU" {
+        // `GPU <idx> <val0> <val1> …` → values start at index 2.
+        if cells.len() < 3 || cells[0] != "GPU" {
             continue;
         }
         let idx: u32 = match cells[1].parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let util = cells[2].parse::<f32>().ok();
-        let temp = cells[4].parse::<f32>().ok();
-        let power = cells[5].parse::<f32>().ok();
-        let plim = cells[7].parse::<f32>().ok();
+        let values: Vec<&str> = cells.iter().skip(2).copied().collect();
+        let get = |name: &str| -> Option<f32> {
+            let pos = col_names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+            values.get(pos)?.parse::<f32>().ok()
+        };
+        // Column name → DCGM field ID:
+        //   GPUTL = 203 (GPU_UTIL)
+        //   MCUTL = 204 (MEM_COPY_UTIL)
+        //   POWER = 156 (POWER_USAGE, watts)
+        //   TOTEC = 157 (TOTAL_ENERGY, mJ — unused)
+        //   TMPTR = 150 (GPU_TEMP, °C)
+        //   MMTMP = 140 (MEMORY_TEMP, °C — unused)
+        //   PLIMIT = 140 on some older builds; on 3.x `POWER_LIMIT`
+        //   comes out as `PWR` sometimes. Try both names.
+        let util = get("GPUTL");
+        let temp = get("TMPTR").or_else(|| get("GPUTMP"));
+        let mem_temp = get("MMTMP").or_else(|| get("MEMTMP"));
+        let power = get("POWER");
+        let plim = get("PMLMT")
+            .or_else(|| get("PLIMIT"))
+            .or_else(|| get("PWR_LIM"))
+            .or_else(|| get("PWR"));
+        // Integer-like fields: parse through u64 first to keep precision.
+        let get_u64 = |name: &str| -> Option<u64> {
+            let pos = col_names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+            let raw = values.get(pos)?;
+            if raw.eq_ignore_ascii_case("N/A") {
+                return None;
+            }
+            raw.parse::<u64>()
+                .ok()
+                .or_else(|| raw.parse::<f64>().ok().map(|v| v as u64))
+        };
+        let ecc_dbe = get_u64("EDVDV")
+            .or_else(|| get_u64("ECDBE"))
+            .or_else(|| get_u64("ECCDBE"))
+            .or_else(|| get_u64("DBEVOL"));
+        let xid = get_u64("XIDER")
+            .or_else(|| get_u64("XID"))
+            .map(|v| v as u32);
+        let throttle = get_u64("DVCCTR")
+            .or_else(|| get_u64("TTLRSN"))
+            .or_else(|| get_u64("TRSN"))
+            .or_else(|| get_u64("THRREAS"));
+        let throttle_label = throttle.and_then(decode_throttle_reasons);
+
+        if util.is_none() && temp.is_none() && power.is_none() {
+            continue;
+        }
         out_vec.push(GpuStats {
             index: idx,
-            name: format!("GPU {idx}"), // dmon doesn't carry the name; UI can merge with nvsmi for the model string if needed
+            name: format!("GPU {idx}"),
             util_pct: util,
             mem_used_mib: None,
             mem_total_mib: None,
@@ -661,9 +814,52 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
             power_w: power,
             power_limit_w: plim,
             source: "dcgm",
+            mem_temp_c: mem_temp,
+            ecc_dbe_total: ecc_dbe,
+            xid_last: xid,
+            throttle_reasons: throttle,
+            throttle_reason_label: throttle_label,
         });
     }
     Ok(out_vec)
+}
+
+/// Decode DCGM's clock-throttle-reasons bitmask into a short
+/// operator-facing label. Returns `None` for idle/benign reasons so
+/// the UI can stay quiet on healthy GPUs; returns `Some("...")` only
+/// when the GPU is actually being held back.
+fn decode_throttle_reasons(bits: u64) -> Option<String> {
+    // DCGM bits (match NVML DCGM_FI_DEV_CLOCK_THROTTLE_REASONS):
+    //   0x01 GPU_IDLE (not a real throttle)
+    //   0x02 CLOCKS_SETTING (user app clock — benign)
+    //   0x04 SW_POWER_CAP     (⚠ power budget hit)
+    //   0x08 HW_SLOWDOWN      (⚠⚠ thermal / power emergency)
+    //   0x10 SYNC_BOOST
+    //   0x20 SW_THERMAL_SLOWDOWN
+    //   0x40 HW_THERMAL_SLOWDOWN
+    //   0x80 HW_POWER_BRAKE_SLOWDOWN
+    //   0x100 DISPLAY_CLOCK_SETTING
+    let mut labels = Vec::new();
+    if bits & 0x04 != 0 {
+        labels.push("SW power cap");
+    }
+    if bits & 0x08 != 0 {
+        labels.push("HW slowdown");
+    }
+    if bits & 0x20 != 0 {
+        labels.push("SW thermal");
+    }
+    if bits & 0x40 != 0 {
+        labels.push("HW thermal");
+    }
+    if bits & 0x80 != 0 {
+        labels.push("HW power brake");
+    }
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.join(" | "))
+    }
 }
 
 fn parse_ipmi_dcmi_power(txt: &str) -> Option<f32> {

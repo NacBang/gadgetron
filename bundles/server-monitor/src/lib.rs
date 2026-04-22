@@ -47,6 +47,7 @@ pub mod collectors;
 pub mod gadgets;
 pub mod inventory;
 pub mod metrics;
+pub mod poller;
 pub mod ssh;
 
 pub use gadgets::ServerMonitorProvider;
@@ -55,3 +56,4 @@ pub use metrics::{
     run_metrics_writer, stats_to_samples, IngestionCounters, MetricSample, BATCH_MAX,
     FLUSH_INTERVAL,
 };
+pub use poller::{run_background_poller, PollerConfig};

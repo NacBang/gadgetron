@@ -241,6 +241,42 @@ pub fn stats_to_samples(
                 format!("gpu.{}.power_w", gpu.index),
                 power as f64,
                 Some("watts"),
+                labels.clone(),
+            ));
+        }
+        // DCGM-only telemetry. Stored as timeseries so operators can
+        // see the event moment in the chart (e.g. a stepped ECC
+        // counter, a throttle bitmask that flipped non-zero during a
+        // benchmark run).
+        if let Some(mt) = gpu.mem_temp_c {
+            out.push(mk(
+                format!("gpu.{}.mem_temp", gpu.index),
+                mt as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(dbe) = gpu.ecc_dbe_total {
+            out.push(mk(
+                format!("gpu.{}.ecc_dbe", gpu.index),
+                dbe as f64,
+                Some("count"),
+                labels.clone(),
+            ));
+        }
+        if let Some(xid) = gpu.xid_last {
+            out.push(mk(
+                format!("gpu.{}.xid", gpu.index),
+                xid as f64,
+                Some("code"),
+                labels.clone(),
+            ));
+        }
+        if let Some(thr) = gpu.throttle_reasons {
+            out.push(mk(
+                format!("gpu.{}.throttle_bits", gpu.index),
+                thr as f64,
+                Some("bitmask"),
                 labels,
             ));
         }

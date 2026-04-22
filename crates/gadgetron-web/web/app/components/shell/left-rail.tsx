@@ -10,8 +10,11 @@ import {
   FileText,
   Activity,
   Server,
+  Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "../../lib/auth-context";
+import { ConversationsPane } from "./conversations-pane";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,6 +25,7 @@ export type LeftRailTab =
   | "wiki"
   | "dashboard"
   | "servers"
+  | "admin"
   | "knowledge"
   | "bundles";
 
@@ -65,6 +69,13 @@ const NAV_ITEMS: NavItem[] = [
     href: "/servers",
   },
   {
+    id: "admin",
+    label: "Admin",
+    icon: <Shield className="size-4" aria-hidden />,
+    functional: true,
+    href: "/admin",
+  },
+  {
     id: "knowledge",
     label: "Knowledge",
     icon: <BookOpen className="size-4" aria-hidden />,
@@ -86,6 +97,7 @@ function tabFromPathname(pathname: string | null): LeftRailTab {
   if (pathname.startsWith("/wiki")) return "wiki";
   if (pathname.startsWith("/dashboard")) return "dashboard";
   if (pathname.startsWith("/servers")) return "servers";
+  if (pathname.startsWith("/admin")) return "admin";
   return "chat";
 }
 
@@ -106,6 +118,13 @@ export function LeftRail({
 }: LeftRailProps) {
   const pathname = usePathname();
   const activeTab = tabFromPathname(pathname);
+  const { viewMode } = useAuth();
+  // Filter out admin-only items when the user is in user view mode or
+  // when the user isn't an admin at all (viewMode is pinned to "user"
+  // in that case by the AuthProvider).
+  const visibleNav = NAV_ITEMS.filter((item) =>
+    item.id === "admin" ? viewMode === "admin" : true,
+  );
 
   return (
     <aside
@@ -132,7 +151,7 @@ export function LeftRail({
 
       {/* Navigation */}
       <nav className="flex flex-col gap-1 p-2">
-        {NAV_ITEMS.map((item) => {
+        {visibleNav.map((item) => {
           const isActive = activeTab === item.id;
           const buttonClass = cn(
             "flex items-center gap-2.5 rounded px-2 py-2 text-xs font-medium transition-colors",
@@ -202,6 +221,11 @@ export function LeftRail({
             </p>
           </div>
         )}
+
+      {/* ISSUE 31 — per-user conversation list, pinned to the bottom of
+       * the rail. Fills remaining height so long histories scroll
+       * independently from the nav. */}
+      <ConversationsPane collapsed={collapsed} />
     </aside>
   );
 }

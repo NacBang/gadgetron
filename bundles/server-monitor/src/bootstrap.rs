@@ -101,8 +101,16 @@ pub async fn run_bootstrap(
 
     // Step 2 — drop NOPASSWD sudoers for the four monitoring binaries.
     // visudo is used via `-cf` so a typo never leaves a broken file.
+    // `systemctl` is in the allowlist so Penny (and the operator via
+    // the UI) can start/stop/restart system services — most
+    // importantly `nvidia-dcgm` when the DCGM hostengine dies. The
+    // verbs we call are pinned in the `server.systemctl` gadget;
+    // operators get the full sudoers breadth on the target in case
+    // they want to run ad-hoc recoveries.
     let sudoers_body = format!(
-        "{user} ALL=(root) NOPASSWD: /usr/bin/dcgmi, /usr/sbin/smartctl, /usr/bin/ipmitool, /usr/bin/nvidia-smi\n",
+        "{user} ALL=(root) NOPASSWD: /usr/bin/dcgmi, /usr/sbin/smartctl, \
+         /usr/bin/ipmitool, /usr/bin/nvidia-smi, /usr/bin/systemctl, \
+         /bin/systemctl, /usr/bin/journalctl, /bin/journalctl\n",
         user = target_pw.user,
     );
     let sudoers_esc = shell_escape_single(&sudoers_body);
@@ -235,6 +243,16 @@ fn build_dcgm_install_script(sudo_pw: &str) -> String {
     // distro-scoped cuda-keyring (Ubuntu 22.04 default; adjust as needed
     // when Debian/22-only operators surface).
     let keyring_url = "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb";
+    // The script:
+    //   1. Installs `datacenter-gpu-manager` if absent.
+    //   2. Detects the actual service unit name (nvidia-dcgm vs dcgm vs
+    //      nv-hostengine — varies by packaging version).
+    //   3. `enable --now` it with sudo.
+    //   4. **Verifies** by asking systemd it's active AND calling
+    //      `dcgmi dmon -c 1` with a 3 s timeout. Script exits non-zero
+    //      if DCGM isn't actually responsive, so the Rust side's
+    //      `report.dcgm_enabled` reflects reality rather than being a
+    //      false positive.
     format!(
         "set -e; export DEBIAN_FRONTEND=noninteractive; \
          if ! dpkg-query -W -f='${{Status}}' datacenter-gpu-manager 2>/dev/null | grep -q 'install ok installed'; then \
@@ -244,7 +262,30 @@ fn build_dcgm_install_script(sudo_pw: &str) -> String {
            echo {spw} | sudo -S -p '' apt-get install -y -qq --no-install-recommends datacenter-gpu-manager && \
            rm -f \"$TMP\"; \
          fi; \
-         echo {spw} | sudo -S -p '' systemctl enable --now nv-hostengine",
+         UNIT=''; \
+         for candidate in nvidia-dcgm dcgm nv-hostengine; do \
+           if systemctl list-unit-files --no-legend \"$candidate.service\" 2>/dev/null | grep -q .; then \
+             UNIT=\"$candidate\"; break; \
+           fi; \
+         done; \
+         if [ -z \"$UNIT\" ]; then \
+           echo 'DCGM service unit not found after install' >&2; exit 2; \
+         fi; \
+         echo \"DCGM_UNIT=$UNIT\"; \
+         echo {spw} | sudo -S -p '' systemctl enable --now \"$UNIT\" || \
+           {{ echo \"failed to enable $UNIT\" >&2; exit 3; }}; \
+         for i in 1 2 3 4 5; do \
+           if systemctl is-active --quiet \"$UNIT\"; then break; fi; \
+           sleep 0.5; \
+         done; \
+         if ! systemctl is-active --quiet \"$UNIT\"; then \
+           echo {spw} | sudo -S -p '' journalctl -u \"$UNIT\" -n 30 --no-pager >&2; \
+           echo \"$UNIT did not reach active state\" >&2; exit 4; \
+         fi; \
+         if ! timeout 3s sudo -n /usr/bin/dcgmi dmon -c 1 -e 203 >/dev/null 2>&1; then \
+           echo 'dcgmi dmon probe failed — service active but not responsive' >&2; exit 5; \
+         fi; \
+         echo DCGM_READY",
         url = keyring_url,
     )
 }
