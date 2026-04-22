@@ -235,13 +235,12 @@ pub async fn upsert_user_from_google(
     avatar_url: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     // Match-by-sub first (stable).
-    let by_sub: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE tenant_id = $1 AND google_sub = $2",
-    )
-    .bind(tenant_id)
-    .bind(google_sub)
-    .fetch_optional(pool)
-    .await?;
+    let by_sub: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND google_sub = $2")
+            .bind(tenant_id)
+            .bind(google_sub)
+            .fetch_optional(pool)
+            .await?;
     if let Some(id) = by_sub {
         let _ = sqlx::query(
             "UPDATE users SET display_name = $1, avatar_url = COALESCE($2, avatar_url), \
@@ -256,13 +255,12 @@ pub async fn upsert_user_from_google(
     }
 
     // Match-by-email (existing account linking first-time to Google).
-    let by_email: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
-    )
-    .bind(tenant_id)
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
+    let by_email: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant_id)
+            .bind(email)
+            .fetch_optional(pool)
+            .await?;
     if let Some(id) = by_email {
         let _ = sqlx::query(
             "UPDATE users SET google_sub = $1, display_name = $2, \

@@ -56,6 +56,7 @@ fn make_state() -> AppState {
         penny_shared_surface: None,
         penny_assembler: None,
         agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
+        google_oauth: None,
         activity_capture_store: None,
         candidate_coordinator: None,
         activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),

@@ -186,7 +186,10 @@ pub async fn serve_stdio(registry: Arc<GadgetRegistry>) -> std::io::Result<()> {
             }
         };
 
-        log_trace(format!("recv method={} id={:?}", request.method, request.id));
+        log_trace(format!(
+            "recv method={} id={:?}",
+            request.method, request.id
+        ));
 
         // Notifications (no `id` → no response) — includes both the
         // legacy `initialized` name and the MCP-spec `notifications/initialized`.
@@ -206,7 +209,10 @@ pub async fn serve_stdio(registry: Arc<GadgetRegistry>) -> std::io::Result<()> {
             let method = request.method.clone();
             let id = request.id.clone();
             let response = handle_request(&registry, request).await;
-            log_trace(format!("done method={method} id={id:?} is_err={}", response.error.is_some()));
+            log_trace(format!(
+                "done method={method} id={id:?} is_err={}",
+                response.error.is_some()
+            ));
             let _ = tx.send(response);
         });
     }

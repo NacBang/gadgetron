@@ -405,10 +405,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         // ISSUE 30 — Google OAuth sign-in. Routes 404 when `[auth.google]`
         // is not configured, so it's safe to always mount them.
-        .route(
-            "/auth/google/login",
-            get(crate::auth_google::login_handler),
-        )
+        .route("/auth/google/login", get(crate::auth_google::login_handler))
         .route(
             "/auth/google/callback",
             get(crate::auth_google::callback_handler),

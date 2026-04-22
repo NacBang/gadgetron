@@ -116,18 +116,15 @@ pub async fn chat_completions_handler(
                     // behavior on role. We fetch the row here (cheap
                     // indexed lookup) rather than plumbing a field
                     // through every assembler call site.
-                    if let (Some(pool), Some(user_id)) =
-                        (state.pg_pool.as_ref(), ctx.actor_user_id)
+                    if let (Some(pool), Some(user_id)) = (state.pg_pool.as_ref(), ctx.actor_user_id)
                     {
-                        if let Ok(Some((email, name, role))) = sqlx::query_as::<
-                            _,
-                            (String, String, String),
-                        >(
-                            "SELECT email, display_name, role FROM users WHERE id = $1",
-                        )
-                        .bind(user_id)
-                        .fetch_optional(pool)
-                        .await
+                        if let Ok(Some((email, name, role))) =
+                            sqlx::query_as::<_, (String, String, String)>(
+                                "SELECT email, display_name, role FROM users WHERE id = $1",
+                            )
+                            .bind(user_id)
+                            .fetch_optional(pool)
+                            .await
                         {
                             block.push_str(&format!(
                                 "\n<gadgetron_user>\nemail: {email}\nname: {name}\nrole: {role}\n</gadgetron_user>\n"

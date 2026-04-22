@@ -283,9 +283,8 @@ pub async fn collect_stats(target: &SshTarget) -> Result<ServerStats, SshError> 
     // unavailability warning instead. If a future operator needs the
     // fallback, a `[server_monitor].slow_ipmi = true` config knob is
     // the right place to opt in — not every poll.
-    let psu_watts = parse_ipmi_dcmi_power(
-        sections.get("IPMIPWR").map(|s| s.as_str()).unwrap_or(""),
-    );
+    let psu_watts =
+        parse_ipmi_dcmi_power(sections.get("IPMIPWR").map(|s| s.as_str()).unwrap_or(""));
     if psu_watts.is_some() || gpu_watts.is_some() {
         stats.power = Some(PowerStats {
             psu_watts,
@@ -386,10 +385,7 @@ fn split_sections(stdout: &str) -> std::collections::HashMap<String, String> {
     let mut current: Option<String> = None;
     let mut buf = String::new();
     for line in stdout.lines() {
-        if let Some(tag) = line
-            .strip_prefix("===")
-            .and_then(|s| s.strip_suffix("==="))
-        {
+        if let Some(tag) = line.strip_prefix("===").and_then(|s| s.strip_suffix("===")) {
             if let Some(name) = current.take() {
                 out.insert(name, std::mem::take(&mut buf));
             }
@@ -415,8 +411,8 @@ fn parse_cpu(stat_section: &str, load_section: &str, nproc_section: &str) -> Opt
         .collect();
     let (t0, i0) = parse_stat_line(lines.first()?)?;
     let (t1, i1) = parse_stat_line(lines.get(1)?)?;
-    let dt = t1.checked_sub(t0).unwrap_or(0);
-    let di = i1.checked_sub(i0).unwrap_or(0);
+    let dt = t1.saturating_sub(t0);
+    let di = i1.saturating_sub(i0);
     let util_pct = if dt == 0 {
         0.0
     } else {
@@ -563,13 +559,24 @@ fn parse_network(before: &str, after: &str, elapsed_secs: f64) -> Vec<NetworkSta
         {
             continue;
         }
-        let (rx_before, tx_before) = lo_before.get(iface).copied().unwrap_or((*rx_after, *tx_after));
+        let (rx_before, tx_before) = lo_before
+            .get(iface)
+            .copied()
+            .unwrap_or((*rx_after, *tx_after));
         // `rx_bytes` is u64; subtraction wraps in the rare case of a
         // counter rollover (32-bit machines) — saturate for safety.
         let rx_delta = rx_after.saturating_sub(rx_before) as f64;
         let tx_delta = tx_after.saturating_sub(tx_before) as f64;
-        let rx_bps = if elapsed_secs > 0.0 { rx_delta / elapsed_secs } else { 0.0 };
-        let tx_bps = if elapsed_secs > 0.0 { tx_delta / elapsed_secs } else { 0.0 };
+        let rx_bps = if elapsed_secs > 0.0 {
+            rx_delta / elapsed_secs
+        } else {
+            0.0
+        };
+        let tx_bps = if elapsed_secs > 0.0 {
+            tx_delta / elapsed_secs
+        } else {
+            0.0
+        };
         out.push(NetworkStats {
             iface: iface.clone(),
             rx_bps,
@@ -735,11 +742,7 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
             let tokens: Vec<&str> = stripped.split_whitespace().collect();
             // Skip the first token (`Entity` / `Entity ID`) — the
             // identifier column is two data cells (`GPU` + idx).
-            col_names = tokens
-                .iter()
-                .skip(1)
-                .map(|s| s.to_string())
-                .collect();
+            col_names = tokens.iter().skip(1).map(|s| s.to_string()).collect();
             continue;
         }
         if !trimmed.starts_with("GPU") {
@@ -757,7 +760,9 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
         };
         let values: Vec<&str> = cells.iter().skip(2).copied().collect();
         let get = |name: &str| -> Option<f32> {
-            let pos = col_names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+            let pos = col_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(name))?;
             values.get(pos)?.parse::<f32>().ok()
         };
         // Column name → DCGM field ID:
@@ -779,7 +784,9 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
             .or_else(|| get("PWR"));
         // Integer-like fields: parse through u64 first to keep precision.
         let get_u64 = |name: &str| -> Option<u64> {
-            let pos = col_names.iter().position(|n| n.eq_ignore_ascii_case(name))?;
+            let pos = col_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(name))?;
             let raw = values.get(pos)?;
             if raw.eq_ignore_ascii_case("N/A") {
                 return None;
@@ -877,6 +884,7 @@ fn parse_ipmi_dcmi_power(txt: &str) -> Option<f32> {
     None
 }
 
+#[allow(dead_code)] // reserved for future `[server_monitor].slow_ipmi = true` opt-in.
 fn parse_ipmi_sensor_psu_watts(txt: &str) -> Option<f32> {
     // `ipmitool sensor list` POUT rows look like:
     //   "PSU1 POUT         | 420.000    | Watts      | ok    | ..."
@@ -1052,7 +1060,8 @@ Inter-|   Receive                                                |  Transmit
         let txt = "PSU1 POUT         | 420.500    | Watts      | ok    | na        | na\n\
                    PSU2 POUT         | na         | Watts      | na    | na        | na";
         assert_eq!(parse_ipmi_sensor_psu_watts(txt), Some(420.5));
-        let two = "PSU1 POUT | 200.0 | Watts | ok | na | na\nPSU2 POUT | 210.0 | Watts | ok | na | na";
+        let two =
+            "PSU1 POUT | 200.0 | Watts | ok | na | na\nPSU2 POUT | 210.0 | Watts | ok | na | na";
         assert_eq!(parse_ipmi_sensor_psu_watts(two), Some(410.0));
         // All na → None so UI hides the line.
         let all_na = "PSU1 POUT | na | Watts | na | na | na\nPSU2 POUT | na | Watts | na | na | na";

@@ -200,6 +200,7 @@ pub async fn list_server_metrics(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_points(
     pool: &PgPool,
     tenant_id: Uuid,

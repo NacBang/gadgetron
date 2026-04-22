@@ -146,11 +146,7 @@ pub async fn rename_conversation(
     new_title: &str,
 ) -> Result<(), ConversationError> {
     let clean = new_title.trim();
-    let title = if clean.is_empty() {
-        "New chat"
-    } else {
-        clean
-    };
+    let title = if clean.is_empty() { "New chat" } else { clean };
     let affected = sqlx::query(
         "UPDATE conversations SET title = $4, updated_at = now() \
          WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND deleted_at IS NULL",

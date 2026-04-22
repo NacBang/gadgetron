@@ -214,8 +214,8 @@ impl ServerMonitorProvider {
             }
             other => {
                 return Err(GadgetError::InvalidArgs(format!(
-                    "unknown auth_mode '{other}' (expected key_path | key_paste | password_bootstrap)"
-                )))
+                "unknown auth_mode '{other}' (expected key_path | key_paste | password_bootstrap)"
+            )))
             }
         };
 
@@ -237,9 +237,7 @@ impl ServerMonitorProvider {
             .get("tenant_id")
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
-            .unwrap_or_else(|| {
-                Uuid::parse_str(DEFAULT_TENANT).expect("literal uuid")
-            });
+            .unwrap_or_else(|| Uuid::parse_str(DEFAULT_TENANT).expect("literal uuid"));
         let record = HostRecord {
             id,
             host: host.clone(),
@@ -343,7 +341,11 @@ impl ServerMonitorProvider {
 
         let t_ship = std::time::Instant::now();
         let samples = stats_to_samples(rec.tenant_id, rec.id, &stats);
-        try_ship(self.metrics_sender.as_ref(), &self.metrics_counters, samples);
+        try_ship(
+            self.metrics_sender.as_ref(),
+            &self.metrics_counters,
+            samples,
+        );
         let ship_ms = t_ship.elapsed().as_millis();
 
         let t_ser = std::time::Instant::now();
@@ -490,8 +492,22 @@ fn is_safe_unit_name(s: &str) -> bool {
 fn is_safe_priority(s: &str) -> bool {
     matches!(
         s,
-        "emerg" | "alert" | "crit" | "err" | "warning" | "notice" | "info" | "debug"
-            | "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7"
+        "emerg"
+            | "alert"
+            | "crit"
+            | "err"
+            | "warning"
+            | "notice"
+            | "info"
+            | "debug"
+            | "0"
+            | "1"
+            | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
     )
 }
 
@@ -704,7 +720,13 @@ mod tests {
     fn all_gadgets_registered() {
         let p = ServerMonitorProvider::new(InventoryStore::new(std::env::temp_dir()));
         let names: Vec<String> = p.gadget_schemas().into_iter().map(|s| s.name).collect();
-        for expected in ["server.add", "server.list", "server.remove", "server.info", "server.stats"] {
+        for expected in [
+            "server.add",
+            "server.list",
+            "server.remove",
+            "server.info",
+            "server.stats",
+        ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
     }

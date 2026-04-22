@@ -56,7 +56,9 @@ pub enum SshError {
     Io(String),
     #[error("ssh failed (exit={code}): {stderr}")]
     Failed { code: i32, stderr: String },
-    #[error("`sshpass` binary missing — install with `apt-get install sshpass` to use password auth")]
+    #[error(
+        "`sshpass` binary missing — install with `apt-get install sshpass` to use password auth"
+    )]
     SshpassMissing,
     #[error("bootstrap: {0}")]
     Bootstrap(String),
@@ -192,12 +194,7 @@ pub async fn exec_with_password(
     password: &str,
     cmd: &str,
 ) -> Result<CmdOutput, SshError> {
-    if Command::new("sshpass")
-        .arg("-V")
-        .output()
-        .await
-        .is_err()
-    {
+    if Command::new("sshpass").arg("-V").output().await.is_err() {
         return Err(SshError::SshpassMissing);
     }
     // Pwd mode = no -i / no BatchMode, but still accept-new + known_hosts.

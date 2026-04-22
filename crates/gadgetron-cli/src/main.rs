@@ -702,7 +702,9 @@ fn load_penny_registry_from_config(
                 let counters = gadgetron_bundle_server_monitor::IngestionCounters::default();
                 p = p.with_metrics_writer(tx.clone(), counters.clone());
                 tokio::spawn(gadgetron_bundle_server_monitor::run_metrics_writer(
-                    rx, pool, counters.clone(),
+                    rx,
+                    pool,
+                    counters.clone(),
                 ));
                 // Server-side background poller — runs whether the web
                 // UI is open or not, so `host_metrics` stays continuous.

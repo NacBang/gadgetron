@@ -75,16 +75,14 @@ fn random_state() -> String {
 }
 
 fn build_state_cookie(state: &str, max_age: i64) -> HeaderValue {
-    let v = format!(
-        "{STATE_COOKIE_NAME}={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}"
-    );
+    let v =
+        format!("{STATE_COOKIE_NAME}={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
     HeaderValue::from_str(&v).expect("ascii cookie")
 }
 
 fn build_session_cookie(token: &str, max_age: i64) -> HeaderValue {
-    let v = format!(
-        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}"
-    );
+    let v =
+        format!("{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
     HeaderValue::from_str(&v).expect("ascii cookie")
 }
 
@@ -226,12 +224,7 @@ pub async fn callback_handler(
         ("redirect_uri", cfg.redirect_uri.as_str()),
         ("grant_type", "authorization_code"),
     ];
-    let token_resp = match client
-        .post(GOOGLE_TOKEN_URL)
-        .form(&token_body)
-        .send()
-        .await
-    {
+    let token_resp = match client.post(GOOGLE_TOKEN_URL).form(&token_body).send().await {
         Ok(r) => r,
         Err(e) => {
             return json_err(
@@ -350,10 +343,13 @@ pub async fn callback_handler(
             "Google OAuth requires Postgres",
         );
     };
-    let display_name = info
-        .name
-        .clone()
-        .unwrap_or_else(|| info.email.split('@').next().unwrap_or(&info.email).to_string());
+    let display_name = info.name.clone().unwrap_or_else(|| {
+        info.email
+            .split('@')
+            .next()
+            .unwrap_or(&info.email)
+            .to_string()
+    });
     let user_id = match gadgetron_xaas::sessions::upsert_user_from_google(
         pool,
         DEFAULT_TENANT_ID,

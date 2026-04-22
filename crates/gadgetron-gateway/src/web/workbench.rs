@@ -947,11 +947,11 @@ pub async fn list_conversations_handler(
     )
     .await
     .map_err(|e| {
-        WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "list_conversations: {e}"
-        )))
+        WorkbenchHttpError::Core(GadgetronError::Config(format!("list_conversations: {e}")))
     })?;
-    Ok(Json(ListConversationsResponse { conversations: rows }))
+    Ok(Json(ListConversationsResponse {
+        conversations: rows,
+    }))
 }
 
 /// `DELETE /api/v1/web/workbench/conversations/{id}` — soft-delete.
@@ -964,7 +964,7 @@ pub async fn delete_conversation_handler(
     let pool = require_pg_pool(&state, "conversation delete")?;
     let user_id = ctx
         .actor_user_id
-        .ok_or_else(|| WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
     gadgetron_xaas::conversations::delete_conversation(pool, ctx.tenant_id, user_id, id)
         .await
         .map_err(|e| match e {
@@ -986,10 +986,20 @@ pub struct RenameConversationRequest {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryBlock {
-    Text { text: String },
-    Reasoning { text: String },
-    ToolUse { name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1020,7 +1030,7 @@ pub async fn get_conversation_messages_handler(
     let pool = require_pg_pool(&state, "conversation history")?;
     let user_id = ctx
         .actor_user_id
-        .ok_or_else(|| WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
 
     let owned: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT id FROM conversations \
@@ -1106,9 +1116,10 @@ fn strip_penny_context_prefix(s: &str) -> String {
     for tag in ["gadgetron_shared_context", "gadgetron_user"] {
         let open = format!("<{tag}>");
         let close = format!("</{tag}>");
-        loop {
-            let Some(a) = out.find(&open) else { break };
-            let Some(b_rel) = out[a..].find(&close) else { break };
+        while let Some(a) = out.find(&open) {
+            let Some(b_rel) = out[a..].find(&close) else {
+                break;
+            };
             let b = a + b_rel + close.len();
             out.replace_range(a..b, "");
         }
@@ -1156,7 +1167,9 @@ fn parse_claude_jsonl(path: &std::path::Path) -> std::io::Result<Vec<HistoryMess
                         "text" => {
                             if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
                                 if !t.is_empty() {
-                                    blocks.push(HistoryBlock::Text { text: t.to_string() });
+                                    blocks.push(HistoryBlock::Text {
+                                        text: t.to_string(),
+                                    });
                                 }
                             }
                         }
@@ -1175,10 +1188,7 @@ fn parse_claude_jsonl(path: &std::path::Path) -> std::io::Result<Vec<HistoryMess
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("tool")
                                 .to_string();
-                            let input = p
-                                .get("input")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null);
+                            let input = p.get("input").cloned().unwrap_or(serde_json::Value::Null);
                             blocks.push(HistoryBlock::ToolUse { name, input });
                         }
                         "tool_result" => {
@@ -1246,7 +1256,7 @@ pub async fn rename_conversation_handler(
     let pool = require_pg_pool(&state, "conversation rename")?;
     let user_id = ctx
         .actor_user_id
-        .ok_or_else(|| WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
     gadgetron_xaas::conversations::rename_conversation(
         pool,
         ctx.tenant_id,
@@ -1985,14 +1995,10 @@ pub fn workbench_routes() -> Router<AppState> {
             get(crate::web::server_metrics::list_server_metrics),
         )
         // ISSUE 31 — per-user chat conversations (left-rail sidebar).
-        .route(
-            "/conversations",
-            get(list_conversations_handler),
-        )
+        .route("/conversations", get(list_conversations_handler))
         .route(
             "/conversations/{id}",
-            axum::routing::delete(delete_conversation_handler)
-                .patch(rename_conversation_handler),
+            axum::routing::delete(delete_conversation_handler).patch(rename_conversation_handler),
         )
         .route(
             "/conversations/{id}/messages",

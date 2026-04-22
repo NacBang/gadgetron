@@ -25,7 +25,7 @@
 //! `bash -lc` so one SSH round-trip does the whole step. This cuts
 //! latency on slow links and reduces the number of `sudo -S` prompts.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -52,7 +52,7 @@ pub async fn run_bootstrap(
     password: &str,
     sudo_password: &str,
     public_key: &str,
-    private_key_path: &PathBuf,
+    private_key_path: &Path,
 ) -> Result<BootstrapReport, SshError> {
     let mut report = BootstrapReport::default();
 
@@ -96,7 +96,9 @@ pub async fn run_bootstrap(
     if out.stdout.contains("__gsm_key_appended__") {
         report.notes.push("authorized_keys append".into());
     } else {
-        report.notes.push("authorized_keys already had our pubkey".into());
+        report
+            .notes
+            .push("authorized_keys already had our pubkey".into());
     }
 
     // Step 2 — drop NOPASSWD sudoers for the four monitoring binaries.
@@ -132,9 +134,10 @@ pub async fn run_bootstrap(
     let (pkgs, script) = build_apt_install_script(sudo_password);
     let out = exec_with_password(target_pw, password, &script).await?;
     if !out.ok() {
-        report
-            .notes
-            .push(format!("apt install baseline failed: {}", out.stderr.trim()));
+        report.notes.push(format!(
+            "apt install baseline failed: {}",
+            out.stderr.trim()
+        ));
         return Err(SshError::Bootstrap(format!(
             "apt-get install failed (code {}): {}",
             out.code,
@@ -173,7 +176,7 @@ pub async fn run_bootstrap(
     // that scenario hangs → 3 failed attempts → "Permission denied" —
     // NOT because the key is wrong, but because it was never tried.
     let target_key = SshTarget {
-        key_path: Some(private_key_path.clone()),
+        key_path: Some(private_key_path.to_path_buf()),
         ..target_pw.clone()
     };
     let verify_cmd = "echo __gsm_ready__";
@@ -200,7 +203,11 @@ pub async fn verify_key_only(target: &SshTarget) -> Result<BootstrapReport, SshE
         key_installed: true,
         ..Default::default()
     };
-    let out = exec(target, "echo __gsm_ready__ && command -v nvidia-smi || true").await?;
+    let out = exec(
+        target,
+        "echo __gsm_ready__ && command -v nvidia-smi || true",
+    )
+    .await?;
     if !out.ok() || !out.stdout.contains("__gsm_ready__") {
         return Err(SshError::Bootstrap(format!(
             "SSH with key failed: {}",
