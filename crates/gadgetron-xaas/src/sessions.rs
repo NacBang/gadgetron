@@ -156,6 +156,143 @@ pub async fn create_session(
     })
 }
 
+/// Open a session for a user who was already authenticated through a
+/// trusted upstream (e.g. Google OAuth `id_token` verification). Skips
+/// the password check in `create_session`; the caller is responsible
+/// for having proven identity.
+pub async fn create_session_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    user_agent: Option<&str>,
+) -> Result<NewSession, SessionError> {
+    let row: Option<(Uuid, String, bool)> = sqlx::query_as(
+        r#"
+        SELECT tenant_id, role, is_active
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let (tenant_id, role, is_active) = row.ok_or(SessionError::InvalidCredentials)?;
+    if !is_active {
+        return Err(SessionError::Inactive);
+    }
+    if matches!(
+        crate::identity::Role::parse(&role),
+        Some(crate::identity::Role::Service)
+    ) {
+        return Err(SessionError::ServiceRole);
+    }
+
+    let token = generate_cookie_token();
+    let token_hash = hash_cookie(&token);
+    let expires_at = Utc::now() + DEFAULT_SESSION_TTL;
+
+    let id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO user_sessions
+            (user_id, tenant_id, cookie_hash, expires_at, user_agent)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        "#,
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(&token_hash)
+    .bind(expires_at)
+    .bind(user_agent)
+    .fetch_one(pool)
+    .await?;
+
+    let _ = sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await;
+
+    Ok(NewSession {
+        session_id: id,
+        cookie_token: token,
+        expires_at,
+        user_id,
+        tenant_id,
+    })
+}
+
+/// Upsert a user by Google OIDC `sub`. If a user row already exists for
+/// this `(tenant_id, google_sub)` — or for `(tenant_id, email)` when the
+/// `sub` isn't yet linked — its name is refreshed and the `google_sub`
+/// column is set. Otherwise a new row is inserted with `role =
+/// default_role`.
+pub async fn upsert_user_from_google(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    google_sub: &str,
+    email: &str,
+    display_name: &str,
+    default_role: &str,
+    avatar_url: Option<&str>,
+) -> Result<Uuid, sqlx::Error> {
+    // Match-by-sub first (stable).
+    let by_sub: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND google_sub = $2")
+            .bind(tenant_id)
+            .bind(google_sub)
+            .fetch_optional(pool)
+            .await?;
+    if let Some(id) = by_sub {
+        let _ = sqlx::query(
+            "UPDATE users SET display_name = $1, avatar_url = COALESCE($2, avatar_url), \
+             updated_at = NOW() WHERE id = $3",
+        )
+        .bind(display_name)
+        .bind(avatar_url)
+        .bind(id)
+        .execute(pool)
+        .await;
+        return Ok(id);
+    }
+
+    // Match-by-email (existing account linking first-time to Google).
+    let by_email: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant_id)
+            .bind(email)
+            .fetch_optional(pool)
+            .await?;
+    if let Some(id) = by_email {
+        let _ = sqlx::query(
+            "UPDATE users SET google_sub = $1, display_name = $2, \
+             avatar_url = COALESCE($3, avatar_url), updated_at = NOW() \
+             WHERE id = $4",
+        )
+        .bind(google_sub)
+        .bind(display_name)
+        .bind(avatar_url)
+        .bind(id)
+        .execute(pool)
+        .await;
+        return Ok(id);
+    }
+
+    // Fresh insert.
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (tenant_id, email, display_name, role, google_sub, avatar_url, is_active) \
+         VALUES ($1, $2, $3, $4, $5, $6, TRUE) \
+         RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(email)
+    .bind(display_name)
+    .bind(default_role)
+    .bind(google_sub)
+    .bind(avatar_url)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
 /// Validate a session cookie and return the owning user context.
 /// Updates `last_active_at` on successful match. Expired / revoked
 /// rows return NotFound.

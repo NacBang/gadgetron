@@ -915,6 +915,368 @@ pub async fn delete_user_handler(
 }
 
 // ---------------------------------------------------------------------------
+// ISSUE 31 — per-user chat conversations (left-rail sidebar).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListConversationsResponse {
+    pub conversations: Vec<gadgetron_xaas::conversations::ConversationRow>,
+}
+
+/// `GET /api/v1/web/workbench/conversations` — list the calling user's
+/// non-deleted conversations, newest first. Tenant + user boundary
+/// enforced via the SQL WHERE clause.
+pub async fn list_conversations_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<ListConversationsResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "conversation listing")?;
+    let user_id = match ctx.actor_user_id {
+        Some(u) => u,
+        None => {
+            return Ok(Json(ListConversationsResponse {
+                conversations: vec![],
+            }))
+        }
+    };
+    let rows = gadgetron_xaas::conversations::list_conversations_for_user(
+        pool,
+        ctx.tenant_id,
+        user_id,
+        200,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!("list_conversations: {e}")))
+    })?;
+    Ok(Json(ListConversationsResponse {
+        conversations: rows,
+    }))
+}
+
+/// `DELETE /api/v1/web/workbench/conversations/{id}` — soft-delete.
+/// Only the owner can delete; cross-user attempts 404.
+pub async fn delete_conversation_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "conversation delete")?;
+    let user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+    gadgetron_xaas::conversations::delete_conversation(pool, ctx.tenant_id, user_id, id)
+        .await
+        .map_err(|e| match e {
+            gadgetron_xaas::conversations::ConversationError::NotFound => {
+                WorkbenchHttpError::Core(GadgetronError::Config("conversation not found".into()))
+            }
+            gadgetron_xaas::conversations::ConversationError::Db(e) => {
+                WorkbenchHttpError::Core(GadgetronError::Config(format!("delete: {e}")))
+            }
+        })?;
+    Ok(Json(serde_json::json!({ "deleted": true, "id": id })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RenameConversationRequest {
+    pub title: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HistoryBlock {
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    /// Human-readable text-only projection of the message (legacy
+    /// consumers + simple displays). Use `blocks` for structured render.
+    pub content: String,
+    pub blocks: Vec<HistoryBlock>,
+    pub ts: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ConversationMessagesResponse {
+    pub messages: Vec<HistoryMessage>,
+}
+
+/// `GET /api/v1/web/workbench/conversations/{id}/messages` — read
+/// the Claude Code jsonl file for this conversation and return the
+/// user + assistant messages in order. The filename is
+/// `<conversation_id>.jsonl` because `SessionStore::get_or_create`
+/// reuses the conversation uuid as the Claude `--session-id`.
+pub async fn get_conversation_messages_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<ConversationMessagesResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "conversation history")?;
+    let user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+
+    let owned: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM conversations \
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(ctx.tenant_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("lookup: {e}"))))?;
+    if owned.is_none() {
+        tracing::warn!(
+            target: "conversations.history",
+            conv_id = %id,
+            user_id = %user_id,
+            "ownership check miss — user has no row with this id"
+        );
+        return Ok(Json(ConversationMessagesResponse { messages: vec![] }));
+    }
+
+    let candidates = claude_jsonl_candidates(id);
+    tracing::info!(
+        target: "conversations.history",
+        conv_id = %id,
+        candidates = candidates.len(),
+        "jsonl candidates enumerated"
+    );
+    let mut history = Vec::new();
+    for path in &candidates {
+        tracing::info!(
+            target: "conversations.history",
+            path = %path.display(),
+            exists = path.exists(),
+            "trying candidate"
+        );
+        if let Ok(msgs) = parse_claude_jsonl(path) {
+            tracing::info!(
+                target: "conversations.history",
+                path = %path.display(),
+                count = msgs.len(),
+                "parsed jsonl"
+            );
+            history = msgs;
+            if !history.is_empty() {
+                break;
+            }
+        }
+    }
+    Ok(Json(ConversationMessagesResponse { messages: history }))
+}
+
+fn claude_jsonl_candidates(id: uuid::Uuid) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        // Claude Code session path: ~/.claude/projects/<slug>/<session-uuid>.jsonl
+        // The slug is Claude Code's slugified cwd — we'll scan the
+        // `projects` dir and pick any subdir that contains our uuid.
+        let projects = home.join(".claude/projects");
+        if let Ok(rd) = std::fs::read_dir(&projects) {
+            for entry in rd.flatten() {
+                let p = entry.path().join(format!("{id}.jsonl"));
+                if p.exists() {
+                    out.push(p);
+                }
+            }
+        }
+        out.push(
+            home.join(".gadgetron/penny/work")
+                .join(format!("{id}.jsonl")),
+        );
+    }
+    out
+}
+
+/// Remove the `<gadgetron_shared_context>...</gadgetron_shared_context>`
+/// and `<gadgetron_user>...</gadgetron_user>` blocks that the chat
+/// handler injects at the top of every user turn. They're noise for
+/// the transcript view — the operator wants to see their question,
+/// not the ambient context Penny saw.
+fn strip_penny_context_prefix(s: &str) -> String {
+    let mut out = s.to_string();
+    for tag in ["gadgetron_shared_context", "gadgetron_user"] {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        while let Some(a) = out.find(&open) {
+            let Some(b_rel) = out[a..].find(&close) else {
+                break;
+            };
+            let b = a + b_rel + close.len();
+            out.replace_range(a..b, "");
+        }
+    }
+    out.trim().to_string()
+}
+
+fn parse_claude_jsonl(path: &std::path::Path) -> std::io::Result<Vec<HistoryMessage>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let ty = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if ty != "user" && ty != "assistant" {
+            continue;
+        }
+        let msg = val.get("message");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(ty)
+            .to_string();
+        let raw_content = msg.and_then(|m| m.get("content"));
+        let mut blocks: Vec<HistoryBlock> = Vec::new();
+        match raw_content {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                let cleaned = strip_penny_context_prefix(s);
+                if !cleaned.is_empty() {
+                    blocks.push(HistoryBlock::Text { text: cleaned });
+                }
+            }
+            Some(serde_json::Value::Array(parts)) => {
+                for p in parts {
+                    let part_type = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match part_type {
+                        "text" => {
+                            if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                                if !t.is_empty() {
+                                    blocks.push(HistoryBlock::Text {
+                                        text: t.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        "thinking" => {
+                            if let Some(t) = p.get("thinking").and_then(|v| v.as_str()) {
+                                if !t.is_empty() {
+                                    blocks.push(HistoryBlock::Reasoning {
+                                        text: t.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        "tool_use" => {
+                            let name = p
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("tool")
+                                .to_string();
+                            let input = p.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                            blocks.push(HistoryBlock::ToolUse { name, input });
+                        }
+                        "tool_result" => {
+                            let id = p
+                                .get("tool_use_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let content_val = p.get("content");
+                            let result_text = match content_val {
+                                Some(serde_json::Value::String(s)) => s.clone(),
+                                Some(serde_json::Value::Array(arr)) => arr
+                                    .iter()
+                                    .filter_map(|c| c.get("text").and_then(|v| v.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                                Some(v) => serde_json::to_string(v).unwrap_or_default(),
+                                None => String::new(),
+                            };
+                            if !result_text.is_empty() {
+                                blocks.push(HistoryBlock::ToolResult {
+                                    tool_use_id: id,
+                                    content: result_text,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        if blocks.is_empty() {
+            continue;
+        }
+        // Flat legacy text projection (first text block).
+        let content = blocks
+            .iter()
+            .find_map(|b| match b {
+                HistoryBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let ts = val
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        out.push(HistoryMessage {
+            role,
+            content,
+            blocks,
+            ts,
+        });
+    }
+    Ok(out)
+}
+
+/// `PATCH /api/v1/web/workbench/conversations/{id}` — rename.
+pub async fn rename_conversation_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    Json(body): Json<RenameConversationRequest>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "conversation rename")?;
+    let user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+    gadgetron_xaas::conversations::rename_conversation(
+        pool,
+        ctx.tenant_id,
+        user_id,
+        id,
+        &body.title,
+    )
+    .await
+    .map_err(|e| match e {
+        gadgetron_xaas::conversations::ConversationError::NotFound => {
+            WorkbenchHttpError::Core(GadgetronError::Config("conversation not found".into()))
+        }
+        gadgetron_xaas::conversations::ConversationError::Db(e) => {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("rename: {e}")))
+        }
+    })?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+// ---------------------------------------------------------------------------
 // ISSUE 14 TASK 14.4 — user self-service API keys
 // ---------------------------------------------------------------------------
 
@@ -1631,6 +1993,16 @@ pub fn workbench_routes() -> Router<AppState> {
         .route(
             "/servers/{host_id}/metrics",
             get(crate::web::server_metrics::list_server_metrics),
+        )
+        // ISSUE 31 — per-user chat conversations (left-rail sidebar).
+        .route("/conversations", get(list_conversations_handler))
+        .route(
+            "/conversations/{id}",
+            axum::routing::delete(delete_conversation_handler).patch(rename_conversation_handler),
+        )
+        .route(
+            "/conversations/{id}/messages",
+            get(get_conversation_messages_handler),
         )
 }
 
@@ -2507,6 +2879,7 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(gadgetron_core::agent::config::AgentConfig::default()),
+            google_oauth: None,
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),

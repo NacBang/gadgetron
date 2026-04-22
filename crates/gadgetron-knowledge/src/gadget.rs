@@ -646,7 +646,7 @@ impl KnowledgeGadgetProvider {
     ///
     /// Until then, PDF extraction is exercised in two places:
     ///
-    /// 1. **Crate-level unit tests** — `plugins/plugin-document-formats/
+    /// 1. **Crate-level unit tests** — `bundles/document-formats/
     ///    src/pdf.rs` validates `PdfExtractor::extract` end-to-end
     ///    against a hand-crafted PDF fixture.
     /// 2. **Bundle-level integration test** — `crates/gadgetron-

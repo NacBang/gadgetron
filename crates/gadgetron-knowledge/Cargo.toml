@@ -46,7 +46,7 @@ gadgetron-testing = { workspace = true }
 # knowledge, so runtime-scope inclusion would create a cycle. Integration
 # test compiled against `--test` stage, so cycle-safe.
 gadgetron-penny = { workspace = true }
-gadgetron-bundle-document-formats = { path = "../../plugins/plugin-document-formats", features = ["pdf"] }
+gadgetron-bundle-document-formats = { path = "../../bundles/document-formats", features = ["pdf"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

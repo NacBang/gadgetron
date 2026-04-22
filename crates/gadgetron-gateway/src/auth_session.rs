@@ -41,6 +41,12 @@ pub struct WhoamiResponse {
     pub user_id: Uuid,
     pub tenant_id: Uuid,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// User identity fields — enables the frontend to render the user's
+    /// name in place of "You" and to gate admin UI on role.
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,16 +178,36 @@ pub async fn whoami_handler(State(state): State<AppState>, headers: HeaderMap) -
             .into_response();
     };
     match gadgetron_xaas::sessions::validate_session(pool, &token).await {
-        Ok(row) => (
-            StatusCode::OK,
-            Json(WhoamiResponse {
-                session_id: row.id,
-                user_id: row.user_id,
-                tenant_id: row.tenant_id,
-                expires_at: row.expires_at,
-            }),
-        )
-            .into_response(),
+        Ok(row) => {
+            // Enrich with identity so the UI can render the user's name
+            // + gate admin toggle. Cheap single-row select.
+            let identity: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+                "SELECT email, display_name, role, avatar_url FROM users WHERE id = $1",
+            )
+            .bind(row.user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+            let (email, display_name, role, avatar_url) = match identity {
+                Some((e, d, r, a)) => (Some(e), Some(d), Some(r), a),
+                None => (None, None, None, None),
+            };
+            (
+                StatusCode::OK,
+                Json(WhoamiResponse {
+                    session_id: row.id,
+                    user_id: row.user_id,
+                    tenant_id: row.tenant_id,
+                    expires_at: row.expires_at,
+                    email,
+                    display_name,
+                    role,
+                    avatar_url,
+                }),
+            )
+                .into_response()
+        }
         Err(gadgetron_xaas::sessions::SessionError::NotFound) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": { "code": "session_expired", "message": "session not found or expired" } })),

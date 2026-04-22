@@ -129,6 +129,10 @@ pub struct AppState {
     /// injection. Arc so clone is a pointer increment; handler reads only
     /// `agent_config.shared_context.enabled` and limit fields.
     pub agent_config: Arc<AgentConfig>,
+    /// Google OAuth client config, when the operator provisioned
+    /// `[auth.google]` in gadgetron.toml. `None` disables the OAuth
+    /// routes (they return 404).
+    pub google_oauth: Option<Arc<gadgetron_core::config::GoogleOauthConfig>>,
     /// Per-turn bootstrap assembler — wired at startup from
     /// `DefaultPennyTurnContextAssembler` with `penny_shared_surface`. `None`
     /// until PSL-1b is wired in the production binary. The handler uses this
@@ -399,6 +403,13 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/auth/whoami",
             get(crate::auth_session::whoami_handler),
         )
+        // ISSUE 30 — Google OAuth sign-in. Routes 404 when `[auth.google]`
+        // is not configured, so it's safe to always mount them.
+        .route("/auth/google/login", get(crate::auth_google::login_handler))
+        .route(
+            "/auth/google/callback",
+            get(crate::auth_google::callback_handler),
+        )
         .with_state(state); // state moved here (last consumer)
 
     Router::new()
@@ -531,6 +542,7 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            google_oauth: None,
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
@@ -558,6 +570,7 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            google_oauth: None,
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
@@ -902,6 +915,7 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            google_oauth: None,
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),
@@ -986,6 +1000,7 @@ mod tests {
             penny_shared_surface: None,
             penny_assembler: None,
             agent_config: Arc::new(AgentConfig::default()),
+            google_oauth: None,
             activity_capture_store: None,
             candidate_coordinator: None,
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),

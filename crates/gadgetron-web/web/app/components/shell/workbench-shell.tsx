@@ -6,6 +6,7 @@ import { StatusStrip, useGatewayHealth } from "./status-strip";
 import { LeftRail } from "./left-rail";
 import { EvidencePane } from "./evidence-pane";
 import { FailurePanel } from "./failure-panel";
+import { VersionBadge } from "./version-badge";
 import { useWorkbenchPrefs } from "./use-workbench-prefs";
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,8 @@ export function WorkbenchShell({
 
         {!preAuth && resolvedRightRail}
       </div>
+
+      <VersionBadge />
 
       {showHardFailureOverlay && (
         <FailurePanel

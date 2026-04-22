@@ -200,6 +200,7 @@ pub async fn list_server_metrics(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_points(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -253,8 +254,14 @@ async fn fetch_points(
         }
         _ => {
             // Continuous-aggregate views: use the `bucket` column.
+            // `samples` is `bigint` in the 5s rollup but becomes `numeric`
+            // from the 1m tier upward — Postgres widens `SUM(bigint)` to
+            // `numeric` to avoid overflow. sqlx can't decode `numeric`
+            // into `i64` without the `bigdecimal` feature, so we cast
+            // back to `bigint` in SQL. Overflow is not a real concern
+            // here (samples per hour ≪ 2^63).
             let sql = format!(
-                "SELECT bucket AS ts, avg, min, max, samples \
+                "SELECT bucket AS ts, avg, min, max, samples::bigint \
                  FROM {rel} \
                  WHERE tenant_id = $1 AND host_id = $2 AND metric = $3 \
                    AND bucket >= $4 AND bucket < $5 \

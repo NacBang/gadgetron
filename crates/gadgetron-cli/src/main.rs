@@ -55,6 +55,7 @@ struct AppStateParts {
     penny_assembler:
         Option<Arc<dyn gadgetron_core::agent::shared_context::PennyTurnContextAssembler>>,
     agent_config: Arc<gadgetron_core::agent::config::AgentConfig>,
+    google_oauth: Option<Arc<gadgetron_core::config::GoogleOauthConfig>>,
     activity_capture_store:
         Option<Arc<dyn gadgetron_core::knowledge::candidate::ActivityCaptureStore>>,
     candidate_coordinator:
@@ -699,14 +700,27 @@ fn load_penny_registry_from_config(
                     Vec<gadgetron_bundle_server_monitor::MetricSample>,
                 >(4096);
                 let counters = gadgetron_bundle_server_monitor::IngestionCounters::default();
-                p = p.with_metrics_writer(tx, counters.clone());
+                p = p.with_metrics_writer(tx.clone(), counters.clone());
                 tokio::spawn(gadgetron_bundle_server_monitor::run_metrics_writer(
-                    rx, pool, counters,
+                    rx,
+                    pool,
+                    counters.clone(),
+                ));
+                // Server-side background poller — runs whether the web
+                // UI is open or not, so `host_metrics` stays continuous.
+                // Uses the same inventory + writer channel as the gadget
+                // path; SSH ControlMaster multiplexes the two callers
+                // onto one connection per host.
+                tokio::spawn(gadgetron_bundle_server_monitor::run_background_poller(
+                    p.inventory(),
+                    tx,
+                    counters,
+                    gadgetron_bundle_server_monitor::PollerConfig::default(),
                 ));
                 tracing::info!(
                     target: "server_monitor_metrics",
-                    "metrics ingestion writer spawned — server.stats samples \
-                     will land in host_metrics hypertable",
+                    "metrics ingestion writer + background poller spawned — \
+                     host_metrics will be filled continuously at 1 Hz"
                 );
             } else {
                 tracing::info!(
@@ -1043,13 +1057,22 @@ async fn tenant_create(pool: &sqlx::PgPool, name: &str) -> Result<()> {
 async fn key_create(pool: &sqlx::PgPool, tenant_id: Uuid, scope: &str) -> Result<()> {
     let (raw_key, key_hash) = gadgetron_xaas::auth::key_gen::generate_api_key("live");
 
+    // `--scope` is documented as comma-separated; split into a proper
+    // array so `{Management,OpenAiCompat}` lands in the DB instead of a
+    // single `{Management,OpenAiCompat}`-as-one-string element.
+    let scopes: Vec<String> = scope
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     sqlx::query(
         "INSERT INTO api_keys (tenant_id, prefix, key_hash, kind, scopes) \
-         VALUES ($1, 'gad_live', $2, 'live', ARRAY[$3]::TEXT[])",
+         VALUES ($1, 'gad_live', $2, 'live', $3)",
     )
     .bind(tenant_id)
     .bind(&key_hash)
-    .bind(scope)
+    .bind(&scopes)
     .execute(pool)
     .await
     .with_context(|| {
@@ -1848,6 +1871,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         penny_shared_surface,
         penny_assembler,
         agent_config,
+        google_oauth,
         activity_capture_store,
         candidate_coordinator,
         activity_bus,
@@ -1869,6 +1893,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         penny_shared_surface,
         penny_assembler,
         agent_config,
+        google_oauth,
         activity_capture_store,
         candidate_coordinator,
         activity_bus,
@@ -2088,6 +2113,7 @@ async fn init_serve_runtime(
         penny_shared_surface,
         penny_assembler,
         agent_config,
+        google_oauth: config.auth.google.as_ref().map(|g| Arc::new(g.clone())),
         activity_capture_store,
         candidate_coordinator,
         activity_bus,
@@ -4152,6 +4178,7 @@ wiki_max_page_bytes = 1048576
             penny_shared_surface: Some(penny_surface),
             penny_assembler: Some(penny_assembler),
             agent_config: Arc::new(agent_cfg),
+            google_oauth: None,
             activity_capture_store: Some(activity_store),
             candidate_coordinator: Some(candidate_coordinator),
             activity_bus: gadgetron_core::activity_bus::ActivityBus::new(),

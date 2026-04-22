@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { OpenAIChatTransport } from "../openai-transport";
@@ -84,33 +84,38 @@ function LoginCard() {
 }
 
 function AuthedShell({ children }: { children: ReactNode }) {
-  const { apiKey } = useAuth();
-
-  // `useChatRuntime` depends on a stable transport instance. The
-  // transport reads the API key lazily from `localStorage` on each
-  // request, so we don't need to rebuild it when `apiKey` changes
-  // within a session; rebuilding would remount the runtime and defeat
-  // the whole point of hoisting it. `apiKey` is in the dep array only
-  // so the transport closure captures the latest header function.
+  // Transport sends Bearer when an API key exists, falls back to the
+  // session cookie otherwise. Same-origin cookies are sent by default.
   const transport = useMemo(
     () =>
       new OpenAIChatTransport({
         api: `${getApiBase()}/chat/completions`,
         model: "penny",
         headers: (): Record<string, string> => {
-          const key =
-            typeof localStorage !== "undefined"
-              ? localStorage.getItem("gadgetron_api_key")
-              : null;
-          return key ? { Authorization: `Bearer ${key}` } : {};
+          const h: Record<string, string> = {};
+          if (typeof localStorage !== "undefined") {
+            const key = localStorage.getItem("gadgetron_api_key");
+            if (key) h["Authorization"] = `Bearer ${key}`;
+            // ISSUE 31 — conversation id minted by the conversations
+            // pane; read on every turn so switching chats takes effect
+            // on the next send without reconstructing the transport.
+            let convId = localStorage.getItem("gadgetron_conversation_id");
+            if (!convId) {
+              // No active conversation yet: mint one now so the very
+              // first turn lands in a row and the sidebar picks it up.
+              convId = crypto.randomUUID?.() ?? null;
+              if (convId) {
+                localStorage.setItem("gadgetron_conversation_id", convId);
+              }
+            }
+            if (convId) h["X-Gadgetron-Conversation-Id"] = convId;
+          }
+          return h;
         },
       }),
     [],
   );
   const runtime = useChatRuntime({ transport });
-
-  // `apiKey` guarantees we are post-auth, but narrow for TypeScript.
-  if (!apiKey) return null;
 
   return (
     <EvidenceProvider>
@@ -121,26 +126,84 @@ function AuthedShell({ children }: { children: ReactNode }) {
   );
 }
 
+/// Auth state we care about for the shell gate: either an API key
+/// (pre-OAuth flow) or a live session cookie validates.
+type SessionCheck = "checking" | "valid" | "none";
+
+function useSessionCheck(hasApiKey: boolean): SessionCheck {
+  const [state, setState] = useState<SessionCheck>(
+    hasApiKey ? "valid" : "checking",
+  );
+  useEffect(() => {
+    if (hasApiKey) {
+      setState("valid");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const base =
+          (typeof document !== "undefined" &&
+            document
+              .querySelector<HTMLMetaElement>(
+                'meta[name="gadgetron-api-base"]',
+              )
+              ?.content) ||
+          "/v1";
+        const root = base.replace(/\/v\d+$/, "");
+        const res = await fetch(`${root}/api/v1/auth/whoami`, {
+          credentials: "include",
+        });
+        if (!cancelled) setState(res.ok ? "valid" : "none");
+      } catch {
+        if (!cancelled) setState("none");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasApiKey]);
+  return state;
+}
+
 function ShellSwitch({ children }: { children: ReactNode }) {
   const { apiKey, hydrated } = useAuth();
+  const sessionState = useSessionCheck(!!apiKey);
 
-  // Before the initial localStorage read completes, render the shell
-  // chrome with a blank body. This avoids a one-frame flash of the
-  // login form on an authed reload.
-  if (!hydrated) {
+  useEffect(() => {
+    // Once we've definitively determined no auth, hard-redirect to the
+    // login page. Client-side `router.push` would keep the shell
+    // mounted briefly and double-run effects.
+    if (
+      hydrated &&
+      !apiKey &&
+      sessionState === "none" &&
+      typeof window !== "undefined" &&
+      !window.location.pathname.startsWith("/web/login")
+    ) {
+      window.location.assign("/web/login");
+    }
+  }, [hydrated, apiKey, sessionState]);
+
+  // Before the initial localStorage read or the whoami probe completes,
+  // render the shell chrome with a blank body. This avoids a one-frame
+  // flash of the login form on an authed reload.
+  if (!hydrated || sessionState === "checking") {
     return <WorkbenchShell preAuth>{null}</WorkbenchShell>;
   }
 
-  if (!apiKey) {
-    return (
-      <WorkbenchShell preAuth>
-        <LoginCard />
-      </WorkbenchShell>
-    );
+  if (!apiKey && sessionState === "none") {
+    // Redirect in-flight — render nothing to avoid a flash.
+    return <WorkbenchShell preAuth>{null}</WorkbenchShell>;
   }
 
   return <AuthedShell>{children}</AuthedShell>;
 }
+
+// LoginCard kept in the module in case other callers import it, but the
+// shell no longer mounts it — the dedicated /web/login page owns the
+// sign-in UI so Google OAuth + password login can share one screen.
+void LoginCard;
 
 export default function ShellLayout({ children }: { children: ReactNode }) {
   return (

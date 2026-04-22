@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "../../lib/auth-context";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -13,17 +14,6 @@ interface HealthResponse {
   status?: string;
   degraded_reasons?: string[];
 }
-
-// ---------------------------------------------------------------------------
-// Stub fixture — P2A: knowledge plugs displayed statically until
-// /api/v1/web/workbench/bootstrap lands in P2B
-// ---------------------------------------------------------------------------
-
-const STUB_PLUGS = [
-  "llm-wiki (canonical)",
-  "wiki-keyword",
-  "semantic-pgvector",
-];
 
 // ---------------------------------------------------------------------------
 // Health polling
@@ -136,6 +126,31 @@ interface StatusStripProps {
 
 export function StatusStrip({ sessionId, actor }: StatusStripProps) {
   const health = useGatewayHealth();
+  const { identity, viewMode, setViewMode, clearKey } = useAuth();
+  const isAdmin = identity?.role === "admin";
+  const userLabel = identity?.display_name || identity?.email || actor;
+
+  const handleLogout = async () => {
+    try {
+      const metaBase =
+        document
+          .querySelector<HTMLMetaElement>(
+            'meta[name="gadgetron-api-base"]',
+          )
+          ?.content ?? "/v1";
+      const root = metaBase.replace(/\/v\d+$/, "");
+      await fetch(`${root}/api/v1/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // ignore — we clear client state regardless
+    }
+    clearKey();
+    if (typeof window !== "undefined") {
+      window.location.assign("/web/login");
+    }
+  };
 
   const healthLabel = {
     healthy: "Gateway healthy",
@@ -154,48 +169,66 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
         health.status === "blocked" && "border-red-900/40",
       )}
     >
-      {/* Brand: ManyCoreSoft logo + product name. Drop a real
-       * `/web/brand/manycoresoft.svg` (or .png) into
-       * `crates/gadgetron-web/web/public/brand/` to override the
-       * built-in placeholder. */}
+      {/* Brand: ManyCoreSoft wordmark + product name. The wordmark
+       * already carries the company text, so we only render the
+       * product label "Gadgetron" beside it instead of repeating
+       * "ManyCoreSoft" twice. Source asset is whatever lives at
+       * /web/brand/manycoresoft.png (wide aspect, e.g. 5:1) — drop
+       * a different file at the same path to override. */}
       <span
-        className="flex items-center gap-2"
+        className="flex items-baseline gap-2"
         data-testid="brand"
         aria-label="ManyCoreSoft Gadgetron"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/web/brand/manycoresoft.svg"
+          src="/web/brand/manycoresoft.png"
           alt="ManyCoreSoft"
-          width={20}
-          height={20}
-          className="block size-5 shrink-0 rounded"
+          className="block h-5 w-auto shrink-0 self-end"
         />
-        <span className="text-sm font-semibold text-zinc-200">
-          <span className="text-zinc-400">ManyCoreSoft</span>{" "}
-          <span className="text-zinc-100">Gadgetron</span>
+        <span className="text-sm font-semibold text-zinc-100">
+          Gadgetron
         </span>
       </span>
 
-      <span className="text-zinc-700" aria-hidden>
-        |
-      </span>
-
-      {/* Active knowledge plugs — stub fixture at P2A */}
-      <span className="flex items-center gap-1.5 text-zinc-500" data-testid="knowledge-plugs">
-        <span className="text-zinc-600">plugs:</span>
-        {STUB_PLUGS.map((plug, i) => (
-          <span key={plug}>
-            <span className="text-zinc-400">{plug}</span>
-            {i < STUB_PLUGS.length - 1 && (
-              <span className="text-zinc-700">,</span>
-            )}
-          </span>
-        ))}
-      </span>
-
-      {/* Spacer pushes health + (optional) session/actor to the right. */}
+      {/* Spacer pushes (optional) session/actor to the right. */}
       <span className="flex-1" />
+
+      {isAdmin && (
+        <span
+          className="flex items-center overflow-hidden rounded border border-zinc-700 text-[10px]"
+          role="group"
+          aria-label="view mode"
+          data-testid="view-mode-toggle"
+        >
+          <button
+            type="button"
+            onClick={() => setViewMode("admin")}
+            aria-pressed={viewMode === "admin"}
+            className={cn(
+              "px-2 py-0.5",
+              viewMode === "admin"
+                ? "bg-amber-900/40 text-amber-200"
+                : "text-zinc-500 hover:text-zinc-300",
+            )}
+          >
+            Admin
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("user")}
+            aria-pressed={viewMode === "user"}
+            className={cn(
+              "border-l border-zinc-700 px-2 py-0.5",
+              viewMode === "user"
+                ? "bg-blue-900/40 text-blue-200"
+                : "text-zinc-500 hover:text-zinc-300",
+            )}
+          >
+            User
+          </button>
+        </span>
+      )}
 
       {/* Session / actor — optional, only shown when explicitly passed.
        * The "session: --" placeholder was removed because it carried no
@@ -206,30 +239,51 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
           <span className="text-zinc-400">{sessionId.slice(0, 8)}</span>
         </span>
       )}
-      {actor && (
-        <span className="text-zinc-600" data-testid="actor">
-          actor: <span className="text-zinc-400">{actor}</span>
+      {userLabel && (
+        <span className="flex items-center gap-1.5 text-zinc-600" data-testid="actor">
+          {identity?.avatar_url && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={identity.avatar_url}
+              alt=""
+              referrerPolicy="no-referrer"
+              className="size-5 rounded-full border border-zinc-700 object-cover"
+            />
+          )}
+          <span className="text-zinc-400">{userLabel}</span>
+          {identity && (
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              className="ml-1 rounded border border-zinc-800 px-1 py-0.5 text-[9px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+              title="로그아웃"
+            >
+              logout
+            </button>
+          )}
         </span>
       )}
 
-      {/* Gateway health is now the rightmost element — operators glance
-       * top-right (the same spot as the typical status-tray placement
-       * in macOS / Windows) for the "is the box up" signal. */}
-      <span className="flex items-center gap-1.5" data-testid="health-indicator">
-        <StatusDot status={health.status} />
-        <span
-          className={cn(
-            health.status === "healthy" && "text-emerald-400",
-            health.status === "degraded" && "text-amber-400",
-            health.status === "blocked" && "text-red-400",
+      {/* Gateway health status — only rendered when NOT healthy so the
+       * top bar stays clean in normal operation. The strip's border
+       * color also shifts via the parent `className` so operators get
+       * a subtle ambient signal even without a text label. */}
+      {health.status !== "healthy" && health.status !== "checking" && (
+        <span className="flex items-center gap-1.5" data-testid="health-indicator">
+          <StatusDot status={health.status} />
+          <span
+            className={cn(
+              health.status === "degraded" && "text-amber-400",
+              health.status === "blocked" && "text-red-400",
+            )}
+          >
+            {healthLabel}
+          </span>
+          {health.httpStatus !== null && (
+            <span className="text-zinc-600">({health.httpStatus})</span>
           )}
-        >
-          {healthLabel}
         </span>
-        {health.httpStatus !== null && health.status !== "healthy" && (
-          <span className="text-zinc-600">({health.httpStatus})</span>
-        )}
-      </span>
+      )}
     </div>
   );
 }

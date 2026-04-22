@@ -48,6 +48,46 @@ pub struct AppConfig {
 pub struct AuthConfig {
     #[serde(default)]
     pub bootstrap: Option<BootstrapConfig>,
+    #[serde(default)]
+    pub google: Option<GoogleOauthConfig>,
+}
+
+/// Google OAuth 2.0 (OpenID Connect) configuration. When present AND
+/// `enabled = true`, the gateway exposes `/auth/google/login` and
+/// `/auth/google/callback`. A successful sign-in upserts a user row
+/// matched on `(tenant_id, email)` and opens a session cookie via the
+/// same `sessions::create_session_for_user` primitive that password
+/// login uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleOauthConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Google OAuth client ID (public). Create at
+    /// <https://console.cloud.google.com/apis/credentials>.
+    pub client_id: String,
+    /// Name of the env var that carries the client secret. The plaintext
+    /// secret is never stored in config — same rule as `admin_password_env`.
+    pub client_secret_env: String,
+    /// Full callback URL, exactly as registered in Google Console. E.g.
+    /// `http://localhost:18080/auth/google/callback` for local dev or
+    /// `https://gadgetron.example.com/auth/google/callback` in prod.
+    pub redirect_uri: String,
+    /// Optional email-domain allowlist. When non-empty, only users whose
+    /// verified email ends with one of these suffixes can sign in.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Default role assigned to auto-provisioned users. Defaults to
+    /// `"member"`. Admins are still provisioned via the `user create`
+    /// CLI or the admin UI.
+    #[serde(default = "default_google_role")]
+    pub default_role: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_google_role() -> String {
+    "member".into()
 }
 
 /// Mirror of `gadgetron_xaas::auth::bootstrap::BootstrapConfig` for

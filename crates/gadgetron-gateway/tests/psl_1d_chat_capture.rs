@@ -202,6 +202,7 @@ fn make_state_with_coordinator() -> (AppState, Arc<InMemoryActivityCaptureStore>
         workbench: None,
         penny_shared_surface: None,
         agent_config: Arc::new(AgentConfig::default()),
+        google_oauth: None,
         penny_assembler: None,
         activity_capture_store: Some(store.clone()),
         candidate_coordinator: Some(coord),

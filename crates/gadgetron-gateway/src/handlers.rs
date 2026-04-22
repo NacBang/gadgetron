@@ -65,6 +65,35 @@ pub async fn chat_completions_handler(
         }
     }
 
+    // ISSUE 31 — record this turn in the conversations table so the
+    // left-rail sidebar reflects the new message. Fire-and-forget; if
+    // the DB is down we still let the chat go through (shared-context
+    // graceful-degrade pattern).
+    if let (Some(pool), Some(user_id), Some(conv_raw)) = (
+        state.pg_pool.as_ref(),
+        ctx.actor_user_id,
+        req.conversation_id.as_deref(),
+    ) {
+        if let Some(conv_uuid) = extract_conversation_uuid(conv_raw) {
+            let first_user_msg = req
+                .messages
+                .iter()
+                .find(|m| matches!(m.role, gadgetron_core::message::Role::User))
+                .and_then(|m| m.content.text())
+                .unwrap_or_default()
+                .to_string();
+            let pool = pool.clone();
+            let tenant_id = ctx.tenant_id;
+            let msg = first_user_msg.clone();
+            tokio::spawn(async move {
+                let _ = gadgetron_xaas::conversations::upsert_turn(
+                    &pool, conv_uuid, tenant_id, user_id, None, &msg,
+                )
+                .await;
+            });
+        }
+    }
+
     // W3-PSL-1b: inject shared-context bootstrap before dispatch.
     // Graceful degrade: never 5xx the chat endpoint on bootstrap failure.
     // Authority: docs/design/phase2/13-penny-shared-surface-loop.md §2.2.2,
@@ -78,10 +107,30 @@ pub async fn chat_completions_handler(
                 .await
             {
                 Ok(bootstrap) => {
-                    let block = render_penny_shared_context(
+                    let mut block = render_penny_shared_context(
                         &bootstrap,
                         shared_cfg.digest_summary_chars as usize,
                     );
+                    // ISSUE 32 — surface the calling user's identity so
+                    // Penny can address the operator by name and gate
+                    // behavior on role. We fetch the row here (cheap
+                    // indexed lookup) rather than plumbing a field
+                    // through every assembler call site.
+                    if let (Some(pool), Some(user_id)) = (state.pg_pool.as_ref(), ctx.actor_user_id)
+                    {
+                        if let Ok(Some((email, name, role))) =
+                            sqlx::query_as::<_, (String, String, String)>(
+                                "SELECT email, display_name, role FROM users WHERE id = $1",
+                            )
+                            .bind(user_id)
+                            .fetch_optional(pool)
+                            .await
+                        {
+                            block.push_str(&format!(
+                                "\n<gadgetron_user>\nemail: {email}\nname: {name}\nrole: {role}\n</gadgetron_user>\n"
+                            ));
+                        }
+                    }
                     let injection_mode = inject_shared_context_block(&mut req.messages, &block);
                     // Record a tracing event for observability. Using
                     // `tracing::info!` (not info_span!) because we want an
@@ -685,6 +734,15 @@ pub async fn invoke_tool_handler(
 ///   (empty vec, first message is not System, or first message is System with
 ///   `Content::Parts`); a new `Message::system(block)` was inserted at index 0.
 ///
+/// Accept either a raw UUID (`"550e8400-…"`) or the namespaced form
+/// (`"_self:550e8400-…"` / `"{owner}:{uuid}"`). Returns `None` if we
+/// can't parse a UUID so the chat request still goes through — the
+/// conversations table just doesn't get a row.
+fn extract_conversation_uuid(raw: &str) -> Option<uuid::Uuid> {
+    let stripped = raw.split(':').next_back().unwrap_or(raw).trim();
+    uuid::Uuid::parse_str(stripped).ok()
+}
+
 /// Rule for `Content::Parts` system messages: inserting a new system message
 /// ahead of a Parts system message keeps structured parts intact.
 fn inject_shared_context_block(messages: &mut Vec<Message>, block: &str) -> &'static str {
@@ -979,6 +1037,7 @@ mod tests {
             workbench: None,
             penny_shared_surface: None,
             agent_config: Arc::new(AgentConfig::default()),
+            google_oauth: None,
             penny_assembler: None,
             activity_capture_store: None,
             candidate_coordinator: None,
@@ -1396,6 +1455,7 @@ mod tests {
             workbench: None,
             penny_shared_surface: surface,
             agent_config: Arc::new(agent_cfg),
+            google_oauth: None,
             penny_assembler,
             activity_capture_store: None,
             candidate_coordinator: None,

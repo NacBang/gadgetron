@@ -114,16 +114,52 @@ impl RpcResponse {
 /// `registry` is the frozen `GadgetRegistry` built by the caller
 /// with all the providers it wants to expose (typically just
 /// `KnowledgeToolProvider` in P2A).
+/// Append a short trace line to `/tmp/gadget-serve.trace` so the MCP
+/// subprocess (whose stderr Claude Code swallows) still leaves a
+/// debuggable breadcrumb when Penny reports "Connection closed" etc.
+/// Failures are silent — we never want diagnostics to crash the loop.
+fn log_trace(msg: String) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/gadget-serve.trace")
+    {
+        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+        let _ = writeln!(f, "{ts} pid={} {msg}", std::process::id());
+    }
+}
+
 pub async fn serve_stdio(registry: Arc<GadgetRegistry>) -> std::io::Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
-    let mut stdout = tokio::io::stdout();
+    let stdout = tokio::io::stdout();
     let mut line = String::new();
+
+    log_trace(format!("started pid={}", std::process::id()));
+
+    // Responses from concurrent dispatch tasks are funneled through
+    // this channel and written serially by a dedicated writer task.
+    // Serialized writes are load-bearing: `AsyncWriteExt::write_all` on
+    // `tokio::io::Stdout` is NOT cross-task-safe if two futures try to
+    // write overlapping frames — the bytes of a 10 KB JSON response
+    // could interleave with another response, producing corrupt
+    // JSON-RPC on the client side. A single writer task keeps each
+    // frame atomic without a Mutex on every call.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RpcResponse>();
+    let writer_task: tokio::task::JoinHandle<std::io::Result<()>> = tokio::spawn(async move {
+        let mut stdout = stdout;
+        while let Some(resp) = rx.recv().await {
+            write_response(&mut stdout, &resp).await?;
+        }
+        Ok(())
+    });
 
     loop {
         line.clear();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
+            log_trace(format!("stdin EOF pid={}", std::process::id()));
             break; // EOF — parent exited.
         }
 
@@ -135,6 +171,7 @@ pub async fn serve_stdio(registry: Arc<GadgetRegistry>) -> std::io::Result<()> {
         let request: RpcRequest = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
+                log_trace(format!("parse err: {e}"));
                 // Malformed JSON → emit parse error response. Per
                 // JSON-RPC 2.0, parse errors use id: null.
                 let resp = RpcResponse::err(
@@ -144,19 +181,47 @@ pub async fn serve_stdio(registry: Arc<GadgetRegistry>) -> std::io::Result<()> {
                         message: format!("parse error: {e}"),
                     },
                 );
-                write_response(&mut stdout, &resp).await?;
+                let _ = tx.send(resp);
                 continue;
             }
         };
 
-        // `initialized` is a notification (no response).
-        if request.method == "initialized" {
+        log_trace(format!(
+            "recv method={} id={:?}",
+            request.method, request.id
+        ));
+
+        // Notifications (no `id` → no response) — includes both the
+        // legacy `initialized` name and the MCP-spec `notifications/initialized`.
+        if request.method == "initialized" || request.method == "notifications/initialized" {
             continue;
         }
 
-        let response = handle_request(&registry, request).await;
-        write_response(&mut stdout, &response).await?;
+        // Dispatch on a spawned task so slow gadgets (SSH round-trips
+        // etc.) don't head-of-line-block the next request. Claude Code
+        // pipelines parallel `tool_use` blocks; running them serially
+        // would add per-call wallclock latencies and trip MCP client
+        // timeouts. The response channel preserves order-of-completion,
+        // which is what MCP/JSON-RPC correlates by `id`.
+        let registry = Arc::clone(&registry);
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let method = request.method.clone();
+            let id = request.id.clone();
+            let response = handle_request(&registry, request).await;
+            log_trace(format!(
+                "done method={method} id={id:?} is_err={}",
+                response.error.is_some()
+            ));
+            let _ = tx.send(response);
+        });
     }
+
+    // Drop the last sender so the writer task can observe the channel
+    // close and exit. Any in-flight dispatches whose senders were
+    // already cloned into tasks finish writing first.
+    drop(tx);
+    let _ = writer_task.await;
 
     Ok(())
 }

@@ -127,9 +127,13 @@ pub struct SessionEntry {
 
 impl SessionEntry {
     fn new() -> Self {
+        Self::with_uuid(Uuid::new_v4())
+    }
+
+    fn with_uuid(uuid: Uuid) -> Self {
         let now = Instant::now();
         Self {
-            claude_session_uuid: Uuid::new_v4(),
+            claude_session_uuid: uuid,
             created_at: now,
             last_used: std::sync::Mutex::new(now),
             turn_count: std::sync::atomic::AtomicU32::new(0),
@@ -206,13 +210,24 @@ impl SessionStore {
     pub fn get_or_create(&self, id: ConversationId) -> (Arc<SessionEntry>, bool) {
         self.sweep_expired();
 
+        // If the `local_name` portion of the conversation id parses as
+        // a UUID, reuse it as the Claude session UUID. This makes the
+        // jsonl filename (`~/.gadgetron/penny/work/<uuid>.jsonl`) predictable
+        // from the DB's `conversation.id`, so the history endpoint can
+        // locate past messages without a separate mapping table.
+        let (_owner, local) = parse_conversation_id(&id);
+        let preferred_uuid = Uuid::parse_str(local).ok();
+
         let mut first_turn = false;
         let entry = self
             .entries
             .entry(id.clone())
             .or_insert_with(|| {
                 first_turn = true;
-                Arc::new(SessionEntry::new())
+                match preferred_uuid {
+                    Some(u) => Arc::new(SessionEntry::with_uuid(u)),
+                    None => Arc::new(SessionEntry::new()),
+                }
             })
             .value()
             .clone();

@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
 pub mod activity_capture;
+pub mod auth_google;
 pub mod auth_session;
 pub mod error;
 pub mod handlers;

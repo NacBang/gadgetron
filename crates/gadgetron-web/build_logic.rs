@@ -227,6 +227,12 @@ fn extract_web_next_refs(content: &str, refs: &mut std::collections::BTreeSet<St
 fn scrubbed_npm(npm: &Path, cwd: &Path) -> Command {
     let mut cmd = Command::new(npm);
     cmd.current_dir(cwd);
+    // Inline the workspace version so the UI can render it in the
+    // bottom-right corner. Uses Next.js's `NEXT_PUBLIC_*` inlining so
+    // the constant is available at build time without a runtime fetch.
+    if let Ok(v) = env::var("CARGO_PKG_VERSION") {
+        cmd.env("NEXT_PUBLIC_GADGETRON_VERSION", v);
+    }
     for v in &[
         "NPM_TOKEN",
         "GITHUB_TOKEN",

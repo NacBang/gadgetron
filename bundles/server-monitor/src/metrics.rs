@@ -86,7 +86,9 @@ pub fn try_ship(
     let count = samples.len() as u64;
     match sender.try_send(samples) {
         Ok(()) => {
-            counters.samples_enqueued.fetch_add(count, Ordering::Relaxed);
+            counters
+                .samples_enqueued
+                .fetch_add(count, Ordering::Relaxed);
         }
         Err(_) => {
             counters.samples_dropped.fetch_add(count, Ordering::Relaxed);
@@ -109,11 +111,7 @@ pub fn try_ship(
 /// The metric naming convention matches §2.1.2 of the design doc —
 /// hierarchical `<family>[.<instance>][.<leaf>]` strings Penny can
 /// pattern-match against natural-language questions.
-pub fn stats_to_samples(
-    tenant_id: Uuid,
-    host_id: Uuid,
-    stats: &ServerStats,
-) -> Vec<MetricSample> {
+pub fn stats_to_samples(tenant_id: Uuid, host_id: Uuid, stats: &ServerStats) -> Vec<MetricSample> {
     let ts = stats.fetched_at;
     let mut out: Vec<MetricSample> = Vec::with_capacity(48);
 
@@ -129,15 +127,25 @@ pub fn stats_to_samples(
 
     // --- CPU ---
     if let Some(cpu) = &stats.cpu {
-        out.push(mk("cpu.util".into(), cpu.util_pct as f64, Some("pct"), json!({})));
-        out.push(mk("cpu.load_1m".into(), cpu.load_1m as f64, None, json!({})));
-        out.push(mk("cpu.load_5m".into(), cpu.load_5m as f64, None, json!({})));
         out.push(mk(
-            "cpu.cores".into(),
-            cpu.cores as f64,
+            "cpu.util".into(),
+            cpu.util_pct as f64,
+            Some("pct"),
+            json!({}),
+        ));
+        out.push(mk(
+            "cpu.load_1m".into(),
+            cpu.load_1m as f64,
             None,
             json!({}),
         ));
+        out.push(mk(
+            "cpu.load_5m".into(),
+            cpu.load_5m as f64,
+            None,
+            json!({}),
+        ));
+        out.push(mk("cpu.cores".into(), cpu.cores as f64, None, json!({})));
     }
 
     // --- Memory ---
@@ -241,6 +249,42 @@ pub fn stats_to_samples(
                 format!("gpu.{}.power_w", gpu.index),
                 power as f64,
                 Some("watts"),
+                labels.clone(),
+            ));
+        }
+        // DCGM-only telemetry. Stored as timeseries so operators can
+        // see the event moment in the chart (e.g. a stepped ECC
+        // counter, a throttle bitmask that flipped non-zero during a
+        // benchmark run).
+        if let Some(mt) = gpu.mem_temp_c {
+            out.push(mk(
+                format!("gpu.{}.mem_temp", gpu.index),
+                mt as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(dbe) = gpu.ecc_dbe_total {
+            out.push(mk(
+                format!("gpu.{}.ecc_dbe", gpu.index),
+                dbe as f64,
+                Some("count"),
+                labels.clone(),
+            ));
+        }
+        if let Some(xid) = gpu.xid_last {
+            out.push(mk(
+                format!("gpu.{}.xid", gpu.index),
+                xid as f64,
+                Some("code"),
+                labels.clone(),
+            ));
+        }
+        if let Some(thr) = gpu.throttle_reasons {
+            out.push(mk(
+                format!("gpu.{}.throttle_bits", gpu.index),
+                thr as f64,
+                Some("bitmask"),
                 labels,
             ));
         }
@@ -442,7 +486,12 @@ mod tests {
 
     fn fixture() -> ServerStats {
         ServerStats {
-            cpu: Some(CpuStats { util_pct: 2.5, load_1m: 1.0, load_5m: 0.8, cores: 48 }),
+            cpu: Some(CpuStats {
+                util_pct: 2.5,
+                load_1m: 1.0,
+                load_5m: 0.8,
+                cores: 48,
+            }),
             mem: Some(MemStats {
                 total_bytes: 128 * 1024_u64.pow(3),
                 used_bytes: 16 * 1024_u64.pow(3),
@@ -471,8 +520,16 @@ mod tests {
                 power_w: Some(150.0),
                 power_limit_w: Some(300.0),
                 source: "nvidia-smi",
+                mem_temp_c: None,
+                ecc_dbe_total: None,
+                xid_last: None,
+                throttle_reasons: None,
+                throttle_reason_label: None,
             }],
-            power: Some(PowerStats { psu_watts: None, gpu_watts: Some(150.0) }),
+            power: Some(PowerStats {
+                psu_watts: None,
+                gpu_watts: Some(150.0),
+            }),
             network: vec![NetworkStats {
                 iface: "eth0".into(),
                 rx_bps: 1_000_000.0,
@@ -527,7 +584,12 @@ mod tests {
         let samples = stats_to_samples(Uuid::nil(), Uuid::nil(), &fixture());
         // The §4.5 allowlist — any key outside this set must not appear.
         const ALLOWED: &[&str] = &[
-            "source", "gpu_index", "gpu_name", "iface_kind", "chip", "mount",
+            "source",
+            "gpu_index",
+            "gpu_name",
+            "iface_kind",
+            "chip",
+            "mount",
         ];
         for s in &samples {
             if let Value::Object(m) = &s.labels {
@@ -548,8 +610,10 @@ mod tests {
         let counters = IngestionCounters::default();
         // Fill the single slot.
         tx.try_send(vec![]).unwrap();
-        try_ship(Some(&tx), &counters, vec![
-            MetricSample {
+        try_ship(
+            Some(&tx),
+            &counters,
+            vec![MetricSample {
                 tenant_id: Uuid::nil(),
                 host_id: Uuid::nil(),
                 ts: Utc::now(),
@@ -557,8 +621,8 @@ mod tests {
                 value: 1.0,
                 unit: None,
                 labels: Value::Null,
-            },
-        ]);
+            }],
+        );
         assert_eq!(counters.samples_dropped.load(Ordering::Relaxed), 1);
         assert_eq!(counters.samples_enqueued.load(Ordering::Relaxed), 0);
     }

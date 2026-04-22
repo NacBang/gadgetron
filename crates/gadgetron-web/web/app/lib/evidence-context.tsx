@@ -49,11 +49,11 @@ function getApiBase(): string {
   return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
 
-function wsUrl(actorKey: string): string {
+function wsUrl(actorKey: string | null): string {
   if (typeof location === "undefined") return "";
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const base = `${scheme}//${location.host}${getApiBase()}/workbench/events/ws`;
-  return `${base}?token=${encodeURIComponent(actorKey)}`;
+  return actorKey ? `${base}?token=${encodeURIComponent(actorKey)}` : base;
 }
 
 function parseArgsJson(
@@ -177,7 +177,7 @@ function toEvidenceItem(ev: Record<string, unknown>): EvidenceItem | null {
 const MAX_ITEMS = 50;
 
 export function EvidenceProvider({ children }: { children: ReactNode }) {
-  const { apiKey } = useAuth();
+  const { apiKey, identity } = useAuth();
   const [items, setItems] = useState<EvidenceItem[]>([]);
   const [wsStatus, setWsStatus] = useState<
     "disconnected" | "connecting" | "open" | "closed"
@@ -185,7 +185,9 @@ export function EvidenceProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    if (!apiKey) {
+    // Either an API key OR a logged-in session is enough — the gateway
+    // accepts the session cookie on the WS upgrade request.
+    if (!apiKey && !identity) {
       setWsStatus("disconnected");
       return;
     }
@@ -216,7 +218,7 @@ export function EvidenceProvider({ children }: { children: ReactNode }) {
       closed = true;
       wsRef.current?.close();
     };
-  }, [apiKey]);
+  }, [apiKey, identity]);
 
   return (
     <EvidenceContext.Provider
