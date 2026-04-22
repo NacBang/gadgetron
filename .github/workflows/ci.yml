@@ -43,8 +43,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     services:
+      # `timescale/timescaledb-ha:pg16` bundles TimescaleDB AND pgvector
+      # AND postgis. We need the first two: host_metrics migration
+      # (20260421000001) does `CREATE EXTENSION timescaledb`, and the
+      # knowledge layer uses pgvector. Plain `pgvector/pgvector:pg16`
+      # lacks timescaledb and blew up the Test job at migration run.
       postgres:
-        image: pgvector/pgvector:pg16
+        image: timescale/timescaledb-ha:pg16
         env:
           POSTGRES_USER: gadgetron_test
           POSTGRES_PASSWORD: gadgetron_test
