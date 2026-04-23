@@ -5,12 +5,14 @@
 
 use crate::{comments, store};
 use async_trait::async_trait;
+use gadgetron_bundle_server_monitor::InventoryStore;
 use gadgetron_core::agent::tools::{
     GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
@@ -18,11 +20,29 @@ const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 #[derive(Clone)]
 pub struct LogAnalyzerProvider {
     pool: PgPool,
+    /// Source of truth for "which hosts exist". Without this the
+    /// status gadget would list every host_id that ever got a scan
+    /// cursor row, including hosts that have since been removed from
+    /// inventory.json — producing a "Servers vs Logs scan" mismatch.
+    /// When None (unit tests / legacy wiring), status falls back to
+    /// the raw DB list (pre-reconciliation behavior).
+    inventory: Option<Arc<InventoryStore>>,
 }
 
 impl LogAnalyzerProvider {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            inventory: None,
+        }
+    }
+
+    /// Wire the server-monitor inventory so `loganalysis.status` renders
+    /// one row per registered host — even when the DB still has orphan
+    /// cursor rows from a pre-cascade remove.
+    pub fn with_inventory(mut self, inventory: Arc<InventoryStore>) -> Self {
+        self.inventory = Some(inventory);
+        self
     }
 }
 
@@ -143,20 +163,51 @@ impl LogAnalyzerProvider {
     }
 
     async fn call_status(&self) -> Result<GadgetResult, GadgetError> {
-        let rows = store::list_scan_status(&self.pool)
+        let db_rows = store::list_scan_status(&self.pool)
             .await
             .map_err(|e| GadgetError::Execution(format!("status: {e}")))?;
-        let payload: Vec<Value> = rows
-            .into_iter()
-            .map(|(host_id, last_scanned, interval_secs, enabled)| {
-                json!({
-                    "host_id": host_id,
-                    "last_scanned_at": last_scanned,
-                    "interval_secs": interval_secs,
-                    "enabled": enabled,
+        // Inventory is the single source of truth — emit one row per
+        // registered host, even if the DB hasn't seen a scan yet.
+        // Silently drop DB rows whose host_id is no longer in
+        // inventory so the Logs panel never disagrees with /servers.
+        // Legacy wiring without inventory falls back to the raw DB.
+        let payload: Vec<Value> = if let Some(inv) = self.inventory.as_ref() {
+            let hosts = inv
+                .load()
+                .await
+                .map_err(|e| GadgetError::Execution(format!("inventory load: {e}")))?;
+            let by_id: HashMap<Uuid, _> = db_rows
+                .into_iter()
+                .map(|(host_id, last_scanned, interval_secs, enabled)| {
+                    (host_id, (last_scanned, interval_secs, enabled))
                 })
-            })
-            .collect();
+                .collect();
+            hosts
+                .iter()
+                .map(|h| {
+                    let (last_scanned, interval_secs, enabled) =
+                        by_id.get(&h.id).cloned().unwrap_or((None, 120, true));
+                    json!({
+                        "host_id": h.id,
+                        "last_scanned_at": last_scanned,
+                        "interval_secs": interval_secs,
+                        "enabled": enabled,
+                    })
+                })
+                .collect()
+        } else {
+            db_rows
+                .into_iter()
+                .map(|(host_id, last_scanned, interval_secs, enabled)| {
+                    json!({
+                        "host_id": host_id,
+                        "last_scanned_at": last_scanned,
+                        "interval_secs": interval_secs,
+                        "enabled": enabled,
+                    })
+                })
+                .collect()
+        };
         ok_result(json!({ "hosts": payload }))
     }
 

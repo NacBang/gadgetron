@@ -16,11 +16,13 @@
 //! only holds the path string.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::ssh::InventoryError;
@@ -85,6 +87,14 @@ fn default_ssh_port() -> u16 {
 #[derive(Debug, Clone)]
 pub struct InventoryStore {
     root: PathBuf,
+    /// Serializes all `save()` calls so two concurrent gadget
+    /// invocations (e.g. `server.add` + `server.update` firing together)
+    /// can't race on the tmp file. Without this, both saves would open
+    /// the SAME tmp path with truncate, interleave their writes, and
+    /// the rename that wins could end up carrying trailing bytes from
+    /// the loser (observed: 1568-byte corrupt file containing
+    /// `...]}\n]` — two good JSONs spliced at the tail of the shorter).
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl InventoryStore {
@@ -107,7 +117,10 @@ impl InventoryStore {
     }
 
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -153,33 +166,55 @@ impl InventoryStore {
     }
 
     /// Atomic save (write tmp, rename over). 0600 perms on the final file.
+    ///
+    /// Two safeguards against concurrent writers clobbering each other:
+    ///   1. `write_lock` serializes the whole write at the process
+    ///      level — the atomic-rename is only atomic for the renaming,
+    ///      not for the write-then-rename pair.
+    ///   2. Unique tmp filename per call (pid + uuid) so even if the
+    ///      lock is somehow bypassed, two concurrent writes land in
+    ///      separate tmp files and the rename order decides the winner
+    ///      cleanly (no half-torn tmp reused across callers).
     pub async fn save(&self, hosts: &[HostRecord]) -> Result<(), InventoryError> {
+        let _guard = self.write_lock.lock().await;
         self.ensure_layout().await?;
         let final_path = self.inventory_path();
-        let mut tmp = final_path.clone();
-        tmp.set_extension("json.tmp");
+        let tmp = final_path.with_file_name(format!(
+            "inventory.json.tmp.{}.{}",
+            std::process::id(),
+            Uuid::new_v4(),
+        ));
         let body = serde_json::to_vec_pretty(hosts)
             .map_err(|e| InventoryError::Io(format!("serialize: {e}")))?;
-        {
-            let mut f = fs::File::create(&tmp)
+        let result: Result<(), InventoryError> = async {
+            {
+                let mut f = fs::File::create(&tmp)
+                    .await
+                    .map_err(|e| InventoryError::Io(format!("open tmp: {e}")))?;
+                f.write_all(&body)
+                    .await
+                    .map_err(|e| InventoryError::Io(format!("write tmp: {e}")))?;
+                f.sync_all()
+                    .await
+                    .map_err(|e| InventoryError::Io(format!("fsync tmp: {e}")))?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            fs::rename(&tmp, &final_path)
                 .await
-                .map_err(|e| InventoryError::Io(format!("open tmp: {e}")))?;
-            f.write_all(&body)
-                .await
-                .map_err(|e| InventoryError::Io(format!("write tmp: {e}")))?;
-            f.sync_all()
-                .await
-                .map_err(|e| InventoryError::Io(format!("fsync tmp: {e}")))?;
+                .map_err(|e| InventoryError::Io(format!("rename tmp→final: {e}")))?;
+            Ok(())
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        .await;
+        if result.is_err() {
+            // Best-effort cleanup: the unique tmp would otherwise linger
+            // under ~/.gadgetron/server-monitor/ as `inventory.json.tmp.*`.
+            let _ = fs::remove_file(&tmp).await;
         }
-        fs::rename(&tmp, &final_path)
-            .await
-            .map_err(|e| InventoryError::Io(format!("rename tmp→final: {e}")))?;
-        Ok(())
+        result
     }
 
     /// Append / upsert by id.
