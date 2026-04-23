@@ -141,9 +141,33 @@ async fn scan_one(
     let cursor = store::get_cursor(pool, rec.id, source).await.ok().flatten();
 
     let (lines, new_cursor) = match source {
-        "dmesg" => fetch_dmesg(&target, cursor.as_ref().map(|(c, _)| c.as_str()), max_lines, timeout).await?,
-        "journal" => fetch_journal(&target, cursor.as_ref().map(|(c, _)| c.as_str()), max_lines, timeout).await?,
-        "auth" => fetch_auth(&target, cursor.as_ref().map(|(c, _)| c.as_str()), max_lines, timeout).await?,
+        "dmesg" => {
+            fetch_dmesg(
+                &target,
+                cursor.as_ref().map(|(c, _)| c.as_str()),
+                max_lines,
+                timeout,
+            )
+            .await?
+        }
+        "journal" => {
+            fetch_journal(
+                &target,
+                cursor.as_ref().map(|(c, _)| c.as_str()),
+                max_lines,
+                timeout,
+            )
+            .await?
+        }
+        "auth" => {
+            fetch_auth(
+                &target,
+                cursor.as_ref().map(|(c, _)| c.as_str()),
+                max_lines,
+                timeout,
+            )
+            .await?
+        }
         _ => return Ok(()),
     };
 
@@ -151,10 +175,9 @@ async fn scan_one(
         let mut llm_budget = MAX_LLM_PER_TICK;
         for line in &lines {
             if let Some(cls) = rules::classify(line) {
-                let _ = store::upsert_finding(
-                    pool, rec.tenant_id, rec.id, source, &cls, line, "rule",
-                )
-                .await;
+                let _ =
+                    store::upsert_finding(pool, rec.tenant_id, rec.id, source, &cls, line, "rule")
+                        .await;
             } else if let Some(c) = classifier {
                 if llm_budget == 0 || !rules::looks_error_ish(line) {
                     continue;
@@ -166,7 +189,13 @@ async fn scan_one(
                     // would defeat the dismiss-once UX.
                     if cls.severity != Severity::Info {
                         let _ = store::upsert_finding(
-                            pool, rec.tenant_id, rec.id, source, &cls, line, "penny",
+                            pool,
+                            rec.tenant_id,
+                            rec.id,
+                            source,
+                            &cls,
+                            line,
+                            "penny",
                         )
                         .await;
                     }
@@ -204,8 +233,9 @@ async fn fetch_dmesg(
     // last hour to avoid drowning on first run.
     let since = match cursor {
         Some(c) => c.to_string(),
-        None => (Utc::now() - chrono::Duration::hours(1))
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        None => {
+            (Utc::now() - chrono::Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        }
     };
     let cmd = format!(
         "timeout {t}s sudo -n /usr/bin/dmesg --time-format=iso --since='{since}' 2>/dev/null | tail -n {n}",
@@ -249,10 +279,7 @@ async fn fetch_journal(
         let trimmed = line.trim();
         if let Some(c) = trimmed.strip_prefix("-- cursor: ") {
             new_cursor = Some(c.to_string());
-        } else if !trimmed.is_empty()
-            && !trimmed.starts_with("-- ")
-            && !trimmed.starts_with("--")
-        {
+        } else if !trimmed.is_empty() && !trimmed.starts_with("-- ") && !trimmed.starts_with("--") {
             lines.push(line.to_string());
         }
     }

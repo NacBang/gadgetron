@@ -71,10 +71,7 @@ impl LogAnalyzerProvider {
             .get("severity")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(100);
+        let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
         let rows = store::list_open(&self.pool, tenant, host, severity.as_deref(), limit)
             .await
             .map_err(|e| GadgetError::Execution(format!("list: {e}")))?;
@@ -228,17 +225,21 @@ impl LogAnalyzerProvider {
             .get("actor_is_admin")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        comments::delete(&self.pool, tenant, comment_id, actor_user_id, actor_is_admin)
-            .await
-            .map_err(|e| match e {
-                comments::CommentError::Forbidden => {
-                    GadgetError::Execution("only author or admin can delete".into())
-                }
-                comments::CommentError::NotFound => {
-                    GadgetError::Execution("comment not found".into())
-                }
-                other => GadgetError::Execution(format!("comment_delete: {other}")),
-            })?;
+        comments::delete(
+            &self.pool,
+            tenant,
+            comment_id,
+            actor_user_id,
+            actor_is_admin,
+        )
+        .await
+        .map_err(|e| match e {
+            comments::CommentError::Forbidden => {
+                GadgetError::Execution("only author or admin can delete".into())
+            }
+            comments::CommentError::NotFound => GadgetError::Execution("comment not found".into()),
+            other => GadgetError::Execution(format!("comment_delete: {other}")),
+        })?;
         ok_result(json!({ "deleted": true, "id": comment_id }))
     }
 
@@ -252,12 +253,10 @@ impl LogAnalyzerProvider {
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| GadgetError::InvalidArgs("missing/invalid host_id".into()))?;
-        let _ = sqlx::query(
-            "DELETE FROM log_scan_cursor WHERE host_id = $1 AND source = '_meta'",
-        )
-        .bind(host)
-        .execute(&self.pool)
-        .await;
+        let _ = sqlx::query("DELETE FROM log_scan_cursor WHERE host_id = $1 AND source = '_meta'")
+            .bind(host)
+            .execute(&self.pool)
+            .await;
         ok_result(json!({ "queued": true, "host_id": host }))
     }
 }

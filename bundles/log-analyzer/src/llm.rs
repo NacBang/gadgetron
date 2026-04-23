@@ -27,7 +27,7 @@ pub trait Classifier: Send + Sync {
 pub struct GatewayClassifier {
     pub gateway_url: String, // e.g. "http://127.0.0.1:18080"
     pub api_key: String,
-    pub model: String,       // "penny" by default
+    pub model: String, // "penny" by default
     pub client: reqwest::Client,
 }
 

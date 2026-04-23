@@ -290,9 +290,10 @@ impl ServerMonitorProvider {
             }
             if merged_into.is_none() {
                 if let Some(mid) = mid {
-                    if let Some(prior) = existing.iter().find(|h| {
-                        h.machine_id.as_deref() == Some(mid) && h.id != id
-                    }) {
+                    if let Some(prior) = existing
+                        .iter()
+                        .find(|h| h.machine_id.as_deref() == Some(mid) && h.id != id)
+                    {
                         duplicate_warning = Some(format!(
                             "machine-id matches existing host {} ({}) but dmi_uuid \
                              differs — possibly a cloned VM or reimaged disk",
@@ -302,9 +303,10 @@ impl ServerMonitorProvider {
                 }
                 if duplicate_warning.is_none() {
                     if let Some(duuid) = duuid {
-                        if let Some(prior) = existing.iter().find(|h| {
-                            h.dmi_uuid.as_deref() == Some(duuid) && h.id != id
-                        }) {
+                        if let Some(prior) = existing
+                            .iter()
+                            .find(|h| h.dmi_uuid.as_deref() == Some(duuid) && h.id != id)
+                        {
                             duplicate_warning = Some(format!(
                                 "dmi_uuid matches existing host {} ({}) but \
                                  machine-id differs — check if one side was \
@@ -783,9 +785,9 @@ impl ServerMonitorProvider {
         // are tail of standard log files. Reject path:* targets that
         // look unsafe (../, shell metachars).
         let base_cmd = match source.as_str() {
-            "dmesg" => format!(
-                "sudo -n /usr/bin/dmesg --time-format=iso 2>/dev/null | tail -n {lines}"
-            ),
+            "dmesg" => {
+                format!("sudo -n /usr/bin/dmesg --time-format=iso 2>/dev/null | tail -n {lines}")
+            }
             "kern" => format!("sudo -n /usr/bin/tail -n {lines} /var/log/kern.log 2>&1"),
             "syslog" => format!("sudo -n /usr/bin/tail -n {lines} /var/log/syslog 2>&1"),
             "auth" => format!("sudo -n /usr/bin/tail -n {lines} /var/log/auth.log 2>&1"),
@@ -870,9 +872,7 @@ impl ServerMonitorProvider {
         if let Some(s) = args.get("host").and_then(|v| v.as_str()) {
             let trimmed = s.trim().to_string();
             if trimmed.is_empty() {
-                return Err(GadgetError::InvalidArgs(
-                    "host cannot be empty".to_string(),
-                ));
+                return Err(GadgetError::InvalidArgs("host cannot be empty".to_string()));
             }
             if !is_safe_host(&trimmed) {
                 return Err(GadgetError::InvalidArgs(format!(
@@ -928,9 +928,7 @@ impl ServerMonitorProvider {
 }
 
 fn is_safe_alias(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && !s.chars().any(|c| c.is_control())
+    !s.is_empty() && s.len() <= 64 && !s.chars().any(|c| c.is_control())
 }
 
 fn is_safe_host(s: &str) -> bool {
@@ -953,11 +951,7 @@ fn is_safe_ssh_user(s: &str) -> bool {
 }
 
 fn is_safe_grep_pattern(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 256
-        && !s.contains('\'')
-        && !s.contains('\n')
-        && !s.contains('\r')
+    !s.is_empty() && s.len() <= 256 && !s.contains('\'') && !s.contains('\n') && !s.contains('\r')
 }
 
 fn is_safe_log_path(s: &str) -> bool {

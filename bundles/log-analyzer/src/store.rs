@@ -259,16 +259,12 @@ pub async fn list_scan_status(
         .collect())
 }
 
-pub async fn get_config(
-    pool: &PgPool,
-    host_id: Uuid,
-) -> Result<Option<(i32, bool)>, StoreError> {
-    let row: Option<(i32, bool)> = sqlx::query_as(
-        "SELECT interval_secs, enabled FROM log_scan_config WHERE host_id = $1",
-    )
-    .bind(host_id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_config(pool: &PgPool, host_id: Uuid) -> Result<Option<(i32, bool)>, StoreError> {
+    let row: Option<(i32, bool)> =
+        sqlx::query_as("SELECT interval_secs, enabled FROM log_scan_config WHERE host_id = $1")
+            .bind(host_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(row)
 }
 

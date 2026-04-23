@@ -45,11 +45,13 @@ static RULES: Lazy<Vec<Rule>> = Lazy::new(|| {
                        nvidia-dcgm; 3) If recurring, drain workload \
                        and run `nvidia-smi --query-remapped-rows`; \
                        4) RMA candidate if Xid 13/31/74 repeats.",
-            remediation: Some(|| json!({
-                "tool": "server.systemctl",
-                "args": { "verb": "restart", "unit": "nvidia-dcgm" },
-                "label": "nvidia-dcgm 재시작",
-            })),
+            remediation: Some(|| {
+                json!({
+                    "tool": "server.systemctl",
+                    "args": { "verb": "restart", "unit": "nvidia-dcgm" },
+                    "label": "nvidia-dcgm 재시작",
+                })
+            }),
         },
         Rule {
             pattern: r(r"(?i)Machine Check Exception|MCE:|hardware error"),
@@ -330,9 +332,11 @@ pub fn classify(line: &str) -> Option<Classification> {
 /// "panic", "abort", "fatal" case-insensitively.
 pub fn looks_error_ish(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    ["error", "fail", "panic", "abort", "fatal", "warn", "denied", "refused"]
-        .iter()
-        .any(|kw| lower.contains(kw))
+    [
+        "error", "fail", "panic", "abort", "fatal", "warn", "denied", "refused",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
 }
 
 #[cfg(test)]
@@ -341,10 +345,9 @@ mod tests {
 
     #[test]
     fn xid_matches_critical() {
-        let c = classify(
-            "[Tue Apr 15 10:23:01 2026] NVRM: Xid (PCI:0000:01:00): 31, pid='<unknown>'",
-        )
-        .unwrap();
+        let c =
+            classify("[Tue Apr 15 10:23:01 2026] NVRM: Xid (PCI:0000:01:00): 31, pid='<unknown>'")
+                .unwrap();
         assert_eq!(c.category, "gpu_xid");
         assert_eq!(c.severity, Severity::Critical);
         assert!(c.cause.is_some());
@@ -354,8 +357,10 @@ mod tests {
 
     #[test]
     fn ssh_brute_matches_high() {
-        let c = classify("Apr 15 10:00:00 host sshd[1234]: Failed password for invalid user root from 1.2.3.4")
-            .unwrap();
+        let c = classify(
+            "Apr 15 10:00:00 host sshd[1234]: Failed password for invalid user root from 1.2.3.4",
+        )
+        .unwrap();
         assert_eq!(c.category, "ssh_auth_fail");
         assert_eq!(c.severity, Severity::High);
         assert!(c.cause.is_some());

@@ -755,19 +755,15 @@ fn load_penny_registry_from_config(
             if let Some(pool) = pg_pool_for_logs.as_ref() {
                 let log_provider =
                     gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone());
-                builder
-                    .register(Arc::new(log_provider))
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
-                    })?;
+                builder.register(Arc::new(log_provider)).map_err(|e| {
+                    anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
+                })?;
 
                 let classifier: Option<Arc<dyn gadgetron_bundle_log_analyzer::llm::Classifier>> =
                     match std::env::var("GADGETRON_LOG_ANALYZER_KEY").ok() {
                         Some(api_key) if !api_key.trim().is_empty() => {
                             let gateway_url = std::env::var("GADGETRON_LOG_ANALYZER_GATEWAY")
-                                .unwrap_or_else(|_| {
-                                    "http://127.0.0.1:18080".to_string()
-                                });
+                                .unwrap_or_else(|_| "http://127.0.0.1:18080".to_string());
                             tracing::info!(
                                 target: "log_analyzer",
                                 gateway = %gateway_url,
