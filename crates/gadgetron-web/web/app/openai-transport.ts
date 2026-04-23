@@ -99,6 +99,7 @@ export class OpenAIChatTransport<
     let finished = false;
     let buffer = "";
     let contentBuffer = ""; // accumulated assistant delta.content prose
+    let currentEventType = "message"; // SSE event: field (reset on blank line)
     const decoder = new TextDecoder();
 
     const flushContentBuffer = (
@@ -239,9 +240,26 @@ export class OpenAIChatTransport<
       transform(chunk, controller) {
         buffer += decoder.decode(chunk, { stream: true });
         let nl: number;
+        // Track the SSE `event:` field across lines within one event
+        // block. Events are separated by blank lines; the default type
+        // is "message" unless an event: line sets it. The server emits
+        // `event: error\ndata: {...}` when Penny's subprocess dies or
+        // similar; without honoring the event type we'd parse the error
+        // JSON as a normal data frame, fail to match the OpenAI
+        // `choices[].delta` shape, silently drop it, and close the
+        // stream as if nothing happened (observed: "Penny doesn't
+        // answer and running indicator never appears").
         while ((nl = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, nl).trim();
           buffer = buffer.slice(nl + 1);
+          if (line === "") {
+            currentEventType = "message";
+            continue;
+          }
+          if (line.startsWith("event:")) {
+            currentEventType = line.slice(6).trim();
+            continue;
+          }
           if (!line.startsWith("data:")) continue;
           const data = line.slice(5).trim();
           if (data === "[DONE]") {
@@ -270,6 +288,38 @@ export class OpenAIChatTransport<
           try {
             obj = JSON.parse(data);
           } catch {
+            continue;
+          }
+
+          // Server-emitted error event OR a regular data frame that
+          // (due to a non-OpenAI upstream) carried only an `error`
+          // field. Surface the message as a text delta so the user sees
+          // it, flush buffers, then finish with reason "error".
+          const errObj = (
+            obj as { error?: { message?: string; type?: string; code?: string } }
+          )?.error;
+          if (currentEventType === "error" || errObj) {
+            const msg =
+              errObj?.message ??
+              (typeof errObj === "string" ? errObj : "unknown server error");
+            const pretty = `\n\n❌ **오류**: ${msg}`;
+            contentBuffer += pretty;
+            flushContentBuffer(controller, true);
+            if (activeTextStreaming) {
+              controller.enqueue({
+                type: "text-end",
+                id: textId,
+              } as unknown as UIMessageChunk);
+              activeTextStreaming = false;
+            }
+            controller.enqueue({
+              type: "finish-step",
+            } as unknown as UIMessageChunk);
+            controller.enqueue({
+              type: "finish",
+              finishReason: "error",
+            } as unknown as UIMessageChunk);
+            finished = true;
             continue;
           }
 
