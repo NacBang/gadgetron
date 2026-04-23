@@ -56,13 +56,20 @@ pub async fn run_bootstrap(
 ) -> Result<BootstrapReport, SshError> {
     let mut report = BootstrapReport::default();
 
-    // Step 1 — push our pubkey into authorized_keys (idempotent). We
-    // use `set -e` + explicit control-flow so an unexpected failure
-    // earlier in the pipeline can't silently swallow the append (a
-    // pure `A && B || C` chain propagates the exit status of *whatever*
-    // failed, which is harder to diagnose). The final line prints a
-    // marker we grep for so sshpass can't claim success on a
-    // half-applied state.
+    // Step 1 — replace any prior gadgetron-monitor pubkeys and install
+    // ours. Re-bootstrap mints a fresh ed25519 keypair, so blindly
+    // appending would leave every previous re-registration as an
+    // orphan public key on the target (observed: 10+ stale
+    // `gadgetron-monitor:<ip>` lines on a thrice-rebootstrapped host).
+    //
+    // Sweep rule: remove any line whose last whitespace-separated token
+    // starts with `gadgetron-monitor:`. Non-gadgetron keys (operators,
+    // deployment bots, etc.) have different comments and stay intact.
+    //
+    // mktemp in the same directory so the `mv` is atomic (no window
+    // where authorized_keys is missing). The final marker lets the
+    // Rust side confirm end-to-end success instead of trusting a
+    // potentially chained exit code.
     let pk_escaped = shell_escape_single(public_key);
     let install_key = format!(
         "set -e; \
@@ -71,20 +78,17 @@ pub async fn run_bootstrap(
          chmod 700 ~/.ssh; \
          touch ~/.ssh/authorized_keys; \
          chmod 600 ~/.ssh/authorized_keys; \
-         if ! grep -qxF {pk} ~/.ssh/authorized_keys; then \
-           echo >> ~/.ssh/authorized_keys; \
-           echo {pk} >> ~/.ssh/authorized_keys; \
-           echo __gsm_key_appended__; \
-         else \
-           echo __gsm_key_already_present__; \
-         fi",
+         REMOVED=$(grep -cE ' gadgetron-monitor:[^ ]*$' ~/.ssh/authorized_keys || true); \
+         TMP=$(mktemp ~/.ssh/ak.XXXXXX); \
+         grep -vE ' gadgetron-monitor:[^ ]*$' ~/.ssh/authorized_keys > \"$TMP\" || true; \
+         chmod 600 \"$TMP\"; \
+         mv \"$TMP\" ~/.ssh/authorized_keys; \
+         echo {pk} >> ~/.ssh/authorized_keys; \
+         echo \"__gsm_key_installed__ removed=$REMOVED\"",
         pk = pk_escaped,
     );
     let out = exec_with_password(target_pw, password, &install_key).await?;
-    if !out.ok()
-        || !(out.stdout.contains("__gsm_key_appended__")
-            || out.stdout.contains("__gsm_key_already_present__"))
-    {
+    if !out.ok() || !out.stdout.contains("__gsm_key_installed__") {
         return Err(SshError::Bootstrap(format!(
             "install authorized_keys failed (code={}): stdout={:?}, stderr={:?}",
             out.code,
@@ -93,12 +97,20 @@ pub async fn run_bootstrap(
         )));
     }
     report.key_installed = true;
-    if out.stdout.contains("__gsm_key_appended__") {
-        report.notes.push("authorized_keys append".into());
+    let removed = out
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("__gsm_key_installed__ removed="))
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if removed > 0 {
+        report.notes.push(format!(
+            "authorized_keys: swept {removed} orphan gadgetron key(s), appended new"
+        ));
     } else {
         report
             .notes
-            .push("authorized_keys already had our pubkey".into());
+            .push("authorized_keys: appended new gadgetron key".into());
     }
 
     // Step 2 — drop NOPASSWD sudoers for the four monitoring binaries.
