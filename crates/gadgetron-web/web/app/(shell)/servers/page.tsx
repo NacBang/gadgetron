@@ -37,6 +37,9 @@ interface Host {
   last_ok_at: string | null;
   alias?: string | null;
   machine_id?: string | null;
+  cpu_model?: string | null;
+  cpu_cores?: number | null;
+  gpus?: string[] | null;
 }
 
 interface GpuStats {
@@ -149,6 +152,37 @@ function fmtUptime(secs: number | null): string {
   const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/// Drops marketing fluff from lscpu model names so the card stays
+/// readable: "AMD EPYC 7763 64-Core Processor" → "AMD EPYC 7763",
+/// "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz" → "Intel Xeon Gold 6248R".
+/// The full name still lives in the tooltip.
+function shortenCpu(model: string): string {
+  return model
+    .replace(/\([Rr]\)/g, "")
+    .replace(/\([Tt][Mm]\)/g, "")
+    .replace(/\s+CPU\s+@.*$/i, "")
+    .replace(/\s+Processor$/i, "")
+    .replace(/\s+\d+-Core$/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/// Collapses a list like ["NVIDIA RTX 4090", "NVIDIA RTX 4090", "NVIDIA RTX 4090"]
+/// into "3× NVIDIA RTX 4090"; mixed models render as "2× X + 1× Y".
+/// Also trims the redundant "NVIDIA " prefix when every entry shares it
+/// so the card reads "4× RTX 4090" in the common homogeneous case.
+function shortenGpuList(gpus: string[]): string {
+  if (gpus.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const g of gpus) counts.set(g, (counts.get(g) ?? 0) + 1);
+  const allNvidia = [...counts.keys()].every((k) => k.startsWith("NVIDIA "));
+  const parts = [...counts.entries()].map(([name, n]) => {
+    const stripped = allNvidia ? name.replace(/^NVIDIA /, "") : name;
+    return n === 1 ? stripped : `${n}× ${stripped}`;
+  });
+  return parts.join(" + ");
 }
 
 /// Compact health badges surfaced next to the GPU label on the host
@@ -945,6 +979,34 @@ function HostCard({
           <div className="truncate text-[10px] text-zinc-600">
             {host.ssh_user}@{host.host}:{host.ssh_port}
           </div>
+          {(host.cpu_model || (host.gpus && host.gpus.length > 0)) && (
+            <div
+              className="mt-0.5 truncate text-[10px] text-zinc-500"
+              title={[
+                host.cpu_model
+                  ? `CPU: ${host.cpu_model}${host.cpu_cores ? ` (${host.cpu_cores}c)` : ""}`
+                  : null,
+                host.gpus && host.gpus.length > 0
+                  ? `GPU: ${host.gpus.join(" / ")}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join("\n")}
+            >
+              {host.cpu_model && (
+                <span>
+                  {shortenCpu(host.cpu_model)}
+                  {host.cpu_cores ? ` · ${host.cpu_cores}c` : ""}
+                </span>
+              )}
+              {host.cpu_model && host.gpus && host.gpus.length > 0 && (
+                <span className="mx-1 text-zinc-700">·</span>
+              )}
+              {host.gpus && host.gpus.length > 0 && (
+                <span>{shortenGpuList(host.gpus)}</span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {findingsCount && (() => {
