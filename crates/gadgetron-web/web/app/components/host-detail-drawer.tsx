@@ -201,6 +201,21 @@ function defaultGroups(
         tone: SERIES_PALETTE[i % SERIES_PALETTE.length],
       })),
     });
+    // VRAM usage (MiB). DCGM emits this directly; nvidia-smi fallback
+    // also fills it. Showing raw MiB is more useful than a percent
+    // because operators often think "did the model fit in 80 GB?".
+    groups.push({
+      id: "gpu_mem_used",
+      label: "GPU memory used",
+      unit: "MiB",
+      fmt: (v: number) =>
+        v >= 1024 ? `${(v / 1024).toFixed(1)} GiB` : `${v.toFixed(0)} MiB`,
+      series: available.gpus.map((g, i) => ({
+        metric: `gpu.${g.index}.mem_used_mib`,
+        label: `gpu${g.index}`,
+        tone: SERIES_PALETTE[i % SERIES_PALETTE.length],
+      })),
+    });
     // DCGM-only: HBM / memory temperature tracked separately from the
     // SM die temp. Useful for spotting thermal imbalance that the
     // single "temp" value hides.

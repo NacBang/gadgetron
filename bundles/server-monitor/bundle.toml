@@ -129,3 +129,45 @@ destructive = false
 requires_approval = false
 knowledge_hint = "원격 호스트의 journalctl 최근 로그. unit/priority/lines 필터 지원."
 input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, unit = { type = "string", maxLength = 255 }, lines = { type = "integer", minimum = 10, maximum = 2000 }, priority = { type = "string" } }, required = ["id"], additionalProperties = false }
+
+[[actions]]
+id = "server-bash"
+title = "쉘 실행"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.bash"
+gadget_name = "server.bash"
+placement = "context_menu"
+kind = "mutation"
+destructive = true
+requires_approval = true
+knowledge_hint = "원격 호스트에서 임의의 bash 명령 실행. use_sudo=true면 NOPASSWD sudo로 권한 상승. 사용자가 UI에서 매 호출마다 승인 필요. apt/systemd 등 기존 전용 gadget이 없는 경우 일반 해결 경로."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, command = { type = "string", minLength = 1, maxLength = 8192 }, use_sudo = { type = "boolean" } }, required = ["id", "command"], additionalProperties = false }
+
+[[actions]]
+id = "server-logread"
+title = "로그/dmesg 보기"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.logread"
+gadget_name = "server.logread"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "dmesg 또는 임의 로그 파일 (kern/syslog/auth/path:<file>). lines 캡, grep 정규식 필터."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, source = { type = "string", maxLength = 512 }, lines = { type = "integer", minimum = 10, maximum = 2000 }, grep = { type = "string", maxLength = 256 } }, required = ["id"], additionalProperties = false }
+
+[[actions]]
+id = "server-update"
+title = "서버 정보 수정"
+owner_bundle = "server-monitor"
+source_kind = "gadget"
+source_id = "server.update"
+gadget_name = "server.update"
+placement = "context_menu"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "alias / host(IP) / ssh_user / ssh_port 변경. host_metrics는 host_id UUID로 매핑되어 있어 IP 바꿔도 시계열 보존."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, alias = { type = ["string","null"], maxLength = 64 }, host = { type = "string", maxLength = 253 }, ssh_user = { type = "string", maxLength = 64 }, ssh_port = { type = "integer", minimum = 1, maximum = 65535 } }, required = ["id"], additionalProperties = false }

@@ -34,8 +34,13 @@ use tower_http::set_header::SetResponseHeaderLayer;
 ///
 /// Single-line. No newlines — `HeaderValue::from_str` would reject them.
 /// The `build_csp_has_no_newlines` test locks this in.
+// `img-src` allows `https://lh3.googleusercontent.com` so Google OAuth
+// profile pictures render in the top bar / chat bubbles. The avatar URL
+// is what Google's userinfo endpoint hands us at login; without this
+// the browser blocks the image and shows a broken placeholder.
 const CSP_BASE: &str = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; \
-    frame-src 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; \
+    frame-src 'none'; form-action 'self'; \
+    img-src 'self' data: https://lh3.googleusercontent.com; font-src 'self'; \
     style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
     connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; media-src 'self'; \
     object-src 'none'";
@@ -58,7 +63,8 @@ pub fn build_csp(web: &WebConfig) -> String {
 /// the config and uses `build_csp` instead. This exists only for
 /// external tests / doc examples that want the "strict" CSP string.
 pub const CSP: &str = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; \
-    frame-src 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; \
+    frame-src 'none'; form-action 'self'; \
+    img-src 'self' data: https://lh3.googleusercontent.com; font-src 'self'; \
     style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
     connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; media-src 'self'; \
     object-src 'none'; upgrade-insecure-requests";
@@ -158,6 +164,14 @@ mod tests {
             csp.contains("upgrade-insecure-requests"),
             "opt-in CSP must contain upgrade-insecure-requests. got: {csp}"
         );
+    }
+
+    #[test]
+    fn csp_allows_google_avatar_cdn() {
+        // Google OAuth profile pictures live on lh3.googleusercontent.com.
+        // Blocking it leaves users staring at a broken placeholder.
+        assert!(CSP_BASE.contains("https://lh3.googleusercontent.com"));
+        assert!(CSP.contains("https://lh3.googleusercontent.com"));
     }
 
     #[test]

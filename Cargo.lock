@@ -1267,6 +1267,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gadgetron-bundle-log-analyzer"
+version = "0.5.19"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gadgetron-bundle-server-monitor",
+ "gadgetron-core",
+ "once_cell",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "gadgetron-bundle-server-monitor"
 version = "0.5.19"
 dependencies = [
@@ -1292,6 +1312,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "gadgetron-bundle-log-analyzer",
  "gadgetron-bundle-server-monitor",
  "gadgetron-core",
  "gadgetron-gateway",

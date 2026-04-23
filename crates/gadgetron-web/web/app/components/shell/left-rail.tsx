@@ -11,6 +11,7 @@ import {
   Activity,
   Server,
   Shield,
+  AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../../lib/auth-context";
@@ -25,6 +26,7 @@ export type LeftRailTab =
   | "wiki"
   | "dashboard"
   | "servers"
+  | "findings"
   | "admin"
   | "knowledge"
   | "bundles";
@@ -69,6 +71,13 @@ const NAV_ITEMS: NavItem[] = [
     href: "/servers",
   },
   {
+    id: "findings",
+    label: "Logs",
+    icon: <AlertTriangle className="size-4" aria-hidden />,
+    functional: true,
+    href: "/findings",
+  },
+  {
     id: "admin",
     label: "Admin",
     icon: <Shield className="size-4" aria-hidden />,
@@ -97,6 +106,7 @@ function tabFromPathname(pathname: string | null): LeftRailTab {
   if (pathname.startsWith("/wiki")) return "wiki";
   if (pathname.startsWith("/dashboard")) return "dashboard";
   if (pathname.startsWith("/servers")) return "servers";
+  if (pathname.startsWith("/findings")) return "findings";
   if (pathname.startsWith("/admin")) return "admin";
   return "chat";
 }

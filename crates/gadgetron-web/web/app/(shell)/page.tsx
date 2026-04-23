@@ -181,10 +181,57 @@ function HistoryAwareEmpty({ children }: { children: ReactNode }) {
   return <ThreadPrimitive.Empty>{children}</ThreadPrimitive.Empty>;
 }
 
+// A single rendered bubble in the past-conversation transcript.
+// Consecutive assistant turns (Claude/Penny splits its reply across
+// N turns whenever a tool_use lands — each tool roundtrip starts a new
+// assistant message) collapse into ONE assistant group, so a multi-step
+// tool-using response renders as one "Penny" bubble instead of N.
+type RenderGroup =
+  | { kind: "user"; content: string; ts?: string | null }
+  | { kind: "assistant"; blocks: HistoryBlock[]; ts?: string | null };
+
+function coalesce(past: HistoryMsg[]): RenderGroup[] {
+  const groups: RenderGroup[] = [];
+  for (const m of past) {
+    const visibleBlocks = (m.blocks ?? []).filter(
+      (b) => b.kind === "text" || b.kind === "reasoning",
+    );
+    const hasPlainContent =
+      typeof m.content === "string" && m.content.trim().length > 0;
+
+    if (m.role === "user") {
+      // Synth-user turns that only carry tool_result disappear.
+      if (visibleBlocks.length === 0 && !hasPlainContent) continue;
+      groups.push({ kind: "user", content: m.content ?? "", ts: m.ts });
+      continue;
+    }
+
+    // Assistant turn: normalize `m.content` fallback into a synthetic
+    // text block so downstream rendering only has to handle blocks.
+    if (visibleBlocks.length === 0) {
+      if (!hasPlainContent) continue;
+      visibleBlocks.push({ kind: "text", text: m.content });
+    }
+
+    // Fold into the trailing assistant group if the last group is one;
+    // otherwise start a new assistant group. Any real user message
+    // above has already been pushed, which breaks the run naturally.
+    const last = groups[groups.length - 1];
+    if (last && last.kind === "assistant") {
+      last.blocks.push(...visibleBlocks);
+      if (m.ts) last.ts = m.ts;
+    } else {
+      groups.push({ kind: "assistant", blocks: visibleBlocks, ts: m.ts });
+    }
+  }
+  return groups;
+}
+
 function PastMessages() {
   const { past, err } = useActiveHistory();
   const { identity } = useAuth();
-  if (past.length === 0) return null;
+  const groups = useMemo(() => coalesce(past), [past]);
+  if (groups.length === 0) return null;
   const userLabel =
     identity?.display_name || identity?.email?.split("@")[0] || "You";
   return (
@@ -197,21 +244,8 @@ function PastMessages() {
           {err}
         </div>
       )}
-      {past.map((m, i) => {
-        const isUser = m.role === "user";
-        // Drop tool_use / tool_result blocks from the transcript
-        // view — the user said the MCP / tool plumbing is noise for
-        // past-history browsing. Keep text and reasoning.
-        const visibleBlocks = (m.blocks ?? []).filter(
-          (b) => b.kind === "text" || b.kind === "reasoning",
-        );
-        const hasText = visibleBlocks.some((b) => b.kind === "text");
-        // Pure tool_result user turns become empty after filtering —
-        // skip them entirely so the thread isn't interrupted by blank
-        // rows.
-        if (isUser && !hasText && visibleBlocks.length === 0) {
-          return null;
-        }
+      {groups.map((g, i) => {
+        const isUser = g.kind === "user";
         return (
           <div
             key={i}
@@ -244,15 +278,9 @@ function PastMessages() {
               >
                 <CardContent className="px-4 py-2 text-sm leading-relaxed">
                   {isUser ? (
-                    <div className="whitespace-pre-wrap">{m.content}</div>
-                  ) : visibleBlocks.length > 0 ? (
-                    <PastBlocks blocks={visibleBlocks} />
+                    <div className="whitespace-pre-wrap">{g.content}</div>
                   ) : (
-                    <div className="markdown-body prose prose-invert prose-sm max-w-none">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {m.content}
-                      </ReactMarkdown>
-                    </div>
+                    <PastBlocks blocks={g.blocks} />
                   )}
                 </CardContent>
               </Card>
@@ -276,7 +304,7 @@ function PastMessages() {
           </div>
         );
       })}
-      <HistoryDivider lastTs={past[past.length - 1]?.ts ?? null} />
+      <HistoryDivider lastTs={groups[groups.length - 1]?.ts ?? null} />
     </div>
   );
 }

@@ -146,6 +146,62 @@ pub struct ServerInfo {
     pub total_ram_gb: f32,
     pub gpu_models: Vec<String>,
     pub uptime_secs: u64,
+    /// Stable systemd machine-id (`/etc/machine-id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    /// SMBIOS hardware UUID (`/sys/class/dmi/id/product_uuid`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dmi_uuid: Option<String>,
+    /// Chassis serial number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dmi_serial: Option<String>,
+}
+
+/// Light-weight identity capture used at register time. Does NOT need
+/// to pull all the fingerprint fields `collect_info` returns — three
+/// stable identifiers are enough to detect "same physical box behind
+/// a recycled IP" later. Errors degrade to `None` so a host with a
+/// locked-down DMI doesn't fail registration.
+#[derive(Debug, Clone, Default)]
+pub struct MachineIdentity {
+    pub machine_id: Option<String>,
+    pub dmi_uuid: Option<String>,
+    pub dmi_serial: Option<String>,
+    /// Output of `hostname` on the target. Used as the default alias
+    /// at register time.
+    pub hostname: Option<String>,
+}
+
+pub async fn collect_machine_identity(target: &SshTarget) -> MachineIdentity {
+    // Each line is `KEY=value` so we can parse with `IFS=`. All reads
+    // are best-effort: an unreadable file just leaves the key blank.
+    let script = r#"set +e
+        printf 'machine_id='; cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null; echo
+        printf 'dmi_uuid='; cat /sys/class/dmi/id/product_uuid 2>/dev/null; echo
+        printf 'dmi_serial='; cat /sys/class/dmi/id/product_serial 2>/dev/null || cat /sys/class/dmi/id/chassis_serial 2>/dev/null; echo
+        printf 'hostname='; hostname 2>/dev/null; echo
+    "#;
+    let Ok(out) = exec(target, script).await else {
+        return MachineIdentity::default();
+    };
+    let mut id = MachineIdentity::default();
+    for line in out.stdout.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().to_string();
+        if v.is_empty() {
+            continue;
+        }
+        match k {
+            "machine_id" => id.machine_id = Some(v),
+            "dmi_uuid" => id.dmi_uuid = Some(v),
+            "dmi_serial" => id.dmi_serial = Some(v),
+            "hostname" => id.hostname = Some(v),
+            _ => {}
+        }
+    }
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +428,9 @@ pub async fn collect_info(target: &SshTarget) -> Result<ServerInfo, SshError> {
         cpu_cores,
         total_ram_gb,
         gpu_models,
+        machine_id: None,
+        dmi_uuid: None,
+        dmi_serial: None,
         uptime_secs,
     })
 }
@@ -704,7 +763,8 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
         //   112 THROTTLE_REASONS (DVCCTR)   230 XID_ERRORS (XIDER)
         //   310 ECC_SBE_VOL_TOTAL (ESVTL)
         //   319 ECC_DBE_VOL_TOTAL (EDVDV)
-        "timeout 1s sudo -n /usr/bin/dcgmi dmon -c 1 -e 203,204,150,140,155,160,112,230,310,319 2>/dev/null",
+        //   250 FB_TOTAL (FBTTL, MiB)  252 FB_USED (FBUSD, MiB)
+        "timeout 1s sudo -n /usr/bin/dcgmi dmon -c 1 -e 203,204,150,140,155,160,112,230,310,319,250,252 2>/dev/null",
     )
     .await?;
     if !out.ok() || out.stdout.trim().is_empty() {
@@ -806,6 +866,8 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
             .or_else(|| get_u64("TTLRSN"))
             .or_else(|| get_u64("TRSN"))
             .or_else(|| get_u64("THRREAS"));
+        let mem_used = get_u64("FBUSD");
+        let mem_total = get_u64("FBTTL");
         let throttle_label = throttle.and_then(decode_throttle_reasons);
 
         if util.is_none() && temp.is_none() && power.is_none() {
@@ -815,8 +877,8 @@ async fn collect_dcgm(target: &SshTarget) -> Result<Vec<GpuStats>, SshError> {
             index: idx,
             name: format!("GPU {idx}"),
             util_pct: util,
-            mem_used_mib: None,
-            mem_total_mib: None,
+            mem_used_mib: mem_used,
+            mem_total_mib: mem_total,
             temp_c: temp,
             power_w: power,
             power_limit_w: plim,

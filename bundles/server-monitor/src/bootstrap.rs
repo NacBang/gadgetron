@@ -109,10 +109,26 @@ pub async fn run_bootstrap(
     // verbs we call are pinned in the `server.systemctl` gadget;
     // operators get the full sudoers breadth on the target in case
     // they want to run ad-hoc recoveries.
+    //
+    // `apt`/`apt-get`/`apt-cache`/`dpkg` are also allowed so the
+    // `server.apt` gadget can install / remove / upgrade packages
+    // without a follow-up sudo prompt. SECURITY NOTE: this gives the
+    // gadgetron-monitor key full root via `apt install <malicious-
+    // deb>`. The compensating control is the dedicated SSH key per
+    // host (one key per gadgetron deployment) — operators who need
+    // stricter isolation should run a separate gadgetron tenant or
+    // strip the apt entries below post-bootstrap.
+    // /bin/bash is included so `server.bash` with `use_sudo=true` can
+    // elevate without a password prompt. This widens the blast radius to
+    // "any shell command" — which is exactly why the `server_admin`
+    // policy bucket defaults to Ask: Penny can't auto-invoke, an
+    // operator must click a confirm dialog in the UI for every call.
     let sudoers_body = format!(
         "{user} ALL=(root) NOPASSWD: /usr/bin/dcgmi, /usr/sbin/smartctl, \
          /usr/bin/ipmitool, /usr/bin/nvidia-smi, /usr/bin/systemctl, \
-         /bin/systemctl, /usr/bin/journalctl, /bin/journalctl\n",
+         /bin/systemctl, /usr/bin/journalctl, /bin/journalctl, \
+         /usr/bin/apt, /usr/bin/apt-get, /usr/bin/apt-cache, /usr/bin/dpkg, \
+         /usr/bin/dmesg, /bin/dmesg, /usr/bin/tail, /bin/bash\n",
         user = target_pw.user,
     );
     let sudoers_esc = shell_escape_single(&sudoers_body);
@@ -229,10 +245,45 @@ pub async fn verify_key_only(target: &SshTarget) -> Result<BootstrapReport, SshE
 }
 
 fn build_apt_install_script(sudo_pw: &str) -> (Vec<String>, String) {
+    // Baseline packages — picked so a freshly-installed Ubuntu/Debian
+    // box can satisfy every command our hot-path scripts invoke
+    // (collect_stats / collect_info / dcgm install) WITHOUT additional
+    // operator follow-up. Each package is here for a specific reason:
+    //
+    //   ca-certificates  — TLS trust root for `curl https://...`
+    //                       (DCGM keyring fetch fails otherwise)
+    //   curl             — used by the DCGM keyring download step
+    //   gnupg            — apt-get install of cuda-keyring needs
+    //                       `gnupg` to verify the deb signature
+    //   lm-sensors       — `sensors -j` for chip-level temps
+    //   smartmontools    — disk SMART data (forward-looking)
+    //   ipmitool         — DCMI power readings, BMC inspection
+    //   pciutils         — `lspci` for inventory + GPU presence checks
+    //   util-linux       — `lscpu` (CPU info), `dmesg`
+    //   procps           — `uptime`, `ps` (some minimal images skip it)
+    //   coreutils        — `awk`, `head`, `tail`, `df` etc.
+    //   gawk             — explicit GNU awk; some bundles default to mawk
+    //                       which mishandles `awk -F': *'` patterns
+    //   jq               — Penny-friendly JSON shaping for ad-hoc queries
+    //                       (server.systemctl status piped through jq)
+    //   net-tools        — `ifconfig` / `route` fallback for old runbooks
+    //
+    // `--no-install-recommends` keeps the footprint minimal; we only
+    // get exactly what we asked for.
     let pkgs = vec![
+        "ca-certificates".to_string(),
+        "curl".to_string(),
+        "gnupg".to_string(),
         "lm-sensors".to_string(),
         "smartmontools".to_string(),
         "ipmitool".to_string(),
+        "pciutils".to_string(),
+        "util-linux".to_string(),
+        "procps".to_string(),
+        "coreutils".to_string(),
+        "gawk".to_string(),
+        "jq".to_string(),
+        "net-tools".to_string(),
     ];
     let pkg_args = pkgs.join(" ");
     let spw = shell_escape_single(sudo_pw);

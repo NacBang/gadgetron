@@ -35,6 +35,8 @@ interface Host {
   ssh_port: number;
   created_at: string;
   last_ok_at: string | null;
+  alias?: string | null;
+  machine_id?: string | null;
 }
 
 interface GpuStats {
@@ -646,11 +648,147 @@ function AddHostForm({
 // Host card (grid cell)
 // ---------------------------------------------------------------------------
 
+// Floating modal — attaches to one host, runs a bash command via the
+// server.bash gadget. Mandatory confirm dialog before dispatch (policy
+// #2: every invocation requires an explicit operator click). Output is
+// shown inline once the call completes.
+function ShellRunner({
+  apiKey,
+  host,
+  onClose,
+}: {
+  apiKey: string | null;
+  host: Host;
+  onClose: () => void;
+}) {
+  const [cmd, setCmd] = useState("");
+  const [useSudo, setUseSudo] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<
+    | {
+        code: number | null;
+        stdout: string;
+        stderr: string;
+      }
+    | null
+  >(null);
+  const label = host.alias ?? host.host;
+
+  const run = useCallback(async () => {
+    const trimmed = cmd.trim();
+    if (!trimmed || running) return;
+    const preview = trimmed.length > 120 ? trimmed.slice(0, 117) + "…" : trimmed;
+    const ok = window.confirm(
+      `${label}에서 실행할까요?\n\n${useSudo ? "[sudo] " : ""}${preview}`,
+    );
+    if (!ok) return;
+    setRunning(true);
+    setResult(null);
+    try {
+      const resp = await invokeAction(apiKey, "server-bash", {
+        id: host.id,
+        command: trimmed,
+        use_sudo: useSudo,
+      });
+      const payload = unwrapPayload(resp) as
+        | { code?: number | null; stdout?: string; stderr?: string }
+        | undefined;
+      setResult({
+        code: payload?.code ?? null,
+        stdout: payload?.stdout ?? "",
+        stderr: payload?.stderr ?? "",
+      });
+    } catch (e) {
+      setResult({ code: null, stdout: "", stderr: (e as Error).message });
+    } finally {
+      setRunning(false);
+    }
+  }, [apiKey, cmd, host.id, label, running, useSudo]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col gap-3 overflow-hidden rounded border border-zinc-700 bg-zinc-950 p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-semibold text-zinc-100">
+            🔧 shell @ <span className="font-mono text-blue-300">{label}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-zinc-500 hover:text-zinc-200"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="text-[11px] text-zinc-500">
+          모든 실행은 확인 다이얼로그를 거칩니다. sudo는 NOPASSWD 설치된 상태에서만 동작.
+        </div>
+        <Textarea
+          value={cmd}
+          onChange={(e) => setCmd(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+              e.preventDefault();
+              void run();
+            }
+          }}
+          placeholder="예) systemctl restart nvidia-dcgm && dmesg | tail -20"
+          rows={4}
+          className="font-mono text-xs"
+          disabled={running}
+        />
+        <div className="flex items-center justify-between gap-2">
+          <label className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+            <input
+              type="checkbox"
+              checked={useSudo}
+              onChange={(e) => setUseSudo(e.target.checked)}
+              className="accent-blue-500"
+            />
+            sudo 로 실행
+          </label>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void run()}
+            disabled={running || cmd.trim().length === 0}
+          >
+            {running ? "실행 중…" : "실행 (Ctrl+Enter)"}
+          </Button>
+        </div>
+        {result && (
+          <div className="flex-1 overflow-hidden">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+              exit {result.code ?? "—"}
+            </div>
+            <pre className="max-h-64 overflow-auto rounded bg-zinc-900/70 p-2 font-mono text-[11px] text-zinc-200 whitespace-pre-wrap break-all">
+              {result.stdout || result.stderr || "(no output)"}
+            </pre>
+            {result.stderr && result.stdout && (
+              <pre className="mt-1 max-h-32 overflow-auto rounded bg-red-950/40 p-2 font-mono text-[11px] text-red-300 whitespace-pre-wrap break-all">
+                {result.stderr}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function HostCard({
   host,
   data,
   onRemove,
   onOpenDetail,
+  onAliasChange,
+  findingsCount,
   nowMs,
   apiKey,
 }: {
@@ -658,12 +796,45 @@ function HostCard({
   data: StatsMap[string] | undefined;
   onRemove: () => void;
   onOpenDetail: () => void;
+  /** Called after a successful `server.update` so the parent can update
+   * its `hosts` array without waiting for the next list-refresh tick. */
+  onAliasChange: (newAlias: string | null) => void;
+  /** Open log-analyzer findings for this host, by severity. */
+  findingsCount?: { critical: number; high: number; medium: number; info: number };
   /** Tick value from the parent's `setInterval` so the "updated Xs ago"
    * label re-renders every second without coupling the card to its
    * own timer. */
   nowMs: number;
   apiKey: string | null;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(host.alias ?? "");
+  const [saving, setSaving] = useState(false);
+  const [shellOpen, setShellOpen] = useState(false);
+  useEffect(() => {
+    setDraft(host.alias ?? "");
+  }, [host.alias]);
+  const saveAlias = useCallback(async () => {
+    const trimmed = draft.trim();
+    const next = trimmed.length > 0 ? trimmed : null;
+    if (next === (host.alias ?? null)) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await invokeAction(apiKey, "server-update", {
+        id: host.id,
+        alias: next,
+      });
+      onAliasChange(next);
+      setEditing(false);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }, [apiKey, draft, host.alias, host.id, onAliasChange]);
   const stats = data?.stats;
   const err = data?.error;
   const ageS =
@@ -703,18 +874,105 @@ function HostCard({
   return (
     <div
       data-testid={`host-card-${host.host}`}
-      className="flex flex-col gap-2 rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
+      className="group/card flex flex-col gap-2 rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate font-mono text-sm text-zinc-200" title={host.host}>
-            {host.host}
-          </div>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <div className="flex items-center gap-1">
+              <Input
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void saveAlias();
+                  else if (e.key === "Escape") {
+                    setEditing(false);
+                    setDraft(host.alias ?? "");
+                  }
+                }}
+                placeholder="alias (empty = clear)"
+                maxLength={64}
+                className="h-6 px-1 py-0 text-sm"
+                disabled={saving}
+              />
+              <button
+                type="button"
+                onClick={() => void saveAlias()}
+                disabled={saving}
+                className="rounded border border-emerald-900/60 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
+                title="Save (Enter)"
+              >
+                ✓
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditing(false);
+                  setDraft(host.alias ?? "");
+                }}
+                disabled={saving}
+                className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300"
+                title="Cancel (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              <div
+                className="truncate text-sm font-semibold text-zinc-100"
+                title={host.alias ?? host.host}
+              >
+                {host.alias ?? host.host}
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="shrink-0 rounded px-1 text-[10px] text-zinc-600 opacity-0 transition group-hover/card:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+                title="Rename alias"
+                data-testid={`host-alias-edit-${host.id}`}
+              >
+                ✎
+              </button>
+            </div>
+          )}
+          {host.alias && !editing && (
+            <div className="truncate font-mono text-[11px] text-zinc-500">
+              {host.host}
+            </div>
+          )}
           <div className="truncate text-[10px] text-zinc-600">
             {host.ssh_user}@{host.host}:{host.ssh_port}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {findingsCount && (() => {
+            const total =
+              findingsCount.critical +
+              findingsCount.high +
+              findingsCount.medium +
+              findingsCount.info;
+            if (total === 0) return null;
+            const tone =
+              findingsCount.critical > 0
+                ? "border-red-800 bg-red-950/40 text-red-200"
+                : findingsCount.high > 0
+                  ? "border-amber-800 bg-amber-950/40 text-amber-200"
+                  : findingsCount.medium > 0
+                    ? "border-yellow-800 bg-yellow-950/30 text-yellow-200"
+                    : "border-zinc-700 bg-zinc-800 text-zinc-300";
+            return (
+              <a
+                href={`/web/findings?host=${host.id}`}
+                title={`critical ${findingsCount.critical} · high ${findingsCount.high} · medium ${findingsCount.medium} · info ${findingsCount.info}`}
+                className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${tone}`}
+                data-testid={`host-findings-${host.id}`}
+              >
+                ⚠ {total}
+              </a>
+            );
+          })()}
           <button
             type="button"
             data-testid={`host-detail-${host.host}`}
@@ -723,6 +981,15 @@ function HostCard({
             title="Open detail charts"
           >
             detail
+          </button>
+          <button
+            type="button"
+            data-testid={`host-shell-${host.host}`}
+            onClick={() => setShellOpen(true)}
+            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:border-blue-600 hover:text-blue-300"
+            title="원격 bash 실행 (매 호출 승인 필요)"
+          >
+            🔧 shell
           </button>
           <button
             type="button"
@@ -735,6 +1002,13 @@ function HostCard({
           </button>
         </div>
       </div>
+      {shellOpen && (
+        <ShellRunner
+          apiKey={apiKey}
+          host={host}
+          onClose={() => setShellOpen(false)}
+        />
+      )}
       {err && (
         <div className="rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-[10px] text-red-300">
           {err}
@@ -768,6 +1042,17 @@ function HostCard({
               </div>
               {g.util_pct != null && (
                 <ProgressBar pct={g.util_pct} label={g.name} tone="amber" />
+              )}
+              {g.mem_used_mib != null && g.mem_total_mib != null && (
+                <div className="flex items-center justify-between text-[10px] text-zinc-500">
+                  <span>VRAM</span>
+                  <span className="font-mono text-zinc-300">
+                    {(g.mem_used_mib / 1024).toFixed(1)} /{" "}
+                    {(g.mem_total_mib / 1024).toFixed(0)} GiB
+                    {" · "}
+                    {((g.mem_used_mib / g.mem_total_mib) * 100).toFixed(0)}%
+                  </span>
+                </div>
               )}
             </div>
           ))}
@@ -1020,6 +1305,42 @@ export default function ServersPage() {
     }
   }, [apiKey]);
 
+  // Findings counts per host — drives the ⚠ badge on each card. Cheap
+  // single API call returning ALL open findings; we group client-side.
+  const [findingsByHost, setFindingsByHost] = useState<
+    Record<string, { critical: number; high: number; medium: number; info: number }>
+  >({});
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const resp = await invokeAction(apiKey, "loganalysis-list", {
+          limit: 1000,
+        });
+        const payload = unwrapPayload(resp) as
+          | { findings?: Array<{ host_id: string; severity: string }> }
+          | undefined;
+        const next: Record<string, { critical: number; high: number; medium: number; info: number }> = {};
+        for (const f of payload?.findings ?? []) {
+          if (!next[f.host_id]) {
+            next[f.host_id] = { critical: 0, high: 0, medium: 0, info: 0 };
+          }
+          const sev = f.severity as "critical" | "high" | "medium" | "info";
+          if (sev in next[f.host_id]) next[f.host_id][sev]++;
+        }
+        if (!cancelled) setFindingsByHost(next);
+      } catch {
+        // background fetch — drop silently
+      }
+    };
+    void tick();
+    const t = window.setInterval(tick, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [apiKey]);
+
   // Per-host in-flight guard. With `POLL_INTERVAL_MS = 1000` and a
   // typical server.stats round-trip landing in 500-800 ms (ssh handshake
   // + `/proc/stat` delta 300 ms sleep + JSON parse), ticks can start
@@ -1184,6 +1505,14 @@ export default function ServersPage() {
                   data={statsMap[h.id]}
                   onRemove={() => void remove(h.id, h.host)}
                   onOpenDetail={() => setDetailHost(h)}
+                  onAliasChange={(next) =>
+                    setHosts((prev) =>
+                      prev.map((x) =>
+                        x.id === h.id ? { ...x, alias: next } : x,
+                      ),
+                    )
+                  }
+                  findingsCount={findingsByHost[h.id]}
                   nowMs={nowMs}
                   apiKey={apiKey}
                 />
