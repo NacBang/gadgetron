@@ -1090,8 +1090,14 @@ function HostCard({
           {stats.gpus.map((g) => (
             <div key={g.index} className="flex flex-col gap-0.5">
               <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                <span className="flex items-center gap-1.5 truncate font-mono" title={g.name}>
-                  <span className="truncate">GPU {g.index} · {g.source}</span>
+                <span
+                  className="flex items-center gap-1.5 truncate font-mono"
+                  title={`${g.name} (source: ${g.source})`}
+                >
+                  <span className="truncate">
+                    GPU {g.index}
+                    {g.name ? ` — ${g.name.replace(/^NVIDIA /, "")}` : ""}
+                  </span>
                   <GpuHealthBadges gpu={g} />
                 </span>
                 <span className="font-mono text-zinc-300">
