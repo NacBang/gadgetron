@@ -298,6 +298,19 @@ pub async fn collect_stats(target: &SshTarget) -> Result<ServerStats, SshError> 
     if has_dcgm {
         match collect_dcgm(target).await {
             Ok(mut gs) if !gs.is_empty() => {
+                // DCGM's `dmon` doesn't emit product names — splice
+                // them in from the parallel nvidia-smi snapshot so the
+                // UI can render "GPU 0 — NVIDIA RTX 4090" instead of
+                // the "GPU 0" placeholder we default to in the parser.
+                if has_nvsmi {
+                    let name_by_idx =
+                        parse_nvsmi_names(sections.get("NVSMI").map(|s| s.as_str()).unwrap_or(""));
+                    for g in gs.iter_mut() {
+                        if let Some(n) = name_by_idx.get(&g.index) {
+                            g.name = n.clone();
+                        }
+                    }
+                }
                 stats.gpus.append(&mut gs);
             }
             Ok(_) => {
@@ -672,6 +685,28 @@ fn index_net(dump: &str) -> std::collections::HashMap<String, (u64, u64)> {
         m.insert(iface, (rx_bytes, tx_bytes));
     }
     m
+}
+
+/// Extract just `(index -> name)` from an nvidia-smi CSV snapshot, used
+/// by the DCGM path to splice product names into rows `dcgmi dmon`
+/// doesn't carry. Parallel to `parse_nvsmi` but cheap — we only need
+/// the first two columns.
+fn parse_nvsmi_names(csv: &str) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in csv.lines() {
+        let cells: Vec<&str> = line.split(',').map(|c| c.trim()).collect();
+        if cells.len() < 2 {
+            continue;
+        }
+        let Ok(idx) = cells[0].parse::<u32>() else {
+            continue;
+        };
+        let name = cells[1].to_string();
+        if !name.is_empty() {
+            out.insert(idx, name);
+        }
+    }
+    out
 }
 
 fn parse_nvsmi(csv: &str) -> Vec<GpuStats> {

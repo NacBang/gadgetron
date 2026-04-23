@@ -568,9 +568,8 @@ impl ServerMonitorProvider {
         // grab them from the fresh info response and persist. The UI
         // reads these off `server.list` so it never has to wait for a
         // full info roundtrip just to render the card header.
-        let needs_hw_backfill = rec.cpu_model.is_none()
-            || rec.cpu_cores.is_none()
-            || rec.gpus.is_empty();
+        let needs_hw_backfill =
+            rec.cpu_model.is_none() || rec.cpu_cores.is_none() || rec.gpus.is_empty();
         if needs_hw_backfill {
             let mut updated = rec.clone();
             if updated.cpu_model.is_none() && !info.cpu_model.is_empty() {

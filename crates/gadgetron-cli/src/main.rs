@@ -766,11 +766,7 @@ fn load_penny_registry_from_config(
                         key_path: Some(h.key_path.clone()),
                         known_hosts: known_hosts_path.clone(),
                     };
-                    match gadgetron_bundle_server_monitor::collectors::collect_info(
-                        &target,
-                    )
-                    .await
-                    {
+                    match gadgetron_bundle_server_monitor::collectors::collect_info(&target).await {
                         Ok(info) => {
                             let mut updated = h.clone();
                             let mut changed = false;

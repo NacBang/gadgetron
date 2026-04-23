@@ -1087,43 +1087,49 @@ function HostCard({
       )}
       {stats?.gpus && stats.gpus.length > 0 && (
         <div className="flex flex-col gap-1">
-          {stats.gpus.map((g) => (
-            <div key={g.index} className="flex flex-col gap-0.5">
-              <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                <span
-                  className="flex items-center gap-1.5 truncate font-mono"
-                  title={`${g.name} (source: ${g.source})`}
-                >
-                  <span className="truncate">
-                    GPU {g.index}
-                    {g.name ? ` — ${g.name.replace(/^NVIDIA /, "")}` : ""}
+          {stats.gpus.map((g) => {
+            const metaBits: string[] = [];
+            if (g.mem_used_mib != null && g.mem_total_mib != null) {
+              metaBits.push(
+                `${(g.mem_used_mib / 1024).toFixed(1)}/${(g.mem_total_mib / 1024).toFixed(0)} GiB`,
+              );
+            }
+            if (g.temp_c != null) metaBits.push(`${g.temp_c}°C`);
+            if (g.mem_temp_c != null) {
+              metaBits.push(`mem ${Math.round(g.mem_temp_c)}°C`);
+            }
+            if (g.power_w != null) metaBits.push(`${g.power_w.toFixed(0)}W`);
+            return (
+              <div key={g.index} className="flex flex-col gap-0.5">
+                <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                  <span
+                    className="flex items-center gap-1.5 truncate font-mono"
+                    title={`${g.name} (source: ${g.source})`}
+                  >
+                    <span className="truncate">
+                      GPU {g.index}
+                      {(() => {
+                        // Skip the " — name" suffix when the collector
+                        // only returned a placeholder like "GPU 3"
+                        // (DCGM hostengine down / nvidia-smi failed).
+                        const n = (g.name ?? "").trim();
+                        if (!n) return "";
+                        if (/^GPU\s*\d+$/i.test(n)) return "";
+                        return ` — ${n.replace(/^NVIDIA /, "")}`;
+                      })()}
+                    </span>
+                    <GpuHealthBadges gpu={g} />
                   </span>
-                  <GpuHealthBadges gpu={g} />
-                </span>
-                <span className="font-mono text-zinc-300">
-                  {g.temp_c != null ? `${g.temp_c}°C` : ""}
-                  {g.mem_temp_c != null
-                    ? ` · mem ${Math.round(g.mem_temp_c)}°C`
-                    : ""}
-                  {g.power_w != null ? ` · ${g.power_w.toFixed(0)}W` : ""}
-                </span>
-              </div>
-              {g.util_pct != null && (
-                <ProgressBar pct={g.util_pct} label={g.name} tone="amber" />
-              )}
-              {g.mem_used_mib != null && g.mem_total_mib != null && (
-                <div className="flex items-center justify-between text-[10px] text-zinc-500">
-                  <span>VRAM</span>
-                  <span className="font-mono text-zinc-300">
-                    {(g.mem_used_mib / 1024).toFixed(1)} /{" "}
-                    {(g.mem_total_mib / 1024).toFixed(0)} GiB
-                    {" · "}
-                    {((g.mem_used_mib / g.mem_total_mib) * 100).toFixed(0)}%
+                  <span className="truncate font-mono text-zinc-300">
+                    {metaBits.join(" · ")}
                   </span>
                 </div>
-              )}
-            </div>
-          ))}
+                {g.util_pct != null && (
+                  <ProgressBar pct={g.util_pct} label="" tone="amber" />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
       {stats?.power?.psu_watts != null && (
