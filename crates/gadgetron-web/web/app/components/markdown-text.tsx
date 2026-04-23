@@ -11,7 +11,8 @@ import remarkGfm from "remark-gfm";
  * Streaming polish:
  *
  * - **Empty + running** → bouncing 3-dot typing indicator (first-token gap).
- * - **Non-empty + running** → pulsing caret `▎` at the tail of the prose.
+ * - **Non-empty + running** → pulsing dot at the tail of the prose
+ *   ("still going" signal that reads better than a thin caret did).
  * - **Typewriter reveal**: Claude Code's `stream-json` emits each assistant
  *   message as ONE "assistant" event containing the full text, so without
  *   client-side help the chat bubble just pops into existence. We expose
@@ -26,15 +27,26 @@ import remarkGfm from "remark-gfm";
  *   currently-revealed prefix and transparently append a trailing ``` so
  *   react-markdown can render a stable code block that grows in place.
  */
+// assistant-ui passes `{ text, status, ...TextMessagePart }` to the Text
+// component — NOT `isRunning`. Earlier iterations of the prop contract
+// provided a boolean; newer builds moved to a discriminated
+// `status: { type: "running" | "complete" | "incomplete" }` union.
+// Reading the wrong field made the tail indicator permanently hidden
+// once text finished revealing, so the user had no "still working"
+// signal during tool-chained turns. Derive `isRunning` from status.
+// Accept any status shape assistant-ui hands us — the library union is
+// `MessagePartStatus | ToolCallMessagePartStatus` (running / complete /
+// incomplete / requires-action). We only care whether `type === "running"`.
 export function MarkdownText({
   text,
-  isRunning,
+  status,
 }: {
   text: string;
-  isRunning?: boolean;
+  status?: { readonly type: string };
 }) {
+  const isRunning = status?.type === "running";
   // Hooks first (React rules-of-hooks — no conditional hook calls).
-  const displayed = useTypewriterText(text, !!isRunning);
+  const displayed = useTypewriterText(text, isRunning);
   const isRevealing = isRunning || displayed.length < text.length;
   const safeForMarkdown = useMemo(
     () => (isRevealing ? autoCloseFences(displayed) : displayed),
@@ -75,8 +87,8 @@ export function MarkdownText({
       </ReactMarkdown>
       {isRevealing && (
         <span
-          aria-hidden
-          className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] rounded-sm bg-foreground/70 align-middle animate-pulse"
+          aria-label="Penny가 작성 중"
+          className="ml-1.5 inline-block size-2 rounded-full bg-blue-400 align-middle motion-safe:animate-pulse shadow-[0_0_6px_rgba(96,165,250,0.55)]"
         />
       )}
     </div>

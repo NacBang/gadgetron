@@ -374,8 +374,13 @@ function parseSegments(
       continue;
     }
 
-    // Tool result success: "✓ _<output>_ \n\n" — trailing " " + newlines
-    const mResOk = rest.match(/^✓ _([\s\S]*?)_\s*\n?\n?/);
+    // Tool result success: server emits EXACTLY "✓ _<output>_ \n\n"
+    // (stream.rs user_message_to_chunks). The trailing " \n\n" is
+    // load-bearing — journalctl output often contains `_SYSTEMD_UNIT`
+    // / `_CMDLINE` tokens whose leading `_` would otherwise terminate
+    // a loose regex early, strand the rest as plain text, and leak
+    // the raw tool result below the (now empty) ToolPart collapse.
+    const mResOk = rest.match(/^✓ _([\s\S]*?)_ \n\n/);
     if (mResOk && rest.startsWith("✓")) {
       segments.push({
         kind: "tool_result",
@@ -386,8 +391,8 @@ function parseSegments(
       continue;
     }
 
-    // Tool result error: "❌ _<output>_ "
-    const mResErr = rest.match(/^❌ _([\s\S]*?)_\s*\n?\n?/);
+    // Tool result error: "❌ _<output>_ \n\n" — same strictness rule.
+    const mResErr = rest.match(/^❌ _([\s\S]*?)_ \n\n/);
     if (mResErr && rest.startsWith("❌")) {
       segments.push({
         kind: "tool_result",

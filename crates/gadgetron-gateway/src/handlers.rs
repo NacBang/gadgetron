@@ -66,9 +66,14 @@ pub async fn chat_completions_handler(
     }
 
     // ISSUE 31 — record this turn in the conversations table so the
-    // left-rail sidebar reflects the new message. Fire-and-forget; if
-    // the DB is down we still let the chat go through (shared-context
-    // graceful-degrade pattern).
+    // left-rail sidebar reflects the new message. Awaited inline (was
+    // tokio::spawn) so the row commits BEFORE the SSE stream starts —
+    // otherwise the frontend's post-send conversation-list refetch can
+    // race the background task and miss the brand-new row, leaving the
+    // first message orphaned in the sidebar. The insert is a single
+    // indexed write (~1-5ms); graceful-degrade is preserved by ignoring
+    // the error with `let _ =` so a transient DB blip doesn't 5xx the
+    // chat endpoint.
     if let (Some(pool), Some(user_id), Some(conv_raw)) = (
         state.pg_pool.as_ref(),
         ctx.actor_user_id,
@@ -82,15 +87,24 @@ pub async fn chat_completions_handler(
                 .and_then(|m| m.content.text())
                 .unwrap_or_default()
                 .to_string();
-            let pool = pool.clone();
-            let tenant_id = ctx.tenant_id;
-            let msg = first_user_msg.clone();
-            tokio::spawn(async move {
-                let _ = gadgetron_xaas::conversations::upsert_turn(
-                    &pool, conv_uuid, tenant_id, user_id, None, &msg,
-                )
-                .await;
-            });
+            if let Err(e) = gadgetron_xaas::conversations::upsert_turn(
+                pool,
+                conv_uuid,
+                ctx.tenant_id,
+                user_id,
+                None,
+                &first_user_msg,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "conversations",
+                    request_id = %ctx.request_id,
+                    conversation_id = %conv_uuid,
+                    error = %e,
+                    "upsert_turn failed — chat continues but sidebar may miss this turn"
+                );
+            }
         }
     }
 

@@ -321,7 +321,11 @@ fn resolve_write_mode(name: &str, cfg: &AgentConfig) -> GadgetMode {
         "infra" => w.infra_write,
         "scheduler" => w.scheduler_write,
         "provider" => w.provider_mutate,
-        "server" => w.server_admin,
+        // Both `server.*` and `loganalysis.*` operate on the same
+        // registered fleet — they share the `server_admin` policy
+        // toggle so an operator who flipped it to Ask/Never gets
+        // consistent behavior across both bundles.
+        "server" | "loganalysis" => w.server_admin,
         _ => w.default_mode,
     }
 }

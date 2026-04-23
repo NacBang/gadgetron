@@ -51,6 +51,30 @@ pub struct HostRecord {
     /// populate it at register time from the caller's `TenantContext`.
     #[serde(default)]
     pub tenant_id: Uuid,
+    /// Stable system identifier captured at register time. Survives
+    /// hostname / IP changes and OS upgrades; regenerated only on a
+    /// fresh OS install. Sourced from `/etc/machine-id` (systemd) or
+    /// `/var/lib/dbus/machine-id` as fallback. `None` for hosts
+    /// registered before this column existed.
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    /// DMI / SMBIOS hardware UUID (`/sys/class/dmi/id/product_uuid`).
+    /// Tied to the motherboard, persists across OS reinstalls. May be
+    /// `None` when BIOS doesn't expose it or when the SSH user lacks
+    /// the required permission to read the dmi file.
+    #[serde(default)]
+    pub dmi_uuid: Option<String>,
+    /// Chassis serial number — `/sys/class/dmi/id/product_serial` or
+    /// `chassis_serial`. Useful for matching against asset-management
+    /// systems. `None` when not exposed.
+    #[serde(default)]
+    pub dmi_serial: Option<String>,
+    /// Operator-friendly nickname (e.g. `"penny-build-01"`,
+    /// `"a100-train-01"`). The UI prefers this over the raw `host`
+    /// (IP) when set. `None` falls back to the IP. Free-form text;
+    /// the gadget caps length and rejects control characters.
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 fn default_ssh_port() -> u16 {

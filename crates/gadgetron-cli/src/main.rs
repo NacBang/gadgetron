@@ -693,6 +693,7 @@ fn load_penny_registry_from_config(
     // `host_metrics` hypertable. Without a pool the bundle still works
     // (legacy pull-only path) — the provider just keeps an empty
     // sender slot and `try_ship` no-ops.
+    let pg_pool_for_logs = pg_pool.clone();
     match gadgetron_bundle_server_monitor::ServerMonitorProvider::with_default_inventory() {
         Ok(mut p) => {
             if let Some(pool) = pg_pool {
@@ -700,6 +701,9 @@ fn load_penny_registry_from_config(
                     Vec<gadgetron_bundle_server_monitor::MetricSample>,
                 >(4096);
                 let counters = gadgetron_bundle_server_monitor::IngestionCounters::default();
+                // Attach pool FIRST so server.remove can cascade-clean
+                // log_scan_* / log_findings rows for the removed host.
+                p = p.with_pg_pool(pool.clone());
                 p = p.with_metrics_writer(tx.clone(), counters.clone());
                 tokio::spawn(gadgetron_bundle_server_monitor::run_metrics_writer(
                     rx,
@@ -729,9 +733,81 @@ fn load_penny_registry_from_config(
                      (no timeseries history)",
                 );
             }
+            let inv = p.inventory();
             builder
                 .register(Arc::new(p))
-                .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?
+                .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?;
+
+            // Log-analyzer bundle — only meaningful with a pg_pool
+            // (findings + cursor live in PG). Reuses the same
+            // inventory Arc so add/remove flows through. LLM
+            // Optional Penny LLM fallback for log lines that look
+            // error-ish but didn't match a regex rule. Wired when
+            // `GADGETRON_LOG_ANALYZER_KEY` is set — typically a
+            // service-role API key minted at deploy time:
+            //
+            //   gadgetron key create --tenant-id <T> --scope OpenAiCompat
+            //   export GADGETRON_LOG_ANALYZER_KEY=gad_live_...
+            //
+            // Without the env var the scanner runs rule-only (no
+            // unknown-line classification), which still catches every
+            // pattern in `rules.rs` — the LLM only widens the net.
+            if let Some(pool) = pg_pool_for_logs.as_ref() {
+                let log_provider =
+                    gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone());
+                builder
+                    .register(Arc::new(log_provider))
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
+                    })?;
+
+                let classifier: Option<Arc<dyn gadgetron_bundle_log_analyzer::llm::Classifier>> =
+                    match std::env::var("GADGETRON_LOG_ANALYZER_KEY").ok() {
+                        Some(api_key) if !api_key.trim().is_empty() => {
+                            let gateway_url = std::env::var("GADGETRON_LOG_ANALYZER_GATEWAY")
+                                .unwrap_or_else(|_| {
+                                    "http://127.0.0.1:18080".to_string()
+                                });
+                            tracing::info!(
+                                target: "log_analyzer",
+                                gateway = %gateway_url,
+                                "Penny classifier enabled — error-ish lines without a rule \
+                                 match will be sent to /v1/chat/completions for triage"
+                            );
+                            let client = reqwest::Client::builder()
+                                .build()
+                                .expect("reqwest client builds");
+                            Some(Arc::new(
+                                gadgetron_bundle_log_analyzer::llm::GatewayClassifier {
+                                    gateway_url,
+                                    api_key,
+                                    model: std::env::var("GADGETRON_LOG_ANALYZER_MODEL")
+                                        .unwrap_or_else(|_| "penny".to_string()),
+                                    client,
+                                },
+                            ))
+                        }
+                        _ => {
+                            tracing::info!(
+                                target: "log_analyzer",
+                                "Penny classifier disabled (set GADGETRON_LOG_ANALYZER_KEY \
+                                 to enable LLM fallback) — running rules-only"
+                            );
+                            None
+                        }
+                    };
+
+                tokio::spawn(gadgetron_bundle_log_analyzer::run_background_scanner(
+                    inv,
+                    pool.clone(),
+                    classifier,
+                    gadgetron_bundle_log_analyzer::ScannerConfig::default(),
+                ));
+                tracing::info!(
+                    target: "log_analyzer",
+                    "log-analyzer bundle + background scanner spawned"
+                );
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")

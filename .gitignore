@@ -15,6 +15,9 @@
 # Local build env — holds per-host paths + sandbox secrets for demo.sh.
 /.buildenv
 
+# scripts/launch.sh writes the background-mode pidfile here.
+/.gadgetron-serve.pid
+
 # Tool-specific session state and native subagent adapters.
 # Per AGENTS.md the project is tool-independent — adapters stay user-level
 # (e.g. ~/.claude/agents/) and do not ship in the repo.
