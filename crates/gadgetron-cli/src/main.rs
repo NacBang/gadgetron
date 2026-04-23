@@ -767,21 +767,11 @@ fn load_penny_registry_from_config(
                     match inv_snapshot.load().await {
                         Ok(hosts) => {
                             let ids: Vec<uuid::Uuid> = hosts.iter().map(|h| h.id).collect();
-                            let tables = [
-                                "log_scan_cursor",
-                                "log_scan_config",
-                                "log_findings",
-                            ];
+                            let tables = ["log_scan_cursor", "log_scan_config", "log_findings"];
                             let mut total: u64 = 0;
                             for t in &tables {
-                                let sql = format!(
-                                    "DELETE FROM {t} WHERE host_id <> ALL($1)"
-                                );
-                                match sqlx::query(&sql)
-                                    .bind(&ids)
-                                    .execute(&pool_for_recon)
-                                    .await
-                                {
+                                let sql = format!("DELETE FROM {t} WHERE host_id <> ALL($1)");
+                                match sqlx::query(&sql).bind(&ids).execute(&pool_for_recon).await {
                                     Ok(r) => total += r.rows_affected(),
                                     Err(e) => tracing::warn!(
                                         target: "log_analyzer",

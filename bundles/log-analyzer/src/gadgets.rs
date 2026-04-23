@@ -185,10 +185,8 @@ impl LogAnalyzerProvider {
             hosts
                 .iter()
                 .map(|h| {
-                    let (last_scanned, interval_secs, enabled) = by_id
-                        .get(&h.id)
-                        .cloned()
-                        .unwrap_or((None, 120, true));
+                    let (last_scanned, interval_secs, enabled) =
+                        by_id.get(&h.id).cloned().unwrap_or((None, 120, true));
                     json!({
                         "host_id": h.id,
                         "last_scanned_at": last_scanned,
