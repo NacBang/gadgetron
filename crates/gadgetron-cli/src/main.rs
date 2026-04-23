@@ -753,8 +753,65 @@ fn load_penny_registry_from_config(
             // unknown-line classification), which still catches every
             // pattern in `rules.rs` — the LLM only widens the net.
             if let Some(pool) = pg_pool_for_logs.as_ref() {
+                // Reconcile log-analyzer tables against the current
+                // inventory: any host_id present in log_scan_cursor /
+                // log_scan_config / log_findings but NOT in
+                // inventory.json is an orphan from a pre-cascade
+                // server.remove (or a manual inventory edit). Purge so
+                // the Logs tab stops showing "phantom" hosts that
+                // don't appear in Servers. Best-effort: DB blip here
+                // is logged and the CLI proceeds normally.
+                let inv_snapshot = inv.clone();
+                let pool_for_recon = pool.clone();
+                tokio::spawn(async move {
+                    match inv_snapshot.load().await {
+                        Ok(hosts) => {
+                            let ids: Vec<uuid::Uuid> = hosts.iter().map(|h| h.id).collect();
+                            let tables = [
+                                "log_scan_cursor",
+                                "log_scan_config",
+                                "log_findings",
+                            ];
+                            let mut total: u64 = 0;
+                            for t in &tables {
+                                let sql = format!(
+                                    "DELETE FROM {t} WHERE host_id <> ALL($1)"
+                                );
+                                match sqlx::query(&sql)
+                                    .bind(&ids)
+                                    .execute(&pool_for_recon)
+                                    .await
+                                {
+                                    Ok(r) => total += r.rows_affected(),
+                                    Err(e) => tracing::warn!(
+                                        target: "log_analyzer",
+                                        table = %t,
+                                        error = %e,
+                                        "startup orphan purge failed",
+                                    ),
+                                }
+                            }
+                            if total > 0 {
+                                tracing::info!(
+                                    target: "log_analyzer",
+                                    purged_rows = total,
+                                    live_hosts = ids.len(),
+                                    "startup: purged orphan log rows for hosts no \
+                                     longer in inventory",
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            target: "log_analyzer",
+                            error = %e,
+                            "could not load inventory for startup reconciliation",
+                        ),
+                    }
+                });
+
                 let log_provider =
-                    gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone());
+                    gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone())
+                        .with_inventory(inv.clone());
                 builder.register(Arc::new(log_provider)).map_err(|e| {
                     anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
                 })?;
