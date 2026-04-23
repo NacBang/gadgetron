@@ -316,7 +316,7 @@ async fn fetch_auth(
         .map(|s| s.to_string())
         .collect();
     // Compute the new offset: previous + bytes we just consumed.
-    let consumed = chunk.as_bytes().len() as u64;
+    let consumed = chunk.len() as u64;
     let new_offset = prev_offset.unwrap_or(0) + consumed;
     Ok((lines, Some(new_offset.to_string())))
 }

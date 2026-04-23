@@ -15,7 +15,7 @@
 //!
 //! Operator-facing surface:
 //!   - `loganalysis.list`        : list non-dismissed findings (filter
-//!                                  by host_id / severity / since)
+//!     by host_id / severity / since)
 //!   - `loganalysis.dismiss`     : mark as handled
 //!   - `loganalysis.scan_now`    : force a tick for one host
 //!   - `loganalysis.set_interval`: per-host poll interval override

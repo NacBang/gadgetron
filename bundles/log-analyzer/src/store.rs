@@ -235,13 +235,16 @@ pub async fn set_cursor(
     Ok(())
 }
 
+/// One row of `list_scan_status` output: (host_id, last_scanned_at,
+/// interval_secs, enabled). Aliased to keep the public signature legible.
+pub type ScanStatusRow = (Uuid, Option<DateTime<Utc>>, i32, bool);
+
 /// Scan status per host: most-recent scan timestamp across any
 /// source + the per-host interval/enabled config (or defaults).
 /// Powers the UI's "last scan: 30s ago · interval: 120s" line.
-pub async fn list_scan_status(
-    pool: &PgPool,
-) -> Result<Vec<(Uuid, Option<DateTime<Utc>>, i32, bool)>, StoreError> {
-    let rows: Vec<(Uuid, Option<DateTime<Utc>>, Option<i32>, Option<bool>)> = sqlx::query_as(
+pub async fn list_scan_status(pool: &PgPool) -> Result<Vec<ScanStatusRow>, StoreError> {
+    type RawRow = (Uuid, Option<DateTime<Utc>>, Option<i32>, Option<bool>);
+    let rows: Vec<RawRow> = sqlx::query_as(
         "SELECT c.host_id, \
                 MAX(c.last_scanned_at) AS last_scanned, \
                 cfg.interval_secs, \

@@ -237,6 +237,10 @@ mod tests {
             created_at: Utc::now(),
             last_ok_at: None,
             tenant_id: Uuid::nil(),
+            machine_id: None,
+            dmi_uuid: None,
+            dmi_serial: None,
+            alias: None,
         }
     }
 
