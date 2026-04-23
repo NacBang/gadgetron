@@ -5,6 +5,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Toaster, toast } from "sonner";
 import { Button } from "../../components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { useAuth } from "../../lib/auth-context";
@@ -197,6 +205,8 @@ export default function WikiWorkbenchPage() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchHits, setSearchHits] = useState<
@@ -271,6 +281,34 @@ export default function WikiWorkbenchPage() {
       setSaving(false);
     }
   }, [apiKey, selected, content, refreshPages]);
+
+  // -------- wiki-delete -----------------------------------------------------
+  // Soft delete: the page is moved to `_archived/<name>` with an auto-commit.
+  // Recoverable from git history OR by asking Penny to pull it back. A second
+  // click in the dialog is required so a stray button press doesn't nuke a
+  // page the operator was only skimming.
+  const deletePage = useCallback(async () => {
+    if (!selected || deleting) return;
+    setDeleting(true);
+    setPageError(null);
+    try {
+      await invokeAction(apiKey, "wiki-delete", { name: selected });
+      toast.success(`Deleted ${selected}`, {
+        description: "Moved to _archived/ and committed.",
+      });
+      setConfirmDeleteOpen(false);
+      setEditing(false);
+      setSelected(null);
+      setContent("");
+      await refreshPages();
+    } catch (e) {
+      const msg = (e as Error).message;
+      setPageError(msg);
+      toast.error("Delete failed", { description: msg });
+    } finally {
+      setDeleting(false);
+    }
+  }, [apiKey, selected, deleting, refreshPages]);
 
   // -------- knowledge-search ------------------------------------------------
   const runSearch = useCallback(async () => {
@@ -373,6 +411,39 @@ export default function WikiWorkbenchPage() {
   return (
     <>
       <Toaster theme="dark" richColors position="bottom-right" />
+
+      <Dialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
+        <DialogContent className="border-zinc-800 bg-zinc-950">
+          <DialogHeader>
+            <DialogTitle className="text-zinc-100">
+              페이지를 삭제할까요?
+            </DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              <span className="font-mono text-zinc-200">{selected}</span>
+              을(를) <code>_archived/</code>로 이동하고 git에 커밋합니다. 복구는 git
+              히스토리에서 가능하거나 Penny에게 되돌려 달라고 요청할 수 있어요.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setConfirmDeleteOpen(false)}
+              disabled={deleting}
+              className="text-zinc-400"
+            >
+              취소
+            </Button>
+            <Button
+              onClick={() => void deletePage()}
+              disabled={deleting}
+              className="bg-red-800 text-red-50 hover:bg-red-700"
+              data-testid="wiki-delete-confirm"
+            >
+              {deleting ? "삭제 중…" : "삭제"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Page header — title + actions. Sign-out moved into the shell's
        * settings dialog so it lives in one place across all pages. */}
@@ -508,15 +579,27 @@ export default function WikiWorkbenchPage() {
                       </Button>
                     </>
                   ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setEditing(true)}
-                      className="h-6 px-3 text-[11px]"
-                      data-testid="wiki-edit-button"
-                    >
-                      Edit
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setEditing(true)}
+                        className="h-6 px-3 text-[11px]"
+                        data-testid="wiki-edit-button"
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setConfirmDeleteOpen(true)}
+                        className="h-6 px-3 text-[11px] text-zinc-500 hover:bg-red-950/40 hover:text-red-300"
+                        data-testid="wiki-delete-button"
+                        title="페이지 삭제 (soft: _archived/ 로 이동)"
+                      >
+                        🗑️ Delete
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>
