@@ -734,6 +734,95 @@ fn load_penny_registry_from_config(
                 );
             }
             let inv = p.inventory();
+            // Backfill static hardware descriptors (cpu_model, cpu_cores,
+            // gpus) for hosts registered before 0.5.21. The UI renders
+            // these on every server card; without a one-shot probe the
+            // operator would have to click server.info (or manually
+            // re-register) per host. Staggered by 5 s so a busy fleet
+            // doesn't hammer the monitor at startup.
+            //
+            // Guard on `Handle::try_current()` so unit tests that drive
+            // `load_penny_registry_from_config` outside a runtime (e.g.
+            // `load_penny_registry_resolves_relative_wiki_path_against_config_dir`)
+            // don't panic at `tokio::spawn`. Production `serve` always
+            // runs inside the multi-thread runtime so the guard is a
+            // no-op there.
+            let inv_backfill = inv.clone();
+            let known_hosts_path = inv.root().join("known_hosts");
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let hosts = match inv_backfill.load().await {
+                        Ok(h) => h,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "server_monitor",
+                                error = %e,
+                                "hw backfill: could not load inventory",
+                            );
+                            return;
+                        }
+                    };
+                    for h in hosts {
+                        if h.cpu_model.is_some() && !h.gpus.is_empty() {
+                            continue;
+                        }
+                        let target = gadgetron_bundle_server_monitor::ssh::SshTarget {
+                            host: h.host.clone(),
+                            user: h.ssh_user.clone(),
+                            port: h.ssh_port,
+                            key_path: Some(h.key_path.clone()),
+                            known_hosts: known_hosts_path.clone(),
+                        };
+                        match gadgetron_bundle_server_monitor::collectors::collect_info(&target)
+                            .await
+                        {
+                            Ok(info) => {
+                                let mut updated = h.clone();
+                                let mut changed = false;
+                                if updated.cpu_model.is_none() && !info.cpu_model.is_empty() {
+                                    updated.cpu_model = Some(info.cpu_model.clone());
+                                    changed = true;
+                                }
+                                if updated.cpu_cores.is_none() && info.cpu_cores > 0 {
+                                    updated.cpu_cores = Some(info.cpu_cores);
+                                    changed = true;
+                                }
+                                if updated.gpus.is_empty() && !info.gpu_models.is_empty() {
+                                    updated.gpus = info.gpu_models;
+                                    changed = true;
+                                }
+                                if changed {
+                                    if let Err(e) = inv_backfill.upsert(updated).await {
+                                        tracing::warn!(
+                                            target: "server_monitor",
+                                            host_id = %h.id,
+                                            error = %e,
+                                            "hw backfill save failed",
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            target: "server_monitor",
+                                            host_id = %h.id,
+                                            alias = h.alias.as_deref().unwrap_or(""),
+                                            "hw backfill: captured cpu/gpu descriptors",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                target: "server_monitor",
+                                host_id = %h.id,
+                                error = %e,
+                                "hw backfill: collect_info failed",
+                            ),
+                        }
+                        // Pace the fleet sweep so a 10-host registration
+                        // doesn't fire 10 parallel SSH sessions at boot.
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                });
+            }
             builder
                 .register(Arc::new(p))
                 .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?;

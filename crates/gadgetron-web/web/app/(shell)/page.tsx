@@ -7,6 +7,7 @@ import {
   useComposerRuntime,
   useThread,
   useMessage,
+  useThreadViewport,
 } from "@assistant-ui/react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -660,6 +661,14 @@ function EmptyState() {
 }
 
 function JumpToLatest() {
+  // Only render when the user has scrolled away from the bottom.
+  // At the bottom the button is redundant noise — it was visible on
+  // every turn even when a new delta had already snapped the viewport
+  // down. `useThreadViewport` exposes the live scroll state; this
+  // hook re-runs on every scroll event, so the button shows up exactly
+  // during back-reading sessions.
+  const isAtBottom = useThreadViewport((s) => s.isAtBottom);
+  if (isAtBottom) return null;
   return (
     <ThreadPrimitive.ScrollToBottom asChild>
       <button

@@ -15,6 +15,13 @@ export interface SparkPoint {
 
 interface SparklineProps {
   points: SparkPoint[];
+  /** Optional stacked series — each inner array is drawn as a
+   * translucent line on the SAME chart so callers can overlay e.g.
+   * all per-GPU utilizations on one graph. `points` remains the
+   * primary series (drawn on top, fully opaque); `series` lines are
+   * lower opacity for visual layering. All arrays must share the
+   * same Y scale and timestamp spacing. */
+  series?: SparkPoint[][];
   /** Height in pixels — width auto-stretches to the parent. */
   height?: number;
   /** Reserve a vertical range so a flat line doesn't fill the box.
@@ -39,6 +46,7 @@ const TONE: Record<NonNullable<SparklineProps["tone"]>, string> = {
 
 export function Sparkline({
   points,
+  series,
   height = 24,
   yMin,
   yMax,
@@ -47,24 +55,41 @@ export function Sparkline({
   current,
 }: SparklineProps) {
   const path = useMemo(() => {
-    if (points.length < 2) return null;
-    const values = points.map((p) => p.avg);
-    const lo = yMin ?? Math.min(...values);
-    const hi = yMax ?? Math.max(...values);
+    const allSeries = series ?? [];
+    const primary = points.length >= 2 ? points : null;
+    if (!primary && allSeries.every((s) => s.length < 2)) return null;
+    // Compute shared Y scale across every series so overlapping lines
+    // stay comparable. Pull from primary + secondary in one pass.
+    const allVals: number[] = [];
+    if (primary) for (const p of primary) allVals.push(p.avg);
+    for (const s of allSeries) for (const p of s) allVals.push(p.avg);
+    const lo = yMin ?? (allVals.length > 0 ? Math.min(...allVals) : 0);
+    const hi = yMax ?? (allVals.length > 0 ? Math.max(...allVals) : 1);
     const range = hi - lo || 1;
-    const w = 100; // SVG viewBox units; CSS scales to container width
+    const w = 100;
     const h = height;
-    const dx = w / (points.length - 1);
-    const xy = points.map((p, i) => {
-      const x = i * dx;
-      const y = h - ((p.avg - lo) / range) * h;
-      return [x, Number.isFinite(y) ? y : h] as const;
-    });
-    const linePath =
-      "M " + xy.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" L ");
-    const areaPath = `${linePath} L ${w},${h} L 0,${h} Z`;
-    return { linePath, areaPath, w, h };
-  }, [points, height, yMin, yMax]);
+    const toPath = (pts: SparkPoint[]): string | null => {
+      if (pts.length < 2) return null;
+      const dx = w / (pts.length - 1);
+      const xy = pts.map((p, i) => {
+        const x = i * dx;
+        const y = h - ((p.avg - lo) / range) * h;
+        return [x, Number.isFinite(y) ? y : h] as const;
+      });
+      return (
+        "M " +
+        xy.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join(" L ")
+      );
+    };
+    const primaryLine = primary ? toPath(primary) : null;
+    const primaryArea = primaryLine
+      ? `${primaryLine} L ${w},${h} L 0,${h} Z`
+      : null;
+    const secondaryLines = allSeries
+      .map((s) => toPath(s))
+      .filter((p): p is string => p != null);
+    return { primaryLine, primaryArea, secondaryLines, w, h };
+  }, [points, series, height, yMin, yMax]);
 
   return (
     <div className="flex flex-col gap-0.5" data-testid="sparkline">
@@ -83,14 +108,35 @@ export function Sparkline({
           className="w-full"
           style={{ height: `${height}px` }}
         >
-          <path d={path.areaPath} className={`stroke-0 ${TONE[tone]}`} />
-          <path
-            d={path.linePath}
-            className={TONE[tone]}
-            fill="none"
-            strokeWidth={1.4}
-            vectorEffect="non-scaling-stroke"
-          />
+          {/* Secondary series — drawn first at lower opacity so the
+              primary line stays dominant. Useful for "all GPUs util
+              on one chart" type overlays. */}
+          {path.secondaryLines.map((d, i) => (
+            <path
+              key={i}
+              d={d}
+              className={TONE[tone]}
+              fill="none"
+              strokeWidth={1}
+              strokeOpacity={0.45}
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+          {path.primaryArea && (
+            <path
+              d={path.primaryArea}
+              className={`stroke-0 ${TONE[tone]}`}
+            />
+          )}
+          {path.primaryLine && (
+            <path
+              d={path.primaryLine}
+              className={TONE[tone]}
+              fill="none"
+              strokeWidth={1.4}
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
         </svg>
       ) : (
         <div

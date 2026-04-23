@@ -264,6 +264,20 @@ impl ServerMonitorProvider {
         // gets recycled. Best-effort: we don't fail registration if
         // any field is unreadable.
         let identity = collect_machine_identity(&target).await;
+        // Also snapshot CPU/GPU descriptors here so /web/servers can
+        // show "AMD EPYC 7763 · 128c · 8× NVIDIA RTX 4090" without
+        // re-polling on every render. Best-effort — if lscpu or
+        // nvidia-smi fails (e.g. headless CPU-only node) we just
+        // leave the fields None / empty.
+        let static_info = collect_info(&target).await.ok();
+        let (cpu_model, cpu_cores, gpu_models) = match &static_info {
+            Some(info) => (
+                Some(info.cpu_model.clone()),
+                Some(info.cpu_cores),
+                info.gpu_models.clone(),
+            ),
+            None => (None, None, Vec::new()),
+        };
         // Identity match logic:
         //   * BOTH machine_id AND dmi_uuid match an existing row
         //     (both non-null on each side) → auto-merge. Update the
@@ -364,6 +378,13 @@ impl ServerMonitorProvider {
                 dmi_uuid: identity.dmi_uuid.clone(),
                 dmi_serial: identity.dmi_serial.clone().or(prior.dmi_serial.clone()),
                 alias: new_alias,
+                cpu_model: cpu_model.clone().or(prior.cpu_model.clone()),
+                cpu_cores: cpu_cores.or(prior.cpu_cores),
+                gpus: if gpu_models.is_empty() {
+                    prior.gpus.clone()
+                } else {
+                    gpu_models.clone()
+                },
             };
             self.inventory
                 .upsert(updated.clone())
@@ -396,6 +417,9 @@ impl ServerMonitorProvider {
             dmi_uuid: identity.dmi_uuid.clone(),
             dmi_serial: identity.dmi_serial.clone(),
             alias: alias_input,
+            cpu_model: cpu_model.clone(),
+            cpu_cores,
+            gpus: gpu_models.clone(),
         };
         self.inventory
             .upsert(record.clone())
@@ -432,6 +456,9 @@ impl ServerMonitorProvider {
                     "created_at": h.created_at,
                     "last_ok_at": h.last_ok_at,
                     "machine_id": h.machine_id,
+                    "cpu_model": h.cpu_model,
+                    "cpu_cores": h.cpu_cores,
+                    "gpus": h.gpus,
                 })
             })
             .collect();
@@ -532,6 +559,31 @@ impl ServerMonitorProvider {
             if updated.machine_id != rec.machine_id
                 || updated.dmi_uuid != rec.dmi_uuid
                 || updated.dmi_serial != rec.dmi_serial
+            {
+                let _ = self.inventory.upsert(updated).await;
+            }
+        }
+        // Static hardware descriptors backfill: if the cached record
+        // doesn't have cpu/gpu names yet (pre-0.5.21 registration),
+        // grab them from the fresh info response and persist. The UI
+        // reads these off `server.list` so it never has to wait for a
+        // full info roundtrip just to render the card header.
+        let needs_hw_backfill =
+            rec.cpu_model.is_none() || rec.cpu_cores.is_none() || rec.gpus.is_empty();
+        if needs_hw_backfill {
+            let mut updated = rec.clone();
+            if updated.cpu_model.is_none() && !info.cpu_model.is_empty() {
+                updated.cpu_model = Some(info.cpu_model.clone());
+            }
+            if updated.cpu_cores.is_none() && info.cpu_cores > 0 {
+                updated.cpu_cores = Some(info.cpu_cores);
+            }
+            if updated.gpus.is_empty() && !info.gpu_models.is_empty() {
+                updated.gpus = info.gpu_models.clone();
+            }
+            if updated.cpu_model != rec.cpu_model
+                || updated.cpu_cores != rec.cpu_cores
+                || updated.gpus != rec.gpus
             {
                 let _ = self.inventory.upsert(updated).await;
             }

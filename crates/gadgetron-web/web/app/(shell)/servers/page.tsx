@@ -37,6 +37,9 @@ interface Host {
   last_ok_at: string | null;
   alias?: string | null;
   machine_id?: string | null;
+  cpu_model?: string | null;
+  cpu_cores?: number | null;
+  gpus?: string[] | null;
 }
 
 interface GpuStats {
@@ -151,6 +154,53 @@ function fmtUptime(secs: number | null): string {
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+/// Drops marketing fluff from lscpu model names so the card stays
+/// readable: "AMD EPYC 7763 64-Core Processor" → "AMD EPYC 7763",
+/// "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz" → "Intel Xeon Gold 6248R".
+/// The full name still lives in the tooltip.
+function shortenCpu(model: string): string {
+  return model
+    .replace(/\([Rr]\)/g, "")
+    .replace(/\([Tt][Mm]\)/g, "")
+    .replace(/\s+CPU\s+@.*$/i, "")
+    .replace(/\s+Processor$/i, "")
+    .replace(/\s+\d+-Core$/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/// Further trims a single GPU product name for the per-GPU card row
+/// where horizontal space is tight. Drops the "NVIDIA " / "GeForce "
+/// marketing prefixes, the "Server Edition" suffix, and the form-factor
+/// tail (SXM/PCIe) so "NVIDIA GeForce RTX 4090" → "RTX 4090" and
+/// "NVIDIA RTX PRO 6000 Blackwell Server Edition" → "RTX PRO 6000
+/// Blackwell". Keep the full string in tooltips — this is only for the
+/// visible row.
+function shortenGpuName(name: string): string {
+  return name
+    .replace(/^NVIDIA\s+/, "")
+    .replace(/^GeForce\s+/, "")
+    .replace(/\s+Server Edition$/, "")
+    .replace(/\s+(SXM[0-9]?|PCIe)$/i, "")
+    .trim();
+}
+
+/// Collapses a list like ["NVIDIA RTX 4090", "NVIDIA RTX 4090", "NVIDIA RTX 4090"]
+/// into "3× NVIDIA RTX 4090"; mixed models render as "2× X + 1× Y".
+/// Also trims the redundant "NVIDIA " prefix when every entry shares it
+/// so the card reads "4× RTX 4090" in the common homogeneous case.
+function shortenGpuList(gpus: string[]): string {
+  if (gpus.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const g of gpus) counts.set(g, (counts.get(g) ?? 0) + 1);
+  const allNvidia = [...counts.keys()].every((k) => k.startsWith("NVIDIA "));
+  const parts = [...counts.entries()].map(([name, n]) => {
+    const stripped = allNvidia ? name.replace(/^NVIDIA /, "") : name;
+    return n === 1 ? stripped : `${n}× ${stripped}`;
+  });
+  return parts.join(" + ");
+}
+
 /// Compact health badges surfaced next to the GPU label on the host
 /// card. Each badge maps to a DCGM signal that means "this GPU needs
 /// operator attention". Uses color intensity as the severity cue:
@@ -238,15 +288,24 @@ function ProgressBar({
           : tone === "red"
             ? "bg-red-500"
             : "bg-blue-500";
+  // Single-line layout: [label .......... bar ......... %]. Label can
+  // grow up to its natural width then truncate; the bar takes the
+  // remaining space via flex-1. `text-[10px]` matches every other
+  // label row on the card (GPU, VRAM, PSU, uptime) so type sizes no
+  // longer pop visually between sections.
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center justify-between text-[11px]">
-        <span className="text-zinc-400">{label}</span>
-        <span className="font-mono text-zinc-300">{clamped.toFixed(0)}%</span>
-      </div>
-      <div className="h-1.5 w-full overflow-hidden rounded bg-zinc-800">
+    <div className="flex items-center gap-2 text-[11px]">
+      {label && (
+        <span className="min-w-0 max-w-[60%] shrink-0 truncate font-mono font-semibold text-zinc-300">
+          {label}
+        </span>
+      )}
+      <div className="h-1.5 flex-1 overflow-hidden rounded bg-zinc-800">
         <div className={`h-full ${color}`} style={{ width: `${clamped}%` }} />
       </div>
+      <span className="w-8 shrink-0 text-right font-mono tabular-nums text-zinc-300">
+        {clamped.toFixed(0)}%
+      </span>
     </div>
   );
 }
@@ -811,6 +870,7 @@ function HostCard({
   const [draft, setDraft] = useState(host.alias ?? "");
   const [saving, setSaving] = useState(false);
   const [shellOpen, setShellOpen] = useState(false);
+  const [gpuExpanded, setGpuExpanded] = useState(false);
   useEffect(() => {
     setDraft(host.alias ?? "");
   }, [host.alias]);
@@ -848,9 +908,11 @@ function HostCard({
   // can actually render. CPU + Mem are always present; NIC is per-iface.
   const sparkMetrics = useMemo(() => {
     const m = ["cpu.util", "mem.used_bytes"];
-    const firstGpu = stats?.gpus?.[0];
-    if (firstGpu) {
-      m.push(`gpu.${firstGpu.index}.util`);
+    // Include every GPU so the stacked sparkline at the bottom shows
+    // the whole fleet on one chart (primary line = GPU 0, others
+    // overlaid at lower opacity).
+    for (const g of stats?.gpus ?? []) {
+      m.push(`gpu.${g.index}.util`);
     }
     const firstNic = stats?.network?.[0];
     if (firstNic) {
@@ -874,7 +936,7 @@ function HostCard({
   return (
     <div
       data-testid={`host-card-${host.host}`}
-      className="group/card flex flex-col gap-2 rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
+      className="group/card flex h-[500px] flex-col gap-2 overflow-hidden rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
@@ -945,6 +1007,34 @@ function HostCard({
           <div className="truncate text-[10px] text-zinc-600">
             {host.ssh_user}@{host.host}:{host.ssh_port}
           </div>
+          {(host.cpu_model || (host.gpus && host.gpus.length > 0)) && (
+            <div
+              className="mt-0.5 truncate text-[10px] text-zinc-500"
+              title={[
+                host.cpu_model
+                  ? `CPU: ${host.cpu_model}${host.cpu_cores ? ` (${host.cpu_cores}c)` : ""}`
+                  : null,
+                host.gpus && host.gpus.length > 0
+                  ? `GPU: ${host.gpus.join(" / ")}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join("\n")}
+            >
+              {host.cpu_model && (
+                <span>
+                  {shortenCpu(host.cpu_model)}
+                  {host.cpu_cores ? ` · ${host.cpu_cores}c` : ""}
+                </span>
+              )}
+              {host.cpu_model && host.gpus && host.gpus.length > 0 && (
+                <span className="mx-1 text-zinc-700">·</span>
+              )}
+              {host.gpus && host.gpus.length > 0 && (
+                <span>{shortenGpuList(host.gpus)}</span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {findingsCount && (() => {
@@ -1015,7 +1105,10 @@ function HostCard({
         </div>
       )}
       {stats?.cpu && (
-        <ProgressBar pct={stats.cpu.util_pct} label={`CPU (${stats.cpu.cores} cores)`} />
+        <ProgressBar
+          pct={stats.cpu.util_pct}
+          label={`CPU${host.cpu_model ? ` ${shortenCpu(host.cpu_model)}` : ""} · ${stats.cpu.cores}c`}
+        />
       )}
       {stats?.mem && (
         <ProgressBar
@@ -1023,41 +1116,120 @@ function HostCard({
           label={`RAM ${fmtBytes(stats.mem.used_bytes)} / ${fmtBytes(stats.mem.total_bytes)}`}
         />
       )}
-      {stats?.gpus && stats.gpus.length > 0 && (
-        <div className="flex flex-col gap-1">
-          {stats.gpus.map((g) => (
-            <div key={g.index} className="flex flex-col gap-0.5">
-              <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                <span className="flex items-center gap-1.5 truncate font-mono" title={g.name}>
-                  <span className="truncate">GPU {g.index} · {g.source}</span>
-                  <GpuHealthBadges gpu={g} />
-                </span>
-                <span className="font-mono text-zinc-300">
-                  {g.temp_c != null ? `${g.temp_c}°C` : ""}
-                  {g.mem_temp_c != null
-                    ? ` · mem ${Math.round(g.mem_temp_c)}°C`
-                    : ""}
-                  {g.power_w != null ? ` · ${g.power_w.toFixed(0)}W` : ""}
-                </span>
+      {stats?.gpus && stats.gpus.length > 0 && (() => {
+        const gpus = stats.gpus;
+        const utils = gpus
+          .map((g) => g.util_pct)
+          .filter((u): u is number => u != null);
+        const avgUtil =
+          utils.length > 0 ? utils.reduce((a, b) => a + b, 0) / utils.length : 0;
+        const hottest = gpus
+          .map((g) => g.temp_c)
+          .filter((t): t is number => t != null)
+          .reduce((m, v) => (v > m ? v : m), -Infinity);
+        const totalW = gpus
+          .map((g) => g.power_w)
+          .filter((p): p is number => p != null)
+          .reduce((a, b) => a + b, 0);
+        const headerBits: string[] = [];
+        if (Number.isFinite(hottest)) headerBits.push(`${hottest.toFixed(0)}°C`);
+        if (totalW > 0) headerBits.push(`${totalW.toFixed(0)}W`);
+        return (
+          <div className="flex min-h-0 shrink-0 flex-col gap-1">
+            {/* Summary row — always visible. Click to toggle the per-GPU
+             * detail block. Collapsed view shows the GPU fleet average
+             * + max temp + total wattage, so the card tells you "are
+             * my GPUs working?" without expanding. */}
+            <button
+              type="button"
+              onClick={() => setGpuExpanded((v) => !v)}
+              className="flex items-center gap-2 text-[11px] text-zinc-400 hover:text-zinc-200"
+            >
+              {/* Label column — left-aligned, same visual column as the
+               * CPU / RAM ProgressBar labels. Arrow moved to the right
+               * edge so the "GPU" text lines up with "CPU" and "RAM"
+               * across the card. Bold + zinc-300 matches ProgressBar. */}
+              <span className="min-w-0 flex-1 truncate text-left font-mono font-semibold text-zinc-300">
+                GPU × {gpus.length}
+                {gpus.length > 0 && gpus[0].name
+                  ? ` — ${shortenGpuName(gpus[0].name)}`
+                  : ""}
+              </span>
+              <span className="shrink-0 truncate font-mono text-zinc-300">
+                {headerBits.join(" · ")}
+              </span>
+              <span
+                aria-hidden
+                className="w-3 shrink-0 text-center font-mono text-zinc-500"
+              >
+                {gpuExpanded ? "▾" : "▸"}
+              </span>
+            </button>
+            <ProgressBar pct={avgUtil} label="" tone="amber" />
+            {gpuExpanded && (
+              <div className="mt-1 flex max-h-[150px] flex-col gap-1 overflow-y-auto border-t border-zinc-800/60 pt-1 pr-1">
+                {gpus.map((g) => {
+                  const tempPowerBits: string[] = [];
+                  if (g.temp_c != null) tempPowerBits.push(`${g.temp_c}°C`);
+                  if (g.mem_temp_c != null) {
+                    tempPowerBits.push(`mem ${Math.round(g.mem_temp_c)}°C`);
+                  }
+                  if (g.power_w != null)
+                    tempPowerBits.push(`${g.power_w.toFixed(0)}W`);
+                  const hasVram =
+                    g.mem_used_mib != null && g.mem_total_mib != null;
+                  return (
+                    <div key={g.index} className="flex flex-col gap-0.5">
+                      <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                        <span
+                          className="flex items-center gap-1.5 truncate font-mono"
+                          title={`${g.name} (source: ${g.source})`}
+                        >
+                          <span className="truncate">
+                            GPU {g.index}
+                            {(() => {
+                              const n = (g.name ?? "").trim();
+                              if (!n) return "";
+                              if (/^GPU\s*\d+$/i.test(n)) return "";
+                              return ` — ${shortenGpuName(n)}`;
+                            })()}
+                          </span>
+                          <GpuHealthBadges gpu={g} />
+                        </span>
+                        <span className="truncate font-mono text-zinc-300">
+                          {tempPowerBits.join(" · ")}
+                        </span>
+                      </div>
+                      {hasVram && (
+                        <div className="flex items-center justify-between text-[11px] text-zinc-500">
+                          <span>VRAM</span>
+                          <span className="font-mono text-zinc-300">
+                            {(g.mem_used_mib! / 1024).toFixed(1)} /{" "}
+                            {(g.mem_total_mib! / 1024).toFixed(0)} GiB
+                            {" · "}
+                            {(
+                              (g.mem_used_mib! / g.mem_total_mib!) *
+                              100
+                            ).toFixed(0)}
+                            %
+                          </span>
+                        </div>
+                      )}
+                      {g.util_pct != null && (
+                        <ProgressBar
+                          pct={g.util_pct}
+                          label=""
+                          tone="amber"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-              {g.util_pct != null && (
-                <ProgressBar pct={g.util_pct} label={g.name} tone="amber" />
-              )}
-              {g.mem_used_mib != null && g.mem_total_mib != null && (
-                <div className="flex items-center justify-between text-[10px] text-zinc-500">
-                  <span>VRAM</span>
-                  <span className="font-mono text-zinc-300">
-                    {(g.mem_used_mib / 1024).toFixed(1)} /{" "}
-                    {(g.mem_total_mib / 1024).toFixed(0)} GiB
-                    {" · "}
-                    {((g.mem_used_mib / g.mem_total_mib) * 100).toFixed(0)}%
-                  </span>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+            )}
+          </div>
+        );
+      })()}
       {stats?.power?.psu_watts != null && (
         <div className="flex items-center justify-between text-[10px] text-zinc-500">
           <span>PSU</span>
@@ -1080,7 +1252,7 @@ function HostCard({
       )}
       {sparkMetrics.length > 0 && (
         <div
-          className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-zinc-800 pt-2"
+          className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t border-zinc-800 pt-2"
           data-testid="host-sparklines"
         >
           <Sparkline
@@ -1109,16 +1281,34 @@ function HostCard({
             yMin={0}
             yMax={stats?.mem ? 100 : undefined}
           />
-          {stats?.gpus?.[0] && (
-            <Sparkline
-              label={`gpu${stats.gpus[0].index} util (5m)`}
-              current={gpu0Pct}
-              points={history[`gpu.${stats.gpus[0].index}.util`] ?? []}
-              tone="amber"
-              yMin={0}
-              yMax={100}
-            />
-          )}
+          {stats?.gpus && stats.gpus.length > 0 && (() => {
+            const gpus = stats.gpus;
+            // Primary line = GPU 0, all other GPUs overlaid at lower
+            // opacity so a 4× fleet reads as one chart rather than four
+            // duplicate panels.
+            const primaryPts = history[`gpu.${gpus[0].index}.util`] ?? [];
+            const extraSeries = gpus
+              .slice(1)
+              .map((g) => history[`gpu.${g.index}.util`] ?? []);
+            const currentVals = gpus
+              .map((g) =>
+                g.util_pct != null ? g.util_pct.toFixed(0) : "—",
+              )
+              .join("/");
+            const labelSuffix =
+              gpus.length > 1 ? ` × ${gpus.length}` : "";
+            return (
+              <Sparkline
+                label={`gpu util${labelSuffix} (5m)`}
+                current={`${currentVals}%`}
+                points={primaryPts}
+                series={extraSeries}
+                tone="amber"
+                yMin={0}
+                yMax={100}
+              />
+            );
+          })()}
           {nic0 && (
             <Sparkline
               label={`nic ${nic0.iface} rx (5m)`}

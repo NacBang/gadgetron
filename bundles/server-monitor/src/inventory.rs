@@ -77,6 +77,18 @@ pub struct HostRecord {
     /// the gadget caps length and rejects control characters.
     #[serde(default)]
     pub alias: Option<String>,
+    /// Static hardware descriptors captured at register / first-info
+    /// time. These don't change at runtime, so we cache them on the
+    /// inventory record and surface in `server.list` instead of
+    /// re-polling every 1 Hz tick. `cpu_model` / `cpu_cores` come
+    /// from `lscpu`; `gpus` is a compact list of GPU product names
+    /// (e.g. `"NVIDIA RTX 4090"`) from `nvidia-smi --query-gpu=name`.
+    #[serde(default)]
+    pub cpu_model: Option<String>,
+    #[serde(default)]
+    pub cpu_cores: Option<u32>,
+    #[serde(default)]
+    pub gpus: Vec<String>,
 }
 
 fn default_ssh_port() -> u16 {
@@ -276,6 +288,9 @@ mod tests {
             dmi_uuid: None,
             dmi_serial: None,
             alias: None,
+            cpu_model: None,
+            cpu_cores: None,
+            gpus: Vec::new(),
         }
     }
 
