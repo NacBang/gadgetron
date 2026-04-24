@@ -662,42 +662,17 @@ export function HostDetailDrawer({
                   data-testid={`detail-chart-${g.id}`}
                   className="rounded border border-zinc-800 bg-zinc-900 p-3"
                 >
-                  <div className="mb-2 flex items-center justify-between text-[11px]">
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono text-zinc-300">{g.label}</span>
-                      {g.series.length > 1 && (
-                        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          {g.series.map((s) => {
-                            const hidden = hiddenSeries.has(s.metric);
-                            return (
-                              <button
-                                key={s.metric}
-                                type="button"
-                                onClick={() => toggleSeries(s.metric)}
-                                aria-pressed={!hidden}
-                                data-testid={`series-toggle-${s.metric}`}
-                                className={`flex items-center gap-1 rounded px-1 ${
-                                  hidden
-                                    ? "text-zinc-600 line-through"
-                                    : "text-zinc-400 hover:text-zinc-200"
-                                }`}
-                                title={hidden ? "Click to show" : "Click to hide"}
-                              >
-                                <span
-                                  className="inline-block size-2 rounded-sm"
-                                  style={{
-                                    background: hidden ? "transparent" : s.tone,
-                                    border: `1px solid ${s.tone}`,
-                                  }}
-                                  aria-hidden
-                                />
-                                {s.label}
-                              </button>
-                            );
-                          })}
-                        </span>
-                      )}
-                    </div>
+                  {/* Title + meta on one row. Series toggles go on a
+                    * SEPARATE row below when there's more than one
+                    * series — otherwise the meta text on the right
+                    * (which changes width every poll as `pts`/`lag`
+                    * update) fights for horizontal space with the
+                    * flex-wrap toggle pills and visibly oscillates
+                    * the chip row between 1 and 2 lines when there
+                    * are many GPUs. Separating the rows kills that
+                    * layout thrash. */}
+                  <div className="mb-1 flex items-center justify-between text-[11px]">
+                    <span className="font-mono text-zinc-300">{g.label}</span>
                     <span className="text-zinc-600">
                       {hasAnyData && metaResolution
                         ? `${data.length} pts · ${metaResolution}${
@@ -706,6 +681,38 @@ export function HostDetailDrawer({
                         : "loading…"}
                     </span>
                   </div>
+                  {g.series.length > 1 && (
+                    <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                      {g.series.map((s) => {
+                        const hidden = hiddenSeries.has(s.metric);
+                        return (
+                          <button
+                            key={s.metric}
+                            type="button"
+                            onClick={() => toggleSeries(s.metric)}
+                            aria-pressed={!hidden}
+                            data-testid={`series-toggle-${s.metric}`}
+                            className={`flex items-center gap-1 rounded px-1 ${
+                              hidden
+                                ? "text-zinc-600 line-through"
+                                : "text-zinc-400 hover:text-zinc-200"
+                            }`}
+                            title={hidden ? "Click to show" : "Click to hide"}
+                          >
+                            <span
+                              className="inline-block size-2 rounded-sm"
+                              style={{
+                                background: hidden ? "transparent" : s.tone,
+                                border: `1px solid ${s.tone}`,
+                              }}
+                              aria-hidden
+                            />
+                            {s.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <div style={{ width: "100%", height: 160 }}>
                     <ResponsiveContainer>
                       <ComposedChart
