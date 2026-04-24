@@ -56,9 +56,14 @@ pub async fn create_conversation(
 }
 
 /// Called on every chat turn. Ensures a row exists for this
-/// (user, conversation_id) pair and updates `title` on the first turn
-/// (when the existing title is still the default "New chat") using a
-/// truncated form of the first user message.
+/// (user, conversation_id) pair, bumps `turn_count`, and seeds `title`
+/// on the very first turn (when the existing title is still the
+/// default "New chat") using a truncated form of the first user
+/// message. Later turns don't touch the title — the Penny-powered
+/// summarizer in `summarize_title_if_due` rolls it forward.
+///
+/// Returns `(turn_count, summary_turn_at)` so the caller can decide
+/// whether to kick off an async summary refresh.
 pub async fn upsert_turn(
     pool: &PgPool,
     conversation_id: Uuid,
@@ -66,26 +71,52 @@ pub async fn upsert_turn(
     user_id: Uuid,
     claude_session_uuid: Option<Uuid>,
     first_user_message: &str,
-) -> Result<(), ConversationError> {
+) -> Result<(i32, i32), ConversationError> {
     let title_candidate = summarize_message(first_user_message);
-    // Insert if missing, otherwise touch updated_at and claude_session_uuid.
-    // The title is only overwritten if it still equals the default seed
-    // "New chat" — once a real title exists, subsequent turns don't
-    // clobber it.
-    sqlx::query(
-        "INSERT INTO conversations (id, tenant_id, user_id, title, claude_session_uuid) \
-         VALUES ($1, $2, $3, $4, $5) \
+    let row: (i32, i32) = sqlx::query_as(
+        "INSERT INTO conversations \
+             (id, tenant_id, user_id, title, claude_session_uuid, turn_count, summary_turn_at) \
+         VALUES ($1, $2, $3, $4, $5, 1, 0) \
          ON CONFLICT (id) DO UPDATE SET \
             updated_at = now(), \
             title = CASE WHEN conversations.title = 'New chat' AND LENGTH(EXCLUDED.title) > 0 \
                          THEN EXCLUDED.title ELSE conversations.title END, \
-            claude_session_uuid = COALESCE(EXCLUDED.claude_session_uuid, conversations.claude_session_uuid)",
+            claude_session_uuid = COALESCE(EXCLUDED.claude_session_uuid, conversations.claude_session_uuid), \
+            turn_count = conversations.turn_count + 1 \
+         RETURNING turn_count, summary_turn_at",
     )
     .bind(conversation_id)
     .bind(tenant_id)
     .bind(user_id)
     .bind(&title_candidate)
     .bind(claude_session_uuid)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Apply a Penny-generated summary as the conversation's new title.
+/// Writes both the title and a marker (`summary_turn_at = turn_count`
+/// at the moment of submission) so the next regen trigger knows how
+/// much the conversation has grown since.
+pub async fn set_rolling_summary(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    new_title: &str,
+    turn_count_at_summary: i32,
+) -> Result<(), ConversationError> {
+    let clean = new_title.trim();
+    if clean.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE conversations \
+         SET title = $2, summary_turn_at = $3, updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(conversation_id)
+    .bind(clean)
+    .bind(turn_count_at_summary)
     .execute(pool)
     .await?;
     Ok(())
