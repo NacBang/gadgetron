@@ -104,6 +104,17 @@ impl ApprovalStore for InMemoryApprovalStore {
         entry.deny_reason = reason;
         Ok(entry.clone())
     }
+
+    async fn list_pending(&self, tenant_id: Uuid) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+        let map = self.lock()?;
+        let mut out: Vec<ApprovalRequest> = map
+            .values()
+            .filter(|r| r.tenant_id == tenant_id && r.state == ApprovalState::Pending)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

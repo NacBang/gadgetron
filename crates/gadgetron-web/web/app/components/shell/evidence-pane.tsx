@@ -132,6 +132,63 @@ function useActionsFeed(apiKey: string | null): PendingAction[] {
   return actions;
 }
 
+// -----------------------------------------------------------------
+// Pending approvals (distinct from finding remediations — these are
+// Penny / workbench calls sitting at the `pending_approval` stage of
+// the action lifecycle, waiting for an operator click).
+// -----------------------------------------------------------------
+
+interface PendingApproval {
+  id: string;
+  actionId: string;
+  gadgetName: string | null;
+  args: unknown;
+  createdAt: string;
+}
+
+function usePendingApprovalsFeed(apiKey: string | null): PendingApproval[] {
+  const [items, setItems] = useState<PendingApproval[]>([]);
+  useEffect(() => {
+    let cancel = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const fetchOnce = async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/workbench/approvals/pending`, {
+          credentials: "include",
+          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          approvals?: Array<{
+            id: string;
+            action_id: string;
+            gadget_name: string | null;
+            args: unknown;
+            created_at: string;
+          }>;
+        };
+        const next: PendingApproval[] = (body.approvals ?? []).map((r) => ({
+          id: r.id,
+          actionId: r.action_id,
+          gadgetName: r.gadget_name,
+          args: r.args,
+          createdAt: r.created_at,
+        }));
+        if (!cancel) setItems(next);
+      } catch {
+        // keep existing on transient fail
+      }
+    };
+    void fetchOnce();
+    timer = setInterval(fetchOnce, 5_000);
+    return () => {
+      cancel = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [apiKey]);
+  return items;
+}
+
 function severityTint(s: PendingAction["severity"]): string {
   switch (s) {
     case "critical":
@@ -147,6 +204,43 @@ function severityTint(s: PendingAction["severity"]): string {
 
 function ActionsTab({ apiKey }: { apiKey: string | null }) {
   const actions = useActionsFeed(apiKey);
+  const approvals = usePendingApprovalsFeed(apiKey);
+  const decide = useCallback(
+    async (approvalId: string, approve: boolean, reason?: string) => {
+      const verb = approve ? "approve" : "deny";
+      if (
+        !window.confirm(
+          approve
+            ? "이 대기 중인 조치를 승인하시겠습니까?"
+            : "이 대기 중인 조치를 거부하시겠습니까?",
+        )
+      )
+        return;
+      try {
+        const res = await fetch(
+          `${getApiBase()}/workbench/approvals/${approvalId}/${verb}`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+              "Content-Type": "application/json",
+            },
+            body: approve
+              ? "{}"
+              : JSON.stringify({ reason: reason ?? "" }),
+          },
+        );
+        if (!res.ok) {
+          const body = await res.text();
+          alert(`${verb} 실패: ${res.status} ${body.slice(0, 200)}`);
+        }
+      } catch (e) {
+        alert(`${verb} 실패: ${(e as Error).message}`);
+      }
+    },
+    [apiKey],
+  );
   const run = useCallback(
     async (a: PendingAction) => {
       const label =
@@ -185,7 +279,7 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
     [apiKey],
   );
 
-  if (actions.length === 0) {
+  if (actions.length === 0 && approvals.length === 0) {
     return (
       <div
         className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center"
@@ -203,9 +297,55 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
   }
   return (
     <ol className="flex-1 overflow-y-auto" data-testid="actions-list">
+      {approvals.map((a) => (
+        <li
+          key={`approval-${a.id}`}
+          className="border-b border-purple-900/50 bg-purple-950/20 px-3 py-2 text-[11px] text-purple-100"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate font-mono text-purple-200">
+              ⏳ {a.actionId}
+            </span>
+            <span className="shrink-0 rounded bg-purple-900/40 px-1 text-[9px] uppercase text-purple-200">
+              pending
+            </span>
+          </div>
+          {a.gadgetName && (
+            <div className="mt-0.5 truncate font-mono text-[10px] text-purple-300">
+              → {a.gadgetName}
+            </div>
+          )}
+          <div className="mt-1 flex items-center gap-2">
+            <code
+              className="flex-1 truncate rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-purple-200"
+              title={JSON.stringify(a.args)}
+            >
+              {typeof a.args === "object" && a.args
+                ? JSON.stringify(a.args).slice(0, 80)
+                : "()"}
+            </code>
+            <button
+              type="button"
+              onClick={() => void decide(a.id, true)}
+              className="shrink-0 rounded border border-emerald-700 bg-emerald-950/40 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-200 hover:border-emerald-500 hover:bg-emerald-900/60"
+              title="승인"
+            >
+              ⚡ 승인
+            </button>
+            <button
+              type="button"
+              onClick={() => void decide(a.id, false)}
+              className="shrink-0 rounded border border-red-800 bg-red-950/30 px-2 py-0.5 font-mono text-[10px] font-semibold text-red-200 hover:border-red-500 hover:bg-red-900/40"
+              title="거부"
+            >
+              ✕ 거부
+            </button>
+          </div>
+        </li>
+      ))}
       {actions.map((a) => (
         <li
-          key={a.findingId}
+          key={`action-${a.findingId}`}
           className={`border-b border-zinc-900 px-3 py-2 text-[11px] ${severityTint(a.severity)}`}
         >
           <div className="flex items-center justify-between gap-2">
@@ -401,11 +541,13 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
   const [tab, setTab] = useState<TabId>("actions");
 
   const actionsBadge = useActionsFeed(apiKey);
+  const approvalsBadge = usePendingApprovalsFeed(apiKey);
+  const pendingCount = actionsBadge.length + approvalsBadge.length;
   const sourcesBadge = useMemo(
     () => items.filter((i) => isKnowledgeKind(i.name)).length,
     [items],
   );
-  const totalBadge = actionsBadge.length + sourcesBadge;
+  const totalBadge = pendingCount + sourcesBadge;
 
   if (!open) {
     return (
@@ -430,16 +572,16 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
         >
           <PanelRight className="size-3.5" aria-hidden />
         </button>
-        {actionsBadge.length > 0 && (
+        {pendingCount > 0 && (
           <span
             data-testid="evidence-pane-badge"
             className="rounded bg-blue-900/50 px-1 font-mono text-[9px] text-blue-300"
-            title={`${actionsBadge.length} 대기 조치`}
+            title={`${pendingCount} 대기 조치`}
           >
-            ⚡{actionsBadge.length}
+            ⚡{pendingCount}
           </span>
         )}
-        {sourcesBadge > 0 && actionsBadge.length === 0 && (
+        {sourcesBadge > 0 && pendingCount === 0 && (
           <span
             data-testid="evidence-pane-badge-sources"
             className="rounded bg-zinc-800 px-1 font-mono text-[9px] text-zinc-400"
@@ -465,7 +607,7 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
           active={tab === "actions"}
           onClick={() => setTab("actions")}
           label="Actions"
-          count={actionsBadge.length}
+          count={pendingCount}
           icon={<Zap className="size-3" aria-hidden />}
         />
         <TabButton

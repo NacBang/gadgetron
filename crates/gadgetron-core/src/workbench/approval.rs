@@ -170,6 +170,11 @@ pub trait ApprovalStore: Send + Sync + 'static {
         approver: &AuthenticatedContext,
         reason: Option<String>,
     ) -> Result<ApprovalRequest, ApprovalError>;
+    /// List pending requests scoped to one tenant, newest first. Used by
+    /// the Side Panel → Actions tab so operators can see the approval
+    /// queue without hunting through chat history. Empty vec when nothing
+    /// is pending or the tenant owns no requests.
+    async fn list_pending(&self, tenant_id: Uuid) -> Result<Vec<ApprovalRequest>, ApprovalError>;
 }
 
 #[cfg(test)]

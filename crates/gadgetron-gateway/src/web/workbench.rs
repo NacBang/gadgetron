@@ -477,6 +477,28 @@ pub async fn list_actions(
     Ok(Json(resp))
 }
 
+/// `GET /approvals/pending` — list pending approvals for the caller's
+/// tenant, newest first. Powers the Side Panel → Actions tab so
+/// operators can see and resolve the queue without walking chat.
+pub async fn list_pending_approvals(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let store = svc.approval_store.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "approval store is not wired in this build".into(),
+        ))
+    })?;
+    let rows = store
+        .list_pending(ctx.tenant_id)
+        .await
+        .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Provider(e.to_string())))?;
+    Ok(Json(
+        serde_json::json!({ "approvals": rows, "count": rows.len() }),
+    ))
+}
+
 /// `POST /approvals/:approval_id/approve` — resolve a `pending_approval`
 /// into an `ok` dispatch.
 ///
@@ -1923,6 +1945,7 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/actions", get(list_actions))
         .route("/actions/{action_id}", post(invoke_action))
         // ISSUE 3 TASK 3.3 — real approval flow.
+        .route("/approvals/pending", get(list_pending_approvals))
         .route("/approvals/{approval_id}/approve", post(approve_action))
         .route("/approvals/{approval_id}/deny", post(deny_action))
         // ISSUE 3 TASK 3.4 — tenant-scoped audit event query.

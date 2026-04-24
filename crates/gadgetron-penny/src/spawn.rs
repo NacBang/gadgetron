@@ -342,6 +342,14 @@ pub const PENNY_DISALLOWED_TOOLS: &[&str] = &[
     "ToolSearch", // MCP tools are pre-loaded; ToolSearch searches deferred built-ins and misleads the model
     "TodoWrite",  // internal task tracking chatter leaks to UI
     "NotebookEdit",
+    // Claude Code's interactive prompt — the model invokes it to ask
+    // the operator a multiple-choice question and blocks for the
+    // answer. Gadgetron's chat UI has no renderer for the dialog, so
+    // the call just emits a "no answer" tool-result while the user
+    // sees nothing. Block it so the model falls back to asking
+    // clarifying questions as regular text — which is the right
+    // pattern for a chat agent anyway.
+    "AskUserQuestion",
     // --- local-host mutation bypass ---
     // `Bash` runs commands on the gadgetron host; without it on this
     // list Penny can install packages / edit files / read secrets on
