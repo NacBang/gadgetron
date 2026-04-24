@@ -816,35 +816,35 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
       style={{ width }}
       aria-label="Side panel"
     >
-      {/* Tab row + controls */}
-      <div className="flex h-9 shrink-0 items-center border-b border-zinc-800 px-1">
+      {/* Tab row + controls — icon-only so the narrow panel isn't dominated by labels */}
+      <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-zinc-800 px-1">
         <TabButton
           active={tab === "actions"}
           onClick={() => setTab("actions")}
           label="Actions"
           count={pendingCount}
-          icon={<Zap className="size-3" aria-hidden />}
+          icon={<Zap className="size-3.5" aria-hidden />}
         />
         <TabButton
           active={tab === "sources"}
           onClick={() => setTab("sources")}
           label="Sources"
           count={sourcesBadge}
-          icon={<BookOpen className="size-3" aria-hidden />}
+          icon={<BookOpen className="size-3.5" aria-hidden />}
         />
         <TabButton
           active={tab === "activity"}
           onClick={() => setTab("activity")}
           label="Activity"
           count={items.length}
-          icon={<Activity className="size-3" aria-hidden />}
+          icon={<Activity className="size-3.5" aria-hidden />}
         />
         <TabButton
           active={tab === "settings"}
           onClick={() => setTab("settings")}
           label="Settings"
           count={0}
-          icon={<SettingsIcon className="size-3" aria-hidden />}
+          icon={<SettingsIcon className="size-3.5" aria-hidden />}
         />
         <div className="ml-auto flex items-center gap-1 pr-1">
           <span
@@ -923,21 +923,22 @@ function TabButton({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+      aria-label={label}
+      title={count > 0 ? `${label} (${count})` : label}
+      className={`relative flex size-7 shrink-0 items-center justify-center rounded transition-colors ${
         active
           ? "bg-zinc-800 text-zinc-100"
           : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
       }`}
     >
       {icon}
-      <span>{label}</span>
       {count > 0 && (
         <span
-          className={`ml-0.5 rounded px-1 font-mono text-[9px] ${
-            active ? "bg-zinc-900 text-zinc-300" : "bg-zinc-900 text-zinc-500"
+          className={`absolute -right-0.5 -top-0.5 min-w-[14px] rounded-full px-1 font-mono text-[9px] leading-[14px] tabular-nums ${
+            active ? "bg-blue-700 text-white" : "bg-blue-900/70 text-blue-100"
           }`}
         >
-          {count}
+          {count > 99 ? "99+" : count}
         </span>
       )}
     </button>
