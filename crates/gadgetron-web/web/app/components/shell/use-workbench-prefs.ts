@@ -26,7 +26,11 @@ const DEFAULT_PREFS: WorkbenchPrefs = {
   density: "comfortable",
   rightPane: "evidence",
   leftRailCollapsed: false,
-  evidencePaneOpen: true,
+  // Default collapsed. The pane mostly surfaces read-tier tool-call
+  // noise and sits empty otherwise — users who want the live feed can
+  // reopen it via the collapsed-column button; localStorage remembers
+  // per-user. Future UX revamp (Action Center) tracked in Task #57.
+  evidencePaneOpen: false,
   evidencePaneWidth: 320,
   leftRailWidth: 240,
   showReasoning: false,

@@ -882,9 +882,31 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
     const convId =
       window.localStorage.getItem("gadgetron_conversation_id") ?? "default";
     const storageKey = `gadgetron_draft_${convId}`;
+    const pendingSubmitKey = `gadgetron_pending_submit_${convId}`;
     const saved = window.localStorage.getItem(storageKey);
     if (saved && !composer.getState().text) {
       composer.setText(saved);
+    }
+    // Deep-link entry point: when another page (e.g. the Logs tab
+    // "💬 Penny와 상의" button) minted this conversation + seeded a
+    // draft AND set the pending_submit flag, auto-fire the send so
+    // the operator doesn't have to hit Enter again. Clear both
+    // markers so a reload doesn't re-submit forever.
+    if (
+      saved &&
+      window.localStorage.getItem(pendingSubmitKey) === "1"
+    ) {
+      window.localStorage.removeItem(pendingSubmitKey);
+      // One tick delay so the composer has rendered its current text
+      // + the runtime has finished spinning up.
+      setTimeout(() => {
+        try {
+          composer.send();
+        } catch {
+          // If send throws (unlikely) the draft is still there for
+          // the operator to submit manually.
+        }
+      }, 60);
     }
     const unsub = composer.subscribe(() => {
       const t = composer.getState().text;
