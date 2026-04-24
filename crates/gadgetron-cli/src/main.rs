@@ -1878,6 +1878,7 @@ fn build_workbench(
     bundle_signing: gadgetron_core::config::BundleSigningConfig,
     billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
     approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore>,
+    agent_config: Arc<gadgetron_core::agent::AgentConfig>,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
     use gadgetron_core::agent::tools::GadgetDispatcher;
     use gadgetron_core::audit::{ActionAuditSink, NoopActionAuditSink};
@@ -1905,6 +1906,9 @@ fn build_workbench(
         descriptor_catalog: catalog.clone(),
     });
 
+    let gadget_mode_reconfigurer: Option<
+        Arc<dyn gadgetron_core::agent::tools::GadgetModeReconfigurer>,
+    > = penny_registry.clone().map(|r| r as _);
     let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> =
         penny_registry.map(|r| r as Arc<dyn GadgetDispatcher>);
 
@@ -1953,6 +1957,9 @@ fn build_workbench(
         None => Arc::new(action_svc_impl.with_billing_failures(billing_failures)),
     };
 
+    let gadget_modes = Some(Arc::new(arc_swap::ArcSwap::new(Arc::new(
+        agent_config.gadgets.clone(),
+    ))));
     let svc = Arc::new(GatewayWorkbenchService {
         projection,
         actions: Some(action_svc),
@@ -1961,6 +1968,9 @@ fn build_workbench(
         catalog_path,
         bundles_dir,
         bundle_signing,
+        gadget_modes,
+        gadget_mode_reconfigurer,
+        agent_config_base: Some(agent_config),
     });
     // Prime the catalog from `[web] bundles_dir` / `catalog_path` at
     // startup so the operator doesn't have to SIGHUP / hit
@@ -2263,6 +2273,8 @@ async fn init_serve_runtime(
     )?;
     let llm_router = build_llm_router(providers_for_router, config);
 
+    let agent_config = Arc::new(config.agent.clone());
+
     let workbench = build_workbench(
         knowledge_service.clone(),
         candidate_coordinator.clone(),
@@ -2273,9 +2285,8 @@ async fn init_serve_runtime(
         config.web.bundle_signing.clone(),
         Arc::clone(&billing_failures_for_enforcer),
         approval_store.clone(),
+        agent_config.clone(),
     );
-
-    let agent_config = Arc::new(config.agent.clone());
 
     let (penny_shared_surface, penny_assembler) =
         match (&workbench, &activity_capture_store, &candidate_coordinator) {
@@ -4359,6 +4370,7 @@ wiki_max_page_bytes = 1048576
             std::sync::Arc::new(
                 gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
             ),
+            std::sync::Arc::new(gadgetron_core::agent::AgentConfig::default()),
         );
         assert!(
             workbench.is_some(),
@@ -4473,6 +4485,7 @@ wiki_max_page_bytes = 1048576
             std::sync::Arc::new(
                 gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
             ),
+            std::sync::Arc::new(gadgetron_core::agent::AgentConfig::default()),
         );
         assert!(
             workbench.is_some(),

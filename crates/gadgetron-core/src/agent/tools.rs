@@ -83,6 +83,26 @@ pub trait GadgetCatalog: Send + Sync + 'static {
     fn all_schemas(&self) -> Vec<GadgetSchema>;
 }
 
+/// Runtime-mutation seam for the operator-config gate inside a
+/// `GadgetRegistry`. The Side Panel → Tool Modes editor flips a bucket
+/// (e.g. `server_admin`) from `Auto`→`Ask`; the `PATCH
+/// /workbench/agent/modes` handler rebuilds `allowed_names` +
+/// `ask_names` from the schemas against the new `AgentConfig` without
+/// restarting the server.
+///
+/// The handler lives in the gateway, which cannot depend on
+/// `gadgetron-penny` (crate-layering invariant — see `GadgetDispatcher`
+/// and `GadgetCatalog` above). This trait is the gateway-side seam.
+///
+/// Concrete impl: `gadgetron_penny::GadgetRegistry::reconfigure`.
+pub trait GadgetModeReconfigurer: Send + Sync + 'static {
+    /// Rebuild the allowed-names / ask-names derivation from the
+    /// schemas against `cfg` and atomically swap in the new sets.
+    /// Does NOT restart running subprocesses — the new config takes
+    /// effect on the next dispatch and the next subprocess respawn.
+    fn reconfigure(&self, cfg: &crate::agent::AgentConfig);
+}
+
 /// Stable Bundle-facing interface for Gadget suppliers.
 ///
 /// Each provider bundles a set of related Gadgets under a namespace (category).

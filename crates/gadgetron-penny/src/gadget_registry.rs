@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use gadgetron_core::agent::config::{AgentConfig, GadgetMode};
 use gadgetron_core::agent::tools::{
     ensure_tool_name_allowed, GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
@@ -166,8 +167,8 @@ impl GadgetRegistryBuilder {
         GadgetRegistry {
             by_tool_name,
             all_schemas: Arc::from(all_schemas.into_boxed_slice()),
-            allowed_names: Arc::new(allowed_names),
-            ask_names: Arc::new(ask_names),
+            allowed_names: Arc::new(ArcSwap::new(Arc::new(allowed_names))),
+            ask_names: Arc::new(ArcSwap::new(Arc::new(ask_names))),
             tool_metadata: Arc::new(tool_metadata),
             approval_store,
         }
@@ -180,21 +181,25 @@ impl Default for GadgetRegistryBuilder {
     }
 }
 
-/// Immutable dispatch table. Cheap to clone (internal `Arc`s).
+/// Dispatch table. Cheap to clone (internal `Arc`s). The operator-
+/// allowed / Ask-mode sets live behind `ArcSwap`, so a runtime
+/// config update (Side Panel → Tool Modes) can atomically swap in a
+/// new allowlist without stopping the server.
 #[derive(Clone)]
 pub struct GadgetRegistry {
     by_tool_name: HashMap<String, Arc<dyn GadgetProvider>>,
     all_schemas: Arc<[GadgetSchema]>,
     /// Precomputed set of tool names whose tier × mode resolves to
-    /// "operator-allowed" under the config passed to `freeze()`. Used
-    /// by `dispatch()` for L3 defense-in-depth. Tools NOT in this set
+    /// "operator-allowed" under the current config. Used by
+    /// `dispatch()` for L3 defense-in-depth. Tools NOT in this set
     /// are rejected with `GadgetError::Denied` before the provider is
-    /// invoked.
-    allowed_names: Arc<HashSet<String>>,
+    /// invoked. Replaced atomically by `reconfigure`.
+    allowed_names: Arc<ArcSwap<HashSet<String>>>,
     /// Tools whose mode resolves to `Ask`. Listed in `allowed_names`
     /// (so Penny sees them and can call them) but routed through the
-    /// `approval_store` before reaching the provider.
-    ask_names: Arc<HashSet<String>>,
+    /// `approval_store` before reaching the provider. Replaced
+    /// atomically by `reconfigure`.
+    ask_names: Arc<ArcSwap<HashSet<String>>>,
     /// Denormalized `(tier, category)` per tool name. Used by the
     /// Penny audit emitter in `session.rs::drive` to fill
     /// `ToolCallCompleted` events without walking the provider list
@@ -260,13 +265,43 @@ impl GadgetRegistry {
     /// gate at freeze time. Tests + metrics use this to introspect the
     /// L3 allowed-set without exposing the internal `HashSet`.
     pub fn allowed_names_len(&self) -> usize {
-        self.allowed_names.len()
+        self.allowed_names.load().len()
     }
 
-    /// True if the tool name is operator-allowed under the config
-    /// passed to `freeze()`. Used by tests + the L3 gate in `dispatch`.
+    /// True if the tool name is operator-allowed under the current
+    /// config. Used by tests + the L3 gate in `dispatch`.
     pub fn is_tool_allowed(&self, name: &str) -> bool {
-        self.allowed_names.contains(name)
+        self.allowed_names.load().contains(name)
+    }
+
+    /// Recompute `allowed_names` + `ask_names` from the live schemas
+    /// against `cfg` and atomically swap them in. Called by the
+    /// `PATCH /workbench/agent/modes` handler so an operator flipping
+    /// a bucket from `Auto`→`Ask` in the Side Panel takes effect on
+    /// the NEXT dispatch without restarting the server.
+    ///
+    /// Does NOT restart running Penny subprocesses — those keep the
+    /// `--allowed-tools` list they were spawned with. New subprocesses
+    /// pick up the new list the next time Penny respawns.
+    pub fn reconfigure(&self, cfg: &AgentConfig) {
+        let has_store = self.approval_store.is_some();
+        let allowed: HashSet<String> = self
+            .all_schemas
+            .iter()
+            .filter(|schema| tool_is_enabled(schema, cfg, has_store))
+            .map(|schema| schema.name.clone())
+            .collect();
+        let ask: HashSet<String> = self
+            .all_schemas
+            .iter()
+            .filter(|schema| {
+                matches!(schema.tier, GadgetTier::Write)
+                    && matches!(resolve_write_mode(&schema.name, cfg), GadgetMode::Ask)
+            })
+            .map(|schema| schema.name.clone())
+            .collect();
+        self.allowed_names.store(Arc::new(allowed));
+        self.ask_names.store(Arc::new(ask));
     }
 
     /// Cheap `Arc` clone of the `(tool_name → GadgetMetadata)` snapshot
@@ -303,7 +338,12 @@ impl GadgetRegistry {
         args: serde_json::Value,
     ) -> Result<GadgetResult, GadgetError> {
         // L3 gate: reject disabled tools before provider lookup.
-        if !self.allowed_names.contains(name) {
+        // Snapshot the ArcSwap guards once — contains() reads and the
+        // guards live until the end of the scope, pinning the Arc so a
+        // concurrent reconfigure doesn't pull the rug mid-dispatch.
+        let allowed = self.allowed_names.load();
+        let ask = self.ask_names.load();
+        if !allowed.contains(name) {
             // Preserve UnknownTool semantics: if the tool is not
             // registered at all, emit UnknownTool so the existing
             // `dispatch_unknown_tool_returns_unknown_tool_error` test
@@ -319,7 +359,7 @@ impl GadgetRegistry {
         // Without a store the call falls through (the L3 set excludes
         // Ask names in that wiring, so this branch is unreachable
         // — but defense-in-depth).
-        if self.ask_names.contains(name) {
+        if ask.contains(name) {
             let Some(store) = self.approval_store.as_ref() else {
                 return Err(GadgetError::Denied {
                     reason: format!(
@@ -396,6 +436,16 @@ async fn wait_for_approval(
                 });
             }
         }
+    }
+}
+
+/// `GadgetModeReconfigurer` impl so the `PATCH /workbench/agent/modes`
+/// handler (living in the gateway crate, which cannot depend on penny)
+/// can rebuild the operator-config sets through a trait object instead
+/// of a concrete `Arc<GadgetRegistry>`.
+impl gadgetron_core::agent::tools::GadgetModeReconfigurer for GadgetRegistry {
+    fn reconfigure(&self, cfg: &gadgetron_core::agent::AgentConfig) {
+        GadgetRegistry::reconfigure(self, cfg);
     }
 }
 

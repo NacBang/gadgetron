@@ -196,6 +196,23 @@ pub struct GatewayWorkbenchService {
     /// install behavior for deployments that haven't rotated to
     /// signed bundles yet.
     pub bundle_signing: gadgetron_core::config::BundleSigningConfig,
+    /// Live mode matrix for `PATCH /workbench/agent/modes`. Seeded
+    /// from the on-disk `[agent.gadgets]` at startup; the editor in
+    /// the Side Panel swaps in a new `GadgetsConfig` on each save.
+    /// `None` in legacy fixtures that don't wire a workbench.
+    pub gadget_modes: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::GadgetsConfig>>>,
+    /// Trait-object handle to the Penny `GadgetRegistry` so the
+    /// `PATCH` handler can ask it to rebuild its derived sets
+    /// (`allowed_names`, `ask_names`) against the new config without
+    /// the gateway depending on `gadgetron-penny` directly.
+    pub gadget_mode_reconfigurer:
+        Option<Arc<dyn gadgetron_core::agent::tools::GadgetModeReconfigurer>>,
+    /// Frozen base `AgentConfig` — used by the `PATCH` handler to
+    /// rebuild a full `AgentConfig` with the new `.gadgets` slot so
+    /// the reconfigurer's `reconfigure(&AgentConfig)` signature is
+    /// satisfied. The registry only reads `.gadgets` internally, so
+    /// the other fields can be anything consistent with startup.
+    pub agent_config_base: Option<Arc<gadgetron_core::agent::AgentConfig>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +647,68 @@ pub struct DenyApprovalResponse {
     pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
     pub resolved_by_user_id: Option<Uuid>,
     pub reason: Option<String>,
+}
+
+/// `GET /workbench/agent/modes` — return the live `[agent.gadgets]`
+/// matrix so the Side Panel → Tool Modes editor can seed its dropdowns
+/// with the actual runtime state.
+///
+/// Returns 501 when the workbench wiring didn't provision
+/// `gadget_modes` (e.g. binary started with no Penny registry).
+pub async fn get_agent_modes(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let modes = svc.gadget_modes.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "agent.modes editor is not wired in this build (no Penny registry?)".into(),
+        ))
+    })?;
+    let snapshot = modes.load_full();
+    Ok(Json(serde_json::json!({
+        "gadgets": &*snapshot,
+    })))
+}
+
+/// `PATCH /workbench/agent/modes` — replace the live `[agent.gadgets]`
+/// matrix. Body is the full `GadgetsConfig` (keeps the wire format
+/// simple and deterministic — PATCHing the whole struct is effectively
+/// PUT semantics but matches the REST idiom).
+///
+/// Behavior:
+/// 1. Validate the incoming matrix (`GadgetsConfig::validate` — V1/V5/V6/V14)
+/// 2. Atomically swap into the shared `ArcSwap`
+/// 3. Call `GadgetModeReconfigurer::reconfigure` so the Penny registry
+///    rebuilds its `allowed_names` + `ask_names` sets
+///
+/// The new modes take effect on the NEXT Penny dispatch and NEXT
+/// Claude Code subprocess spawn — running subprocesses keep their
+/// `--allowed-tools` list. For Ask-flow verification this is the
+/// expected behavior: the next `server.bash` call lands on the
+/// approval card path.
+pub async fn patch_agent_modes(
+    State(state): State<AppState>,
+    Json(body): Json<gadgetron_core::agent::GadgetsConfig>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let modes = svc.gadget_modes.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "agent.modes editor is not wired in this build (no Penny registry?)".into(),
+        ))
+    })?;
+    body.validate().map_err(WorkbenchHttpError::Core)?;
+    modes.store(Arc::new(body.clone()));
+    if let (Some(reconfig), Some(base)) = (
+        svc.gadget_mode_reconfigurer.as_ref(),
+        svc.agent_config_base.as_ref(),
+    ) {
+        let mut next = (**base).clone();
+        next.gadgets = body.clone();
+        reconfig.reconfigure(&next);
+    }
+    Ok(Json(serde_json::json!({
+        "gadgets": &body,
+    })))
 }
 
 /// Map `ApprovalError` → `WorkbenchHttpError` keeping the status-code
@@ -1948,6 +2027,9 @@ pub fn workbench_routes() -> Router<AppState> {
         .route("/approvals/pending", get(list_pending_approvals))
         .route("/approvals/{approval_id}/approve", post(approve_action))
         .route("/approvals/{approval_id}/deny", post(deny_action))
+        // Side Panel → Tool Modes editor (per-tool approval config).
+        .route("/agent/modes", get(get_agent_modes))
+        .route("/agent/modes", axum::routing::patch(patch_agent_modes))
         // ISSUE 3 TASK 3.4 — tenant-scoped audit event query.
         .route("/audit/events", get(list_audit_events))
         // ISSUE 5 TASK 5.2 — Penny tool-call audit surface.

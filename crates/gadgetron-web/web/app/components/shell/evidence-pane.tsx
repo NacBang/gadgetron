@@ -1,7 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PanelRight, X, Zap, BookOpen, Activity } from "lucide-react";
+import {
+  PanelRight,
+  X,
+  Zap,
+  BookOpen,
+  Activity,
+  Settings as SettingsIcon,
+} from "lucide-react";
 import { useEvidence, type EvidenceItem } from "../../lib/evidence-context";
 import { useAuth } from "../../lib/auth-context";
 
@@ -29,7 +36,7 @@ interface EvidencePaneProps {
   width?: number;
 }
 
-type TabId = "actions" | "sources" | "activity";
+type TabId = "actions" | "sources" | "activity" | "settings";
 
 function getApiBase(): string {
   if (typeof document === "undefined") return "/api/v1/web";
@@ -379,6 +386,214 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings tab — per-bucket approval mode editor
+// ---------------------------------------------------------------------------
+
+type GadgetMode = "auto" | "ask" | "never";
+
+interface WriteGadgetsConfig {
+  default_mode: GadgetMode;
+  wiki_write: GadgetMode;
+  infra_write: GadgetMode;
+  scheduler_write: GadgetMode;
+  provider_mutate: GadgetMode;
+  server_admin: GadgetMode;
+}
+
+interface DestructiveGadgetsConfig {
+  enabled: boolean;
+  max_per_hour: number;
+  extra_confirmation: "none" | "env" | "file";
+  extra_confirmation_token_file: string;
+}
+
+interface GadgetsConfig {
+  read: GadgetMode;
+  approval_timeout_secs: number;
+  write: WriteGadgetsConfig;
+  destructive: DestructiveGadgetsConfig;
+}
+
+const WRITE_BUCKETS: Array<{ key: keyof WriteGadgetsConfig; label: string; hint: string }> = [
+  { key: "default_mode", label: "기본 (default_mode)", hint: "버킷에 매칭되지 않는 Write 툴 공통" },
+  { key: "wiki_write", label: "위키 (wiki_write)", hint: "wiki.write / wiki.create / wiki.delete" },
+  { key: "server_admin", label: "서버 운영 (server_admin)", hint: "server.bash / server.systemctl / server.add / server.remove" },
+  { key: "infra_write", label: "인프라 (infra_write)", hint: "infra.* (P2C)" },
+  { key: "scheduler_write", label: "스케줄러 (scheduler_write)", hint: "scheduler.* (P3)" },
+  { key: "provider_mutate", label: "프로바이더 (provider_mutate)", hint: "infra.rotate_api_key / infra.add_provider (P2C)" },
+];
+
+function SettingsTab({ apiKey }: { apiKey: string | null }) {
+  const [cfg, setCfg] = useState<GadgetsConfig | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setErr(null);
+    fetch(`${getApiBase()}/workbench/agent/modes`, {
+      credentials: "include",
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+        return r.json();
+      })
+      .then((j) => {
+        if (alive) setCfg(j.gadgets as GadgetsConfig);
+      })
+      .catch((e) => alive && setErr((e as Error).message))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [apiKey]);
+
+  const save = useCallback(
+    async (next: GadgetsConfig, changedKey: string) => {
+      setSaving(changedKey);
+      setErr(null);
+      try {
+        const r = await fetch(`${getApiBase()}/workbench/agent/modes`, {
+          method: "PATCH",
+          credentials: "include",
+          headers: {
+            ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(next),
+        });
+        if (!r.ok) {
+          const body = await r.text();
+          throw new Error(`${r.status} ${body.slice(0, 200)}`);
+        }
+        const j = await r.json();
+        setCfg(j.gadgets as GadgetsConfig);
+      } catch (e) {
+        setErr((e as Error).message);
+      } finally {
+        setSaving(null);
+      }
+    },
+    [apiKey],
+  );
+
+  if (loading) {
+    return (
+      <div
+        className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center"
+        data-testid="settings-loading"
+      >
+        <SettingsIcon className="size-4 text-zinc-700" aria-hidden />
+        <p className="text-xs font-medium text-zinc-400">설정 로드 중…</p>
+      </div>
+    );
+  }
+  if (err && !cfg) {
+    return (
+      <div
+        className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center"
+        data-testid="settings-error"
+      >
+        <SettingsIcon className="size-4 text-red-700" aria-hidden />
+        <p className="text-xs font-medium text-red-400">설정 API 오류</p>
+        <p className="break-all text-[10px] leading-relaxed text-zinc-500">{err}</p>
+      </div>
+    );
+  }
+  if (!cfg) return null;
+
+  return (
+    <div className="flex-1 overflow-y-auto" data-testid="settings-panel">
+      <div className="border-b border-zinc-900 px-3 py-2 text-[11px] text-zinc-300">
+        <div className="font-semibold text-zinc-200">Write 툴 버킷별 승인 모드</div>
+        <p className="mt-0.5 text-[10px] leading-relaxed text-zinc-500">
+          <strong>Auto</strong>: 즉시 실행 · <strong>Ask</strong>: 승인 대기 카드 · <strong>Never</strong>: 차단
+        </p>
+      </div>
+      <ul className="px-2 py-2">
+        {WRITE_BUCKETS.map(({ key, label, hint }) => {
+          const value = cfg.write[key];
+          return (
+            <li
+              key={key}
+              className="flex items-start justify-between gap-2 border-b border-zinc-900/60 py-2 pl-1"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="truncate text-[11px] font-medium text-zinc-200">
+                  {label}
+                </div>
+                <div className="mt-0.5 truncate text-[10px] text-zinc-500" title={hint}>
+                  {hint}
+                </div>
+              </div>
+              <select
+                aria-label={`${label} 모드`}
+                data-testid={`settings-bucket-${key}`}
+                disabled={saving !== null}
+                value={value}
+                onChange={(e) => {
+                  const newMode = e.target.value as GadgetMode;
+                  const next: GadgetsConfig = {
+                    ...cfg,
+                    write: { ...cfg.write, [key]: newMode },
+                  };
+                  setCfg(next);
+                  void save(next, key);
+                }}
+                className="shrink-0 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[11px] text-zinc-100 hover:border-zinc-600 disabled:opacity-50"
+              >
+                <option value="auto">auto</option>
+                <option value="ask">ask</option>
+                <option value="never">never</option>
+              </select>
+            </li>
+          );
+        })}
+        <li className="flex items-start justify-between gap-2 border-b border-zinc-900/60 py-2 pl-1">
+          <div className="flex-1 min-w-0">
+            <div className="truncate text-[11px] font-medium text-zinc-200">
+              파괴적 툴 (destructive)
+            </div>
+            <div className="mt-0.5 truncate text-[10px] text-zinc-500">
+              T3 허용 여부 — Ask 강제, 이 토글은 ON/OFF만
+            </div>
+          </div>
+          <label className="flex shrink-0 items-center gap-1 text-[11px] text-zinc-300">
+            <input
+              type="checkbox"
+              data-testid="settings-destructive-enabled"
+              disabled={saving !== null}
+              checked={cfg.destructive.enabled}
+              onChange={(e) => {
+                const next: GadgetsConfig = {
+                  ...cfg,
+                  destructive: { ...cfg.destructive, enabled: e.target.checked },
+                };
+                setCfg(next);
+                void save(next, "destructive");
+              }}
+            />
+            enabled
+          </label>
+        </li>
+      </ul>
+      <div className="px-3 py-2 text-[10px] leading-relaxed text-zinc-500">
+        변경은 다음 Penny 디스패치부터 적용됩니다. 이미 실행 중인 서브프로세스는
+        시작 시 고정된 <code>--allowed-tools</code> 목록을 유지해요.
+        {err && (
+          <div className="mt-1 break-all text-red-400" data-testid="settings-save-error">
+            저장 실패: {err}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Sources tab — current-conversation citations
 // ---------------------------------------------------------------------------
 
@@ -624,6 +839,13 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
           count={items.length}
           icon={<Activity className="size-3" aria-hidden />}
         />
+        <TabButton
+          active={tab === "settings"}
+          onClick={() => setTab("settings")}
+          label="Settings"
+          count={0}
+          icon={<SettingsIcon className="size-3" aria-hidden />}
+        />
         <div className="ml-auto flex items-center gap-1 pr-1">
           <span
             data-testid="evidence-ws-status"
@@ -674,6 +896,7 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
       {tab === "actions" && <ActionsTab apiKey={apiKey} />}
       {tab === "sources" && <SourcesTab items={items} />}
       {tab === "activity" && <ActivityTab items={items} />}
+      {tab === "settings" && <SettingsTab apiKey={apiKey} />}
       {/* Hidden totalBadge marker for selectors/tests */}
       <span className="hidden" data-testid="side-panel-total-badge">
         {totalBadge}
