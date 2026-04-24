@@ -308,17 +308,45 @@ static RULES: Lazy<Vec<Rule>> = Lazy::new(|| {
     ]
 });
 
+/// Category → wiki runbook slug mapping. When a finding matches one
+/// of these categories, the UI surfaces `[[runbooks/<slug>]]` as a
+/// link in the solution area so the operator sees the team's actual
+/// playbook rather than the generic rule text. Missing mapping =
+/// no link; rule text alone is used. Keep this conservative: add an
+/// entry only after the wiki page exists and has been reviewed.
+pub fn runbook_for_category(category: &str) -> Option<&'static str> {
+    match category {
+        "dbus_service_activation_timeout" => Some("bluez-dbus-activation-timeout"),
+        // Add more as wiki runbooks land:
+        // "gpu_xid" => Some("gpu-xid-triage"),
+        // "oom_kill" => Some("oom-kill-response"),
+        _ => None,
+    }
+}
+
 /// Match a single log line against the rule list. `Some` on hit;
 /// `None` means caller should fall back to LLM (or skip).
 pub fn classify(line: &str) -> Option<Classification> {
     for rule in RULES.iter() {
         if rule.pattern.is_match(line) {
+            // Append a runbook pointer to the solution when we have
+            // one on file. The UI already renders `[[wiki links]]`
+            // as clickable anchors via MarkdownText, so the operator
+            // can jump from the finding card straight to the runbook.
+            let solution = match runbook_for_category(rule.category) {
+                Some(slug) => format!(
+                    "{base}\n\n런북: [[runbooks/{slug}]]",
+                    base = rule.solution,
+                    slug = slug,
+                ),
+                None => rule.solution.to_string(),
+            };
             return Some(Classification {
                 severity: rule.severity,
                 category: rule.category.to_string(),
                 summary: rule.summary.to_string(),
                 cause: Some(rule.cause.to_string()),
-                solution: Some(rule.solution.to_string()),
+                solution: Some(solution),
                 remediation: rule.remediation.map(|f| f()),
             });
         }

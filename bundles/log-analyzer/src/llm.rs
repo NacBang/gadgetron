@@ -113,12 +113,27 @@ impl Classifier for GatewayClassifier {
         // {...} block.
         let json_str = extract_json_object(&text)?;
         let parsed: LlmJson = serde_json::from_str(&json_str).ok()?;
+        let category = sanitize_category(&parsed.category);
+        // Attach the matching wiki runbook pointer (if one exists for
+        // this Penny-chosen category) to the solution. Mirrors the
+        // rule-match path so every finding — rule- or LLM-classified —
+        // can jump to the team's canonical playbook with one click.
+        let base_solution = parsed.solution.map(|s| truncate(&s, 600));
+        let solution = match (
+            base_solution.as_deref(),
+            crate::rules::runbook_for_category(&category),
+        ) {
+            (Some(base), Some(slug)) => Some(format!("{base}\n\n런북: [[runbooks/{slug}]]")),
+            (None, Some(slug)) => Some(format!("런북: [[runbooks/{slug}]]")),
+            (Some(base), None) => Some(base.to_string()),
+            (None, None) => None,
+        };
         Some(Classification {
             severity: Severity::parse(&parsed.severity).unwrap_or(Severity::Info),
-            category: sanitize_category(&parsed.category),
+            category,
             summary: truncate(&parsed.summary, 200),
             cause: parsed.cause.map(|s| truncate(&s, 600)),
-            solution: parsed.solution.map(|s| truncate(&s, 600)),
+            solution,
             remediation: validate_remediation(parsed.remediation),
         })
     }
