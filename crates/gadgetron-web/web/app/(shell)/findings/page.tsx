@@ -128,6 +128,39 @@ function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/// Mint a fresh conversation and seed the composer with a finding
+/// summary so Penny picks it up as the opening message. Writes the
+/// new conversation id into localStorage (consumed by the chat
+/// transport) and the draft under a per-conversation key (consumed
+/// by the composer on mount), then navigates to /web.
+function openChatAboutFinding(f: Finding, hostLabel: string): void {
+  if (typeof window === "undefined") return;
+  const convId = safeRandomUUID();
+  const lines: string[] = [];
+  lines.push(
+    `이 Log를 같이 봐줘요. 어떻게 할지 같이 정하고 싶어요.`,
+  );
+  lines.push("");
+  lines.push(`host: ${hostLabel} (${f.host_id.slice(0, 8)})`);
+  lines.push(`source: ${f.source} · severity: ${f.severity}`);
+  lines.push(`category: ${f.category}`);
+  lines.push(`summary: ${f.summary}`);
+  if (f.cause) lines.push(`cause: ${f.cause}`);
+  if (f.solution) lines.push(`solution hint: ${f.solution}`);
+  lines.push("");
+  lines.push("excerpt:");
+  lines.push("```");
+  lines.push(
+    f.excerpt.length > 1200 ? `${f.excerpt.slice(0, 1200)}…` : f.excerpt,
+  );
+  lines.push("```");
+  const draft = lines.join("\n");
+  window.localStorage.setItem("gadgetron_conversation_id", convId);
+  window.localStorage.setItem(`gadgetron_draft_${convId}`, draft);
+  window.localStorage.setItem(`gadgetron_pending_submit_${convId}`, "1");
+  window.location.assign("/web");
+}
+
 // Expandable thread per finding. Collapsed by default so a long incident
 // list isn't drowned by older comments; count badge surfaces activity
 // without opening. Members can write, Penny can write via gadget calls
@@ -732,14 +765,24 @@ export default function FindingsPage() {
                             {f.excerpt}
                           </pre>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => void dismiss(f.id)}
-                          title="목록에서 감춥니다 (실제로 고치지는 않음). 같은 이슈가 다시 발생하면 새 finding으로 다시 올라옵니다."
-                          className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
-                        >
-                          🙈 감추기
-                        </button>
+                        <div className="flex shrink-0 flex-col gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void dismiss(f.id)}
+                            title="목록에서 감춥니다 (실제로 고치지는 않음). 같은 이슈가 다시 발생하면 새 finding으로 다시 올라옵니다."
+                            className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
+                          >
+                            🙈 감추기
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openChatAboutFinding(f, hostLabel)}
+                            title="이 이슈를 주제로 Penny와 새 대화를 시작합니다."
+                            className="rounded border border-purple-800 bg-purple-950/30 px-2 py-1 text-[11px] text-purple-200 hover:border-purple-500 hover:bg-purple-900/40"
+                          >
+                            💬 Penny와 상의
+                          </button>
+                        </div>
                       </div>
                       <CommentsSection
                         finding={f}
