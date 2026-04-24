@@ -202,6 +202,26 @@ impl ServerMonitorProvider {
                 (target, report)
             }
             "password_bootstrap" => {
+                // Precheck: `sshpass` must exist on the gadgetron host.
+                // Without this guard the code would generate a fresh
+                // keypair, write it to disk, and only fail on the first
+                // exec_with_password call — leaving an orphan key file
+                // behind. Fail fast with a message that points the
+                // operator to the wiki runbook.
+                if tokio::process::Command::new("sshpass")
+                    .arg("-V")
+                    .output()
+                    .await
+                    .is_err()
+                {
+                    return Err(GadgetError::Execution(
+                        "`sshpass` is not installed on the gadgetron host — \
+                         required for password_bootstrap. Install with \
+                         `sudo apt-get install sshpass` on the gadgetron host \
+                         and retry. See wiki/ops/gadgetron-sshpass-missing.md."
+                            .into(),
+                    ));
+                }
                 let ssh_pw = OneShotSecret::new(get_str(&args, "ssh_password")?);
                 let sudo_pw = OneShotSecret::new(get_str(&args, "sudo_password")?);
                 generate_keypair(&key_path, &format!("gadgetron-monitor:{host}"))
@@ -663,6 +683,39 @@ impl ServerMonitorProvider {
             .map_err(|e| GadgetError::Execution(format!("inventory get: {e}")))?
             .ok_or_else(|| GadgetError::InvalidArgs(format!("no host with id {id}")))?;
         let target = to_target(&rec, self.known_hosts_path());
+        // Masked-unit guard: running `start|restart|reload` against a
+        // masked unit silently no-ops (systemd refuses to start masked
+        // units), so the "이상 징후 해결" ⚡ button would appear to run
+        // cleanly but the underlying error keeps firing. Probe state
+        // first for the verbs that would otherwise look like they did
+        // something, and return a clear error pointing to the real fix
+        // (usually `apt purge` of the owning package). See
+        // wiki/runbooks/bluez-dbus-activation-timeout.md for the
+        // canonical reproducer.
+        let state_probing = matches!(verb.as_str(), "start" | "restart" | "reload" | "enable");
+        if state_probing {
+            let probe_cmd = format!("sudo -n /bin/systemctl is-enabled {unit} 2>&1 || true");
+            if let Ok(out) = crate::ssh::exec(&target, &probe_cmd).await {
+                let state = out.stdout.trim();
+                if state == "masked" {
+                    return ok_result(json!({
+                        "host": rec.host,
+                        "verb": verb,
+                        "unit": unit,
+                        "code": 1,
+                        "stdout": "",
+                        "stderr": format!(
+                            "unit '{unit}' is masked — `{verb}` is a no-op on masked units. \
+                             Either unmask with `sudo systemctl unmask {unit}` and retry, \
+                             or (more commonly for headless servers) remove the package that \
+                             owns the unit (e.g. `sudo apt purge bluez`). See \
+                             wiki/runbooks/bluez-dbus-activation-timeout.md."
+                        ),
+                        "skipped_reason": "masked_unit",
+                    }));
+                }
+            }
+        }
         // `--no-pager` prevents status output from blocking on a pager;
         // `--full` avoids column-width truncation that would hide useful
         // journal snippets. Limit status output to the last ~20 lines
