@@ -87,7 +87,7 @@ pub async fn chat_completions_handler(
                 .and_then(|m| m.content.text())
                 .unwrap_or_default()
                 .to_string();
-            if let Err(e) = gadgetron_xaas::conversations::upsert_turn(
+            match gadgetron_xaas::conversations::upsert_turn(
                 pool,
                 conv_uuid,
                 ctx.tenant_id,
@@ -97,13 +97,81 @@ pub async fn chat_completions_handler(
             )
             .await
             {
-                tracing::warn!(
+                Ok((turn_count, summary_turn_at)) => {
+                    // Rolling title summary via Penny. Re-summarize
+                    // every 3 turns after the 3rd (3, 6, 9, …) so the
+                    // sidebar label tracks what the conversation is
+                    // *now* about rather than the very first question.
+                    // Fire-and-forget: the summary call goes through
+                    // our own /v1/chat/completions with the same key
+                    // the log-analyzer already uses. Failures log and
+                    // drop; the previous title stays.
+                    const RESUMMARIZE_EVERY: i32 = 3;
+                    if turn_count >= RESUMMARIZE_EVERY
+                        && turn_count - summary_turn_at >= RESUMMARIZE_EVERY
+                    {
+                        if let Ok(api_key) = std::env::var("GADGETRON_LOG_ANALYZER_KEY") {
+                            if !api_key.trim().is_empty() {
+                                let pool_for_summary = pool.clone();
+                                let gateway = std::env::var("GADGETRON_LOG_ANALYZER_GATEWAY")
+                                    .unwrap_or_else(|_| "http://127.0.0.1:18080".into());
+                                let model = std::env::var("GADGETRON_LOG_ANALYZER_MODEL")
+                                    .unwrap_or_else(|_| "penny".into());
+                                let transcript = build_transcript_preview(&req.messages);
+                                tokio::spawn(async move {
+                                    match generate_rolling_title(
+                                        &gateway,
+                                        &api_key,
+                                        &model,
+                                        &transcript,
+                                    )
+                                    .await
+                                    {
+                                        Ok(title) => {
+                                            if let Err(e) =
+                                                gadgetron_xaas::conversations::set_rolling_summary(
+                                                    &pool_for_summary,
+                                                    conv_uuid,
+                                                    &title,
+                                                    turn_count,
+                                                )
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    target: "conversations",
+                                                    conversation_id = %conv_uuid,
+                                                    error = %e,
+                                                    "set_rolling_summary failed",
+                                                );
+                                            } else {
+                                                tracing::debug!(
+                                                    target: "conversations",
+                                                    conversation_id = %conv_uuid,
+                                                    title = %title,
+                                                    turn = turn_count,
+                                                    "rolling title refreshed",
+                                                );
+                                            }
+                                        }
+                                        Err(e) => tracing::debug!(
+                                            target: "conversations",
+                                            conversation_id = %conv_uuid,
+                                            error = %e,
+                                            "rolling-title summarizer skipped",
+                                        ),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(
                     target: "conversations",
                     request_id = %ctx.request_id,
                     conversation_id = %conv_uuid,
                     error = %e,
                     "upsert_turn failed — chat continues but sidebar may miss this turn"
-                );
+                ),
             }
         }
     }
@@ -755,6 +823,108 @@ pub async fn invoke_tool_handler(
 fn extract_conversation_uuid(raw: &str) -> Option<uuid::Uuid> {
     let stripped = raw.split(':').next_back().unwrap_or(raw).trim();
     uuid::Uuid::parse_str(stripped).ok()
+}
+
+/// Build a compact transcript string for the title summarizer.
+/// We pass only user turns (keeps the prompt short + side-steps any
+/// shared-context injection prefix that Penny might otherwise see).
+/// Up to the 6 most recent user messages, each capped at 280 chars.
+fn build_transcript_preview(messages: &[Message]) -> String {
+    let mut lines: Vec<String> = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::User))
+        .filter_map(|m| m.content.text().map(|t| t.to_string()))
+        .collect();
+    if lines.len() > 6 {
+        let cut = lines.len() - 6;
+        lines.drain(..cut);
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut out = String::new();
+            for (j, ch) in t.chars().enumerate() {
+                if j >= 280 {
+                    out.push('…');
+                    break;
+                }
+                out.push(ch);
+            }
+            format!("{}. {}", i + 1, out.replace('\n', " "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Ask Penny for a 5-8 word summary title for the conversation.
+/// Single-round non-streaming chat completion. Returns the trimmed
+/// first line of the response; errors bubble up so the caller can
+/// decide to drop the attempt (preserves the existing title).
+async fn generate_rolling_title(
+    gateway_url: &str,
+    api_key: &str,
+    model: &str,
+    transcript: &str,
+) -> Result<String, String> {
+    let system =
+        "이 대화의 핵심 주제를 한국어 5~8단어로 요약해줘. 따옴표·마침표·이모지 없이 명사구로만. \
+                  예: 'NVMe PCIe 오류 진단', 'RTX 4090 DCGM 부트스트랩'.";
+    let body = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user",   "content": transcript },
+        ],
+        "max_tokens": 40,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(25))
+        .build()
+        .map_err(|e| format!("client build: {e}"))?;
+    let resp = client
+        .post(format!(
+            "{}/v1/chat/completions",
+            gateway_url.trim_end_matches('/')
+        ))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("http send: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("http {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("http json: {e}"))?;
+    let content = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| "response missing choices[0].message.content".to_string())?;
+    let first_line = content
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '「' || c == '」')
+        .to_string();
+    if first_line.is_empty() {
+        return Err("empty summary".into());
+    }
+    // Cap hard — the prompt asks for short but models occasionally
+    // ignore that; truncate at 80 chars to fit the sidebar row.
+    let mut out = String::new();
+    for (i, ch) in first_line.chars().enumerate() {
+        if i >= 80 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    Ok(out)
 }
 
 /// Rule for `Content::Parts` system messages: inserting a new system message
