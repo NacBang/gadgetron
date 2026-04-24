@@ -31,6 +31,92 @@ use serde::Serialize;
 
 use crate::ssh::{exec, exec_with_password, CmdOutput, SshError, SshTarget};
 
+/// Detected OS family of a registration target. Each branch has its
+/// own package manager, its own cuda-keyring (when relevant), and its
+/// own "which system log feed / journal command" — we pick the right
+/// script bundle by matching on this enum at bootstrap time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsFamily {
+    /// Ubuntu / Debian — `apt-get`, `journalctl`, `/etc/machine-id`.
+    Debian,
+    /// RHEL family — Rocky / Alma / CentOS Stream / RHEL proper.
+    /// `dnf`, `journalctl`, `/etc/machine-id`, SELinux present.
+    Rhel,
+    /// macOS — `brew` (not installed by us), `log show` instead of
+    /// journalctl, `launchctl` instead of systemctl, `ioreg` for the
+    /// hardware UUID. No NVIDIA → DCGM skipped.
+    Mac,
+    /// Detection failed or the box is something we don't script for
+    /// (Alpine, Arch, FreeBSD, Windows under WSL…). Caller falls back
+    /// to the minimum bootstrap (SSH key only) and emits a warning.
+    Unknown,
+}
+
+impl OsFamily {
+    pub fn label(self) -> &'static str {
+        match self {
+            OsFamily::Debian => "debian",
+            OsFamily::Rhel => "rhel",
+            OsFamily::Mac => "mac",
+            OsFamily::Unknown => "unknown",
+        }
+    }
+}
+
+/// Probe the target's OS over SSH with the one-shot password. Reads
+/// `/etc/os-release` when present (every mainstream Linux distro has
+/// it), otherwise falls back to `uname` and a hostname sniff for Mac.
+/// Best-effort: we never fail registration on detection failure —
+/// `Unknown` just means we skip the distro-specific steps and the
+/// caller proceeds with the minimal path.
+pub async fn detect_os(target_pw: &SshTarget, password: &str) -> OsFamily {
+    let probe = r#"if [ -r /etc/os-release ]; then
+    ID=$(. /etc/os-release; echo "${ID:-}") ;
+    ID_LIKE=$(. /etc/os-release; echo "${ID_LIKE:-}") ;
+    echo "osrelease_id=$ID" ;
+    echo "osrelease_like=$ID_LIKE" ;
+fi
+UN=$(uname 2>/dev/null || true) ; echo "uname=$UN""#;
+    let Ok(out) = exec_with_password(target_pw, password, probe).await else {
+        return OsFamily::Unknown;
+    };
+    let mut id = String::new();
+    let mut id_like = String::new();
+    let mut uname = String::new();
+    for line in out.stdout.lines() {
+        if let Some(v) = line.strip_prefix("osrelease_id=") {
+            id = v.trim().trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("osrelease_like=") {
+            id_like = v.trim().trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("uname=") {
+            uname = v.trim().to_string();
+        }
+    }
+    if uname == "Darwin" {
+        return OsFamily::Mac;
+    }
+    let debian_family = ["debian", "ubuntu", "linuxmint", "pop"];
+    let rhel_family = ["rhel", "centos", "rocky", "almalinux", "fedora"];
+    let id_lower = id.to_lowercase();
+    let id_like_lower = id_like.to_lowercase();
+    if debian_family.iter().any(|k| id_lower == *k)
+        || id_like_lower
+            .split_whitespace()
+            .any(|k| debian_family.contains(&k))
+    {
+        return OsFamily::Debian;
+    }
+    if rhel_family.iter().any(|k| id_lower == *k)
+        || id_like_lower
+            .split_whitespace()
+            .any(|k| rhel_family.contains(&k))
+    {
+        return OsFamily::Rhel;
+    }
+    OsFamily::Unknown
+}
+
 /// What we did on the target. Returned by `server.add` and surfaced
 /// verbatim in the UI so operators can sanity-check.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -158,42 +244,102 @@ pub async fn run_bootstrap(
     expect_ok(&out, "install sudoers")?;
     report.sudoers_installed = true;
 
-    // Step 3 — apt-get install baseline packages.
-    let (pkgs, script) = build_apt_install_script(sudo_password);
-    let out = exec_with_password(target_pw, password, &script).await?;
-    if !out.ok() {
-        report.notes.push(format!(
-            "apt install baseline failed: {}",
-            out.stderr.trim()
-        ));
-        return Err(SshError::Bootstrap(format!(
-            "apt-get install failed (code {}): {}",
-            out.code,
-            out.stderr.trim()
-        )));
-    }
-    for p in &pkgs {
-        report.installed_pkgs.push(p.clone());
+    // Step 3 — OS-aware baseline package install.
+    // Debian → apt-get; RHEL → dnf; Mac → skip entirely (user installs
+    // deps via brew when they actually need them); Unknown → skip with
+    // a warning so the operator notices drift.
+    let os = detect_os(target_pw, password).await;
+    report
+        .notes
+        .push(format!("detected os family: {}", os.label()));
+    match os {
+        OsFamily::Debian => {
+            let (pkgs, script) = build_apt_install_script(sudo_password);
+            let out = exec_with_password(target_pw, password, &script).await?;
+            if !out.ok() {
+                report.notes.push(format!(
+                    "apt install baseline failed: {}",
+                    out.stderr.trim()
+                ));
+                return Err(SshError::Bootstrap(format!(
+                    "apt-get install failed (code {}): {}",
+                    out.code,
+                    out.stderr.trim()
+                )));
+            }
+            for p in &pkgs {
+                report.installed_pkgs.push(p.clone());
+            }
+        }
+        OsFamily::Rhel => {
+            let (pkgs, script) = build_dnf_install_script(sudo_password);
+            let out = exec_with_password(target_pw, password, &script).await?;
+            if !out.ok() {
+                report.notes.push(format!(
+                    "dnf install baseline failed: {}",
+                    out.stderr.trim()
+                ));
+                return Err(SshError::Bootstrap(format!(
+                    "dnf install failed (code {}): {}",
+                    out.code,
+                    out.stderr.trim()
+                )));
+            }
+            for p in &pkgs {
+                report.installed_pkgs.push(p.clone());
+            }
+        }
+        OsFamily::Mac => {
+            report.notes.push(
+                "macOS target — skipping baseline apt/dnf. Install \
+                 telemetry helpers via `brew install ...` as needed; \
+                 `server.bash` works out of the box."
+                    .into(),
+            );
+        }
+        OsFamily::Unknown => {
+            report.notes.push(
+                "unknown OS family — skipping baseline package install. \
+                 Telemetry may be partial; register via key_path + \
+                 manual setup for full parity."
+                    .into(),
+            );
+        }
     }
 
     // Step 4 — detect NVIDIA, install DCGM if appropriate.
-    let probe = exec_with_password(target_pw, password, "command -v nvidia-smi").await?;
-    if probe.ok() && !probe.stdout.trim().is_empty() {
-        report.gpu_detected = true;
-        let dcgm_script = build_dcgm_install_script(sudo_password);
-        let out = exec_with_password(target_pw, password, &dcgm_script).await?;
-        if out.ok() {
-            report.dcgm_enabled = true;
-            report.installed_pkgs.push("datacenter-gpu-manager".into());
+    // DCGM is a Linux-only path. Mac + Unknown skip even when probing
+    // succeeds (it won't on Mac).
+    if matches!(os, OsFamily::Debian | OsFamily::Rhel) {
+        let probe = exec_with_password(target_pw, password, "command -v nvidia-smi").await?;
+        if probe.ok() && !probe.stdout.trim().is_empty() {
+            report.gpu_detected = true;
+            let dcgm_script = match os {
+                OsFamily::Debian => build_dcgm_install_script(sudo_password),
+                OsFamily::Rhel => build_dcgm_install_script_rhel(sudo_password),
+                _ => unreachable!(),
+            };
+            let out = exec_with_password(target_pw, password, &dcgm_script).await?;
+            if out.ok() {
+                report.dcgm_enabled = true;
+                report.installed_pkgs.push("datacenter-gpu-manager".into());
+            } else {
+                report.notes.push(format!(
+                    "DCGM install failed; falling back to nvidia-smi ({}) ",
+                    out.stderr.trim()
+                ));
+            }
         } else {
-            report.notes.push(format!(
-                "DCGM install failed; falling back to nvidia-smi ({}) ",
-                out.stderr.trim()
-            ));
+            report.skipped_pkgs.push("datacenter-gpu-manager".into());
+            report.notes.push("no NVIDIA GPU detected".into());
         }
     } else {
         report.skipped_pkgs.push("datacenter-gpu-manager".into());
-        report.notes.push("no NVIDIA GPU detected".into());
+        report.notes.push(
+            "DCGM path skipped — only Linux (Debian/RHEL) targets can run \
+             nvidia-dcgm today"
+                .into(),
+        );
     }
 
     // Step 5 — verify key-only login works now. We need a fresh
@@ -357,6 +503,88 @@ fn build_dcgm_install_script(sudo_pw: &str) -> String {
          fi; \
          echo DCGM_READY",
         url = keyring_url,
+    )
+}
+
+/// RHEL family equivalent of `build_apt_install_script`. Uses `dnf`
+/// (Rocky 9 / Alma 9 / RHEL 9 / Fedora) with the same package set
+/// remapped to RPM names. `lsb_release` is skipped — we don't need
+/// it, and modern dnf-based distros ship `/etc/os-release` universally.
+fn build_dnf_install_script(sudo_pw: &str) -> (Vec<String>, String) {
+    // RPM equivalents. A few names differ from Debian:
+    //   - coreutils / util-linux / gawk / jq / curl: same name
+    //   - lm-sensors → `lm_sensors`
+    //   - pciutils / smartmontools / ipmitool: same name
+    //   - net-tools → same name (legacy package on RHEL too)
+    //   - ca-certificates → same name
+    //   - gnupg → `gnupg2`
+    //   - procps → `procps-ng`
+    let pkgs = vec![
+        "ca-certificates".to_string(),
+        "curl".to_string(),
+        "gnupg2".to_string(),
+        "lm_sensors".to_string(),
+        "smartmontools".to_string(),
+        "ipmitool".to_string(),
+        "pciutils".to_string(),
+        "util-linux".to_string(),
+        "procps-ng".to_string(),
+        "coreutils".to_string(),
+        "gawk".to_string(),
+        "jq".to_string(),
+        "net-tools".to_string(),
+    ];
+    let pkg_args = pkgs.join(" ");
+    let spw = shell_escape_single(sudo_pw);
+    let script = format!(
+        "set -e; \
+         echo {spw} | sudo -S -p '' /usr/bin/dnf -y -q makecache && \
+         echo {spw} | sudo -S -p '' /usr/bin/dnf -y -q install {pkgs}",
+        pkgs = pkg_args,
+    );
+    (pkgs, script)
+}
+
+/// RHEL family DCGM install. Uses the NVIDIA cuda-rhel9 repo (works for
+/// Rocky 9 / Alma 9 / RHEL 9 / Fedora 37+). The repo file registration
+/// plus package install pattern differs from the `.deb` keyring flow,
+/// but the ultimate state (systemd unit `nvidia-dcgm.service` enabled)
+/// is the same, so the detect-unit-and-enable logic is reused verbatim.
+fn build_dcgm_install_script_rhel(sudo_pw: &str) -> String {
+    let spw = shell_escape_single(sudo_pw);
+    let repo_url =
+        "https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo";
+    format!(
+        "set -e; \
+         if ! rpm -q datacenter-gpu-manager >/dev/null 2>&1; then \
+           echo {spw} | sudo -S -p '' curl -fsSL {url} -o /etc/yum.repos.d/cuda-rhel9.repo && \
+           echo {spw} | sudo -S -p '' /usr/bin/dnf -y -q install datacenter-gpu-manager; \
+         fi; \
+         UNIT=''; \
+         for candidate in nvidia-dcgm dcgm nv-hostengine; do \
+           if systemctl list-unit-files --no-legend \"$candidate.service\" 2>/dev/null | grep -q .; then \
+             UNIT=\"$candidate\"; break; \
+           fi; \
+         done; \
+         if [ -z \"$UNIT\" ]; then \
+           echo 'DCGM service unit not found after install' >&2; exit 2; \
+         fi; \
+         echo \"DCGM_UNIT=$UNIT\"; \
+         echo {spw} | sudo -S -p '' systemctl enable --now \"$UNIT\" || \
+           {{ echo \"failed to enable $UNIT\" >&2; exit 3; }}; \
+         for i in 1 2 3 4 5; do \
+           if systemctl is-active --quiet \"$UNIT\"; then break; fi; \
+           sleep 0.5; \
+         done; \
+         if ! systemctl is-active --quiet \"$UNIT\"; then \
+           echo {spw} | sudo -S -p '' journalctl -u \"$UNIT\" -n 30 --no-pager >&2; \
+           echo \"$UNIT did not reach active state\" >&2; exit 4; \
+         fi; \
+         if ! timeout 3s sudo -n /usr/bin/dcgmi dmon -c 1 -e 203 >/dev/null 2>&1; then \
+           echo 'dcgmi dmon probe failed — service active but not responsive' >&2; exit 5; \
+         fi; \
+         echo DCGM_READY",
+        url = repo_url,
     )
 }
 

@@ -173,13 +173,31 @@ pub struct MachineIdentity {
 }
 
 pub async fn collect_machine_identity(target: &SshTarget) -> MachineIdentity {
-    // Each line is `KEY=value` so we can parse with `IFS=`. All reads
-    // are best-effort: an unreadable file just leaves the key blank.
+    // Each line is `KEY=value`. The Linux paths (/etc/machine-id, DMI
+    // sysfs) are tried first; if we're on macOS (detected via
+    // `uname`), we fall back to `ioreg` for the IOPlatformUUID +
+    // IOPlatformSerialNumber. Script stays single-liner so one SSH
+    // round-trip covers every OS we support.
     let script = r#"set +e
-        printf 'machine_id='; cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null; echo
-        printf 'dmi_uuid='; cat /sys/class/dmi/id/product_uuid 2>/dev/null; echo
-        printf 'dmi_serial='; cat /sys/class/dmi/id/product_serial 2>/dev/null || cat /sys/class/dmi/id/chassis_serial 2>/dev/null; echo
+        UN=$(uname 2>/dev/null || true)
         printf 'hostname='; hostname 2>/dev/null; echo
+        if [ "$UN" = "Darwin" ]; then
+            # macOS — DMI sysfs doesn't exist; use ioreg instead.
+            MUID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null \
+                     | awk -F'"' '/IOPlatformUUID/ {print $4; exit}')
+            MSER=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null \
+                     | awk -F'"' '/IOPlatformSerialNumber/ {print $4; exit}')
+            # Treat the IOPlatformUUID as BOTH machine_id and dmi_uuid
+            # for merge-matching — it's the stable identifier Apple
+            # exposes and doesn't change on OS reinstall.
+            printf 'machine_id='; echo "$MUID"
+            printf 'dmi_uuid='; echo "$MUID"
+            printf 'dmi_serial='; echo "$MSER"
+        else
+            printf 'machine_id='; cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null; echo
+            printf 'dmi_uuid='; cat /sys/class/dmi/id/product_uuid 2>/dev/null; echo
+            printf 'dmi_serial='; cat /sys/class/dmi/id/product_serial 2>/dev/null || cat /sys/class/dmi/id/chassis_serial 2>/dev/null; echo
+        fi
     "#;
     let Ok(out) = exec(target, script).await else {
         return MachineIdentity::default();
