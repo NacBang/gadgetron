@@ -15,6 +15,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub const FOLD_WINDOW: Duration = Duration::hours(1);
+/// How long a dismiss button click keeps the `(host, source, category)`
+/// pattern muted. During this window, new scans matching the same
+/// pattern silently bump the count on the already-dismissed row
+/// instead of resurrecting a fresh card. Without this, a fixed issue
+/// whose historical log lines still live in the journal (2k+ past
+/// matches is routine) would re-appear on every scan.
+/// Authority: bugs/log-analyzer-duplicate-issue-registration.md
+pub const DISMISS_MUTE_WINDOW: Duration = Duration::days(7);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -135,31 +143,63 @@ pub async fn upsert_finding(
         .bind(id)
         .execute(pool)
         .await?;
-        Ok(id)
-    } else {
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO log_findings \
-                (tenant_id, host_id, source, severity, category, summary, excerpt, \
-                 ts_first, ts_last, classified_by, cause, solution, remediation) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12) \
-             RETURNING id",
-        )
-        .bind(tenant_id)
-        .bind(host_id)
-        .bind(source)
-        .bind(cls.severity.as_str())
-        .bind(&cls.category)
-        .bind(&cls.summary)
-        .bind(truncate(excerpt, 1024))
-        .bind(now)
-        .bind(classified_by)
-        .bind(cls.cause.as_deref())
-        .bind(cls.solution.as_deref())
-        .bind(cls.remediation.as_ref())
-        .fetch_one(pool)
-        .await?;
-        Ok(id)
+        return Ok(id);
     }
+
+    // No open finding to fold into. Before creating a fresh card,
+    // check whether the operator recently dismissed the same
+    // (host, source, category) — if so, silently bump the dismissed
+    // row's count and leave dismissed_at alone. Keeps the "감추기"
+    // click sticky across re-scans of historical journal lines.
+    let mute_cutoff = now - DISMISS_MUTE_WINDOW;
+    let muted: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM log_findings \
+         WHERE tenant_id = $1 AND host_id = $2 AND source = $3 AND category = $4 \
+         AND dismissed_at IS NOT NULL AND dismissed_at >= $5 \
+         ORDER BY dismissed_at DESC LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(host_id)
+    .bind(source)
+    .bind(&cls.category)
+    .bind(mute_cutoff)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(id) = muted {
+        sqlx::query(
+            "UPDATE log_findings \
+             SET count = count + 1, ts_last = $1 \
+             WHERE id = $2",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        return Ok(id);
+    }
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO log_findings \
+            (tenant_id, host_id, source, severity, category, summary, excerpt, \
+             ts_first, ts_last, classified_by, cause, solution, remediation) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12) \
+         RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(host_id)
+    .bind(source)
+    .bind(cls.severity.as_str())
+    .bind(&cls.category)
+    .bind(&cls.summary)
+    .bind(truncate(excerpt, 1024))
+    .bind(now)
+    .bind(classified_by)
+    .bind(cls.cause.as_deref())
+    .bind(cls.solution.as_deref())
+    .bind(cls.remediation.as_ref())
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
 }
 
 /// Fetch the remediation JSON (and host_id) for one finding so the
