@@ -547,9 +547,9 @@ fn build_dnf_install_script(sudo_pw: &str) -> (Vec<String>, String) {
 
 /// RHEL family DCGM install. Uses the NVIDIA cuda-rhel9 repo (works for
 /// Rocky 9 / Alma 9 / RHEL 9 / Fedora 37+). The repo file registration
-/// + package install pattern differs from the `.deb` keyring flow but
-/// the ultimate state (systemd unit `nvidia-dcgm.service` enabled) is
-/// the same, so the detect-unit-and-enable logic is reused verbatim.
+/// plus package install pattern differs from the `.deb` keyring flow,
+/// but the ultimate state (systemd unit `nvidia-dcgm.service` enabled)
+/// is the same, so the detect-unit-and-enable logic is reused verbatim.
 fn build_dcgm_install_script_rhel(sudo_pw: &str) -> String {
     let spw = shell_escape_single(sudo_pw);
     let repo_url =
