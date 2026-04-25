@@ -764,6 +764,31 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
   );
   const totalBadge = pendingCount + sourcesBadge;
 
+  // Auto-open the panel + switch to Actions tab whenever a NEW pending
+  // approval shows up. Operators were missing approval cards while the
+  // panel was collapsed — an invisible queue is worse than an
+  // auto-intrusion. We track the previous count across renders and
+  // only trigger on the 0→N transition (a single approval landing),
+  // not on every poll.
+  const prevApprovalsCount = useMemo(() => ({ value: 0 }), []);
+  useEffect(() => {
+    const cur = approvalsBadge.length;
+    const prev = prevApprovalsCount.value;
+    prevApprovalsCount.value = cur;
+    if (cur > prev && cur > 0) {
+      setTab("actions");
+      if (!open) {
+        if (typeof window !== "undefined") {
+          localStorage.setItem(
+            "gadgetron.workbench.evidencePaneOpen",
+            "true",
+          );
+        }
+        onToggle(true);
+      }
+    }
+  }, [approvalsBadge.length, open, onToggle, prevApprovalsCount]);
+
   if (!open) {
     return (
       <div

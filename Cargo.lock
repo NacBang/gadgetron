@@ -1456,6 +1456,7 @@ dependencies = [
  "once_cell",
  "proptest",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

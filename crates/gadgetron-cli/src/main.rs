@@ -984,7 +984,34 @@ async fn load_penny_registry_from_config_for_gadget_serve(
             tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")
         }
     }
-    Ok(Some(Arc::new(builder.freeze(agent_cfg))))
+    // When the parent gateway exported callback env vars (set in the
+    // `serve` startup just before Penny's Claude Code subprocess
+    // spawns), wire a `ForwardConfig` so this grandchild routes
+    // Ask-mode tools back to the parent's `/v1/tools/{name}/invoke`.
+    // The parent owns the in-memory `ApprovalStore` + the Side Panel
+    // queue, so the operator clicks ⚡ once and the result flows back
+    // through Claude Code → Penny → the chat UI.
+    let registry = match (
+        std::env::var("GADGETRON_GATEWAY_CALLBACK_URL").ok(),
+        std::env::var("GADGETRON_GATEWAY_CALLBACK_KEY").ok(),
+    ) {
+        (Some(url), Some(key)) if !url.trim().is_empty() && !key.trim().is_empty() => {
+            tracing::info!(
+                target: "gadget_serve",
+                gateway = %url,
+                "forwarding Ask-mode tool calls to parent gateway"
+            );
+            builder.freeze_with_forwarding(
+                agent_cfg,
+                gadgetron_penny::ForwardConfig {
+                    base_url: url,
+                    auth_token: key,
+                },
+            )
+        }
+        _ => builder.freeze(agent_cfg),
+    };
+    Ok(Some(Arc::new(registry)))
 }
 
 fn load_knowledge_config_from_path(
@@ -2421,6 +2448,25 @@ fn require_tty_for_tui(tui_enabled: bool, has_tty: bool) -> anyhow::Result<()> {
     )
 }
 
+/// Translate the operator-supplied `bind_addr` (e.g. `0.0.0.0:18080`,
+/// `[::]:18080`, `127.0.0.1:18080`) into a loopback URL the grandchild
+/// `gadget serve` process can dial back to. Wildcard binds become
+/// `127.0.0.1` / `[::1]`; explicit hosts are preserved.
+fn bind_addr_to_loopback_url(bind_addr: &str) -> String {
+    let (host, port) = bind_addr.rsplit_once(':').unwrap_or((bind_addr, ""));
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host = match host {
+        "0.0.0.0" | "" => "127.0.0.1",
+        "::" => "[::1]",
+        other => other,
+    };
+    if port.is_empty() {
+        format!("http://{host}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
 async fn bind_and_serve(app: axum::Router, bind_addr: &str, config: &AppConfig) -> Result<()> {
     // Print "Starting server..." progress line before binding (matches design §1.4 Stage 3-B).
     eprint!("  Starting server...");
@@ -2430,6 +2476,30 @@ async fn bind_and_serve(app: axum::Router, bind_addr: &str, config: &AppConfig) 
 
     eprintln!(" done");
     tracing::info!(addr = %bind_addr, "listening");
+
+    // Export callback env so the `gadget serve` grandchild that
+    // Claude Code spawns under Penny can forward Ask-mode tool calls
+    // back to this parent gateway. `GADGETRON_GATEWAY_CALLBACK_URL`
+    // tells the grandchild where; `GADGETRON_GATEWAY_CALLBACK_KEY`
+    // is the bearer token. We default the key to the existing
+    // `GADGETRON_LOG_ANALYZER_KEY` admin key when set — it's already
+    // an operator-managed secret used for the same kind of internal
+    // loopback callback. When neither is set, the grandchild's
+    // registry falls back to "Ask collapses to Never".
+    let callback_url = bind_addr_to_loopback_url(bind_addr);
+    std::env::set_var("GADGETRON_GATEWAY_CALLBACK_URL", &callback_url);
+    if std::env::var("GADGETRON_GATEWAY_CALLBACK_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        if let Some(k) = std::env::var("GADGETRON_LOG_ANALYZER_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
+            std::env::set_var("GADGETRON_GATEWAY_CALLBACK_KEY", k);
+        }
+    }
 
     // Print startup banner to stdout (matches design §1.4 Stage 3-B).
     print_serve_banner(

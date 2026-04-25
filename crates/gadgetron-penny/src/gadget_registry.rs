@@ -51,6 +51,21 @@ const APPROVAL_WAIT: Duration = Duration::from_secs(120);
 /// upgrade; 1 s polling is fine for the operator-attended demo.
 const APPROVAL_POLL: Duration = Duration::from_secs(1);
 
+/// Configuration for routing Ask-mode tool calls back to a parent
+/// gadgetron gateway. Used by the `gadgetron gadget serve` grandchild
+/// (Claude Code spawns it via stdio MCP) so its dispatch can talk to
+/// the shared in-memory `ApprovalStore` that lives in the parent
+/// process. Without this, Ask-mode tools collapse to Never in the
+/// grandchild — the parent's approval queue is unreachable.
+#[derive(Clone, Debug)]
+pub struct ForwardConfig {
+    /// Base URL of the parent gateway, e.g. `http://127.0.0.1:18080`.
+    pub base_url: String,
+    /// Bearer token used to authenticate the forwarded
+    /// `/v1/tools/{name}/invoke` POST.
+    pub auth_token: String,
+}
+
 /// Mutable builder. Lives in `main()` until all providers are registered.
 pub struct GadgetRegistryBuilder {
     providers: Vec<Arc<dyn GadgetProvider>>,
@@ -109,7 +124,7 @@ impl GadgetRegistryBuilder {
     /// duplicate in `/v1/tools` (future P2B endpoint). The test
     /// `duplicate_tool_name_last_wins_in_dispatch` locks this in.
     pub fn freeze(self, cfg: &AgentConfig) -> GadgetRegistry {
-        self.freeze_with_approvals(cfg, None)
+        self.freeze_inner(cfg, None, None)
     }
 
     /// Same as `freeze` but threads an `ApprovalStore` so Ask-mode
@@ -120,6 +135,30 @@ impl GadgetRegistryBuilder {
         self,
         cfg: &AgentConfig,
         approval_store: Option<Arc<dyn ApprovalStore>>,
+    ) -> GadgetRegistry {
+        self.freeze_inner(cfg, approval_store, None)
+    }
+
+    /// Freeze with a parent-forwarding seam so the grandchild
+    /// `gadget serve` process can reuse the parent's approval queue
+    /// for Ask-mode tools. When `forward` is `Some`, Ask-mode Write
+    /// tools land in `allowed_names` AND `dispatch` routes them via
+    /// HTTP to `<base_url>/v1/tools/{name}/invoke` instead of running
+    /// the local provider — the parent there does the full approval
+    /// flow against its in-process `ApprovalStore`.
+    pub fn freeze_with_forwarding(
+        self,
+        cfg: &AgentConfig,
+        forward: ForwardConfig,
+    ) -> GadgetRegistry {
+        self.freeze_inner(cfg, None, Some(forward))
+    }
+
+    fn freeze_inner(
+        self,
+        cfg: &AgentConfig,
+        approval_store: Option<Arc<dyn ApprovalStore>>,
+        forward: Option<ForwardConfig>,
     ) -> GadgetRegistry {
         let mut by_tool_name: HashMap<String, Arc<dyn GadgetProvider>> = HashMap::new();
         let mut all_schemas: Vec<GadgetSchema> = Vec::new();
@@ -142,20 +181,21 @@ impl GadgetRegistryBuilder {
             }
         }
         // Precompute the allowed-names set. A tool is in the set iff
-        // `tool_is_enabled(schema, cfg, has_store)` — Ask-mode tools
-        // are now allowed when the registry carries an approval store,
-        // because dispatch routes them through the approval flow.
-        // Without the store, the legacy "Ask collapses to Never"
-        // behavior holds.
-        let has_store = approval_store.is_some();
+        // `tool_is_enabled(schema, cfg, has_ask_handler)` — Ask-mode
+        // tools are allowed when EITHER an approval store or a
+        // parent-forwarding seam is wired, because dispatch can route
+        // them through the approval flow in either case. Without
+        // either, the legacy "Ask collapses to Never" behavior holds.
+        let has_ask_handler = approval_store.is_some() || forward.is_some();
         let allowed_names: HashSet<String> = all_schemas
             .iter()
-            .filter(|schema| tool_is_enabled(schema, cfg, has_store))
+            .filter(|schema| tool_is_enabled(schema, cfg, has_ask_handler))
             .map(|schema| schema.name.clone())
             .collect();
         // Tools whose effective mode is Ask. Carried separately so
         // `dispatch` can decide between (a) call provider directly or
-        // (b) create approval + wait + call provider on approve.
+        // (b) create approval + wait + call provider on approve, or
+        // (c) forward to the parent gateway.
         let ask_names: HashSet<String> = all_schemas
             .iter()
             .filter(|schema| {
@@ -164,6 +204,12 @@ impl GadgetRegistryBuilder {
             })
             .map(|schema| schema.name.clone())
             .collect();
+        let forward_client = forward.as_ref().map(|_| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(150))
+                .build()
+                .expect("reqwest client must build")
+        });
         GadgetRegistry {
             by_tool_name,
             all_schemas: Arc::from(all_schemas.into_boxed_slice()),
@@ -171,6 +217,8 @@ impl GadgetRegistryBuilder {
             ask_names: Arc::new(ArcSwap::new(Arc::new(ask_names))),
             tool_metadata: Arc::new(tool_metadata),
             approval_store,
+            forward,
+            forward_client,
         }
     }
 }
@@ -211,6 +259,17 @@ pub struct GadgetRegistry {
     /// `None` in legacy/test wirings; in that case Ask-mode tools are
     /// rejected with `GadgetError::Denied` to fail closed.
     approval_store: Option<Arc<dyn ApprovalStore>>,
+    /// Parent-forwarding seam used by the `gadgetron gadget serve`
+    /// grandchild. When `Some`, dispatch on an Ask-mode tool POSTs
+    /// to `<base_url>/v1/tools/{name}/invoke` and returns the result —
+    /// the parent there owns the approval queue and the Side Panel UI.
+    /// Mutually exclusive with `approval_store` in practice (the
+    /// parent uses approval_store, the grandchild uses forward).
+    forward: Option<ForwardConfig>,
+    /// reqwest client reused for forward dispatches. `Some` iff
+    /// `forward.is_some()`. Build cost is ~ms; reuse keeps connection
+    /// pooling working across rapid back-to-back tool calls.
+    forward_client: Option<reqwest::Client>,
 }
 
 impl GadgetRegistry {
@@ -249,11 +308,11 @@ impl GadgetRegistry {
     ///
     /// Output is sorted by tool name for deterministic test snapshots.
     pub fn build_allowed_tools(&self, cfg: &AgentConfig) -> Vec<String> {
-        let has_store = self.approval_store.is_some();
+        let has_ask_handler = self.approval_store.is_some() || self.forward.is_some();
         let mut out: Vec<String> = self
             .all_schemas
             .iter()
-            .filter(|schema| tool_is_enabled(schema, cfg, has_store))
+            .filter(|schema| tool_is_enabled(schema, cfg, has_ask_handler))
             .map(|schema| schema.name.clone())
             .collect();
         out.sort();
@@ -284,11 +343,11 @@ impl GadgetRegistry {
     /// `--allowed-tools` list they were spawned with. New subprocesses
     /// pick up the new list the next time Penny respawns.
     pub fn reconfigure(&self, cfg: &AgentConfig) {
-        let has_store = self.approval_store.is_some();
+        let has_ask_handler = self.approval_store.is_some() || self.forward.is_some();
         let allowed: HashSet<String> = self
             .all_schemas
             .iter()
-            .filter(|schema| tool_is_enabled(schema, cfg, has_store))
+            .filter(|schema| tool_is_enabled(schema, cfg, has_ask_handler))
             .map(|schema| schema.name.clone())
             .collect();
         let ask: HashSet<String> = self
@@ -355,16 +414,21 @@ impl GadgetRegistry {
                 reason: format!("tool '{name}' disabled by operator config"),
             });
         }
-        // Ask-mode gate: route through ApprovalStore when present.
-        // Without a store the call falls through (the L3 set excludes
-        // Ask names in that wiring, so this branch is unreachable
-        // — but defense-in-depth).
+        // Ask-mode gate: route through ApprovalStore when present, or
+        // forward to the parent gateway when this registry was frozen
+        // with a `ForwardConfig` (the `gadget serve` grandchild path).
         if ask.contains(name) {
+            if let (Some(forward), Some(client)) =
+                (self.forward.as_ref(), self.forward_client.as_ref())
+            {
+                return forward_tool_call(client, forward, name, args).await;
+            }
             let Some(store) = self.approval_store.as_ref() else {
                 return Err(GadgetError::Denied {
                     reason: format!(
-                        "tool '{name}' requires operator approval but the approval store \
-                         isn't wired in this build"
+                        "tool '{name}' requires operator approval but neither the \
+                         approval store nor a parent-forwarding seam is wired in \
+                         this build"
                     ),
                 });
             };
@@ -437,6 +501,75 @@ async fn wait_for_approval(
             }
         }
     }
+}
+
+/// Forward an Ask-mode tool call to the parent gateway. Used by the
+/// `gadget serve` grandchild — its registry is in a separate process
+/// from the operator's `ApprovalStore`, so it bounces the call through
+/// HTTP. The parent's `/v1/tools/{name}/invoke` handler creates the
+/// approval, blocks on the operator click, runs the provider on
+/// approve, and returns the tool result. We unwrap that response back
+/// into a `GadgetResult`.
+///
+/// The 150 s reqwest client timeout sits a hair above the 120 s
+/// `APPROVAL_WAIT` so a parent timeout always fires first with a
+/// clean `denied: approval timed out` instead of a network error.
+async fn forward_tool_call(
+    client: &reqwest::Client,
+    forward: &ForwardConfig,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> Result<GadgetResult, GadgetError> {
+    let url = format!(
+        "{}/v1/tools/{}/invoke",
+        forward.base_url.trim_end_matches('/'),
+        tool_name
+    );
+    let resp = client
+        .post(&url)
+        .bearer_auth(&forward.auth_token)
+        .json(&args)
+        .send()
+        .await
+        .map_err(|e| GadgetError::Execution(format!("forward POST {url}: {e}")))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| GadgetError::Execution(format!("forward decode {url}: {e}")))?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| body.to_string());
+        // Map known error codes back to `GadgetError` variants so the
+        // grandchild's `gadget_error_as_tool_result` mapper produces
+        // the same `denied: ...` text Penny already knows how to render.
+        let code = body
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        return Err(match code {
+            "mcp_denied_by_policy" => GadgetError::Denied { reason: msg },
+            "mcp_unknown_tool" => GadgetError::UnknownGadget(tool_name.to_string()),
+            _ => {
+                GadgetError::Execution(format!("forward {url} returned {}: {msg}", status.as_u16()))
+            }
+        });
+    }
+    // `/v1/tools/{name}/invoke` success returns `{"content": [...], "isError": bool}`.
+    let content = body
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let is_error = body
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(GadgetResult { content, is_error })
 }
 
 /// `GadgetModeReconfigurer` impl so the `PATCH /workbench/agent/modes`

@@ -26,6 +26,7 @@ uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
+reqwest = { workspace = true }
 
 # subprocess management
 regex = { workspace = true }

@@ -573,11 +573,46 @@ pub async fn approve_action(
         },
     );
     let action_id = approved.action_id.clone();
-    let resp = action_svc
+    let approval_id = approved.id;
+    // Penny-created approvals carry an MCP tool name (e.g. "server.bash")
+    // as their `action_id` instead of a workbench descriptor id. For
+    // those, the dispatch happens elsewhere — the grandchild's
+    // `forward_tool_call` poll picks up the Approved state and runs
+    // the gadget — so `resume_approval` would (correctly) report
+    // `ActionNotFound`. Suppress that error and return an "ok" stub
+    // so the operator's ⚡ click in the Side Panel doesn't surface a
+    // bogus 404. Any other error from `resume_approval` is still
+    // propagated.
+    match action_svc
         .resume_approval(&actor, &ctx.scopes, approved)
-        .await?;
-    publish_action_activity(&state, &actor, &action_id, &resp, None);
-    Ok(Json(resp))
+        .await
+    {
+        Ok(resp) => {
+            publish_action_activity(&state, &actor, &action_id, &resp, None);
+            Ok(Json(resp))
+        }
+        Err(WorkbenchHttpError::ActionNotFound { .. }) => {
+            tracing::info!(
+                target: "workbench.approval",
+                %approval_id,
+                action_id = %action_id,
+                "approve resolved an MCP-tool approval (no workbench descriptor); \
+                 dispatch will run via the forwarding poll loop"
+            );
+            Ok(Json(InvokeWorkbenchActionResponse {
+                result: gadgetron_core::workbench::WorkbenchActionResult {
+                    status: "ok".into(),
+                    approval_id: Some(approval_id),
+                    activity_event_id: None,
+                    audit_event_id: None,
+                    refresh_view_ids: Vec::new(),
+                    knowledge_candidates: Vec::new(),
+                    payload: None,
+                },
+            }))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// `POST /approvals/:approval_id/deny` — refuse a `pending_approval`.
