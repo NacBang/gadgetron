@@ -753,11 +753,14 @@ fn default_write_mode() -> GadgetMode {
 fn default_wiki_write_mode() -> GadgetMode {
     GadgetMode::Auto
 }
-/// server-monitor is a local-operator surface (register one's own fleet),
-/// not a Penny-driven public API, so Auto by default matches the demo
-/// UX. Operators on shared hosts should pin `server_admin = "ask"`.
+/// server-monitor mutating gadgets default to `Ask`. Penny needs explicit
+/// operator approval before a `server.bash` / `server.systemctl` /
+/// `server.add` call leaves the gateway. The Side Panel → Actions tab
+/// surfaces pending approvals; resolution flips this from a no-op into
+/// a real dispatch. Operators who want hands-off automation can pin
+/// `server_admin = "auto"` in `gadgetron.toml`.
 fn default_server_admin_mode() -> GadgetMode {
-    GadgetMode::Auto
+    GadgetMode::Ask
 }
 
 impl Default for WriteGadgetsConfig {

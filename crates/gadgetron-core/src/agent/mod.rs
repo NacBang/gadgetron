@@ -22,5 +22,6 @@ pub use config::{
     ExtraConfirmation, GadgetMode, GadgetsConfig, WriteGadgetsConfig,
 };
 pub use tools::{
-    GadgetDispatcher, GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
+    GadgetDispatcher, GadgetError, GadgetModeReconfigurer, GadgetProvider, GadgetResult,
+    GadgetSchema, GadgetTier,
 };

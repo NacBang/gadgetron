@@ -1445,6 +1445,7 @@ dependencies = [
 name = "gadgetron-penny"
 version = "0.5.20"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "chrono",
  "dashmap",
@@ -1455,6 +1456,7 @@ dependencies = [
  "once_cell",
  "proptest",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

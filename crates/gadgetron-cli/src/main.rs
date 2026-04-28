@@ -669,6 +669,7 @@ fn load_penny_registry_from_config(
     config_path: &std::path::Path,
     agent_cfg: &gadgetron_core::agent::AgentConfig,
     pg_pool: Option<sqlx::PgPool>,
+    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
 ) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
     let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? else {
         return Ok(None);
@@ -949,8 +950,11 @@ fn load_penny_registry_from_config(
     // Freeze against the operator's [agent] config so `dispatch()` can
     // enforce L3 defense-in-depth on any tool call that reaches this
     // registry, regardless of whether it is used in-process or via the
-    // child-side stdio server.
-    Ok(Some(Arc::new(builder.freeze(agent_cfg))))
+    // child-side stdio server. Approval store flows in so Ask-mode
+    // Write tools route through the operator-approval queue.
+    Ok(Some(Arc::new(
+        builder.freeze_with_approvals(agent_cfg, approval_store),
+    )))
 }
 
 async fn load_penny_registry_from_config_for_gadget_serve(
@@ -980,7 +984,34 @@ async fn load_penny_registry_from_config_for_gadget_serve(
             tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")
         }
     }
-    Ok(Some(Arc::new(builder.freeze(agent_cfg))))
+    // When the parent gateway exported callback env vars (set in the
+    // `serve` startup just before Penny's Claude Code subprocess
+    // spawns), wire a `ForwardConfig` so this grandchild routes
+    // Ask-mode tools back to the parent's `/v1/tools/{name}/invoke`.
+    // The parent owns the in-memory `ApprovalStore` + the Side Panel
+    // queue, so the operator clicks ⚡ once and the result flows back
+    // through Claude Code → Penny → the chat UI.
+    let registry = match (
+        std::env::var("GADGETRON_GATEWAY_CALLBACK_URL").ok(),
+        std::env::var("GADGETRON_GATEWAY_CALLBACK_KEY").ok(),
+    ) {
+        (Some(url), Some(key)) if !url.trim().is_empty() && !key.trim().is_empty() => {
+            tracing::info!(
+                target: "gadget_serve",
+                gateway = %url,
+                "forwarding Ask-mode tool calls to parent gateway"
+            );
+            builder.freeze_with_forwarding(
+                agent_cfg,
+                gadgetron_penny::ForwardConfig {
+                    base_url: url,
+                    auth_token: key,
+                },
+            )
+        }
+        _ => builder.freeze(agent_cfg),
+    };
+    Ok(Some(Arc::new(registry)))
 }
 
 fn load_knowledge_config_from_path(
@@ -1124,13 +1155,18 @@ fn prepare_penny_router_registration(
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
     >,
+    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
 ) -> Result<Option<PennyRouterRegistration>> {
     if !config_path.exists() {
         return Ok(None);
     }
 
-    let Some(registry) =
-        load_penny_registry_from_config(config_path, &app_config.agent, pg_pool.clone())?
+    let Some(registry) = load_penny_registry_from_config(
+        config_path,
+        &app_config.agent,
+        pg_pool.clone(),
+        approval_store,
+    )?
     else {
         return Ok(None);
     };
@@ -1778,6 +1814,7 @@ fn build_provider_maps(
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
     >,
+    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
 ) -> Result<(
     SharedProviderMap,
     RouterProviderMap,
@@ -1804,6 +1841,7 @@ fn build_provider_maps(
         pg_pool,
         activity_bus,
         candidate_coordinator,
+        approval_store,
     );
     Ok((providers_ss, providers_for_router, penny_registry))
 }
@@ -1866,6 +1904,8 @@ fn build_workbench(
     bundles_dir: Option<String>,
     bundle_signing: gadgetron_core::config::BundleSigningConfig,
     billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
+    approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore>,
+    agent_config: Arc<gadgetron_core::agent::AgentConfig>,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
     use gadgetron_core::agent::tools::GadgetDispatcher;
     use gadgetron_core::audit::{ActionAuditSink, NoopActionAuditSink};
@@ -1893,6 +1933,9 @@ fn build_workbench(
         descriptor_catalog: catalog.clone(),
     });
 
+    let gadget_mode_reconfigurer: Option<
+        Arc<dyn gadgetron_core::agent::tools::GadgetModeReconfigurer>,
+    > = penny_registry.clone().map(|r| r as _);
     let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> =
         penny_registry.map(|r| r as Arc<dyn GadgetDispatcher>);
 
@@ -1916,17 +1959,6 @@ fn build_workbench(
     } else {
         Arc::new(NoopActionAuditSink)
     };
-
-    // Wire the approval store. The in-memory store is fine for P2A
-    // (single-instance, restart-loses-pending is acceptable); a
-    // Postgres-backed store slots in behind the same trait when
-    // Gadgetron grows to multi-instance. The SAME store instance is
-    // shared between the action service (step 6 `create`) and the
-    // approval endpoints (`mark_approved` / `mark_denied`), so a
-    // `pending_approval` returned from invoke is visible to the
-    // subsequent approve call.
-    let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> =
-        Arc::new(gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new());
 
     // ISSUE 12 TASK 12.2 — thread the PG pool so successful
     // direct-action + approved-action dispatches emit a billing_events
@@ -1952,6 +1984,9 @@ fn build_workbench(
         None => Arc::new(action_svc_impl.with_billing_failures(billing_failures)),
     };
 
+    let gadget_modes = Some(Arc::new(arc_swap::ArcSwap::new(Arc::new(
+        agent_config.gadgets.clone(),
+    ))));
     let svc = Arc::new(GatewayWorkbenchService {
         projection,
         actions: Some(action_svc),
@@ -1960,6 +1995,9 @@ fn build_workbench(
         catalog_path,
         bundles_dir,
         bundle_signing,
+        gadget_modes,
+        gadget_mode_reconfigurer,
+        agent_config_base: Some(agent_config),
     });
     // Prime the catalog from `[web] bundles_dir` / `catalog_path` at
     // startup so the operator doesn't have to SIGHUP / hit
@@ -2243,14 +2281,26 @@ async fn init_serve_runtime(
             _ => (None, None),
         };
 
+    // Approval store is shared between (a) Penny's Ask-mode dispatch
+    // gate (which blocks on `ApprovalStore::wait_or_create` until the
+    // operator approves/denies via the Side Panel) and (b) the
+    // workbench action service + `/workbench/approvals/*` endpoints.
+    // Create it before `build_provider_maps` so Penny's registry can
+    // hold the same Arc used by the HTTP surface.
+    let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> =
+        Arc::new(gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new());
+
     let (providers_ss, providers_for_router, penny_registry) = build_provider_maps(
         config,
         config_path,
         pg_pool.clone(),
         Some(activity_bus.clone()),
         candidate_coordinator.clone(),
+        Some(approval_store.clone()),
     )?;
     let llm_router = build_llm_router(providers_for_router, config);
+
+    let agent_config = Arc::new(config.agent.clone());
 
     let workbench = build_workbench(
         knowledge_service.clone(),
@@ -2261,9 +2311,9 @@ async fn init_serve_runtime(
         config.web.bundles_dir.clone(),
         config.web.bundle_signing.clone(),
         Arc::clone(&billing_failures_for_enforcer),
+        approval_store.clone(),
+        agent_config.clone(),
     );
-
-    let agent_config = Arc::new(config.agent.clone());
 
     let (penny_shared_surface, penny_assembler) =
         match (&workbench, &activity_capture_store, &candidate_coordinator) {
@@ -2398,6 +2448,25 @@ fn require_tty_for_tui(tui_enabled: bool, has_tty: bool) -> anyhow::Result<()> {
     )
 }
 
+/// Translate the operator-supplied `bind_addr` (e.g. `0.0.0.0:18080`,
+/// `[::]:18080`, `127.0.0.1:18080`) into a loopback URL the grandchild
+/// `gadget serve` process can dial back to. Wildcard binds become
+/// `127.0.0.1` / `[::1]`; explicit hosts are preserved.
+fn bind_addr_to_loopback_url(bind_addr: &str) -> String {
+    let (host, port) = bind_addr.rsplit_once(':').unwrap_or((bind_addr, ""));
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host = match host {
+        "0.0.0.0" | "" => "127.0.0.1",
+        "::" => "[::1]",
+        other => other,
+    };
+    if port.is_empty() {
+        format!("http://{host}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
 async fn bind_and_serve(app: axum::Router, bind_addr: &str, config: &AppConfig) -> Result<()> {
     // Print "Starting server..." progress line before binding (matches design §1.4 Stage 3-B).
     eprint!("  Starting server...");
@@ -2407,6 +2476,30 @@ async fn bind_and_serve(app: axum::Router, bind_addr: &str, config: &AppConfig) 
 
     eprintln!(" done");
     tracing::info!(addr = %bind_addr, "listening");
+
+    // Export callback env so the `gadget serve` grandchild that
+    // Claude Code spawns under Penny can forward Ask-mode tool calls
+    // back to this parent gateway. `GADGETRON_GATEWAY_CALLBACK_URL`
+    // tells the grandchild where; `GADGETRON_GATEWAY_CALLBACK_KEY`
+    // is the bearer token. We default the key to the existing
+    // `GADGETRON_LOG_ANALYZER_KEY` admin key when set — it's already
+    // an operator-managed secret used for the same kind of internal
+    // loopback callback. When neither is set, the grandchild's
+    // registry falls back to "Ask collapses to Never".
+    let callback_url = bind_addr_to_loopback_url(bind_addr);
+    std::env::set_var("GADGETRON_GATEWAY_CALLBACK_URL", &callback_url);
+    if std::env::var("GADGETRON_GATEWAY_CALLBACK_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        if let Some(k) = std::env::var("GADGETRON_LOG_ANALYZER_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
+            std::env::set_var("GADGETRON_GATEWAY_CALLBACK_KEY", k);
+        }
+    }
 
     // Print startup banner to stdout (matches design §1.4 Stage 3-B).
     print_serve_banner(
@@ -2578,6 +2671,7 @@ fn register_penny_if_configured(
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
     >,
+    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
 ) -> Option<Arc<gadgetron_penny::GadgetRegistry>> {
     // We re-read the toml file to extract the `[knowledge]` section.
     // The main AppConfig load path doesn't include a `knowledge`
@@ -2590,6 +2684,7 @@ fn register_penny_if_configured(
         pg_pool,
         activity_bus,
         candidate_coordinator,
+        approval_store,
     ) {
         Ok(Some(registration)) => registration,
         Ok(None) => {
@@ -4022,6 +4117,7 @@ bind = "127.0.0.1:8080"
             &config_path,
             &gadgetron_core::agent::AgentConfig::default(),
             None, // no Postgres pool in unit-test path → ingestion writer skipped
+            None, // no approval store in unit-test path → Ask tools disabled
         )
         .expect("load should succeed");
         assert!(
@@ -4058,6 +4154,7 @@ wiki_max_page_bytes = 1048576
             &config_path,
             &gadgetron_core::agent::AgentConfig::default(),
             None, // no Postgres pool in unit-test path → ingestion writer skipped
+            None, // no approval store in unit-test path → Ask tools disabled
         )
         .expect("load should succeed")
         .expect("knowledge config should build a Penny registry");
@@ -4340,6 +4437,10 @@ wiki_max_page_bytes = 1048576
             None,
             Default::default(),
             std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
+            std::sync::Arc::new(
+                gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
+            ),
+            std::sync::Arc::new(gadgetron_core::agent::AgentConfig::default()),
         );
         assert!(
             workbench.is_some(),
@@ -4440,7 +4541,7 @@ wiki_max_page_bytes = 1048576
             "knowledge_service must be None"
         );
 
-        // build_workbench(None, None, None, None, None, None, Default::default(), std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new())) → Some (degraded-mode projection —
+        // build_workbench(None, None, None, None, None, None, Default::default(), ...) → Some (degraded-mode projection —
         // always wired so the endpoint returns a degraded bootstrap rather than 404).
         let workbench = build_workbench(
             None,
@@ -4451,6 +4552,10 @@ wiki_max_page_bytes = 1048576
             None,
             Default::default(),
             std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
+            std::sync::Arc::new(
+                gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
+            ),
+            std::sync::Arc::new(gadgetron_core::agent::AgentConfig::default()),
         );
         assert!(
             workbench.is_some(),

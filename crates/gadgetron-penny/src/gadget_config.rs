@@ -139,6 +139,20 @@ fn knowledge_server_env(
         }
     }
 
+    // Forward Ask-mode tool calls back to the parent gateway. The
+    // grandchild's GadgetRegistry reads these to wire its
+    // `ForwardConfig`; without them, Ask-mode tools collapse to Never
+    // (the parent's in-memory ApprovalStore is unreachable from a
+    // separate process).
+    for var in [
+        "GADGETRON_GATEWAY_CALLBACK_URL",
+        "GADGETRON_GATEWAY_CALLBACK_KEY",
+    ] {
+        if let Some(value) = env.get(var).filter(|v| !v.trim().is_empty()) {
+            out.insert(var.to_string(), serde_json::Value::String(value));
+        }
+    }
+
     if out.is_empty() {
         None
     } else {
