@@ -7,6 +7,10 @@ import { OpenAIChatTransport } from "../openai-transport";
 import { WorkbenchShell } from "../components/shell/workbench-shell";
 import { AuthProvider, useAuth } from "../lib/auth-context";
 import { EvidenceProvider } from "../lib/evidence-context";
+import {
+  getActiveConversationId,
+  setActiveConversationId,
+} from "../lib/conversation-id";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Card, CardContent } from "../components/ui/card";
@@ -96,17 +100,16 @@ function AuthedShell({ children }: { children: ReactNode }) {
           if (typeof localStorage !== "undefined") {
             const key = localStorage.getItem("gadgetron_api_key");
             if (key) h["Authorization"] = `Bearer ${key}`;
-            // ISSUE 31 — conversation id minted by the conversations
-            // pane; read on every turn so switching chats takes effect
-            // on the next send without reconstructing the transport.
-            let convId = localStorage.getItem("gadgetron_conversation_id");
+            // Per-tab active conversation. The id lives in
+            // `sessionStorage` so two parallel browser windows don't
+            // stomp on each other's chat state. Helper handles the
+            // localStorage→sessionStorage migration on first read.
+            let convId = getActiveConversationId();
             if (!convId) {
-              // No active conversation yet: mint one now so the very
+              // Fresh tab with no inherited id: mint one so the very
               // first turn lands in a row and the sidebar picks it up.
               convId = crypto.randomUUID?.() ?? null;
-              if (convId) {
-                localStorage.setItem("gadgetron_conversation_id", convId);
-              }
+              if (convId) setActiveConversationId(convId);
             }
             if (convId) h["X-Gadgetron-Conversation-Id"] = convId;
           }

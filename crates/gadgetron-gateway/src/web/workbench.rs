@@ -1104,7 +1104,8 @@ pub async fn delete_conversation_handler(
     gadgetron_xaas::conversations::delete_conversation(pool, ctx.tenant_id, user_id, id)
         .await
         .map_err(|e| match e {
-            gadgetron_xaas::conversations::ConversationError::NotFound => {
+            gadgetron_xaas::conversations::ConversationError::NotFound
+            | gadgetron_xaas::conversations::ConversationError::OwnershipMismatch => {
                 WorkbenchHttpError::Core(GadgetronError::Config("conversation not found".into()))
             }
             gadgetron_xaas::conversations::ConversationError::Db(e) => {
@@ -1402,7 +1403,8 @@ pub async fn rename_conversation_handler(
     )
     .await
     .map_err(|e| match e {
-        gadgetron_xaas::conversations::ConversationError::NotFound => {
+        gadgetron_xaas::conversations::ConversationError::NotFound
+        | gadgetron_xaas::conversations::ConversationError::OwnershipMismatch => {
             WorkbenchHttpError::Core(GadgetronError::Config("conversation not found".into()))
         }
         gadgetron_xaas::conversations::ConversationError::Db(e) => {

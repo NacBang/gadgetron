@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { useAuth } from "../../lib/auth-context";
+import { setActiveConversationId } from "../../lib/conversation-id";
 import { Button } from "../../components/ui/button";
 import { safeRandomUUID } from "../../lib/uuid";
 
@@ -155,7 +156,7 @@ function openChatAboutFinding(f: Finding, hostLabel: string): void {
   );
   lines.push("```");
   const draft = lines.join("\n");
-  window.localStorage.setItem("gadgetron_conversation_id", convId);
+  setActiveConversationId(convId);
   window.localStorage.setItem(`gadgetron_draft_${convId}`, draft);
   window.localStorage.setItem(`gadgetron_pending_submit_${convId}`, "1");
   window.location.assign("/web");

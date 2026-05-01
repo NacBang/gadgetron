@@ -28,6 +28,11 @@ pub enum ConversationError {
     Db(#[from] sqlx::Error),
     #[error("not found")]
     NotFound,
+    /// The supplied `(tenant_id, user_id)` does not match the existing
+    /// conversation row's owner. The caller is attempting to write
+    /// turns into another principal's conversation — refuse loudly.
+    #[error("conversation owned by a different principal")]
+    OwnershipMismatch,
 }
 
 /// Insert a new conversation row. The caller supplies the id (so the
@@ -73,7 +78,15 @@ pub async fn upsert_turn(
     first_user_message: &str,
 ) -> Result<(i32, i32), ConversationError> {
     let title_candidate = summarize_message(first_user_message);
-    let row: (i32, i32) = sqlx::query_as(
+    // The `WHERE conversations.tenant_id = $2 AND conversations.user_id = $3`
+    // predicate on the ON CONFLICT branch is the security gate: a
+    // caller who guesses (or leaks) another principal's conversation
+    // UUID cannot append turns to it. When the predicate fails the
+    // UPDATE matches no row, RETURNING produces no row, and `fetch_optional`
+    // hands back `None`, which we map to `OwnershipMismatch`. The
+    // INSERT path (no row exists yet) still succeeds — first-write
+    // wins, and from there the predicate locks the owner.
+    let row: Option<(i32, i32)> = sqlx::query_as(
         "INSERT INTO conversations \
              (id, tenant_id, user_id, title, claude_session_uuid, turn_count, summary_turn_at) \
          VALUES ($1, $2, $3, $4, $5, 1, 0) \
@@ -83,6 +96,7 @@ pub async fn upsert_turn(
                          THEN EXCLUDED.title ELSE conversations.title END, \
             claude_session_uuid = COALESCE(EXCLUDED.claude_session_uuid, conversations.claude_session_uuid), \
             turn_count = conversations.turn_count + 1 \
+         WHERE conversations.tenant_id = $2 AND conversations.user_id = $3 \
          RETURNING turn_count, summary_turn_at",
     )
     .bind(conversation_id)
@@ -90,9 +104,9 @@ pub async fn upsert_turn(
     .bind(user_id)
     .bind(&title_candidate)
     .bind(claude_session_uuid)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(row)
+    row.ok_or(ConversationError::OwnershipMismatch)
 }
 
 /// Apply a Penny-generated summary as the conversation's new title.
