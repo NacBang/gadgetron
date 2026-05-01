@@ -640,11 +640,14 @@ fn resolve_write_mode(name: &str, cfg: &AgentConfig) -> GadgetMode {
         "infra" => w.infra_write,
         "scheduler" => w.scheduler_write,
         "provider" => w.provider_mutate,
-        // Both `server.*` and `loganalysis.*` operate on the same
-        // registered fleet — they share the `server_admin` policy
-        // toggle so an operator who flipped it to Ask/Never gets
-        // consistent behavior across both bundles.
-        "server" | "loganalysis" => w.server_admin,
+        // `server.*` mutates the host (server.bash, systemctl, add,
+        // remove) — gated by `server_admin` (default Ask). The
+        // `loganalysis.*` writes only touch the findings DB
+        // (dismiss / set_interval / comment_*) and never reach the
+        // host, so they live in their own `loganalysis_admin` bucket
+        // (default Auto) to keep the Logs UI one-click.
+        "server" => w.server_admin,
+        "loganalysis" => w.loganalysis_admin,
         _ => w.default_mode,
     }
 }

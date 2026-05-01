@@ -369,9 +369,14 @@ export default function FindingsPage() {
     setLoading(true);
     setErr(null);
     try {
+      // Always fetch the FULL fleet view; severity + host filters
+      // are applied client-side below so the All / critical / high /
+      // medium / info pill counts are stable across selections.
+      // Host filter still passes through so a single-host deep link
+      // (`?host=<uuid>`) doesn't drag in 500 unrelated rows over the
+      // wire.
       const args: Record<string, unknown> = { limit: 500 };
       if (hostFilter) args.host_id = hostFilter;
-      if (sevFilter) args.severity = sevFilter;
       const [findingsResp, hostsResp, statusResp] = await Promise.all([
         invokeAction(apiKey, "loganalysis-list", args),
         invokeAction(apiKey, "server-list", {}),
@@ -390,7 +395,7 @@ export default function FindingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [apiKey, hostFilter, sevFilter]);
+  }, [apiKey, hostFilter]);
 
   useEffect(() => {
     void refresh();
@@ -501,20 +506,10 @@ export default function FindingsPage() {
     return m;
   }, [hosts]);
 
-  // Group by severity then host.
-  const grouped = useMemo(() => {
-    const out: Record<Finding["severity"], Finding[]> = {
-      critical: [],
-      high: [],
-      medium: [],
-      info: [],
-    };
-    for (const f of findings) {
-      out[f.severity].push(f);
-    }
-    return out;
-  }, [findings]);
-
+  // Severity counts computed from the FULL fetched set (host filter
+  // is server-side, but severity is client-side) so the pills always
+  // show the true totals — clicking critical doesn't zero-out high /
+  // medium / info, which was the user-reported confusion.
   const severityCounts = useMemo(() => {
     const c: Record<Finding["severity"], number> = {
       critical: 0,
@@ -526,6 +521,26 @@ export default function FindingsPage() {
     return c;
   }, [findings]);
 
+  // Apply the active severity filter client-side to produce the
+  // displayed list. `null` means no filter (All).
+  const visibleFindings = useMemo(
+    () => (sevFilter ? findings.filter((f) => f.severity === sevFilter) : findings),
+    [findings, sevFilter],
+  );
+
+  const grouped = useMemo(() => {
+    const out: Record<Finding["severity"], Finding[]> = {
+      critical: [],
+      high: [],
+      medium: [],
+      info: [],
+    };
+    for (const f of visibleFindings) {
+      out[f.severity].push(f);
+    }
+    return out;
+  }, [visibleFindings]);
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl space-y-4 p-6">
@@ -534,20 +549,6 @@ export default function FindingsPage() {
             <h1 className="text-lg font-semibold text-zinc-100">Logs</h1>
           </div>
           <div className="flex items-center gap-2">
-            {hostFilter && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setHostFilter(null);
-                  if (typeof window !== "undefined")
-                    window.history.replaceState(null, "", "/web/findings");
-                }}
-                className="h-7 px-2 text-[11px]"
-              >
-                전체 호스트 ✕
-              </Button>
-            )}
             <Button
               variant="ghost"
               size="sm"
@@ -641,15 +642,40 @@ export default function FindingsPage() {
           </div>
         </details>
 
-        {/* Severity filter pills */}
-        <div className="flex gap-1.5">
+        {/* Filter row — host dropdown + severity pills */}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+            호스트
+            <select
+              value={hostFilter ?? ""}
+              onChange={(e) => {
+                const v = e.target.value || null;
+                setHostFilter(v);
+                if (typeof window !== "undefined") {
+                  const url = new URL(window.location.href);
+                  if (v) url.searchParams.set("host", v);
+                  else url.searchParams.delete("host");
+                  window.history.replaceState(null, "", url.toString());
+                }
+              }}
+              className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200 hover:border-zinc-600"
+            >
+              <option value="">전체 ({hosts.length})</option>
+              {hosts.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {h.alias ?? h.host}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="mx-1 h-4 w-px bg-zinc-800" aria-hidden />
           <button
             type="button"
             onClick={() => setSevFilter(null)}
             className={`rounded border px-2 py-0.5 text-[11px] ${
               sevFilter == null
                 ? "border-zinc-500 bg-zinc-800 text-zinc-100"
-                : "border-zinc-800 bg-zinc-900 text-zinc-500"
+                : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300"
             }`}
           >
             All ({findings.length})
@@ -670,26 +696,17 @@ export default function FindingsPage() {
           ))}
         </div>
 
-        {hostFilter && (
-          <div className="rounded border border-blue-900/40 bg-blue-950/20 px-3 py-2 text-[11px] text-blue-300">
-            호스트 필터:{" "}
-            <span className="font-mono">
-              {hostsById.get(hostFilter)?.alias ??
-                hostsById.get(hostFilter)?.host ??
-                hostFilter.slice(0, 8)}
-            </span>
-          </div>
-        )}
-
         {err && (
           <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
             {err}
           </div>
         )}
 
-        {!loading && findings.length === 0 && !err && (
+        {!loading && visibleFindings.length === 0 && !err && (
           <div className="rounded border border-zinc-800 bg-zinc-900/50 px-4 py-8 text-center text-[12px] text-zinc-500">
-            🟢 처리할 이상 징후가 없습니다.
+            {findings.length === 0
+              ? "🟢 처리할 이상 징후가 없습니다."
+              : `현재 필터 조건에 맞는 finding이 없습니다 (총 ${findings.length}개 중).`}
           </div>
         )}
 
