@@ -3,7 +3,7 @@
 //! Tier choice: list/scan_now are Read; dismiss + set_interval are
 //! Write because they mutate state operators care about.
 
-use crate::{comments, store};
+use crate::{comments, llm::Classifier, scanner, store};
 use async_trait::async_trait;
 use gadgetron_bundle_server_monitor::InventoryStore;
 use gadgetron_core::agent::tools::{
@@ -27,6 +27,11 @@ pub struct LogAnalyzerProvider {
     /// When None (unit tests / legacy wiring), status falls back to
     /// the raw DB list (pre-reconciliation behavior).
     inventory: Option<Arc<InventoryStore>>,
+    /// Penny LLM classifier used by `loganalysis.scan_now` for the
+    /// fallback path on lines no rule matches. `None` → rules-only,
+    /// matching the background-loop behavior when
+    /// `GADGETRON_LOG_ANALYZER_KEY` is unset.
+    classifier: Option<Arc<dyn Classifier>>,
 }
 
 impl LogAnalyzerProvider {
@@ -34,6 +39,7 @@ impl LogAnalyzerProvider {
         Self {
             pool,
             inventory: None,
+            classifier: None,
         }
     }
 
@@ -42,6 +48,15 @@ impl LogAnalyzerProvider {
     /// cursor rows from a pre-cascade remove.
     pub fn with_inventory(mut self, inventory: Arc<InventoryStore>) -> Self {
         self.inventory = Some(inventory);
+        self
+    }
+
+    /// Wire the same Penny classifier the background loop uses so
+    /// `loganalysis.scan_now` can fall back to LLM triage on
+    /// rule-misses. Without this, scan_now is rules-only (still
+    /// useful for catching the high-confidence patterns).
+    pub fn with_classifier(mut self, classifier: Arc<dyn Classifier>) -> Self {
+        self.classifier = Some(classifier);
         self
     }
 }
@@ -295,20 +310,47 @@ impl LogAnalyzerProvider {
     }
 
     async fn call_scan_now(&self, args: Value) -> Result<GadgetResult, GadgetError> {
-        // Manual trigger — clear the `_meta` cursor so the next
-        // scheduler tick treats this host as overdue and scans
-        // immediately. The actual scan happens on the background
-        // loop's cadence (≤30 s), not synchronously.
+        // Synchronous on-demand scan. The background loop is now
+        // opt-in (defaults off to keep Penny-token costs predictable),
+        // so this Gadget is the operator's primary entry point for
+        // log analysis. We call `scan_host_now` for ALL configured
+        // sources and return a count of successes / failures so the
+        // caller can render a meaningful status line.
         let host = args
             .get("host_id")
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| GadgetError::InvalidArgs("missing/invalid host_id".into()))?;
-        let _ = sqlx::query("DELETE FROM log_scan_cursor WHERE host_id = $1 AND source = '_meta'")
-            .bind(host)
-            .execute(&self.pool)
-            .await;
-        ok_result(json!({ "queued": true, "host_id": host }))
+        let inventory = self.inventory.as_ref().ok_or_else(|| {
+            GadgetError::Execution(
+                "scan_now requires the inventory wiring; call \
+                 LogAnalyzerProvider::with_inventory() at startup"
+                    .into(),
+            )
+        })?;
+        let hosts = inventory
+            .load()
+            .await
+            .map_err(|e| GadgetError::Execution(format!("inventory load: {e}")))?;
+        let rec = hosts
+            .into_iter()
+            .find(|r| r.id == host)
+            .ok_or_else(|| GadgetError::InvalidArgs(format!("unknown host_id {host}")))?;
+        let cfg = scanner::ScannerConfig::default();
+        let (ok, failed) = scanner::scan_host_now(
+            &self.pool,
+            inventory.as_ref(),
+            &rec,
+            self.classifier.as_deref(),
+            &cfg,
+        )
+        .await;
+        ok_result(json!({
+            "scanned": true,
+            "host_id": host,
+            "sources_ok": ok,
+            "sources_failed": failed,
+        }))
     }
 }
 
