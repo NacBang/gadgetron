@@ -20,21 +20,16 @@
 
 const KEY = "gadgetron_conversation_id";
 
-let migrated = false;
-
+// Cheap per-call check: if this tab's sessionStorage already holds a
+// value, skip immediately. Otherwise, adopt the cross-tab `localStorage`
+// seed (set by any prior `setActiveConversationId` write — see below)
+// so a single-tab user reloading after deploy still resumes their last
+// conversation. Idempotent and cheap, so no need for a module-level
+// "already-migrated" flag — that flag would have made this function
+// blind to seed updates from sibling tabs after the first call.
 function maybeMigrate(): void {
-  if (migrated) return;
-  migrated = true;
   if (typeof window === "undefined") return;
-  // If this tab already has its own active id, do nothing — the
-  // operator has already established a session in this tab.
   if (window.sessionStorage.getItem(KEY)) return;
-  // First read in this tab. If the legacy `localStorage` slot is set,
-  // adopt it as the seed value so a single-tab user reloading the
-  // page after deploy still resumes their last conversation. If
-  // multiple tabs hit this branch concurrently, each one gets the
-  // same seed but writes diverge from there because each tab uses
-  // its own sessionStorage from this point on.
   const legacy = window.localStorage.getItem(KEY);
   if (legacy) {
     window.sessionStorage.setItem(KEY, legacy);

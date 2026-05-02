@@ -22,9 +22,11 @@ import { cn } from "@/lib/utils";
 // off server-side. Client history re-fetch is a P2B concern — for now,
 // switching conversations hard-reloads the page so the assistant-ui
 // runtime boots into a clean thread pointed at the new conversation.
+//
+// All access to the active id MUST go through
+// `app/lib/conversation-id.ts` — direct localStorage / sessionStorage
+// access for this key is a bug (breaks the per-tab isolation invariant).
 // ---------------------------------------------------------------------------
-
-export const CONV_ID_STORAGE_KEY = "gadgetron_conversation_id";
 
 interface ConvRow {
   id: string;
