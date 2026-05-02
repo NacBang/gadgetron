@@ -30,4 +30,4 @@ pub mod store;
 
 pub use gadgets::LogAnalyzerProvider;
 pub use model::{Finding, Severity};
-pub use scanner::{run_background_scanner, ScannerConfig};
+pub use scanner::{run_background_scanner, scan_host_now, ScannerConfig};

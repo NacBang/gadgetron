@@ -743,6 +743,15 @@ pub struct WriteGadgetsConfig {
     /// `Never` (disable completely).
     #[serde(default = "default_server_admin_mode")]
     pub server_admin: GadgetMode,
+
+    /// log-analyzer bundle write tools (`loganalysis.dismiss`,
+    /// `loganalysis.set_interval`, `loganalysis.comment_*`). These
+    /// touch the findings DB only — they do NOT mutate the host —
+    /// so they default to `Auto` to keep the Logs UI's 감추기 /
+    /// interval-slider one-click. Operators can flip to `Ask` if
+    /// they want approval cards on Logs-tab edits.
+    #[serde(default = "default_loganalysis_admin_mode")]
+    pub loganalysis_admin: GadgetMode,
 }
 
 fn default_write_mode() -> GadgetMode {
@@ -762,6 +771,14 @@ fn default_wiki_write_mode() -> GadgetMode {
 fn default_server_admin_mode() -> GadgetMode {
     GadgetMode::Ask
 }
+/// log-analyzer write Gadgets only touch the findings DB (dismiss /
+/// set_interval / comment_*) — never the host. Defaulting to `Auto`
+/// keeps the Logs page UI snappy (one-click 감추기) while the
+/// host-mutating server.bash / systemctl path stays gated under
+/// `server_admin`.
+fn default_loganalysis_admin_mode() -> GadgetMode {
+    GadgetMode::Auto
+}
 
 impl Default for WriteGadgetsConfig {
     fn default() -> Self {
@@ -772,6 +789,7 @@ impl Default for WriteGadgetsConfig {
             scheduler_write: GadgetMode::Ask,
             provider_mutate: GadgetMode::Ask,
             server_admin: default_server_admin_mode(),
+            loganalysis_admin: default_loganalysis_admin_mode(),
         }
     }
 }

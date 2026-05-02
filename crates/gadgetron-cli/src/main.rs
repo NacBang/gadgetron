@@ -889,13 +889,6 @@ fn load_penny_registry_from_config(
                     }
                 });
 
-                let log_provider =
-                    gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone())
-                        .with_inventory(inv.clone());
-                builder.register(Arc::new(log_provider)).map_err(|e| {
-                    anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
-                })?;
-
                 let classifier: Option<Arc<dyn gadgetron_bundle_log_analyzer::llm::Classifier>> =
                     match std::env::var("GADGETRON_LOG_ANALYZER_KEY").ok() {
                         Some(api_key) if !api_key.trim().is_empty() => {
@@ -930,16 +923,46 @@ fn load_penny_registry_from_config(
                         }
                     };
 
-                tokio::spawn(gadgetron_bundle_log_analyzer::run_background_scanner(
-                    inv,
-                    pool.clone(),
-                    classifier,
-                    gadgetron_bundle_log_analyzer::ScannerConfig::default(),
-                ));
-                tracing::info!(
-                    target: "log_analyzer",
-                    "log-analyzer bundle + background scanner spawned"
-                );
+                let mut log_provider =
+                    gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone())
+                        .with_inventory(inv.clone());
+                if let Some(c) = classifier.clone() {
+                    log_provider = log_provider.with_classifier(c);
+                }
+                builder.register(Arc::new(log_provider)).map_err(|e| {
+                    anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
+                })?;
+
+                // Background scanner is OPT-IN. The default off-state
+                // means Penny LLM tokens are spent only when the
+                // operator explicitly invokes `loganalysis.scan_now`
+                // through chat / Side Panel. Set
+                // `GADGETRON_LOG_ANALYZER_AUTO=1` to restore the old
+                // 30-second polling loop.
+                let auto_scan = std::env::var("GADGETRON_LOG_ANALYZER_AUTO")
+                    .ok()
+                    .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(false);
+                if auto_scan {
+                    tokio::spawn(gadgetron_bundle_log_analyzer::run_background_scanner(
+                        inv,
+                        pool.clone(),
+                        classifier,
+                        gadgetron_bundle_log_analyzer::ScannerConfig::default(),
+                    ));
+                    tracing::info!(
+                        target: "log_analyzer",
+                        "log-analyzer bundle registered + background scanner spawned \
+                         (GADGETRON_LOG_ANALYZER_AUTO is set)"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "log_analyzer",
+                        "log-analyzer bundle registered; background scanner DISABLED \
+                         (set GADGETRON_LOG_ANALYZER_AUTO=1 to re-enable). On-demand \
+                         scans via `loganalysis.scan_now` continue to work."
+                    );
+                }
             }
         }
         Err(e) => {
@@ -3431,8 +3454,17 @@ fn build_providers(
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_env("RUST_LOG")
-        .unwrap_or_else(|_| "gadgetron=info,tower_http=info".parse().unwrap());
+    // Default filter exposes the bundle init/runtime targets so an
+    // operator can see at-a-glance whether the log-analyzer scanner
+    // is auto-running, the server-monitor poller is alive, etc.
+    // Bumping a target up: set RUST_LOG=log_analyzer=debug, etc.
+    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| {
+        "gadgetron=info,tower_http=info,log_analyzer=info,\
+         server_monitor=info,server_monitor_metrics=info,\
+         server_monitor_poller=info,penny_audit=info"
+            .parse()
+            .unwrap()
+    });
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }

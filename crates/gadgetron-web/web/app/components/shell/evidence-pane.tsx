@@ -153,6 +153,197 @@ interface PendingApproval {
   createdAt: string;
 }
 
+// `host_id` → display alias, used to humanize approval cards (the
+// operator sees `dg4R-4090-4` instead of a UUID slug). Refreshed
+// every 60 s — far slower than the 5 s approvals poll because the
+// fleet rarely churns and `server.list` is an SSH-touching call we
+// don't want to over-pull.
+function useHostAliasMap(apiKey: string | null): Record<string, string> {
+  const [map, setMap] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let cancel = false;
+    const fetchOnce = async () => {
+      try {
+        const res = await fetch(
+          `${getApiBase()}/workbench/actions/server-list`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ args: {} }),
+          },
+        );
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          result?: { payload?: Array<{ text?: string }> };
+        };
+        const text = body.result?.payload?.[0]?.text;
+        if (typeof text !== "string") return;
+        const data = JSON.parse(text) as {
+          hosts?: Array<{ id: string; alias?: string | null; host: string }>;
+        };
+        const next: Record<string, string> = {};
+        for (const h of data.hosts ?? []) {
+          next[h.id] = h.alias ?? h.host;
+        }
+        if (!cancel) setMap(next);
+      } catch {
+        // keep existing on transient fail
+      }
+    };
+    void fetchOnce();
+    const timer = setInterval(fetchOnce, 60_000);
+    return () => {
+      cancel = true;
+      clearInterval(timer);
+    };
+  }, [apiKey]);
+  return map;
+}
+
+// Pull a one-line summary of the most operator-relevant arg out of a
+// pending approval, keyed on the gadget name. We deliberately keep
+// this short (truncated at ~120 chars) so the collapsed card fits
+// the narrow Side Panel; the operator can hit "펼치기" to see the
+// full JSON.
+function approvalSummaryLine(
+  gadgetName: string | null,
+  args: unknown,
+): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  const name = gadgetName ?? "";
+  // Tool-specific surface: pull the field the operator cares about.
+  if (name === "server.bash" && typeof a.command === "string") {
+    return `$ ${a.command}`;
+  }
+  if (name === "server.systemctl") {
+    const action = typeof a.action === "string" ? a.action : "?";
+    const unit = typeof a.unit === "string" ? a.unit : "?";
+    return `systemctl ${action} ${unit}`;
+  }
+  if (name === "server.add" || name === "server.update") {
+    const host = typeof a.host === "string" ? a.host : "?";
+    const user = typeof a.ssh_user === "string" ? a.ssh_user : "?";
+    return `${user}@${host}`;
+  }
+  if (name === "server.remove") {
+    const host = typeof a.host === "string" ? a.host : "?";
+    return `remove ${host}`;
+  }
+  // Fallback: compact JSON sans the host_id (which we surface above).
+  const filtered: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(a)) {
+    if (k === "id" || k === "host_id") continue;
+    filtered[k] = v;
+  }
+  if (Object.keys(filtered).length === 0) return null;
+  const s = JSON.stringify(filtered);
+  return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+}
+
+function approvalHostLine(
+  args: unknown,
+  hostMap: Record<string, string>,
+): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  const id =
+    (typeof a.id === "string" && a.id) ||
+    (typeof a.host_id === "string" && a.host_id) ||
+    null;
+  if (!id) return null;
+  const alias = hostMap[id];
+  if (alias) return `${alias}`;
+  return `${id.slice(0, 8)}…`;
+}
+
+function relativeAge(iso: string): string {
+  const d = new Date(iso);
+  const diff = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if (diff < 60) return `${Math.floor(diff)}s 전`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m 전`;
+  return `${Math.floor(diff / 3600)}h 전`;
+}
+
+function ApprovalCard({
+  a,
+  hostMap,
+  decide,
+}: {
+  a: PendingApproval;
+  hostMap: Record<string, string>;
+  decide: (approvalId: string, approve: boolean, reason?: string) => Promise<void>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = approvalSummaryLine(a.gadgetName, a.args);
+  const hostLine = approvalHostLine(a.args, hostMap);
+  const fullJson =
+    a.args && typeof a.args === "object"
+      ? JSON.stringify(a.args, null, 2)
+      : String(a.args);
+  return (
+    <li className="border-b border-purple-900/50 bg-purple-950/20 px-3 py-2 text-[11px] text-purple-100">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-mono font-semibold text-purple-100">
+          ⏳ {a.gadgetName ?? a.actionId}
+        </span>
+        <span className="shrink-0 text-[9px] text-purple-400">
+          {relativeAge(a.createdAt)}
+        </span>
+      </div>
+      {hostLine && (
+        <div className="mt-1 flex items-center gap-1 text-[10.5px] text-purple-300">
+          <span className="text-purple-500">host:</span>
+          <span className="truncate font-mono text-purple-100">{hostLine}</span>
+        </div>
+      )}
+      {summary && (
+        <div
+          className="mt-1 break-all rounded bg-black/30 px-1.5 py-1 font-mono text-[10.5px] text-purple-100"
+          title={summary}
+        >
+          {summary}
+        </div>
+      )}
+      {expanded && (
+        <pre className="mt-1 max-h-48 overflow-auto rounded bg-black/40 px-2 py-1 font-mono text-[10px] leading-snug text-purple-200">
+          {fullJson}
+        </pre>
+      )}
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="rounded border border-purple-800 bg-purple-950/30 px-1.5 py-0.5 font-mono text-[10px] text-purple-300 hover:border-purple-500 hover:text-purple-100"
+        >
+          {expanded ? "▴ 접기" : "▾ 전체 인자"}
+        </button>
+        <span className="ml-auto" />
+        <button
+          type="button"
+          onClick={() => void decide(a.id, true)}
+          className="shrink-0 rounded border border-emerald-700 bg-emerald-950/40 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-emerald-200 hover:border-emerald-500 hover:bg-emerald-900/60"
+          title="승인"
+        >
+          ⚡ 승인
+        </button>
+        <button
+          type="button"
+          onClick={() => void decide(a.id, false)}
+          className="shrink-0 rounded border border-red-800 bg-red-950/30 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-red-200 hover:border-red-500 hover:bg-red-900/40"
+          title="거부"
+        >
+          ✕ 거부
+        </button>
+      </div>
+    </li>
+  );
+}
+
 function usePendingApprovalsFeed(apiKey: string | null): PendingApproval[] {
   const [items, setItems] = useState<PendingApproval[]>([]);
   useEffect(() => {
@@ -210,6 +401,7 @@ function severityTint(s: PendingAction["severity"]): string {
 }
 
 function ActionsTab({ apiKey }: { apiKey: string | null }) {
+  const hostMap = useHostAliasMap(apiKey);
   const actions = useActionsFeed(apiKey);
   const approvals = usePendingApprovalsFeed(apiKey);
   const decide = useCallback(
@@ -305,50 +497,12 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
   return (
     <ol className="flex-1 overflow-y-auto" data-testid="actions-list">
       {approvals.map((a) => (
-        <li
+        <ApprovalCard
           key={`approval-${a.id}`}
-          className="border-b border-purple-900/50 bg-purple-950/20 px-3 py-2 text-[11px] text-purple-100"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate font-mono text-purple-200">
-              ⏳ {a.actionId}
-            </span>
-            <span className="shrink-0 rounded bg-purple-900/40 px-1 text-[9px] uppercase text-purple-200">
-              pending
-            </span>
-          </div>
-          {a.gadgetName && (
-            <div className="mt-0.5 truncate font-mono text-[10px] text-purple-300">
-              → {a.gadgetName}
-            </div>
-          )}
-          <div className="mt-1 flex items-center gap-2">
-            <code
-              className="flex-1 truncate rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-purple-200"
-              title={JSON.stringify(a.args)}
-            >
-              {typeof a.args === "object" && a.args
-                ? JSON.stringify(a.args).slice(0, 80)
-                : "()"}
-            </code>
-            <button
-              type="button"
-              onClick={() => void decide(a.id, true)}
-              className="shrink-0 rounded border border-emerald-700 bg-emerald-950/40 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-200 hover:border-emerald-500 hover:bg-emerald-900/60"
-              title="승인"
-            >
-              ⚡ 승인
-            </button>
-            <button
-              type="button"
-              onClick={() => void decide(a.id, false)}
-              className="shrink-0 rounded border border-red-800 bg-red-950/30 px-2 py-0.5 font-mono text-[10px] font-semibold text-red-200 hover:border-red-500 hover:bg-red-900/40"
-              title="거부"
-            >
-              ✕ 거부
-            </button>
-          </div>
-        </li>
+          a={a}
+          hostMap={hostMap}
+          decide={decide}
+        />
       ))}
       {actions.map((a) => (
         <li
@@ -398,6 +552,7 @@ interface WriteGadgetsConfig {
   scheduler_write: GadgetMode;
   provider_mutate: GadgetMode;
   server_admin: GadgetMode;
+  loganalysis_admin: GadgetMode;
 }
 
 interface DestructiveGadgetsConfig {
@@ -418,6 +573,7 @@ const WRITE_BUCKETS: Array<{ key: keyof WriteGadgetsConfig; label: string; hint:
   { key: "default_mode", label: "기본 (default_mode)", hint: "버킷에 매칭되지 않는 Write 툴 공통" },
   { key: "wiki_write", label: "위키 (wiki_write)", hint: "wiki.write / wiki.create / wiki.delete" },
   { key: "server_admin", label: "서버 운영 (server_admin)", hint: "server.bash / server.systemctl / server.add / server.remove" },
+  { key: "loganalysis_admin", label: "로그 분석 (loganalysis_admin)", hint: "loganalysis.dismiss / set_interval / comment_* (DB only)" },
   { key: "infra_write", label: "인프라 (infra_write)", hint: "infra.* (P2C)" },
   { key: "scheduler_write", label: "스케줄러 (scheduler_write)", hint: "scheduler.* (P3)" },
   { key: "provider_mutate", label: "프로바이더 (provider_mutate)", hint: "infra.rotate_api_key / infra.add_provider (P2C)" },

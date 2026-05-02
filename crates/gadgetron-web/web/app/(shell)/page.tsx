@@ -40,6 +40,7 @@ import {
   DialogFooter,
 } from "../components/ui/dialog";
 import { useAuth } from "../lib/auth-context";
+import { getActiveConversationId } from "../lib/conversation-id";
 
 // ---------------------------------------------------------------------------
 // /web — Chat page. Runs inside `(shell)/layout.tsx`, which owns the
@@ -137,10 +138,7 @@ function useActiveHistory(): { past: HistoryMsg[]; err: string | null } {
   const [past, setPast] = useState<HistoryMsg[]>([]);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    const id =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("gadgetron_conversation_id")
-        : null;
+    const id = getActiveConversationId();
     if (!id) {
       setPast([]);
       return;
@@ -360,10 +358,7 @@ function ActiveConversationBanner() {
     setTurnCount(thread);
   }, [thread]);
   useEffect(() => {
-    const id =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("gadgetron_conversation_id")
-        : null;
+    const id = getActiveConversationId();
     if (!id) {
       setTitle(null);
       return;
@@ -879,8 +874,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   // store subscription.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const convId =
-      window.localStorage.getItem("gadgetron_conversation_id") ?? "default";
+    const convId = getActiveConversationId() ?? "default";
     const storageKey = `gadgetron_draft_${convId}`;
     const pendingSubmitKey = `gadgetron_pending_submit_${convId}`;
     const saved = window.localStorage.getItem(storageKey);
@@ -921,8 +915,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     // Clear any saved draft — the message is heading out.
     if (typeof window !== "undefined") {
-      const convId =
-        window.localStorage.getItem("gadgetron_conversation_id") ?? "default";
+      const convId = getActiveConversationId() ?? "default";
       window.localStorage.removeItem(`gadgetron_draft_${convId}`);
     }
     const state = composer.getState();

@@ -165,6 +165,22 @@ pub async fn chat_completions_handler(
                         }
                     }
                 }
+                Err(gadgetron_xaas::conversations::ConversationError::OwnershipMismatch) => {
+                    // Cross-principal conversation hijack attempt.
+                    // Reject the chat outright instead of letting Penny
+                    // dispatch into another user's session — that
+                    // would leak history through the Claude jsonl +
+                    // pollute the original owner's transcript.
+                    tracing::warn!(
+                        target: "conversations.security",
+                        request_id = %ctx.request_id,
+                        conversation_id = %conv_uuid,
+                        attacker_tenant = %ctx.tenant_id,
+                        attacker_user = %user_id,
+                        "REFUSED: chat carries another principal's conversation_id"
+                    );
+                    return crate::error::ApiError(GadgetronError::Forbidden).into_response();
+                }
                 Err(e) => tracing::warn!(
                     target: "conversations",
                     request_id = %ctx.request_id,

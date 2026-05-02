@@ -4,6 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useThread } from "@assistant-ui/react";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useAuth } from "../../lib/auth-context";
+import {
+  clearActiveConversationId,
+  getActiveConversationId,
+  setActiveConversationId,
+} from "../../lib/conversation-id";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -17,9 +22,11 @@ import { cn } from "@/lib/utils";
 // off server-side. Client history re-fetch is a P2B concern — for now,
 // switching conversations hard-reloads the page so the assistant-ui
 // runtime boots into a clean thread pointed at the new conversation.
+//
+// All access to the active id MUST go through
+// `app/lib/conversation-id.ts` — direct localStorage / sessionStorage
+// access for this key is a bug (breaks the per-tab isolation invariant).
 // ---------------------------------------------------------------------------
-
-export const CONV_ID_STORAGE_KEY = "gadgetron_conversation_id";
 
 interface ConvRow {
   id: string;
@@ -83,14 +90,12 @@ async function deleteConversation(
 }
 
 function readActiveConvId(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(CONV_ID_STORAGE_KEY);
+  return getActiveConversationId();
 }
 
 function writeActiveConvId(id: string | null): void {
-  if (typeof window === "undefined") return;
-  if (id) window.localStorage.setItem(CONV_ID_STORAGE_KEY, id);
-  else window.localStorage.removeItem(CONV_ID_STORAGE_KEY);
+  if (id) setActiveConversationId(id);
+  else clearActiveConversationId();
 }
 
 export function ConversationsPane({ collapsed }: { collapsed: boolean }) {

@@ -128,6 +128,52 @@ pub async fn run_background_scanner(
     }
 }
 
+/// On-demand scan for one host across all configured sources. Used by
+/// the `loganalysis.scan_now` Gadget so an operator (or Penny) can
+/// trigger a scan synchronously without depending on the background
+/// loop. Returns `(sources_scanned, sources_failed)` so the caller can
+/// surface a partial-success status.
+///
+/// Decoupled from `run_background_scanner` so the auto loop can be
+/// disabled by default — the operator pays Penny LLM tokens only for
+/// scans they explicitly request.
+pub async fn scan_host_now(
+    pool: &PgPool,
+    inventory: &InventoryStore,
+    rec: &HostRecord,
+    classifier: Option<&dyn Classifier>,
+    cfg: &ScannerConfig,
+) -> (usize, usize) {
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    for source in SOURCES {
+        match scan_one(
+            pool,
+            inventory,
+            rec,
+            source,
+            classifier,
+            cfg.max_lines_per_tick,
+            cfg.per_host_timeout,
+        )
+        .await
+        {
+            Ok(()) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    target: "log_analyzer.scan_now",
+                    host = %rec.host,
+                    source = %source,
+                    error = %e,
+                    "scan_now source failed"
+                );
+            }
+        }
+    }
+    (ok, failed)
+}
+
 async fn scan_one(
     pool: &PgPool,
     inventory: &InventoryStore,
