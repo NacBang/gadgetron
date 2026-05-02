@@ -66,6 +66,18 @@ admin_email = "admin@example.com"
 admin_display_name = "Admin"
 admin_password_env = "GADGETRON_ADMIN_PW"
 
+# --- Optional: Google OAuth login ---------------------------------------
+# Uncomment only after creating an OAuth 2.0 Client ID in Google Cloud
+# Console and adding the exact redirect URI there.
+
+# [auth.google]
+# enabled = true
+# client_id = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
+# client_secret_env = "GADGETRON_GOOGLE_CLIENT_SECRET"
+# redirect_uri = "http://localhost:18080/auth/google/callback"
+# allowed_domains = []
+# default_role = "member"
+
 # --- Phase 2A: Web UI ----------------------------------------------------
 # `web-ui` Cargo feature must be on (default) for this to take effect.
 
