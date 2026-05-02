@@ -78,18 +78,26 @@ pub struct SshTarget {
 
 impl SshTarget {
     /// Per-target ControlPath for OpenSSH connection multiplexing.
-    /// Stashed under the inventory known_hosts parent so the master
-    /// socket rotates with the bundle state dir rather than polluting
-    /// `~/.ssh/`. `%C` is a hash of host/port/user that OpenSSH fills
-    /// in, so two simultaneous polls reuse the same tunnel but a
-    /// different host gets its own socket.
-    fn control_path(&self) -> String {
+    /// OpenSSH creates a temporary listener path by appending a suffix
+    /// to this value, and Unix-domain socket paths are short on macOS.
+    /// Keep the socket under a short per-process runtime dir rather
+    /// than the longer inventory dir (`~/.gadgetron/server-monitor`).
+    /// `%C` is a hash of host/port/user filled in by OpenSSH.
+    #[cfg(unix)]
+    fn control_path(&self) -> Option<String> {
+        let dir = PathBuf::from(format!("/tmp/gadgetron-ssh-{}", std::process::id()));
+        ensure_control_dir(&dir).ok()?;
+        Some(format!("{}/%C", dir.display()))
+    }
+
+    #[cfg(not(unix))]
+    fn control_path(&self) -> Option<String> {
         let parent = self
             .known_hosts
             .parent()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "/tmp".into());
-        format!("{parent}/ssh-ctl-%C")
+            .unwrap_or_else(|| std::env::temp_dir().display().to_string());
+        Some(format!("{parent}/ssh-ctl-%C"))
     }
 
     pub fn argv_base(&self) -> Vec<String> {
@@ -120,16 +128,50 @@ impl SshTarget {
                 "IdentitiesOnly=yes".into(),
                 "-o".into(),
                 "BatchMode=yes".into(),
-                "-o".into(),
-                "ControlMaster=auto".into(),
-                "-o".into(),
-                format!("ControlPath={}", self.control_path()),
-                "-o".into(),
-                "ControlPersist=60".into(),
             ]);
+            if let Some(control_path) = self.control_path() {
+                a.extend([
+                    "-o".into(),
+                    "ControlMaster=auto".into(),
+                    "-o".into(),
+                    format!("ControlPath={control_path}"),
+                    "-o".into(),
+                    "ControlPersist=60".into(),
+                ]);
+            }
         }
         a
     }
+}
+
+#[cfg(unix)]
+fn ensure_control_dir(dir: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dir)?;
+    let meta = std::fs::metadata(dir)?;
+    if !meta.is_dir() {
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            format!("{} is not a directory", dir.display()),
+        ));
+    }
+
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!("{} must not be group/world accessible", dir.display()),
+        ));
+    }
+
+    Ok(())
 }
 
 pub struct CmdOutput {
@@ -324,5 +366,42 @@ impl Drop for OneShotSecret {
         if let Some(s) = self.0.take() {
             drop_secret(s);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn argv_base_uses_short_control_path_for_long_state_dirs() {
+        let long_state_dir = PathBuf::from(format!(
+            "/tmp/{}",
+            "very-long-gadgetron-server-monitor-state-dir-".repeat(4)
+        ));
+        let target = SshTarget {
+            host: "192.0.2.10".into(),
+            user: "root".into(),
+            port: 22,
+            key_path: Some(PathBuf::from("/tmp/test-key")),
+            known_hosts: long_state_dir.join("known_hosts"),
+        };
+
+        let argv = target.argv_base();
+        let control_path = argv
+            .iter()
+            .find_map(|arg| arg.strip_prefix("ControlPath="))
+            .expect("key-based ssh should enable ControlPath multiplexing");
+
+        assert!(
+            control_path.starts_with("/tmp/gadgetron-ssh-"),
+            "ControlPath should live under a short runtime directory, got {control_path}"
+        );
+        assert!(
+            control_path.len() <= 80,
+            "ControlPath should leave room for OpenSSH's temporary suffix, got len={} path={control_path}",
+            control_path.len()
+        );
     }
 }
