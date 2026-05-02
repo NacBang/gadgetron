@@ -84,3 +84,4 @@ admin_password_env = "GADGETRON_ADMIN_PW"
 # [web]
 # enabled = true
 # api_base_path = "/v1"
+# bundles_dir = "bundles"  # loads bundles/*/bundle.toml, including server-monitor actions
