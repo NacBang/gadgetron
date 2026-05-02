@@ -89,6 +89,17 @@ If not installed:
 brew install postgresql@16 git
 ```
 
+If this machine will run `server-add` with `password_bootstrap`, also install
+`sshpass` on the Gadgetron host:
+
+```bash
+brew install sshpass
+```
+
+`password_bootstrap` uses `sshpass` only for the one-time password SSH login
+that installs a generated monitoring key on the target host. The `key_path`
+and `key_paste` registration modes do not require it.
+
 ### Step 3: Rust toolchain
 
 ```bash
@@ -211,6 +222,7 @@ Status: stopped (launchctl job not loaded)
 | `pgvector` | must match the PostgreSQL major version | Docker `pgvector/pgvector:pg16` or your distro's pgvector package |
 | OpenSSL dev | any | `apt install libssl-dev` (Ubuntu only; macOS includes it) |
 | C compiler | any | `apt install build-essential` / Xcode CLT (macOS) |
+| `sshpass` | optional | Required only for `server-add` `password_bootstrap`; `apt install sshpass` / `brew install sshpass` |
 
 Gadgetron does not require a GPU. GPU support is used only by the node-management subsystem. The gateway runs on any host that can reach PostgreSQL and your LLM providers.
 
@@ -1148,4 +1160,5 @@ The `systemctl stop` on failure gives the LB's `/ready` probe a clear 503 signal
 | `could not connect to server` (PostgreSQL) | Start your pgvector-capable PostgreSQL and verify the URL in `GADGETRON_DATABASE_URL` |
 | `createdb: database creation failed` | Ensure your user has PG superuser role: `sudo -u postgres createuser -s $USER` |
 | `extension "vector" is not available` | Your PostgreSQL server does not provide `pgvector`; use `pgvector/pgvector:pg16` or install the matching pgvector package locally |
+| `sshpass is not installed on the gadgetron host` | Install `sshpass` on the machine running Gadgetron (`sudo apt-get install sshpass` or `brew install sshpass`), then retry `server-add` `password_bootstrap` |
 | `cargo build` timeout or OOM | Ensure at least 4 GB RAM and 2 GB disk for compilation |

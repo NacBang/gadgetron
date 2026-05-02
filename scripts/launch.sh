@@ -54,6 +54,15 @@ require_vars() {
     (( missing == 0 )) || exit 1
 }
 
+warn_optional_prereqs() {
+    if command -v sshpass >/dev/null 2>&1; then
+        return
+    fi
+    echo "warning: sshpass not found; server-add password_bootstrap will fail." >&2
+    echo "         Install on the Gadgetron host: brew install sshpass (macOS) or sudo apt-get install sshpass (Ubuntu)." >&2
+    echo "         key_path/key_paste server registration modes do not require sshpass." >&2
+}
+
 cmd_rebuild() {
     echo "→ cargo build --release -p gadgetron-cli"
     (cd "${REPO}" && cargo build --release -p gadgetron-cli)
@@ -87,6 +96,8 @@ cmd_status() {
     fi
     echo "--- health ---"
     curl -sS -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:${BIND##*:}/health" || true
+    echo "--- local prerequisites ---"
+    warn_optional_prereqs
     if [[ -f "${LOG}" ]]; then
         echo "--- last 10 log lines ---"
         tail -n 10 "${LOG}"
@@ -135,6 +146,7 @@ main() {
 
     load_env
     require_vars
+    warn_optional_prereqs
 
     if (( do_rebuild )); then
         cmd_rebuild
