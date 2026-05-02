@@ -31,8 +31,12 @@ compile_error!(
 use std::io::Write;
 use std::path::Path;
 
-use gadgetron_core::agent::config::{EnvResolver, StdEnv};
+use gadgetron_core::agent::config::{AgentConfig, EnvResolver, GadgetsConfig, StdEnv};
 use tempfile::NamedTempFile;
+
+/// JSON-encoded `GadgetsConfig` override forwarded from the parent
+/// gateway into the stdio MCP child.
+pub const GADGETRON_AGENT_GADGETS_JSON_ENV: &str = "GADGETRON_AGENT_GADGETS_JSON";
 
 /// Build the JSON document that Claude Code consumes via `--mcp-config`.
 ///
@@ -57,9 +61,31 @@ pub fn build_config_json(config_path: Option<&Path>) -> serde_json::Value {
     build_config_json_with_env(config_path, &StdEnv)
 }
 
+/// Build an MCP config for a Penny request using the live `AgentConfig`.
+///
+/// The `gadgetron gadget serve` MCP child still reads `--config` from
+/// disk for knowledge settings, but gadget modes can be changed in the
+/// Workbench at runtime. Forwarding the live `GadgetsConfig` here keeps
+/// the next Penny request in sync without requiring a TOML rewrite or
+/// server restart.
+pub fn build_config_json_for_agent(
+    config_path: Option<&Path>,
+    config: &AgentConfig,
+) -> serde_json::Value {
+    build_config_json_with_env_and_gadgets(config_path, &StdEnv, Some(&config.gadgets))
+}
+
 fn build_config_json_with_env(
     config_path: Option<&Path>,
     env: &dyn EnvResolver,
+) -> serde_json::Value {
+    build_config_json_with_env_and_gadgets(config_path, env, None)
+}
+
+fn build_config_json_with_env_and_gadgets(
+    config_path: Option<&Path>,
+    env: &dyn EnvResolver,
+    gadgets_override: Option<&GadgetsConfig>,
 ) -> serde_json::Value {
     let gadgetron_bin = std::env::current_exe()
         .ok()
@@ -83,7 +109,7 @@ fn build_config_json_with_env(
         ),
     ]);
 
-    if let Some(env_map) = knowledge_server_env(config_path, env) {
+    if let Some(env_map) = knowledge_server_env(config_path, env, gadgets_override) {
         knowledge.insert("env".to_string(), serde_json::Value::Object(env_map));
     }
 
@@ -102,6 +128,19 @@ fn build_config_json_with_env(
 /// into the Claude Code command line via `--mcp-config <path>`.
 pub fn write_config_file(config_path: Option<&Path>) -> std::io::Result<NamedTempFile> {
     let json = build_config_json(config_path);
+    write_config_json_to_tempfile(&json)
+}
+
+/// Write an MCP config for a Penny request, including live gadget modes.
+pub fn write_config_file_for_agent(
+    config_path: Option<&Path>,
+    config: &AgentConfig,
+) -> std::io::Result<NamedTempFile> {
+    let json = build_config_json_for_agent(config_path, config);
+    write_config_json_to_tempfile(&json)
+}
+
+fn write_config_json_to_tempfile(json: &serde_json::Value) -> std::io::Result<NamedTempFile> {
     let serialized = serde_json::to_vec_pretty(&json)?;
 
     let mut tmpfile = NamedTempFile::with_prefix("gadgetron-mcp-")?;
@@ -117,8 +156,18 @@ pub fn write_config_file(config_path: Option<&Path>) -> std::io::Result<NamedTem
 fn knowledge_server_env(
     config_path: Option<&Path>,
     env: &dyn EnvResolver,
+    gadgets_override: Option<&GadgetsConfig>,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut out = serde_json::Map::new();
+
+    if let Some(gadgets) = gadgets_override {
+        if let Ok(raw) = serde_json::to_string(gadgets) {
+            out.insert(
+                GADGETRON_AGENT_GADGETS_JSON_ENV.to_string(),
+                serde_json::Value::String(raw),
+            );
+        }
+    }
 
     if let Some(db_url) = env
         .get("GADGETRON_DATABASE_URL")
@@ -233,6 +282,27 @@ api_key_env = "OPENAI_API_KEY"
         assert_eq!(
             server_env["OPENAI_API_KEY"].as_str().expect("api key"),
             "sk-test"
+        );
+    }
+
+    #[test]
+    fn build_config_json_for_agent_forwards_live_gadget_modes() {
+        let mut cfg = gadgetron_core::agent::config::AgentConfig::default();
+        cfg.gadgets.write.server_admin = gadgetron_core::agent::config::GadgetMode::Auto;
+
+        let v = build_config_json_for_agent(None, &cfg);
+        let server_env = v["mcpServers"]["knowledge"]["env"]
+            .as_object()
+            .expect("env object");
+        let raw = server_env["GADGETRON_AGENT_GADGETS_JSON"]
+            .as_str()
+            .expect("gadgets override json");
+        let parsed: gadgetron_core::agent::config::GadgetsConfig =
+            serde_json::from_str(raw).expect("parse gadgets override");
+
+        assert_eq!(
+            parsed.write.server_admin,
+            gadgetron_core::agent::config::GadgetMode::Auto
         );
     }
 

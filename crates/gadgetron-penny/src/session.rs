@@ -71,7 +71,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::gadget_config::write_config_file;
+use crate::gadget_config::write_config_file_for_agent;
 use crate::home::PennyHome;
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
@@ -434,12 +434,13 @@ fn spawn_claude_process(
     // is forwarded so the MCP grandchild spawned by Claude Code can find
     // `[knowledge]` / `[agent]` even though its cwd is pinned to Penny's
     // neutral workdir (which contains no TOML).
-    let mcp_tmp = write_config_file(config_path).map_err(|e| GadgetronError::Penny {
-        kind: PennyErrorKind::SpawnFailed {
-            reason: format!("mcp tmpfile: {e}"),
-        },
-        message: "failed to create MCP config tmpfile".to_string(),
-    })?;
+    let mcp_tmp =
+        write_config_file_for_agent(config_path, config).map_err(|e| GadgetronError::Penny {
+            kind: PennyErrorKind::SpawnFailed {
+                reason: format!("mcp tmpfile: {e}"),
+            },
+            message: "failed to create MCP config tmpfile".to_string(),
+        })?;
 
     // 2. Build the Command (env_clear + allowlist + kill_on_drop + session flag).
     let mut cmd = build_claude_command_with_session(

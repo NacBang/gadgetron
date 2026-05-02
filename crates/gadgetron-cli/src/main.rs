@@ -628,9 +628,13 @@ async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
     // parse the full AppConfig here and pick out `.agent`. A missing
     // section is tolerated because `AgentConfig` implements
     // `#[serde(default)]` at the AppConfig level.
-    let agent_cfg = gadgetron_core::config::AppConfig::load(&config_path.to_string_lossy())
+    let mut agent_cfg = gadgetron_core::config::AppConfig::load(&config_path.to_string_lossy())
         .map(|app| app.agent)
         .unwrap_or_default();
+    apply_agent_gadgets_env_override(
+        &mut agent_cfg,
+        std::env::var(gadgetron_penny::GADGETRON_AGENT_GADGETS_JSON_ENV).ok(),
+    )?;
 
     let registry = load_penny_registry_from_config_for_gadget_serve(&config_path, &agent_cfg)
         .await?
@@ -647,6 +651,22 @@ async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("gadget stdio server error: {e}"))?;
 
+    Ok(())
+}
+
+fn apply_agent_gadgets_env_override(
+    agent_cfg: &mut gadgetron_core::agent::config::AgentConfig,
+    raw: Option<String>,
+) -> Result<()> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let gadgets: gadgetron_core::agent::config::GadgetsConfig =
+        serde_json::from_str(&raw).context("failed to parse GADGETRON_AGENT_GADGETS_JSON")?;
+    gadgets
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid GADGETRON_AGENT_GADGETS_JSON: {e}"))?;
+    agent_cfg.gadgets = gadgets;
     Ok(())
 }
 
@@ -4237,6 +4257,22 @@ wiki_max_page_bytes = 1048576
         assert_eq!(
             resolve_config_path(None, None),
             PathBuf::from("gadgetron.toml")
+        );
+    }
+
+    #[test]
+    fn apply_agent_gadgets_env_override_updates_server_admin() {
+        let mut cfg = gadgetron_core::agent::config::AgentConfig::default();
+        cfg.gadgets.write.server_admin = gadgetron_core::agent::config::GadgetMode::Ask;
+        let mut next = cfg.gadgets.clone();
+        next.write.server_admin = gadgetron_core::agent::config::GadgetMode::Auto;
+        let raw = serde_json::to_string(&next).expect("serialize gadgets");
+
+        apply_agent_gadgets_env_override(&mut cfg, Some(raw)).expect("apply override");
+
+        assert_eq!(
+            cfg.gadgets.write.server_admin,
+            gadgetron_core::agent::config::GadgetMode::Auto
         );
     }
 

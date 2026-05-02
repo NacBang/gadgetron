@@ -197,10 +197,13 @@ impl LlmProvider for PennyProvider {
         &self,
         req: ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
-        let allowed_tools = self.registry.build_allowed_tools(self.config.as_ref());
+        let mut live_config = (*self.config).clone();
+        live_config.gadgets = self.registry.current_gadgets_config();
+        let live_config = Arc::new(live_config);
+        let allowed_tools = self.registry.build_allowed_tools(live_config.as_ref());
         let tool_metadata = self.registry.tool_metadata_snapshot();
         let session = ClaudeCodeSession::new_with_home_and_config_path(
-            self.config.clone(),
+            live_config,
             allowed_tools,
             req,
             tool_metadata,

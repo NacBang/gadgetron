@@ -39,6 +39,27 @@ type = "round_robin"
 # request_timeout_secs = 300
 # max_concurrent_subprocesses = 4
 
+# [agent.gadgets]
+# # T1 read tools must stay "auto"; include this when writing the table
+# # explicitly so partial TOML does not fall back to the write-mode default.
+# read = "auto"
+# approval_timeout_secs = 60
+#
+# [agent.gadgets.write]
+# default_mode = "ask"
+# wiki_write = "auto"
+# # Host-mutating server-monitor tools: server.add/remove/bash/systemctl.
+# # Use "ask" for operator approval cards, "auto" for unattended admin flows,
+# # or "never" to hide these tools from Penny entirely.
+# server_admin = "ask"
+# # Log UI write tools only mutate Gadgetron's findings DB.
+# loganalysis_admin = "auto"
+#
+# [agent.gadgets.destructive]
+# enabled = false
+# max_per_hour = 3
+# extra_confirmation = "none"
+
 # [agent.brain]
 # # "claude_max" uses the operator's local ~/.claude/ OAuth session
 # # (the default). Set mode = "external_anthropic" + external_base_url

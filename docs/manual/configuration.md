@@ -648,6 +648,7 @@ Penny가 실행할 수 있는 Gadget(도구) 권한 모델입니다. `[agent.too
 
 ```toml
 [agent.gadgets]
+read = "auto"                  # T1 읽기 도구는 항상 auto여야 함
 approval_timeout_secs = 60     # 승인 카드 만료 시간 (범위: [10, 600])
 
 [agent.gadgets.write]
@@ -656,6 +657,8 @@ wiki_write = "auto"            # wiki.write / wiki.create / wiki.delete (기본 
 infra_write = "ask"            # infra 쓰기 도구 (P2C)
 scheduler_write = "ask"        # 스케줄러 쓰기 도구 (P3)
 provider_mutate = "ask"        # provider 변경 도구 (P2C)
+server_admin = "ask"           # server.add/remove/bash/systemctl 등 host-mutating server-monitor 도구
+loganalysis_admin = "auto"     # loganalysis dismiss/comment/interval 등 DB 쓰기 도구
 
 [agent.gadgets.destructive]
 enabled = false                # true로 설정해야 T3 도구가 allowed-tools에 노출됨
@@ -665,6 +668,8 @@ extra_confirmation = "none"    # "none" | "env" | "file"
 ```
 
 `read` 티어(T1)는 항상 `auto`이며 변경할 수 없습니다 (V1).
+
+Workbench 웹 설정에서 바꾼 Gadget 모드는 다음 Penny 요청부터 런타임에 자동 반영됩니다. 다만 웹 설정은 현재 프로세스의 live 정책이며 `gadgetron.toml`을 자동 저장하지는 않습니다. 재시작 후에도 같은 기본값을 유지하려면 위 TOML 값을 함께 갱신하세요.
 
 `[agent.gadgets.destructive]` 세부 필드:
 

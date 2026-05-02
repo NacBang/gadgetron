@@ -1323,6 +1323,7 @@ dependencies = [
  "gadgetron-tui",
  "gadgetron-xaas",
  "reqwest",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",

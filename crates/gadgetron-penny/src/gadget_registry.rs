@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use gadgetron_core::agent::config::{AgentConfig, GadgetMode};
+use gadgetron_core::agent::config::{AgentConfig, GadgetMode, GadgetsConfig};
 use gadgetron_core::agent::tools::{
     ensure_tool_name_allowed, GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
 };
@@ -114,9 +114,9 @@ impl GadgetRegistryBuilder {
     /// `build_allowed_tools` — for example a direct `gadgetron gadget serve`
     /// consumer — cannot reach a `Never`/`Ask`-mode tool because
     /// `dispatch()` checks the precomputed set before routing to the
-    /// provider. The registry becomes stale if `cfg` changes at runtime;
-    /// this is acceptable in P2A (no hot-reload), and P2B's approval
-    /// flow will thread a live `Arc<AgentConfig>` through the registry.
+    /// provider. Runtime mode changes are applied by `reconfigure()`,
+    /// which atomically swaps the allowed/ask sets and the live gadget
+    /// mode snapshot used for new Penny subprocesses.
     ///
     /// If two providers register tools with the same namespaced name,
     /// the later-registered one wins in the dispatch map — but the
@@ -213,6 +213,7 @@ impl GadgetRegistryBuilder {
         GadgetRegistry {
             by_tool_name,
             all_schemas: Arc::from(all_schemas.into_boxed_slice()),
+            gadgets_config: Arc::new(ArcSwap::new(Arc::new(cfg.gadgets.clone()))),
             allowed_names: Arc::new(ArcSwap::new(Arc::new(allowed_names))),
             ask_names: Arc::new(ArcSwap::new(Arc::new(ask_names))),
             tool_metadata: Arc::new(tool_metadata),
@@ -237,6 +238,10 @@ impl Default for GadgetRegistryBuilder {
 pub struct GadgetRegistry {
     by_tool_name: HashMap<String, Arc<dyn GadgetProvider>>,
     all_schemas: Arc<[GadgetSchema]>,
+    /// Live gadget mode snapshot. Workbench updates swap this together
+    /// with the allow/ask sets so new Penny subprocesses can forward
+    /// the same policy into their stdio MCP child.
+    gadgets_config: Arc<ArcSwap<GadgetsConfig>>,
     /// Precomputed set of tool names whose tier × mode resolves to
     /// "operator-allowed" under the current config. Used by
     /// `dispatch()` for L3 defense-in-depth. Tools NOT in this set
@@ -361,6 +366,14 @@ impl GadgetRegistry {
             .collect();
         self.allowed_names.store(Arc::new(allowed));
         self.ask_names.store(Arc::new(ask));
+        self.gadgets_config.store(Arc::new(cfg.gadgets.clone()));
+    }
+
+    /// Snapshot of the current gadget modes after any Workbench
+    /// reconfiguration. Returned by value so callers can splice it into
+    /// a request-local `AgentConfig` without holding a live reference.
+    pub fn current_gadgets_config(&self) -> GadgetsConfig {
+        (*self.gadgets_config.load_full()).clone()
     }
 
     /// Cheap `Arc` clone of the `(tool_name → GadgetMetadata)` snapshot
@@ -1102,6 +1115,22 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(tools, sorted);
+    }
+
+    #[test]
+    fn reconfigure_updates_current_gadget_modes_snapshot() {
+        let mut cfg = AgentConfig::default();
+        cfg.gadgets.write.server_admin = GadgetMode::Ask;
+        let reg = registry_with_full_set_cfg(&cfg);
+
+        let mut next = cfg.clone();
+        next.gadgets.write.server_admin = GadgetMode::Auto;
+        reg.reconfigure(&next);
+
+        assert_eq!(
+            reg.current_gadgets_config().write.server_admin,
+            GadgetMode::Auto
+        );
     }
 
     #[test]

@@ -43,7 +43,10 @@ pub mod spawn;
 pub mod stream;
 pub mod workbench_awareness;
 
-pub use gadget_config::{build_config_json, write_config_file};
+pub use gadget_config::{
+    build_config_json, build_config_json_for_agent, write_config_file, write_config_file_for_agent,
+    GADGETRON_AGENT_GADGETS_JSON_ENV,
+};
 pub use gadget_registry::{ForwardConfig, GadgetRegistry, GadgetRegistryBuilder};
 pub use gadget_server::serve_stdio;
 pub use home::{prepare_penny_home, HomeError, PennyHome};
