@@ -56,6 +56,16 @@ type = "round_robin"
 # timeout_secs = 10
 # max_results = 10
 
+# --- Phase 2B: First admin bootstrap ------------------------------------
+# Full DB mode fails fast on a fresh database unless the first admin can be
+# created. The plaintext password is read from the env var named here; keep
+# the actual value in `.env`, not in this TOML file.
+
+[auth.bootstrap]
+admin_email = "admin@example.com"
+admin_display_name = "Admin"
+admin_password_env = "GADGETRON_ADMIN_PW"
+
 # --- Phase 2A: Web UI ----------------------------------------------------
 # `web-ui` Cargo feature must be on (default) for this to take effect.
 

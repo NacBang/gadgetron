@@ -24,21 +24,20 @@ A self-hosted control plane for GPU server fleets — log analysis, fault triage
 
 ```bash
 # 1. Postgres (TimescaleDB + pgvector)
+docker build -t gadgetron-pgvector-timescale:pg16 images/pgvector-timescale
 docker run -d --name gadgetron-pg \
     -p 5432:5432 \
     -e POSTGRES_USER=gadgetron \
     -e POSTGRES_PASSWORD=secret \
     -e POSTGRES_DB=gadgetron_demo \
-    timescale/timescaledb-ha:pg16
+    gadgetron-pgvector-timescale:pg16
 
 # 2. Local config
 cp gadgetron.example.toml gadgetron.toml
 $EDITOR gadgetron.toml      # provider keys, OAuth client id, etc.
 
-cat > .env <<'EOF'
-GADGETRON_DATABASE_URL=postgres://gadgetron:secret@127.0.0.1:5432/gadgetron_demo
-GADGETRON_GOOGLE_CLIENT_SECRET=YOUR-OAUTH-SECRET
-EOF
+cp .env.template .env
+$EDITOR .env                # database URL, bootstrap admin password, OAuth secret if enabled
 
 # 3. Build + launch (wraps env loading + pid handling)
 cargo build --release -p gadgetron-cli
