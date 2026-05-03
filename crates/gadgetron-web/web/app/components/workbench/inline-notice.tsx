@@ -1,6 +1,6 @@
 "use client";
 
-import { type ComponentType, type ReactNode, useState } from "react";
+import { type ComponentType, type ReactNode, useId, useState } from "react";
 import { AlertCircle, CheckCircle2, Info, TriangleAlert } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -42,10 +42,11 @@ export function InlineNotice({
   tone?: NoticeTone;
   title: string;
   children?: ReactNode;
-  details?: ReactNode;
+  details?: string;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const detailsId = useId();
   const meta = NOTICE_META[tone];
   const Icon = meta.icon;
 
@@ -60,13 +61,18 @@ export function InlineNotice({
             <div className="mt-2">
               <button
                 type="button"
+                aria-controls={detailsId}
+                aria-expanded={open}
                 className="text-xs font-medium underline underline-offset-4 opacity-80 hover:opacity-100"
                 onClick={() => setOpen((value) => !value)}
               >
                 Details
               </button>
               {open && (
-                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-current/15 bg-black/20 p-2 text-[11px] leading-4 opacity-90">
+                <pre
+                  id={detailsId}
+                  className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-current/15 bg-black/20 p-2 text-[11px] leading-4 opacity-90"
+                >
                   {details}
                 </pre>
               )}
