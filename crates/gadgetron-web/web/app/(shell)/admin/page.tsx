@@ -9,6 +9,13 @@ import {
   useState,
 } from "react";
 import { Toaster, toast } from "sonner";
+import {
+  InlineNotice,
+  OperationalPanel,
+  PageToolbar,
+  StatusBadge,
+  WorkbenchPage,
+} from "../../components/workbench";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { useAuth } from "../../lib/auth-context";
@@ -98,6 +105,8 @@ interface ManagedHostRow {
   host: string;
   alias?: string | null;
 }
+
+type AdminTab = "penny-runtime" | "users" | "access";
 
 const MAX_AVATAR_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -686,7 +695,7 @@ function PennyBrainSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Penny LLM Gateway</h2>
+          <h2 className="text-sm font-medium text-zinc-200">Applied configuration</h2>
           <p className="text-[11px] text-zinc-500">
             {settings
               ? settings.source === "database"
@@ -836,7 +845,7 @@ function LlmEndpointSettings({
         base_url: baseUrl.trim(),
         model_id: modelId.trim() || undefined,
       });
-      toast.success(`Endpoint 추가: ${name.trim()}`);
+      toast.success(`Endpoint added: ${name.trim()}`);
       setName("");
       setBaseUrl("");
       setModelId("");
@@ -1050,7 +1059,7 @@ function LlmEndpointSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Penny LLM Wiring</h2>
+          <h2 className="text-sm font-medium text-zinc-200">Penny Runtime</h2>
           <p className="text-[11px] text-zinc-500">
             IP/port 감지 · 모델 목록 자동 수집 · CCR/Anthropic endpoint만 Penny 연결
           </p>
@@ -1149,7 +1158,7 @@ function LlmEndpointSettings({
               disabled={busy === "autodetect" || !canCall}
               className="w-full"
             >
-              {busy === "autodetect" ? "감지 중…" : "자동 감지"}
+              {busy === "autodetect" ? "Detecting…" : "Auto-detect"}
             </Button>
           </div>
         </div>
@@ -1157,7 +1166,7 @@ function LlmEndpointSettings({
 
       <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/30 p-3">
         <summary className="cursor-pointer text-[11px] text-zinc-400">
-          고급 등록
+          Advanced registration
         </summary>
         <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-6">
           <div>
@@ -1217,7 +1226,7 @@ function LlmEndpointSettings({
         </div>
         <div className="mt-3 flex justify-end">
           <Button onClick={() => void submit()} disabled={busy === "create" || !canCall}>
-            {busy === "create" ? "추가 중…" : "Endpoint 추가"}
+            {busy === "create" ? "Adding…" : "Add endpoint"}
           </Button>
         </div>
       </details>
@@ -1312,7 +1321,7 @@ function LlmEndpointSettings({
                 disabled={busy === "ccr:create" || !canCall}
                 className="w-full"
               >
-                {busy === "ccr:create" ? "생성 중…" : "Bridge 생성"}
+                {busy === "ccr:create" ? "Creating…" : "Create bridge"}
               </Button>
             </div>
           </div>
@@ -1398,11 +1407,11 @@ function LlmEndpointSettings({
                       className="h-6 px-2 text-[11px]"
                       title={
                         endpoint.protocol === "anthropic_messages"
-                          ? "Penny LLM Gateway에 적용"
+                          ? "Apply to Penny runtime"
                           : "OpenAI-compatible endpoint 앞에 CCR bridge를 만듭니다"
                       }
                     >
-                      {endpoint.protocol === "anthropic_messages" ? "Use" : "CCR 만들기"}
+                      {endpoint.protocol === "anthropic_messages" ? "Use" : "Create CCR"}
                     </Button>
                     <Button
                       type="button"
@@ -1480,7 +1489,7 @@ function AddUserForm({
 
   return (
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
-      <h2 className="mb-3 text-sm font-medium text-zinc-200">새 유저 추가</h2>
+      <h2 className="mb-3 text-sm font-medium text-zinc-200">Add user</h2>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-6">
         <div className="lg:col-span-2">
           <label className="mb-1 block text-[11px] text-zinc-500">Email</label>
@@ -1529,7 +1538,7 @@ function AddUserForm({
       </div>
       <div className="mt-3 flex justify-end">
         <Button onClick={() => void submit()} disabled={busy}>
-          {busy ? "추가 중…" : "추가"}
+          {busy ? "Adding…" : "Add user"}
         </Button>
       </div>
     </section>
@@ -1573,7 +1582,7 @@ function UsersTable({
           display_name: editName.trim(),
           avatar_url: editAvatarUrl.trim() || null,
         });
-        toast.success(`프로필 저장: ${u.email}`);
+        toast.success(`Profile saved: ${u.email}`);
         setEditing(null);
         onChanged();
       } catch (e) {
@@ -1660,7 +1669,7 @@ function UsersTable({
                       className="h-6 px-2 text-[11px]"
                       onClick={() => startEdit(u)}
                     >
-                      수정
+                      Edit
                     </Button>
                     <Button
                       size="sm"
@@ -1713,12 +1722,12 @@ function UsersTable({
                       <Button
                         type="button"
                         size="sm"
-                        aria-label="프로필 저장"
+                        aria-label="Save profile"
                         onClick={() => void saveEdit(u)}
                         disabled={saving === u.id}
                         className="h-7 px-2 text-[11px]"
                       >
-                        {saving === u.id ? "저장 중…" : "저장"}
+                        {saving === u.id ? "Saving…" : "Save"}
                       </Button>
                     </div>
                   </td>
@@ -1785,6 +1794,7 @@ export default function AdminPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AdminTab>("penny-runtime");
   // Either an API key OR a logged-in session grants access; the
   // backend middleware accepts the session cookie when Bearer is absent.
   const canCall = !!apiKey || !!identity;
@@ -1808,16 +1818,18 @@ export default function AdminPage() {
     void refresh();
   }, [refresh]);
 
+  const tabs: Array<{ id: AdminTab; label: string }> = [
+    { id: "penny-runtime", label: "Penny Runtime" },
+    { id: "users", label: "Users" },
+    { id: "access", label: "Access" },
+  ];
+
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-4 p-6">
-        <header className="flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-semibold text-zinc-100">Admin</h1>
-            <p className="text-[11px] text-zinc-500">
-              유저 관리 — Management scope 필요
-            </p>
-          </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <WorkbenchPage
+        title="Admin"
+        subtitle="Configure Penny runtime, users, and access controls."
+        actions={
           <Button
             variant="ghost"
             size="sm"
@@ -1827,29 +1839,73 @@ export default function AdminPage() {
           >
             {loading ? "…" : "Refresh"}
           </Button>
-        </header>
+        }
+        toolbar={
+          <PageToolbar
+            status={
+              <StatusBadge
+                status={!canCall ? "unauthorized" : loading ? "pending" : "ready"}
+              />
+            }
+          >
+            <div role="tablist" aria-label="Admin sections" className="flex flex-wrap gap-2">
+              {tabs.map((tab) => (
+                <Button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  variant={activeTab === tab.id ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setActiveTab(tab.id)}
+                  className="h-7 px-2 text-[11px]"
+                >
+                  {tab.label}
+                </Button>
+              ))}
+            </div>
+          </PageToolbar>
+        }
+      >
+        <div className="mx-auto max-w-5xl space-y-4">
+          {!canCall && (
+            <InlineNotice tone="warn" title="Sign in required">
+              Admin requests require an authenticated session or API key.
+            </InlineNotice>
+          )}
 
-        {!canCall && (
-          <div className="rounded border border-amber-900/60 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
-            로그인이 필요합니다.
-          </div>
-        )}
+          {err && (
+            <InlineNotice tone="error" title="Admin request failed" details={err}>
+              Check the details and retry after resolving access or service state.
+            </InlineNotice>
+          )}
 
-        {err && (
-          <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-            {err}
-          </div>
-        )}
+          {activeTab === "penny-runtime" && (
+            <div role="tabpanel" className="space-y-4">
+              <PennyBrainSettings apiKey={requestApiKey} canCall={canCall} />
+              <LlmEndpointSettings apiKey={requestApiKey} canCall={canCall} />
+            </div>
+          )}
 
-        {err && err.includes("403") && (
-          <ApiKeyOverride onSet={(k) => saveKey(k)} />
-        )}
+          {activeTab === "users" && (
+            <div role="tabpanel" className="space-y-4">
+              <AddUserForm apiKey={requestApiKey} onAdded={refresh} />
+              <UsersTable users={users} apiKey={requestApiKey} onChanged={refresh} />
+            </div>
+          )}
 
-        <PennyBrainSettings apiKey={requestApiKey} canCall={canCall} />
-        <LlmEndpointSettings apiKey={requestApiKey} canCall={canCall} />
-        <AddUserForm apiKey={requestApiKey} onAdded={refresh} />
-        <UsersTable users={users} apiKey={requestApiKey} onChanged={refresh} />
-      </div>
+          {activeTab === "access" && (
+            <div role="tabpanel">
+              <OperationalPanel
+                title="Access"
+                description="Override the management API key for this browser session."
+              >
+                <ApiKeyOverride onSet={(k) => saveKey(k)} />
+              </OperationalPanel>
+            </div>
+          )}
+        </div>
+      </WorkbenchPage>
       <Toaster theme="dark" position="top-right" richColors />
     </div>
   );
