@@ -172,13 +172,14 @@ impl DescriptorCatalog {
                 "wiki-list".into(),
                 "wiki-read".into(),
                 "wiki-write".into(),
+                "wiki-import".into(),
                 "wiki-delete".into(),
             ],
             required_scope: None,
             disabled_reason: None,
         }];
 
-        // Four actions today — the full wiki CRUD loop via workbench.
+        // Full wiki CRUD + RAW import loop via workbench.
         // Each is gadget-backed so the dispatcher (PR #175) routes to
         // `KnowledgeGadgetProvider` and returns real results in
         // `WorkbenchActionResult.payload`. This is what turns the
@@ -273,6 +274,65 @@ impl DescriptorCatalog {
                 destructive: false,
                 requires_approval: false,
                 knowledge_hint: "wiki.write 가젯을 직접 호출합니다. P2B에서는 승인 흐름이 stub — 직접 기록됩니다.".into(),
+                required_scope: None,
+                disabled_reason: None,
+            },
+            WorkbenchActionDescriptor {
+                id: "wiki-import".into(),
+                title: "Knowledge import".into(),
+                owner_bundle: "core".into(),
+                source_kind: "gadget".into(),
+                source_id: "wiki.import".into(),
+                gadget_name: Some("wiki.import".into()),
+                placement: WorkbenchActionPlacement::CenterMain,
+                kind: WorkbenchActionKind::Mutation,
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "bytes": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Base64-encoded RAW bytes (standard alphabet)."
+                        },
+                        "content_type": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": "MIME type of `bytes`. Currently `text/markdown` and `text/plain` are supported."
+                        },
+                        "target_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": "Optional wiki path override; when omitted the pipeline derives `imports/<kebab-title>`."
+                        },
+                        "title_hint": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "description": "Optional caller-supplied title; overrides the first-heading fallback."
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "If true, allow overwriting an existing page at `target_path`."
+                        },
+                        "auto_enrich": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Caller may set `true` but W3-KL-2 treats this as a no-op; enrichment lands in a later release."
+                        },
+                        "source_uri": {
+                            "type": "string",
+                            "format": "uri",
+                            "description": "Optional URL provenance; copied into the page's `source_uri` frontmatter."
+                        }
+                    },
+                    "required": ["bytes", "content_type"],
+                    "additionalProperties": false
+                }),
+                destructive: false,
+                requires_approval: false,
+                knowledge_hint: "Imports markdown or plain text through wiki.import and writes an imports/* canonical page.".into(),
                 required_scope: None,
                 disabled_reason: None,
             },
@@ -883,6 +943,17 @@ input_schema = { type = "object" }
             seed_ids, bundle_ids,
             "first-party bundle must ship the same action ids as seed_p2b()"
         );
+        let seed_import = seed
+            .find_action("wiki-import")
+            .expect("seed must include wiki-import");
+        let bundle_import = catalog
+            .find_action("wiki-import")
+            .expect("bundle must include wiki-import");
+        assert_eq!(
+            serde_json::to_value(seed_import).expect("seed import serializes"),
+            serde_json::to_value(bundle_import).expect("bundle import serializes"),
+            "wiki-import descriptor must match between seed_p2b and first-party bundle"
+        );
         // Snapshot must compile: validates schemas round-trip through TOML.
         let _ = catalog.into_snapshot();
     }
@@ -1121,9 +1192,18 @@ version = "1"
     fn visible_actions_no_required_scope_visible() {
         let catalog = DescriptorCatalog::seed_p2b();
         let actions = catalog.visible_actions(&openai_scopes());
-        // seed_p2b ships 5 actions: knowledge-search, wiki-list,
-        // wiki-read, wiki-write, wiki-delete (approval-gated).
-        assert_eq!(actions.len(), 5);
+        // seed_p2b ships 6 actions: knowledge-search, wiki-list,
+        // wiki-read, wiki-write, wiki-delete (approval-gated), wiki-import.
+        assert_eq!(actions.len(), 6);
+        assert!(
+            actions.iter().any(|a| {
+                a.id == "wiki-import"
+                    && a.gadget_name.as_deref() == Some("wiki.import")
+                    && !a.destructive
+                    && !a.requires_approval
+            }),
+            "wiki-import must be visible as a normal import action"
+        );
         for a in &actions {
             assert!(
                 a.disabled_reason.is_none(),
@@ -1169,7 +1249,7 @@ version = "1"
         let catalog = DescriptorCatalog::seed_p2b().with_allow_direct_actions(false);
         let actions = catalog.visible_actions(&openai_scopes());
         // Actions are NOT stripped — they remain in the list, but each carries disabled_reason.
-        assert_eq!(actions.len(), 5, "action count must be unchanged");
+        assert_eq!(actions.len(), 6, "action count must be unchanged");
         for a in &actions {
             assert!(
                 a.disabled_reason.is_some(),

@@ -28,7 +28,7 @@ placement = "left_rail"
 renderer = "timeline"
 data_endpoint = "/api/v1/web/workbench/views/knowledge-activity-recent/data"
 refresh_seconds = 5
-action_ids = ["knowledge-search", "wiki-list", "wiki-read", "wiki-write", "wiki-delete"]
+action_ids = ["knowledge-search", "wiki-list", "wiki-read", "wiki-write", "wiki-import", "wiki-delete"]
 
 # -- Actions ---------------------------------------------------------------
 
@@ -87,6 +87,20 @@ destructive = false
 requires_approval = false
 knowledge_hint = "wiki.write 가젯을 직접 호출합니다."
 input_schema = { type = "object", properties = { name = { type = "string", minLength = 1, maxLength = 256 }, content = { type = "string", minLength = 0, maxLength = 65536 }, summary = { type = "string", minLength = 0, maxLength = 512 } }, required = ["name", "content"], additionalProperties = false }
+
+[[actions]]
+id = "wiki-import"
+title = "Knowledge import"
+owner_bundle = "core"
+source_kind = "gadget"
+source_id = "wiki.import"
+gadget_name = "wiki.import"
+placement = "center_main"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "Imports markdown or plain text through wiki.import and writes an imports/* canonical page."
+input_schema = { type = "object", properties = { bytes = { type = "string", minLength = 1, description = "Base64-encoded RAW bytes (standard alphabet)." }, content_type = { type = "string", minLength = 1, maxLength = 256, description = "MIME type of `bytes`. Currently `text/markdown` and `text/plain` are supported." }, target_path = { type = "string", minLength = 1, maxLength = 256, description = "Optional wiki path override; when omitted the pipeline derives `imports/<kebab-title>`." }, title_hint = { type = "string", maxLength = 256, description = "Optional caller-supplied title; overrides the first-heading fallback." }, overwrite = { type = "boolean", default = false, description = "If true, allow overwriting an existing page at `target_path`." }, auto_enrich = { type = "boolean", default = false, description = "Caller may set `true` but W3-KL-2 treats this as a no-op; enrichment lands in a later release." }, source_uri = { type = "string", format = "uri", description = "Optional URL provenance; copied into the page's `source_uri` frontmatter." } }, required = ["bytes", "content_type"], additionalProperties = false }
 
 [[actions]]
 id = "wiki-delete"
