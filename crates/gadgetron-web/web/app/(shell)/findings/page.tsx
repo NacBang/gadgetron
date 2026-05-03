@@ -32,6 +32,7 @@ interface Finding {
   source: string;
   severity: "critical" | "high" | "medium" | "info";
   category: string;
+  fingerprint: string;
   summary: string;
   excerpt: string;
   ts_first: string;
@@ -542,6 +543,24 @@ export default function FindingsPage() {
     return out;
   }, [visibleFindings]);
 
+  const relevantStatuses = useMemo(
+    () =>
+      hostFilter
+        ? statuses.filter((s) => s.host_id === hostFilter)
+        : statuses,
+    [hostFilter, statuses],
+  );
+  const allRelevantScansDisabled =
+    relevantStatuses.length > 0 && relevantStatuses.every((s) => !s.enabled);
+  const noRelevantScanHasRun =
+    relevantStatuses.length > 0 &&
+    relevantStatuses.every((s) => !s.last_scanned_at);
+  const emptyStateText = allRelevantScansDisabled
+    ? "Log scanning is disabled for this host scope."
+    : noRelevantScanHasRun
+      ? "No log scans have run yet. The first background tick or Scan now will populate this view."
+      : "No open findings after the latest scan.";
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl space-y-4 p-6">
@@ -565,13 +584,12 @@ export default function FindingsPage() {
         {/* Per-host scan status + interval slider */}
         <details className="rounded border border-zinc-800 bg-zinc-900/50">
           <summary className="cursor-pointer select-none px-3 py-2 text-[11px] uppercase tracking-wider text-zinc-500">
-            스캔 상태 ({statuses.length} hosts)
+            Scan status ({statuses.length} hosts)
           </summary>
           <div className="space-y-2 border-t border-zinc-800 p-3">
             {statuses.length === 0 ? (
               <div className="text-[11px] text-zinc-600">
-                아직 스캔된 호스트가 없습니다 (백그라운드 워커가 첫 tick을
-                기다리는 중).
+                No registered hosts are available for log scanning.
               </div>
             ) : (
               statuses.map((s) => {
@@ -586,7 +604,7 @@ export default function FindingsPage() {
                       {label}
                     </span>
                     <span className="text-zinc-500">
-                      마지막 스캔:{" "}
+                      Last scan:{" "}
                       <span className="text-zinc-300">
                         {s.last_scanned_at
                           ? relativeTime(s.last_scanned_at)
@@ -594,7 +612,7 @@ export default function FindingsPage() {
                       </span>
                     </span>
                     <label className="flex items-center gap-2 text-zinc-500">
-                      주기
+                      Interval
                       <input
                         type="range"
                         min={30}
@@ -634,7 +652,7 @@ export default function FindingsPage() {
                       onClick={() => void scanNow(s.host_id)}
                       className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
                     >
-                      지금 스캔
+                      Scan now
                     </button>
                   </div>
                 );
@@ -646,7 +664,7 @@ export default function FindingsPage() {
         {/* Filter row — host dropdown + severity pills */}
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-            호스트
+            Host
             <select
               value={hostFilter ?? ""}
               onChange={(e) => {
@@ -661,7 +679,7 @@ export default function FindingsPage() {
               }}
               className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200 hover:border-zinc-600"
             >
-              <option value="">전체 ({hosts.length})</option>
+              <option value="">All hosts ({hosts.length})</option>
               {hosts.map((h) => (
                 <option key={h.id} value={h.id}>
                   {h.alias ?? h.host}
@@ -706,8 +724,8 @@ export default function FindingsPage() {
         {!loading && visibleFindings.length === 0 && !err && (
           <div className="rounded border border-zinc-800 bg-zinc-900/50 px-4 py-8 text-center text-[12px] text-zinc-500">
             {findings.length === 0
-              ? "🟢 처리할 이상 징후가 없습니다."
-              : `현재 필터 조건에 맞는 finding이 없습니다 (총 ${findings.length}개 중).`}
+              ? emptyStateText
+              : `No findings match the current filter (${findings.length} total).`}
           </div>
         )}
 
@@ -736,7 +754,7 @@ export default function FindingsPage() {
                             <span className="text-zinc-400">{f.source}</span>
                             <span className="text-zinc-500">·</span>
                             <span className="font-mono text-zinc-400">
-                              {f.category}
+                              {f.fingerprint || f.category}
                             </span>
                             {f.classified_by === "penny" && (
                               <span className="rounded bg-purple-950/40 px-1 text-[9px] uppercase text-purple-300">
@@ -749,20 +767,21 @@ export default function FindingsPage() {
                               </span>
                             )}
                             <span className="ml-auto text-[10px] text-zinc-500">
+                              First {relativeTime(f.ts_first)} · Last{" "}
                               {relativeTime(f.ts_last)}
                             </span>
                           </div>
                           <div className="text-[13px]">{f.summary}</div>
                           {f.cause && (
                             <div className="mt-2 text-[11px] text-zinc-300">
-                              <span className="text-zinc-500">원인 · </span>
+                              <span className="text-zinc-500">Cause · </span>
                               {f.cause}
                             </div>
                           )}
                           {f.solution && (
                             <div className="mt-1 flex items-start gap-2 text-[11px] text-zinc-300">
                               <span className="shrink-0 text-zinc-500">
-                                해결 ·{" "}
+                                Fix ·{" "}
                               </span>
                               <span className="flex-1 whitespace-pre-wrap">
                                 {f.solution}
@@ -774,7 +793,7 @@ export default function FindingsPage() {
                                   title={`${f.remediation.tool} ${JSON.stringify(f.remediation.args)}`}
                                   className="shrink-0 rounded border border-blue-700 bg-blue-950/40 px-2 py-0.5 text-[11px] font-bold text-blue-200 hover:border-blue-500 hover:bg-blue-900/60"
                                 >
-                                  ⚡ {f.remediation.label ?? "승인 실행"}
+                                  ⚡ {f.remediation.label ?? "Run"}
                                 </button>
                               )}
                             </div>
@@ -787,18 +806,18 @@ export default function FindingsPage() {
                           <button
                             type="button"
                             onClick={() => void dismiss(f.id)}
-                            title="목록에서 감춥니다 (실제로 고치지는 않음). 같은 이슈가 다시 발생하면 새 finding으로 다시 올라옵니다."
+                            title="Hide this finding. If the same issue persists after the mute window, it can reopen."
                             className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
                           >
-                            🙈 감추기
+                            Hide
                           </button>
                           <button
                             type="button"
                             onClick={() => openChatAboutFinding(f, hostLabel)}
-                            title="이 이슈를 주제로 Penny와 새 대화를 시작합니다."
+                            title="Start a new Penny conversation about this finding."
                             className="rounded border border-purple-800 bg-purple-950/30 px-2 py-1 text-[11px] text-purple-200 hover:border-purple-500 hover:bg-purple-900/40"
                           >
-                            💬 Penny와 상의
+                            Ask Penny
                           </button>
                         </div>
                       </div>

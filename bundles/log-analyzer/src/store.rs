@@ -2,19 +2,17 @@
 //! `log_scan_config`. All methods are tenant-scoped at the WHERE
 //! clause; callers pass the tenant id explicitly.
 //!
-//! Folding rule: identical (host_id, source, category) entries seen
-//! within `FOLD_WINDOW` get rolled into the existing open finding
-//! (count++, ts_last bumped). A fresh row is only inserted when the
-//! prior finding is dismissed OR is older than the window — keeps
-//! flapping kernels from drowning the UI but still surfaces new
-//! incidents after an operator clears the previous batch.
+//! Folding rule: identical open `(tenant_id, host_id, source,
+//! fingerprint)` entries are one finding row. Repeats increment
+//! `count`, refresh `ts_last`, and replace `excerpt` with the newest
+//! line. A fresh row is only inserted when the prior finding is
+//! dismissed and outside the mute window.
 
 use crate::model::{Classification, Finding};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub const FOLD_WINDOW: Duration = Duration::hours(1);
 /// How long a dismiss button click keeps the `(host, source, category)`
 /// pattern muted. During this window, new scans matching the same
 /// pattern silently bump the count on the already-dismissed row
@@ -115,53 +113,24 @@ pub async fn upsert_finding(
     classified_by: &str,
 ) -> Result<Uuid, StoreError> {
     let now = Utc::now();
-    let cutoff = now - FOLD_WINDOW;
-    // Look for an OPEN finding within the fold window matching the
-    // same category — that's our roll-up target.
-    let existing: Option<(Uuid, i32)> = sqlx::query_as(
-        "SELECT id, count FROM log_findings \
-         WHERE tenant_id = $1 AND host_id = $2 AND source = $3 AND category = $4 \
-         AND dismissed_at IS NULL AND ts_last >= $5 \
-         ORDER BY ts_last DESC LIMIT 1",
-    )
-    .bind(tenant_id)
-    .bind(host_id)
-    .bind(source)
-    .bind(&cls.category)
-    .bind(cutoff)
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some((id, _count)) = existing {
-        sqlx::query(
-            "UPDATE log_findings \
-             SET count = count + 1, ts_last = $1, excerpt = $2 \
-             WHERE id = $3",
-        )
-        .bind(now)
-        .bind(truncate(excerpt, 1024))
-        .bind(id)
-        .execute(pool)
-        .await?;
-        return Ok(id);
-    }
+    let fingerprint = normalized_fingerprint(cls);
 
     // No open finding to fold into. Before creating a fresh card,
     // check whether the operator recently dismissed the same
-    // (host, source, category) — if so, silently bump the dismissed
+    // (host, source, fingerprint) — if so, silently bump the dismissed
     // row's count and leave dismissed_at alone. Keeps the "감추기"
     // click sticky across re-scans of historical journal lines.
     let mute_cutoff = now - DISMISS_MUTE_WINDOW;
     let muted: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM log_findings \
-         WHERE tenant_id = $1 AND host_id = $2 AND source = $3 AND category = $4 \
+         WHERE tenant_id = $1 AND host_id = $2 AND source = $3 AND fingerprint = $4 \
          AND dismissed_at IS NOT NULL AND dismissed_at >= $5 \
          ORDER BY dismissed_at DESC LIMIT 1",
     )
     .bind(tenant_id)
     .bind(host_id)
     .bind(source)
-    .bind(&cls.category)
+    .bind(fingerprint)
     .bind(mute_cutoff)
     .fetch_optional(pool)
     .await?;
@@ -180,9 +149,22 @@ pub async fn upsert_finding(
 
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO log_findings \
-            (tenant_id, host_id, source, severity, category, summary, excerpt, \
+            (tenant_id, host_id, source, severity, category, fingerprint, summary, excerpt, \
              ts_first, ts_last, classified_by, cause, solution, remediation) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, $13) \
+         ON CONFLICT (tenant_id, host_id, source, fingerprint) \
+             WHERE dismissed_at IS NULL \
+         DO UPDATE SET \
+             severity = EXCLUDED.severity, \
+             category = EXCLUDED.category, \
+             summary = EXCLUDED.summary, \
+             excerpt = EXCLUDED.excerpt, \
+             ts_last = EXCLUDED.ts_last, \
+             count = log_findings.count + 1, \
+             classified_by = EXCLUDED.classified_by, \
+             cause = EXCLUDED.cause, \
+             solution = EXCLUDED.solution, \
+             remediation = EXCLUDED.remediation \
          RETURNING id",
     )
     .bind(tenant_id)
@@ -190,6 +172,7 @@ pub async fn upsert_finding(
     .bind(source)
     .bind(cls.severity.as_str())
     .bind(&cls.category)
+    .bind(fingerprint)
     .bind(&cls.summary)
     .bind(truncate(excerpt, 1024))
     .bind(now)
@@ -200,6 +183,15 @@ pub async fn upsert_finding(
     .fetch_one(pool)
     .await?;
     Ok(id)
+}
+
+fn normalized_fingerprint(cls: &Classification) -> &str {
+    let fingerprint = cls.fingerprint.trim();
+    if fingerprint.is_empty() {
+        cls.category.as_str()
+    } else {
+        fingerprint
+    }
 }
 
 /// Fetch the remediation JSON (and host_id) for one finding so the

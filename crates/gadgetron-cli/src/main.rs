@@ -670,6 +670,13 @@ fn apply_agent_gadgets_env_override(
     Ok(())
 }
 
+fn log_analyzer_auto_scan_enabled(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
 fn resolve_existing_config_path(config_path_override: Option<PathBuf>) -> Result<PathBuf> {
     let config_path: PathBuf = config_path_override
         .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
@@ -953,16 +960,14 @@ fn load_penny_registry_from_config(
                     anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
                 })?;
 
-                // Background scanner is OPT-IN. The default off-state
-                // means Penny LLM tokens are spent only when the
-                // operator explicitly invokes `loganalysis.scan_now`
-                // through chat / Side Panel. Set
-                // `GADGETRON_LOG_ANALYZER_AUTO=1` to restore the old
-                // 30-second polling loop.
-                let auto_scan = std::env::var("GADGETRON_LOG_ANALYZER_AUTO")
-                    .ok()
-                    .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-                    .unwrap_or(false);
+                // Background scanner is on by default. It is rule-only
+                // unless `GADGETRON_LOG_ANALYZER_KEY` is set above, so the
+                // default monitoring path does not spend Penny LLM tokens.
+                // Operators can opt out with
+                // `GADGETRON_LOG_ANALYZER_AUTO=0|false|no|off`.
+                let auto_scan = log_analyzer_auto_scan_enabled(
+                    std::env::var("GADGETRON_LOG_ANALYZER_AUTO").ok().as_deref(),
+                );
                 if auto_scan {
                     tokio::spawn(gadgetron_bundle_log_analyzer::run_background_scanner(
                         inv,
@@ -972,15 +977,14 @@ fn load_penny_registry_from_config(
                     ));
                     tracing::info!(
                         target: "log_analyzer",
-                        "log-analyzer bundle registered + background scanner spawned \
-                         (GADGETRON_LOG_ANALYZER_AUTO is set)"
+                        "log-analyzer bundle registered + background scanner spawned"
                     );
                 } else {
                     tracing::info!(
                         target: "log_analyzer",
                         "log-analyzer bundle registered; background scanner DISABLED \
-                         (set GADGETRON_LOG_ANALYZER_AUTO=1 to re-enable). On-demand \
-                         scans via `loganalysis.scan_now` continue to work."
+                         by GADGETRON_LOG_ANALYZER_AUTO. On-demand scans via \
+                         `loganalysis.scan_now` continue to work."
                     );
                 }
             }
@@ -4341,6 +4345,17 @@ wiki_max_page_bytes = 1048576
             cfg.gadgets.write.server_admin,
             gadgetron_core::agent::config::GadgetMode::Auto
         );
+    }
+
+    #[test]
+    fn log_analyzer_auto_scan_defaults_on_and_accepts_explicit_off() {
+        assert!(log_analyzer_auto_scan_enabled(None));
+        assert!(log_analyzer_auto_scan_enabled(Some("1")));
+        assert!(log_analyzer_auto_scan_enabled(Some("true")));
+        assert!(log_analyzer_auto_scan_enabled(Some("on")));
+        assert!(!log_analyzer_auto_scan_enabled(Some("0")));
+        assert!(!log_analyzer_auto_scan_enabled(Some("false")));
+        assert!(!log_analyzer_auto_scan_enabled(Some("off")));
     }
 
     #[test]

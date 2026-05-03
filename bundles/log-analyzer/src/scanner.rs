@@ -306,11 +306,12 @@ async fn fetch_journal(
     timeout: Duration,
 ) -> Result<(Vec<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     // -p 0..3 keeps to err+ severities (we only care about errors).
-    // First run: read last 30 minutes to anchor the cursor without
-    // surfacing ancient noise.
+    // First run: read last 6 hours so slow periodic hardware warnings
+    // (for example smartd's 30-minute cadence) are not missed. Later
+    // scans use the journal cursor and only read new lines.
     let cursor_arg = match cursor {
         Some(c) => format!("--after-cursor={}", shell_q(c)),
-        None => "--since='-30min'".to_string(),
+        None => "--since='-6h'".to_string(),
     };
     let cmd = format!(
         "timeout {t}s sudo -n /usr/bin/journalctl -p 0..3 --no-pager --show-cursor \
