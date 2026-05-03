@@ -69,6 +69,10 @@ pub struct PennyProvider {
     /// regardless of its cwd (see `mcp_config::build_config_json`).
     /// `None` in tests / legacy constructors.
     config_path: Option<std::path::PathBuf>,
+    /// Optional live brain settings snapshot shared with the gateway Admin
+    /// settings endpoint. When present, every request overlays this snapshot
+    /// onto the frozen startup config before spawning Claude Code.
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
 }
 
 impl PennyProvider {
@@ -123,7 +127,16 @@ impl PennyProvider {
             session_store,
             penny_home,
             config_path,
+            brain_config: None,
         }
+    }
+
+    pub fn with_brain_config(
+        mut self,
+        brain_config: Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>,
+    ) -> Self {
+        self.brain_config = Some(brain_config);
+        self
     }
 
     /// Back-compat constructor — installs a `NoopGadgetAuditEventSink`
@@ -139,6 +152,15 @@ impl PennyProvider {
     /// The model id this provider exposes via `/v1/models` and
     /// matches on when routing.
     pub const MODEL_ID: &'static str = "penny";
+
+    fn live_config_snapshot(&self) -> AgentConfig {
+        let mut live_config = (*self.config).clone();
+        if let Some(brain) = self.brain_config.as_ref() {
+            live_config.brain = (*brain.load_full()).clone();
+        }
+        live_config.gadgets = self.registry.current_gadgets_config();
+        live_config
+    }
 }
 
 #[async_trait]
@@ -197,9 +219,7 @@ impl LlmProvider for PennyProvider {
         &self,
         req: ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
-        let mut live_config = (*self.config).clone();
-        live_config.gadgets = self.registry.current_gadgets_config();
-        let live_config = Arc::new(live_config);
+        let live_config = Arc::new(self.live_config_snapshot());
         let allowed_tools = self.registry.build_allowed_tools(live_config.as_ref());
         let tool_metadata = self.registry.tool_metadata_snapshot();
         let session = ClaudeCodeSession::new_with_home_and_config_path(
@@ -272,6 +292,26 @@ pub fn register_with_router(
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
     config_path: Option<std::path::PathBuf>,
 ) {
+    register_with_router_and_brain_config(
+        config,
+        registry,
+        audit_sink,
+        session_store,
+        providers,
+        config_path,
+        None,
+    );
+}
+
+pub fn register_with_router_and_brain_config(
+    config: Arc<AgentConfig>,
+    registry: Arc<GadgetRegistry>,
+    audit_sink: Arc<dyn GadgetAuditEventSink>,
+    session_store: Arc<SessionStore>,
+    providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
+    config_path: Option<std::path::PathBuf>,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+) {
     let penny_home = match std::env::var("HOME") {
         Ok(real_home) => {
             let root = crate::home::default_home_root(std::path::Path::new(&real_home));
@@ -295,7 +335,7 @@ pub fn register_with_router(
             None
         }
     };
-    let provider = PennyProvider::new_with_home_and_config_path(
+    let mut provider = PennyProvider::new_with_home_and_config_path(
         config,
         registry,
         audit_sink,
@@ -303,6 +343,9 @@ pub fn register_with_router(
         penny_home,
         config_path,
     );
+    if let Some(brain_config) = brain_config {
+        provider = provider.with_brain_config(brain_config);
+    }
     providers.insert(
         PennyProvider::MODEL_ID.to_string(),
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -357,6 +400,28 @@ mod tests {
         let cfg = Arc::new(AgentConfig::default());
         let provider = PennyProvider::new_without_audit(cfg, empty_registry());
         assert_eq!(provider.name(), "penny");
+    }
+
+    #[test]
+    fn live_config_snapshot_overlays_brain_snapshot() {
+        let mut cfg = AgentConfig::default();
+        cfg.brain.model = "claude-default".into();
+        let mut live_brain = cfg.brain.clone();
+        live_brain.mode = gadgetron_core::agent::BrainMode::ExternalProxy;
+        live_brain.external_base_url = "http://127.0.0.1:3456".into();
+        live_brain.model = "openai/local-model".into();
+        let brain_handle = Arc::new(arc_swap::ArcSwap::from_pointee(live_brain));
+        let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry())
+            .with_brain_config(brain_handle);
+
+        let snapshot = provider.live_config_snapshot();
+
+        assert_eq!(
+            snapshot.brain.mode,
+            gadgetron_core::agent::BrainMode::ExternalProxy
+        );
+        assert_eq!(snapshot.brain.external_base_url, "http://127.0.0.1:3456");
+        assert_eq!(snapshot.brain.model, "openai/local-model");
     }
 
     // Helper that constructs a provider with explicit audit sink — used

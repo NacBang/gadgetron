@@ -621,7 +621,10 @@ mode = "claude_max"
 # external_anthropic_api_key_env = "ANTHROPIC_API_KEY"  # API 키가 담긴 환경변수명 (기본값)
 
 # external_proxy 모드:
-# external_base_url = "http://127.0.0.1:4000/v1"        # 필수; proxy endpoint
+# external_base_url = "http://127.0.0.1:8080"           # 필수; Anthropic Messages/CCR-compatible endpoint
+# model = "openai/Qwen3-Coder-30B-A3B-Instruct"         # optional Claude Code model string
+# external_auth_token_env = "PENNY_CCR_AUTH_TOKEN"      # optional token env var name only
+# custom_model_option = true                            # optional for non-standard model ids
 
 # gadgetron_local 모드 (P2C — P2A에서는 startup error):
 # local_model = "ollama/gemma3:27b"
@@ -637,8 +640,13 @@ mode = "claude_max"
 | `gadgetron_local` | Gadgetron 내부 shim → 로컬 provider. P2C. | P2A에서는 startup error |
 
 - `external_anthropic_api_key_env`: `external_anthropic` 모드에서 Anthropic API 키를 담은 환경변수 이름. 기본값 `"ANTHROPIC_API_KEY"`. 해당 환경변수가 설정되지 않으면 서버 시작 시 오류가 발생합니다.
-- `external_base_url`: `external_proxy` 모드에서 ANTHROPIC_BASE_URL 오버라이드. `external_proxy` 모드에서는 필수이며 비어 있으면 startup error입니다. `external_anthropic` 모드에서도 선택적으로 사용할 수 있습니다.
+- `external_base_url`: `external_proxy` 모드에서 `ANTHROPIC_BASE_URL` 오버라이드. `external_proxy` 모드에서는 필수이며 비어 있으면 startup error입니다. `external_anthropic` 모드에서도 선택적으로 사용할 수 있습니다. vLLM/SGLang의 OpenAI-compatible `/v1/chat/completions`를 직접 넣지 말고 CCR 같은 Anthropic Messages-compatible gateway endpoint를 넣습니다.
+- `model`: Claude Code에 전달할 free-form model 문자열. 설정 시 `--model`, `ANTHROPIC_MODEL`로 전달됩니다.
+- `external_auth_token_env`: gateway token이 담긴 환경변수 이름. 값 자체는 config/DB/UI에 저장하지 않으며, Claude Code subprocess spawn 시 `ANTHROPIC_AUTH_TOKEN`으로 전달합니다.
+- `custom_model_option`: `model`을 `ANTHROPIC_CUSTOM_MODEL_OPTION`으로도 전달합니다. CCR/local model id처럼 Claude Code 기본 model picker에 없는 문자열을 쓸 때 켭니다.
 - `local_model`: `gadgetron_local` 모드에서 router provider map의 `<provider_name>/<model_id>`. P2A에서는 동작하지 않으며 startup error입니다.
+
+`/web/admin`의 **Penny LLM Gateway** 섹션에서 같은 값을 저장하면 Postgres에 runtime setting으로 보존되고, 다음 Penny 요청부터 서버 재시작 없이 적용됩니다. 실행 중인 Claude Code subprocess는 기존 설정으로 마무리됩니다.
 
 ### `[agent.gadgets]`
 

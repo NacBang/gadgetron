@@ -18,8 +18,9 @@ pub mod shared_context;
 pub mod tools;
 
 pub use config::{
-    AgentConfig, BrainConfig, BrainMode, BrainShimConfig, DestructiveGadgetsConfig,
-    ExtraConfirmation, GadgetMode, GadgetsConfig, WriteGadgetsConfig,
+    AgentBrainSettings, AgentBrainSettingsSource, AgentConfig, BrainConfig, BrainMode,
+    BrainShimConfig, DestructiveGadgetsConfig, ExtraConfirmation, GadgetMode, GadgetsConfig,
+    UpdateAgentBrainSettingsRequest, WriteGadgetsConfig,
 };
 pub use tools::{
     GadgetDispatcher, GadgetError, GadgetModeReconfigurer, GadgetProvider, GadgetResult,

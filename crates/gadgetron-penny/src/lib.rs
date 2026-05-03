@@ -50,7 +50,7 @@ pub use gadget_config::{
 pub use gadget_registry::{ForwardConfig, GadgetRegistry, GadgetRegistryBuilder};
 pub use gadget_server::serve_stdio;
 pub use home::{prepare_penny_home, HomeError, PennyHome};
-pub use provider::{register_with_router, PennyProvider};
+pub use provider::{register_with_router, register_with_router_and_brain_config, PennyProvider};
 pub use redact::redact_stderr;
 pub use session::ClaudeCodeSession;
 pub use session_store::{

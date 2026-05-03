@@ -12,7 +12,10 @@
 //!   GET  /actions                          → `list_actions`
 //!   POST /actions/:action_id               → `invoke_action`
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -207,6 +210,11 @@ pub struct GatewayWorkbenchService {
     /// the gateway depending on `gadgetron-penny` directly.
     pub gadget_mode_reconfigurer:
         Option<Arc<dyn gadgetron_core::agent::tools::GadgetModeReconfigurer>>,
+    /// Live Penny brain settings. Seeded from `[agent.brain]` at startup,
+    /// overlaid from DB when available, and swapped by the Management-scoped
+    /// `/admin/agent/brain` endpoint. Running Claude Code subprocesses keep
+    /// their env/args; the next Penny turn reads the new snapshot.
+    pub agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
     /// Frozen base `AgentConfig` — used by the `PATCH` handler to
     /// rebuild a full `AgentConfig` with the new `.gadgets` slot so
     /// the reconfigurer's `reconfigure(&AgentConfig)` signature is
@@ -746,6 +754,754 @@ pub async fn patch_agent_modes(
     })))
 }
 
+/// `GET /api/v1/web/workbench/admin/agent/brain` — return the current
+/// DB-backed Penny brain settings for this tenant, falling back to the
+/// startup `[agent.brain]` snapshot when no row has been saved yet.
+pub async fn get_agent_brain_settings(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<gadgetron_core::agent::AgentBrainSettings>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let brain = svc.agent_brain.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "agent brain settings are not wired in this build".into(),
+        ))
+    })?;
+    let pool = require_pg_pool(&state, "agent brain settings")?;
+    let saved = gadgetron_xaas::agent_brain::get_agent_brain_settings(pool, ctx.tenant_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "agent brain settings query: {e}"
+            )))
+        })?;
+    if let Some(saved) = saved {
+        return Ok(Json(saved));
+    }
+
+    let snapshot = brain.load_full();
+    Ok(Json(gadgetron_core::agent::AgentBrainSettings::from_brain(
+        &snapshot,
+        gadgetron_core::agent::AgentBrainSettingsSource::ConfigFile,
+        None,
+        None,
+    )))
+}
+
+/// `PATCH /api/v1/web/workbench/admin/agent/brain` — validate, persist,
+/// and hot-swap the Penny brain settings. The new settings affect the next
+/// Claude Code subprocess spawned by Penny.
+pub async fn patch_agent_brain_settings(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<gadgetron_core::agent::UpdateAgentBrainSettingsRequest>,
+) -> Result<Json<gadgetron_core::agent::AgentBrainSettings>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let brain = svc.agent_brain.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "agent brain settings are not wired in this build".into(),
+        ))
+    })?;
+    let current = brain.load_full();
+    let next = body.overlay_brain(&current);
+    next.validate_with_env(
+        &std::collections::HashMap::new(),
+        &gadgetron_core::agent::config::StdEnv,
+    )
+    .map_err(WorkbenchHttpError::Core)?;
+
+    let pool = require_pg_pool(&state, "agent brain settings")?;
+    let saved = gadgetron_xaas::agent_brain::upsert_agent_brain_settings(
+        pool,
+        ctx.tenant_id,
+        ctx.actor_user_id,
+        &body,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "agent brain settings update: {e}"
+        )))
+    })?;
+    brain.store(Arc::new(next));
+    tracing::info!(
+        target: "workbench.admin.agent_brain",
+        tenant_id = %ctx.tenant_id,
+        actor_user_id = ?ctx.actor_user_id,
+        mode = %saved.mode.as_str(),
+        has_model = !saved.model.is_empty(),
+        has_base_url = !saved.external_base_url.is_empty(),
+        has_auth_token_env = !saved.external_auth_token_env.is_empty(),
+        custom_model_option = saved.custom_model_option,
+        "agent brain settings updated"
+    );
+
+    Ok(Json(saved))
+}
+
+// ---------------------------------------------------------------------------
+// LLM endpoint registry — admin control plane
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateLlmEndpointRequest {
+    pub name: String,
+    pub kind: String,
+    pub protocol: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    #[serde(default)]
+    pub target_host_id: Option<Uuid>,
+    #[serde(default)]
+    pub upstream_endpoint_id: Option<Uuid>,
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateCcrBridgeRequest {
+    pub name: String,
+    pub target_kind: String,
+    #[serde(default)]
+    pub target_host_id: Option<Uuid>,
+    pub base_url: String,
+    pub port: u16,
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct AutoDetectLlmEndpointRequest {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListLlmEndpointsResponse {
+    pub endpoints: Vec<gadgetron_xaas::llm_endpoints::LlmEndpointRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DeleteLlmEndpointResponse {
+    pub deleted: bool,
+    pub endpoint_id: uuid::Uuid,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProbeLlmEndpointResponse {
+    pub ok: bool,
+    pub endpoint: gadgetron_xaas::llm_endpoints::LlmEndpointRow,
+    pub models: Vec<String>,
+    pub message: String,
+}
+
+pub type AutoDetectLlmEndpointResponse = ProbeLlmEndpointResponse;
+
+#[derive(Debug, serde::Serialize)]
+pub struct UseLlmEndpointResponse {
+    pub endpoint: gadgetron_xaas::llm_endpoints::LlmEndpointRow,
+    pub brain: gadgetron_core::agent::AgentBrainSettings,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OpenAiModelsResponse {
+    #[serde(default)]
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn endpoint_alias_or_host_port(alias: Option<String>, host: &str, port: u16) -> String {
+    normalize_optional_text(alias).unwrap_or_else(|| format!("{}:{}", host.trim(), port))
+}
+
+fn validate_llm_endpoint_request(
+    body: &CreateLlmEndpointRequest,
+) -> Result<(), WorkbenchHttpError> {
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint name must be 1..=80 bytes".into(),
+        )));
+    }
+    if !matches!(
+        body.kind.as_str(),
+        "vllm" | "sglang" | "openai_compatible" | "anthropic_proxy" | "ccr"
+    ) {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint kind must be vllm, sglang, openai_compatible, anthropic_proxy, or ccr".into(),
+        )));
+    }
+    if !matches!(body.protocol.as_str(), "openai_chat" | "anthropic_messages") {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint protocol must be openai_chat or anthropic_messages".into(),
+        )));
+    }
+    let base_url = body.base_url.trim();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint base_url must start with http:// or https://".into(),
+        )));
+    }
+    if body
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|model| model.len() > 256)
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint model_id must be at most 256 bytes".into(),
+        )));
+    }
+    let target_kind = body
+        .target_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("external");
+    validate_llm_endpoint_target(target_kind, body.target_host_id)?;
+    if body.listen_port == Some(0) {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint listen_port must be 1..=65535".into(),
+        )));
+    }
+    validate_optional_env_name(body.auth_token_env.as_deref())?;
+    Ok(())
+}
+
+fn validate_ccr_bridge_request(body: &CreateCcrBridgeRequest) -> Result<(), WorkbenchHttpError> {
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "CCR bridge name must be 1..=80 bytes".into(),
+        )));
+    }
+    validate_llm_endpoint_target(body.target_kind.trim(), body.target_host_id)?;
+    let base_url = body.base_url.trim();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "CCR bridge base_url must start with http:// or https://".into(),
+        )));
+    }
+    if body.port == 0 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "CCR bridge port must be 1..=65535".into(),
+        )));
+    }
+    validate_optional_env_name(body.auth_token_env.as_deref())?;
+    Ok(())
+}
+
+fn validate_llm_endpoint_target(
+    target_kind: &str,
+    target_host_id: Option<Uuid>,
+) -> Result<(), WorkbenchHttpError> {
+    match target_kind {
+        "external" => {
+            if target_host_id.is_some() {
+                return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                    "external endpoints must not include target_host_id".into(),
+                )));
+            }
+        }
+        "local" => {
+            if target_host_id.is_some() {
+                return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                    "local endpoints must not include target_host_id".into(),
+                )));
+            }
+        }
+        "registered_server" => {
+            if target_host_id.is_none() {
+                return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                    "registered_server endpoints require target_host_id".into(),
+                )));
+            }
+        }
+        _ => {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "endpoint target_kind must be external, local, or registered_server".into(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_env_name(value: Option<&str>) -> Result<(), WorkbenchHttpError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+    if value.len() > 128 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "auth token env var name must be at most 128 bytes".into(),
+        )));
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Ok(());
+    };
+    if !(first == '_' || first.is_ascii_alphabetic())
+        || chars.any(|c| !(c == '_' || c.is_ascii_alphanumeric()))
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "auth token env var name must look like an environment variable".into(),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_autodetect_request(
+    body: &AutoDetectLlmEndpointRequest,
+) -> Result<String, WorkbenchHttpError> {
+    let host = body.host.trim();
+    if host.is_empty() || host.len() > 253 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint host must be 1..=253 bytes".into(),
+        )));
+    }
+    if body.port == 0 {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint port must be 1..=65535".into(),
+        )));
+    }
+    let scheme = body
+        .scheme
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("http");
+    if !matches!(scheme, "http" | "https") {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint scheme must be http or https".into(),
+        )));
+    }
+    if normalize_optional_text(body.alias.clone())
+        .as_deref()
+        .is_some_and(|alias| alias.len() > 80)
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint alias must be at most 80 bytes".into(),
+        )));
+    }
+    Ok(format!("{scheme}://{host}:{}", body.port))
+}
+
+fn llm_endpoint_error_to_http(
+    op: &str,
+    err: gadgetron_xaas::llm_endpoints::LlmEndpointError,
+) -> WorkbenchHttpError {
+    match err {
+        gadgetron_xaas::llm_endpoints::LlmEndpointError::NotFound => {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("{op}: endpoint not found")))
+        }
+        other => WorkbenchHttpError::Core(GadgetronError::Config(format!("{op}: {other}"))),
+    }
+}
+
+fn openai_models_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    }
+}
+
+fn endpoint_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+async fn probe_openai_base_url(base_url: &str) -> Result<(Vec<String>, i32, String), String> {
+    let client = endpoint_http_client()?;
+    let started = Instant::now();
+    let url = openai_models_url(base_url);
+    let res = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("GET {url}: HTTP {}", res.status()));
+    }
+    let body = res
+        .json::<OpenAiModelsResponse>()
+        .await
+        .map_err(|e| format!("parse /v1/models: {e}"))?;
+    let models = body.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
+    let elapsed = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    Ok((models, elapsed, "OpenAI /v1/models reachable".into()))
+}
+
+async fn probe_anthropic_base_url(base_url: &str) -> Result<(Vec<String>, i32, String), String> {
+    let client = endpoint_http_client()?;
+    let started = Instant::now();
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/health");
+    let res = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("GET {url}: HTTP {}", res.status()));
+    }
+    let elapsed = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    Ok((
+        Vec::new(),
+        elapsed,
+        "Anthropic-compatible endpoint reachable".into(),
+    ))
+}
+
+async fn probe_endpoint(
+    endpoint: &gadgetron_xaas::llm_endpoints::LlmEndpointRow,
+) -> Result<(Vec<String>, i32, String), String> {
+    if endpoint.protocol == "openai_chat" {
+        return probe_openai_base_url(&endpoint.base_url).await;
+    }
+    probe_anthropic_base_url(&endpoint.base_url).await
+}
+
+pub async fn list_llm_endpoints_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<ListLlmEndpointsResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "llm endpoint listing")?;
+    let endpoints = gadgetron_xaas::llm_endpoints::list_llm_endpoints(pool, ctx.tenant_id)
+        .await
+        .map_err(|e| llm_endpoint_error_to_http("list_llm_endpoints", e))?;
+    let returned = endpoints.len();
+    Ok(Json(ListLlmEndpointsResponse {
+        endpoints,
+        returned,
+    }))
+}
+
+pub async fn create_llm_endpoint_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreateLlmEndpointRequest>,
+) -> Result<Json<gadgetron_xaas::llm_endpoints::LlmEndpointRow>, WorkbenchHttpError> {
+    validate_llm_endpoint_request(&body)?;
+    let pool = require_pg_pool(&state, "llm endpoint creation")?;
+    let model_id = normalize_optional_text(body.model_id);
+    let target_kind = body
+        .target_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("external");
+    let auth_token_env = normalize_optional_text(body.auth_token_env);
+    let row = gadgetron_xaas::llm_endpoints::create_llm_endpoint_with_target(
+        pool,
+        ctx.tenant_id,
+        gadgetron_xaas::llm_endpoints::LlmEndpointCreate {
+            name: body.name.trim(),
+            kind: body.kind.trim(),
+            protocol: body.protocol.trim(),
+            base_url: body.base_url.trim().trim_end_matches('/'),
+            target_kind,
+            target_host_id: body.target_host_id,
+            upstream_endpoint_id: body.upstream_endpoint_id,
+            listen_port: body.listen_port.map(i32::from),
+            auth_token_env: auth_token_env.as_deref(),
+            model_id: model_id.as_deref(),
+        },
+    )
+    .await
+    .map_err(|e| llm_endpoint_error_to_http("create_llm_endpoint", e))?;
+    Ok(Json(row))
+}
+
+pub async fn create_ccr_bridge_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(upstream_endpoint_id): axum::extract::Path<uuid::Uuid>,
+    Json(body): Json<CreateCcrBridgeRequest>,
+) -> Result<Json<gadgetron_xaas::llm_endpoints::LlmEndpointRow>, WorkbenchHttpError> {
+    validate_ccr_bridge_request(&body)?;
+    let pool = require_pg_pool(&state, "CCR bridge creation")?;
+    let upstream =
+        gadgetron_xaas::llm_endpoints::get_llm_endpoint(pool, ctx.tenant_id, upstream_endpoint_id)
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("get_llm_endpoint", e))?;
+    if upstream.protocol != "openai_chat" {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "CCR bridge upstream must be an OpenAI-compatible endpoint".into(),
+        )));
+    }
+    let auth_token_env = normalize_optional_text(body.auth_token_env);
+    let row = gadgetron_xaas::llm_endpoints::create_llm_endpoint_with_target(
+        pool,
+        ctx.tenant_id,
+        gadgetron_xaas::llm_endpoints::LlmEndpointCreate {
+            name: body.name.trim(),
+            kind: "ccr",
+            protocol: "anthropic_messages",
+            base_url: body.base_url.trim().trim_end_matches('/'),
+            target_kind: body.target_kind.trim(),
+            target_host_id: body.target_host_id,
+            upstream_endpoint_id: Some(upstream.id),
+            listen_port: Some(i32::from(body.port)),
+            auth_token_env: auth_token_env.as_deref(),
+            model_id: upstream.model_id.as_deref(),
+        },
+    )
+    .await
+    .map_err(|e| llm_endpoint_error_to_http("create_ccr_bridge", e))?;
+    Ok(Json(row))
+}
+
+pub async fn autodetect_llm_endpoint_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<AutoDetectLlmEndpointRequest>,
+) -> Result<Json<AutoDetectLlmEndpointResponse>, WorkbenchHttpError> {
+    let base_url = validate_autodetect_request(&body)?;
+    let alias = endpoint_alias_or_host_port(body.alias, &body.host, body.port);
+    let pool = require_pg_pool(&state, "llm endpoint autodetect")?;
+
+    match probe_openai_base_url(&base_url).await {
+        Ok((models, latency_ms, message)) => {
+            let model_id = models.first().map(String::as_str);
+            let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
+                pool,
+                ctx.tenant_id,
+                &alias,
+                "vllm",
+                "openai_chat",
+                &base_url,
+                model_id,
+            )
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("autodetect_llm_endpoint", e))?;
+            let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+                pool,
+                ctx.tenant_id,
+                endpoint.id,
+                "ok",
+                None,
+                Some(latency_ms),
+            )
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+            Ok(Json(AutoDetectLlmEndpointResponse {
+                ok: true,
+                endpoint,
+                models,
+                message,
+            }))
+        }
+        Err(openai_error) => match probe_anthropic_base_url(&base_url).await {
+            Ok((models, latency_ms, message)) => {
+                let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
+                    pool,
+                    ctx.tenant_id,
+                    &alias,
+                    "ccr",
+                    "anthropic_messages",
+                    &base_url,
+                    None,
+                )
+                .await
+                .map_err(|e| llm_endpoint_error_to_http("autodetect_llm_endpoint", e))?;
+                let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+                    pool,
+                    ctx.tenant_id,
+                    endpoint.id,
+                    "ok",
+                    None,
+                    Some(latency_ms),
+                )
+                .await
+                .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+                Ok(Json(AutoDetectLlmEndpointResponse {
+                    ok: true,
+                    endpoint,
+                    models,
+                    message,
+                }))
+            }
+            Err(anthropic_error) => {
+                let message = format!(
+                    "OpenAI probe failed: {openai_error}; Anthropic health probe failed: {anthropic_error}"
+                );
+                let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
+                    pool,
+                    ctx.tenant_id,
+                    &alias,
+                    "vllm",
+                    "openai_chat",
+                    &base_url,
+                    None,
+                )
+                .await
+                .map_err(|e| llm_endpoint_error_to_http("autodetect_llm_endpoint", e))?;
+                let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+                    pool,
+                    ctx.tenant_id,
+                    endpoint.id,
+                    "error",
+                    Some(&message),
+                    None,
+                )
+                .await
+                .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+                Ok(Json(AutoDetectLlmEndpointResponse {
+                    ok: false,
+                    endpoint,
+                    models: Vec::new(),
+                    message,
+                }))
+            }
+        },
+    }
+}
+
+pub async fn delete_llm_endpoint_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(endpoint_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<DeleteLlmEndpointResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "llm endpoint deletion")?;
+    gadgetron_xaas::llm_endpoints::delete_llm_endpoint(pool, ctx.tenant_id, endpoint_id)
+        .await
+        .map_err(|e| llm_endpoint_error_to_http("delete_llm_endpoint", e))?;
+    Ok(Json(DeleteLlmEndpointResponse {
+        deleted: true,
+        endpoint_id,
+    }))
+}
+
+pub async fn probe_llm_endpoint_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(endpoint_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<ProbeLlmEndpointResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "llm endpoint probe")?;
+    let endpoint =
+        gadgetron_xaas::llm_endpoints::get_llm_endpoint(pool, ctx.tenant_id, endpoint_id)
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("get_llm_endpoint", e))?;
+
+    match probe_endpoint(&endpoint).await {
+        Ok((models, latency_ms, message)) => {
+            let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+                pool,
+                ctx.tenant_id,
+                endpoint_id,
+                "ok",
+                None,
+                Some(latency_ms),
+            )
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+            Ok(Json(ProbeLlmEndpointResponse {
+                ok: true,
+                endpoint,
+                models,
+                message,
+            }))
+        }
+        Err(message) => {
+            let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+                pool,
+                ctx.tenant_id,
+                endpoint_id,
+                "error",
+                Some(&message),
+                None,
+            )
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+            Ok(Json(ProbeLlmEndpointResponse {
+                ok: false,
+                endpoint,
+                models: Vec::new(),
+                message,
+            }))
+        }
+    }
+}
+
+pub async fn use_llm_endpoint_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(endpoint_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<UseLlmEndpointResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let brain = svc.agent_brain.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "agent brain settings are not wired in this build".into(),
+        ))
+    })?;
+    let pool = require_pg_pool(&state, "llm endpoint use")?;
+    let endpoint =
+        gadgetron_xaas::llm_endpoints::get_llm_endpoint(pool, ctx.tenant_id, endpoint_id)
+            .await
+            .map_err(|e| llm_endpoint_error_to_http("get_llm_endpoint", e))?;
+    if endpoint.protocol != "anthropic_messages" {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "OpenAI-compatible endpoints need a CCR/Anthropic bridge before Penny can use them directly"
+                .into(),
+        )));
+    }
+
+    let request = gadgetron_core::agent::UpdateAgentBrainSettingsRequest {
+        mode: gadgetron_core::agent::BrainMode::ExternalProxy,
+        external_base_url: endpoint.base_url.clone(),
+        model: endpoint.model_id.clone().unwrap_or_default(),
+        external_auth_token_env: endpoint.auth_token_env.clone().unwrap_or_default(),
+        custom_model_option: endpoint.model_id.is_some(),
+    };
+    let current = brain.load_full();
+    let next = request.overlay_brain(&current);
+    next.validate_with_env(
+        &std::collections::HashMap::new(),
+        &gadgetron_core::agent::config::StdEnv,
+    )
+    .map_err(WorkbenchHttpError::Core)?;
+    let saved = gadgetron_xaas::agent_brain::upsert_agent_brain_settings(
+        pool,
+        ctx.tenant_id,
+        ctx.actor_user_id,
+        &request,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "agent brain settings update: {e}"
+        )))
+    })?;
+    brain.store(Arc::new(next));
+    Ok(Json(UseLlmEndpointResponse {
+        endpoint,
+        brain: saved,
+    }))
+}
+
 /// Map `ApprovalError` → `WorkbenchHttpError` keeping the status-code
 /// contract callers rely on.
 fn approval_error_to_http(err: gadgetron_core::workbench::ApprovalError) -> WorkbenchHttpError {
@@ -979,11 +1735,20 @@ pub struct ListUsersResponse {
 pub struct CreateUserRequest {
     pub email: String,
     pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub role: gadgetron_xaas::identity::Role,
     /// Plaintext password. Required for `member` + `admin`; MUST be
     /// absent for `service` (400 otherwise).
     #[serde(default)]
     pub password: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateUserProfileRequest {
+    pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1023,11 +1788,38 @@ pub async fn create_user_handler(
         ctx.tenant_id,
         &body.email,
         &body.display_name,
+        body.avatar_url.as_deref(),
         body.role,
         body.password.as_deref(),
     )
     .await
     .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("create_user: {e}"))))?;
+    Ok(Json(row))
+}
+
+/// `PATCH /api/v1/web/workbench/admin/users/{user_id}` — update editable
+/// profile fields for an existing user in the caller's tenant.
+pub async fn update_user_profile_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
+    Json(body): Json<UpdateUserProfileRequest>,
+) -> Result<Json<gadgetron_xaas::identity::UserRow>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "user profile update")?;
+    let row = gadgetron_xaas::identity::update_user_profile(
+        pool,
+        ctx.tenant_id,
+        user_id,
+        body.display_name.trim(),
+        body.avatar_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!("update_user_profile: {e}")))
+    })?;
     Ok(Json(row))
 }
 
@@ -2081,6 +2873,35 @@ pub fn workbench_routes() -> Router<AppState> {
             "/admin/billing/insert-failures",
             get(admin_billing_insert_failures),
         )
+        // Penny Claude Code LLM gateway settings.
+        .route("/admin/agent/brain", get(get_agent_brain_settings))
+        .route(
+            "/admin/agent/brain",
+            axum::routing::patch(patch_agent_brain_settings),
+        )
+        // LLM endpoint registry and Penny attachment.
+        .route("/admin/llm/endpoints", get(list_llm_endpoints_handler))
+        .route("/admin/llm/endpoints", post(create_llm_endpoint_handler))
+        .route(
+            "/admin/llm/endpoints/autodetect",
+            post(autodetect_llm_endpoint_handler),
+        )
+        .route(
+            "/admin/llm/endpoints/{endpoint_id}/ccr",
+            post(create_ccr_bridge_handler),
+        )
+        .route(
+            "/admin/llm/endpoints/{endpoint_id}",
+            axum::routing::delete(delete_llm_endpoint_handler),
+        )
+        .route(
+            "/admin/llm/endpoints/{endpoint_id}/probe",
+            post(probe_llm_endpoint_handler),
+        )
+        .route(
+            "/admin/llm/endpoints/{endpoint_id}/use",
+            post(use_llm_endpoint_handler),
+        )
         // ISSUE 4 TASK 4.3 — live activity WebSocket feed.
         .route("/events/ws", get(events_ws_handler))
         // ISSUE 8 TASK 8.2 — admin catalog hot-reload.
@@ -2097,6 +2918,10 @@ pub fn workbench_routes() -> Router<AppState> {
         // ISSUE 14 TASK 14.3 — admin user CRUD.
         .route("/admin/users", get(list_users_handler))
         .route("/admin/users", post(create_user_handler))
+        .route(
+            "/admin/users/{user_id}",
+            axum::routing::patch(update_user_profile_handler),
+        )
         .route(
             "/admin/users/{user_id}",
             axum::routing::delete(delete_user_handler),
@@ -3019,6 +3844,7 @@ mod tests {
                 bundle_signing: Default::default(),
                 gadget_modes: None,
                 gadget_mode_reconfigurer: None,
+                agent_brain: None,
                 agent_config_base: None,
             })),
             penny_shared_surface: None,
@@ -3040,6 +3866,109 @@ mod tests {
     // ---------------------------------------------------------------
     // Test 1: scope mapping
     // ---------------------------------------------------------------
+
+    #[test]
+    fn create_user_request_deserializes_avatar_url() {
+        let body: CreateUserRequest = serde_json::from_value(serde_json::json!({
+            "email": "alice@example.com",
+            "display_name": "Alice Kim",
+            "avatar_url": "https://cdn.example.com/alice.png",
+            "role": "member",
+            "password": "temporary"
+        }))
+        .expect("create user request");
+
+        assert_eq!(body.email, "alice@example.com");
+        assert_eq!(body.display_name, "Alice Kim");
+        assert_eq!(
+            body.avatar_url.as_deref(),
+            Some("https://cdn.example.com/alice.png")
+        );
+    }
+
+    #[test]
+    fn update_user_profile_request_deserializes_avatar_url() {
+        let body: UpdateUserProfileRequest = serde_json::from_value(serde_json::json!({
+            "display_name": "Robert Lee",
+            "avatar_url": "data:image/jpeg;base64,avatar"
+        }))
+        .expect("update user profile request");
+
+        assert_eq!(body.display_name, "Robert Lee");
+        assert_eq!(
+            body.avatar_url.as_deref(),
+            Some("data:image/jpeg;base64,avatar")
+        );
+    }
+
+    #[test]
+    fn create_llm_endpoint_request_deserializes_openai_endpoint() {
+        let body: CreateLlmEndpointRequest = serde_json::from_value(serde_json::json!({
+            "name": "Gemma 4",
+            "kind": "vllm",
+            "protocol": "openai_chat",
+            "base_url": "http://10.100.1.5:8100",
+            "model_id": "cyankiwi/gemma-4-31B-it-AWQ-4bit"
+        }))
+        .expect("create llm endpoint request");
+
+        assert_eq!(body.name, "Gemma 4");
+        assert_eq!(body.kind, "vllm");
+        assert_eq!(body.protocol, "openai_chat");
+        assert_eq!(body.base_url, "http://10.100.1.5:8100");
+        assert_eq!(
+            body.model_id.as_deref(),
+            Some("cyankiwi/gemma-4-31B-it-AWQ-4bit")
+        );
+    }
+
+    #[test]
+    fn autodetect_llm_endpoint_request_accepts_host_and_port_only() {
+        let body: AutoDetectLlmEndpointRequest = serde_json::from_value(serde_json::json!({
+            "host": "10.100.1.5",
+            "port": 8100,
+            "alias": "gemma4"
+        }))
+        .expect("autodetect request");
+
+        assert_eq!(body.host, "10.100.1.5");
+        assert_eq!(body.port, 8100);
+        assert_eq!(body.scheme.as_deref(), None);
+        assert_eq!(body.alias.as_deref(), Some("gemma4"));
+    }
+
+    #[test]
+    fn create_ccr_bridge_request_accepts_local_target() {
+        let body: CreateCcrBridgeRequest = serde_json::from_value(serde_json::json!({
+            "name": "gemma4-ccr",
+            "target_kind": "local",
+            "base_url": "http://127.0.0.1:3456",
+            "port": 3456,
+            "auth_token_env": "PENNY_CCR_AUTH_TOKEN"
+        }))
+        .expect("ccr bridge request");
+
+        assert_eq!(body.name, "gemma4-ccr");
+        assert_eq!(body.target_kind, "local");
+        assert_eq!(body.target_host_id, None);
+        assert_eq!(body.base_url, "http://127.0.0.1:3456");
+        assert_eq!(body.port, 3456);
+        assert_eq!(body.auth_token_env.as_deref(), Some("PENNY_CCR_AUTH_TOKEN"));
+        validate_ccr_bridge_request(&body).expect("local bridge request is valid");
+    }
+
+    #[test]
+    fn create_ccr_bridge_request_requires_host_for_registered_server() {
+        let body: CreateCcrBridgeRequest = serde_json::from_value(serde_json::json!({
+            "name": "gemma4-ccr",
+            "target_kind": "registered_server",
+            "base_url": "http://10.100.1.5:3456",
+            "port": 3456
+        }))
+        .expect("ccr bridge request");
+
+        assert!(validate_ccr_bridge_request(&body).is_err());
+    }
 
     #[tokio::test]
     async fn scope_guard_maps_workbench_path_to_openai_compat() {

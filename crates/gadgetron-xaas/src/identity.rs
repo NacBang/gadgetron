@@ -45,6 +45,7 @@ pub struct UserRow {
     pub tenant_id: Uuid,
     pub email: String,
     pub display_name: String,
+    pub avatar_url: Option<String>,
     pub role: String,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
@@ -75,7 +76,7 @@ pub async fn list_users(
 ) -> Result<Vec<UserRow>, IdentityError> {
     let rows = sqlx::query_as::<_, UserRow>(
         r#"
-        SELECT id, tenant_id, email, display_name, role, is_active,
+        SELECT id, tenant_id, email, display_name, avatar_url, role, is_active,
                created_at, updated_at, last_login_at
         FROM users
         WHERE tenant_id = $1
@@ -95,6 +96,7 @@ pub async fn create_user(
     tenant_id: Uuid,
     email: &str,
     display_name: &str,
+    avatar_url: Option<&str>,
     role: Role,
     password: Option<&str>,
 ) -> Result<UserRow, IdentityError> {
@@ -109,15 +111,16 @@ pub async fn create_user(
 
     let result = sqlx::query_as::<_, UserRow>(
         r#"
-        INSERT INTO users (tenant_id, email, display_name, role, password_hash)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, tenant_id, email, display_name, role, is_active,
+        INSERT INTO users (tenant_id, email, display_name, avatar_url, role, password_hash)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, tenant_id, email, display_name, avatar_url, role, is_active,
                   created_at, updated_at, last_login_at
         "#,
     )
     .bind(tenant_id)
     .bind(email)
     .bind(display_name)
+    .bind(avatar_url)
     .bind(role.as_str())
     .bind(password_hash.as_deref())
     .fetch_one(pool)
@@ -134,6 +137,34 @@ pub async fn create_user(
     }
 }
 
+pub async fn update_user_profile(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    display_name: &str,
+    avatar_url: Option<&str>,
+) -> Result<UserRow, IdentityError> {
+    let row = sqlx::query_as::<_, UserRow>(
+        r#"
+        UPDATE users
+        SET display_name = $3,
+            avatar_url = $4,
+            updated_at = NOW()
+        WHERE id = $1 AND tenant_id = $2
+        RETURNING id, tenant_id, email, display_name, avatar_url, role, is_active,
+                  created_at, updated_at, last_login_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(display_name)
+    .bind(avatar_url)
+    .fetch_optional(pool)
+    .await?;
+
+    row.ok_or(IdentityError::NotFound)
+}
+
 /// Delete a user. Applies the single-admin guard: refuses to delete
 /// the last active admin in the tenant (spec §7 Q-1).
 pub async fn delete_user(
@@ -144,7 +175,7 @@ pub async fn delete_user(
     let mut tx = pool.begin().await?;
 
     let target: Option<UserRow> = sqlx::query_as::<_, UserRow>(
-        r#"SELECT id, tenant_id, email, display_name, role, is_active,
+        r#"SELECT id, tenant_id, email, display_name, avatar_url, role, is_active,
                   created_at, updated_at, last_login_at
            FROM users WHERE id = $1 AND tenant_id = $2"#,
     )

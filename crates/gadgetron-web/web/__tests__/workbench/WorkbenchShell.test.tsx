@@ -13,6 +13,31 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
 }));
 
+vi.mock("../../app/lib/auth-context", () => ({
+  useAuth: () => ({
+    apiKey: null,
+    saveKey: vi.fn(),
+    clearKey: vi.fn(),
+    hydrated: true,
+    identity: {
+      role: "admin",
+      display_name: "Local Admin",
+      email: "admin@example.local",
+    },
+    refreshIdentity: vi.fn(),
+    viewMode: "admin",
+    setViewMode: vi.fn(),
+  }),
+  useHasAuth: () => true,
+  authHeaders: () => ({}),
+}));
+
+vi.mock("../../app/components/shell/conversations-pane", () => ({
+  ConversationsPane: ({ collapsed }: { collapsed: boolean }) => (
+    <div data-testid="conversations-pane" data-collapsed={String(collapsed)} />
+  ),
+}));
+
 const localStorageMock = (() => {
   let store: Record<string, string> = {};
   return {
@@ -68,8 +93,8 @@ describe("WorkbenchShell", () => {
     });
     expect(screen.getByTestId("left-rail")).toBeTruthy();
     expect(screen.getByTestId("chat-column")).toBeTruthy();
-    // evidence pane defaults open per DEFAULT_PREFS
-    expect(screen.getByTestId("evidence-pane")).toBeTruthy();
+    // evidence pane defaults collapsed per DEFAULT_PREFS
+    expect(screen.getByTestId("evidence-pane-collapsed")).toBeTruthy();
   });
 
   it("renders the workbench shell wrapper", () => {
@@ -91,7 +116,28 @@ describe("WorkbenchShell", () => {
     expect((rail as HTMLElement).style.width).toBe("240px");
   });
 
-  it("evidence pane is collapsible and defaults open", async () => {
+  it("left rail nav targets embedded /web document routes", () => {
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+
+    expect(screen.getByTestId("nav-tab-chat").getAttribute("href")).toBe(
+      "/web",
+    );
+    expect(screen.getByTestId("nav-tab-wiki").getAttribute("href")).toBe(
+      "/web/wiki",
+    );
+    expect(screen.getByTestId("nav-tab-dashboard").getAttribute("href")).toBe(
+      "/web/dashboard",
+    );
+    expect(screen.getByTestId("nav-tab-servers").getAttribute("href")).toBe(
+      "/web/servers",
+    );
+  });
+
+  it("evidence pane defaults collapsed and can be reopened", async () => {
     render(
       <WorkbenchShell>
         <div>chat</div>
@@ -100,10 +146,10 @@ describe("WorkbenchShell", () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50));
     });
-    // Default: evidence pane is open
-    expect(screen.getByTestId("evidence-pane")).toBeTruthy();
-    // Collapse button exists
-    expect(screen.getByTestId("evidence-pane-collapse-btn")).toBeTruthy();
+    // Default: evidence pane is collapsed
+    expect(screen.getByTestId("evidence-pane-collapsed")).toBeTruthy();
+    // Expand button exists
+    expect(screen.getByTestId("evidence-pane-expand-btn")).toBeTruthy();
   });
 
   it("does NOT show failure overlay when health=healthy", async () => {

@@ -22,9 +22,26 @@ REPO=$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)
 ENV_FILE="${REPO}/.env"
 CONFIG_FILE="${REPO}/gadgetron.toml"
 BIN="${REPO}/target/release/gadgetron"
-BIND="${GADGETRON_BIND:-0.0.0.0:18080}"
 LOG="${GADGETRON_LOG_FILE:-/tmp/gadgetron-serve.log}"
 PIDFILE="${REPO}/.gadgetron-serve.pid"
+
+read_config_bind() {
+    awk '
+        /^\[server\]/ { in_server = 1; next }
+        /^\[/ { in_server = 0 }
+        in_server && $1 == "bind" {
+            line = $0
+            sub(/^[^=]*=/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            gsub(/^"|"$/, "", line)
+            print line
+            exit
+        }
+    ' "${CONFIG_FILE}"
+}
+
+CONFIG_BIND="$(read_config_bind || true)"
+BIND="${GADGETRON_BIND:-${CONFIG_BIND:-127.0.0.1:8080}}"
 
 # User-space Node.js install — covers machines without system nodejs.
 if [[ -x "${HOME}/.local/bin/npm" ]]; then
@@ -89,13 +106,21 @@ cmd_stop() {
 }
 
 cmd_status() {
+    local health_code
+    health_code=$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${BIND##*:}/health" || true)
+    if [[ -z "${health_code}" ]]; then
+        health_code="000"
+    fi
+
     if [[ -f "${PIDFILE}" ]] && kill -0 "$(<"${PIDFILE}")" 2>/dev/null; then
         echo "pid $(<"${PIDFILE}") running"
+    elif [[ "${health_code}" =~ ^[23] ]]; then
+        echo "running (health reachable; no live pidfile, likely foreground)"
     else
         echo "not running (no live pidfile)"
     fi
     echo "--- health ---"
-    curl -sS -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:${BIND##*:}/health" || true
+    echo "HTTP ${health_code}"
     echo "--- local prerequisites ---"
     warn_optional_prereqs
     if [[ -f "${LOG}" ]]; then
