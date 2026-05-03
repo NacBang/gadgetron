@@ -938,10 +938,10 @@ function HostCard({
       data-testid={`host-card-${host.host}`}
       className="group/card flex h-[500px] flex-col gap-2 overflow-hidden rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="min-w-0" data-testid="host-card-title-row">
           {editing ? (
-            <div className="flex items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1">
               <Input
                 autoFocus
                 value={draft}
@@ -981,9 +981,9 @@ function HostCard({
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1">
               <div
-                className="truncate text-sm font-semibold text-zinc-100"
+                className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100"
                 title={host.alias ?? host.host}
               >
                 {host.alias ?? host.host}
@@ -1036,7 +1036,10 @@ function HostCard({
             </div>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div
+          className="flex flex-wrap items-center justify-end gap-1"
+          data-testid={`host-card-actions-${host.id}`}
+        >
           {findingsCount && (() => {
             const total =
               findingsCount.critical +
@@ -1077,7 +1080,7 @@ function HostCard({
             data-testid={`host-shell-${host.host}`}
             onClick={() => setShellOpen(true)}
             className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:border-blue-600 hover:text-blue-300"
-            title="원격 bash 실행 (매 호출 승인 필요)"
+            title="Run remote bash (approval required per call)"
           >
             🔧 shell
           </button>
