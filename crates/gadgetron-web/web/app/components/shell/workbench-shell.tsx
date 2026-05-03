@@ -40,6 +40,19 @@ function OfflineBanner() {
   );
 }
 
+function useNarrowDesktop() {
+  const [narrow, setNarrow] = useState(false);
+
+  useEffect(() => {
+    const update = () => setNarrow(window.innerWidth < 1200);
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  return narrow;
+}
+
 // ---------------------------------------------------------------------------
 // WorkbenchShell
 //
@@ -88,6 +101,9 @@ export function WorkbenchShell({
   const [prefs, updatePrefs] = useWorkbenchPrefs();
   const health = useGatewayHealth();
   const [, setRetryCount] = useState(0);
+  const narrowDesktop = useNarrowDesktop();
+  const effectiveLeftRailCollapsed =
+    preAuth || narrowDesktop || prefs.leftRailCollapsed;
 
   const showHardFailureOverlay = health.status === "blocked";
 
@@ -101,7 +117,7 @@ export function WorkbenchShell({
   // passed as a node means "use my custom right rail". Undefined =
   // fall back to the default EvidencePane.
   const resolvedRightRail =
-    rightRail === null
+    preAuth || narrowDesktop || rightRail === null
       ? null
       : rightRail ?? (
           <EvidencePane
@@ -123,7 +139,7 @@ export function WorkbenchShell({
       <div className="flex flex-1 overflow-hidden" data-testid="workbench-body">
         {!preAuth && (
           <LeftRail
-            collapsed={prefs.leftRailCollapsed}
+            collapsed={effectiveLeftRailCollapsed}
             onCollapse={(v) => updatePrefs({ leftRailCollapsed: v })}
             width={prefs.leftRailWidth}
           />

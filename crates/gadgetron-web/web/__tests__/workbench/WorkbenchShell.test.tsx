@@ -74,6 +74,11 @@ beforeEach(() => {
     writable: true,
     configurable: true,
   });
+  Object.defineProperty(window, "innerWidth", {
+    value: 1440,
+    writable: true,
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -135,6 +140,40 @@ describe("WorkbenchShell", () => {
     expect(screen.getByTestId("nav-tab-servers").getAttribute("href")).toBe(
       "/web/servers",
     );
+  });
+
+  it("does not render unwired stub nav entries", () => {
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+
+    expect(screen.queryByTestId("nav-tab-knowledge")).toBeNull();
+    expect(screen.queryByTestId("nav-tab-bundles")).toBeNull();
+  });
+
+  it("collapses left rail and hides evidence pane on narrow desktop", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 900,
+      writable: true,
+      configurable: true,
+    });
+    window.dispatchEvent(new Event("resize"));
+
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    const rail = screen.getByTestId("left-rail");
+    expect(rail.className).toContain("w-12");
+    expect(screen.queryByTestId("evidence-pane-collapsed")).toBeNull();
   });
 
   it("evidence pane defaults collapsed and can be reopened", async () => {

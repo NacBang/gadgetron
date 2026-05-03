@@ -3,8 +3,6 @@
 import { usePathname } from "next/navigation";
 import {
   MessageSquare,
-  BookOpen,
-  Package,
   PanelLeft,
   FileText,
   Activity,
@@ -26,9 +24,7 @@ export type LeftRailTab =
   | "dashboard"
   | "servers"
   | "findings"
-  | "admin"
-  | "knowledge"
-  | "bundles";
+  | "admin";
 
 interface NavItem {
   id: LeftRailTab;
@@ -82,18 +78,6 @@ const NAV_ITEMS: NavItem[] = [
     icon: <Shield className="size-4" aria-hidden />,
     functional: true,
     href: "/web/admin",
-  },
-  {
-    id: "knowledge",
-    label: "Knowledge",
-    icon: <BookOpen className="size-4" aria-hidden />,
-    functional: false,
-  },
-  {
-    id: "bundles",
-    label: "Bundles",
-    icon: <Package className="size-4" aria-hidden />,
-    functional: false,
   },
 ];
 
@@ -213,26 +197,6 @@ export function LeftRail({
           );
         })}
       </nav>
-
-      {/* P2B stub notice — shown only when a stub tab would be selected.
-       * Today no stub tab is reachable via URL, so this is dormant; left
-       * in for when `/knowledge` / `/bundles` land. */}
-      {!collapsed &&
-        (activeTab === "knowledge" || activeTab === "bundles") && (
-          <div
-            className="mx-2 mt-4 rounded border border-zinc-800 bg-zinc-900/50 p-3"
-            data-testid="p2b-not-wired"
-          >
-            <p className="text-xs text-zinc-500">
-              <span className="font-mono text-zinc-400">P2B</span> — not yet
-              wired. This panel will show{" "}
-              {activeTab === "knowledge"
-                ? "knowledge sources"
-                : "installed bundles"}{" "}
-              when the gateway read-model endpoints land.
-            </p>
-          </div>
-        )}
 
       {/* ISSUE 31 — per-user conversation list, pinned to the bottom of
        * the rail. Fills remaining height so long histories scroll
