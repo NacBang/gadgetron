@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Establish a shared desktop operator-console grammar for Gadgetron Web without changing backend behavior or attempting a mobile-specific UI.
+**Goal:** Establish a shared desktop operator-console grammar for Gadgetron Web, connect bundle context to Penny chat, and add a first-pass Knowledge RAW source workflow without attempting a mobile-specific UI.
 
-**Architecture:** Add a small `app/components/workbench/` product-level primitive layer that composes the current shadcn/Tailwind controls. Update the shared shell to hide unwired nav and behave predictably on desktop and narrow desktop. Migrate Admin first, then normalize headers, toolbars, notices, empty states, and status display across the current pages without rewriting their data flows.
+**Architecture:** Add a small `app/components/workbench/` product-level primitive layer that composes the current shadcn/Tailwind controls. Update the shared shell to hide unwired nav and behave predictably on desktop and narrow desktop. Add a workbench subject context so Logs, Servers, Dashboard, Knowledge, and future bundles can seed Penny conversations with structured context. Migrate Admin first, then normalize headers, toolbars, notices, empty states, status display, side-panel context, and Knowledge RAW imports without broad backend rewrites.
 
 **Tech Stack:** Next.js 15, React 19, TypeScript, Tailwind 4, lucide-react, Vitest, Testing Library, Playwright.
 
@@ -23,22 +23,503 @@ Create these files:
 - `crates/gadgetron-web/web/app/components/workbench/field-grid.tsx`: consistent settings form rows.
 - `crates/gadgetron-web/web/app/components/workbench/responsive-record-list.tsx`: desktop/narrow-desktop record list helper.
 - `crates/gadgetron-web/web/app/components/workbench/index.ts`: exports for the workbench primitive layer.
+- `crates/gadgetron-web/web/app/lib/workbench-subject-context.tsx`: shared provider, storage helpers, and `startPennyDiscussion` entry point for bundle-to-chat context handoff.
 - `crates/gadgetron-web/web/__tests__/workbench/WorkbenchPrimitives.test.tsx`: component coverage for the new primitive layer.
+- `crates/gadgetron-web/web/__tests__/workbench/WorkbenchSubjectContext.test.tsx`: subject storage and handoff coverage.
 - `crates/gadgetron-web/web/e2e/ui-consistency.spec.ts`: route and viewport smoke tests for the shared console grammar.
 
 Modify these files:
 
 - `crates/gadgetron-web/web/app/components/shell/left-rail.tsx`: hide stub nav entries and keep only functional routes.
-- `crates/gadgetron-web/web/app/components/shell/workbench-shell.tsx`: add narrow-desktop shell behavior and evidence-pane hiding.
+- `crates/gadgetron-web/web/app/components/shell/workbench-shell.tsx`: add narrow-desktop shell behavior and side-panel hiding.
+- `crates/gadgetron-web/web/app/components/shell/evidence-pane.tsx`: evolve the visible side panel into Context, Actions, Sources, Activity, and Settings tabs while keeping the existing file path during this pass.
+- `crates/gadgetron-web/web/app/(shell)/layout.tsx`: mount `WorkbenchSubjectProvider` next to `EvidenceProvider` and `AssistantRuntimeProvider`.
+- `crates/gadgetron-web/web/app/(shell)/page.tsx`: show the active chat subject, preserve seeded subject drafts, and reserve inline approval cards for current-conversation approvals.
 - `crates/gadgetron-web/web/__tests__/workbench/WorkbenchShell.test.tsx`: update shell expectations.
 - `crates/gadgetron-web/web/app/(shell)/admin/page.tsx`: add Admin tabs and make Penny Runtime the first workflow.
 - `crates/gadgetron-web/web/__tests__/workbench/AdminPage.test.tsx`: update English-first labels and tab expectations.
-- `crates/gadgetron-web/web/app/(shell)/wiki/page.tsx`: normalize page header, toolbar, and empty states.
+- `crates/gadgetron-web/web/app/(shell)/wiki/page.tsx`: normalize page header, toolbar, empty states, visible `Knowledge` language, and RAW source import workflow.
 - `crates/gadgetron-web/web/app/(shell)/dashboard/page.tsx`: normalize page header and notices.
 - `crates/gadgetron-web/web/app/(shell)/servers/page.tsx`: normalize page header, server status display, and raw error details.
-- `crates/gadgetron-web/web/app/(shell)/findings/page.tsx`: normalize page header, scan toolbar, and finding status display.
+- `crates/gadgetron-web/web/app/(shell)/findings/page.tsx`: normalize page header, scan toolbar, finding status display, and structured `log_finding` Penny handoff.
+- `crates/gadgetron-gateway/src/web/catalog.rs`: expose the existing `wiki.import` gadget as direct workbench action `wiki-import` for Knowledge RAW uploads.
+- `bundles/gadgetron-core/bundle.toml`: keep the first-party catalog mirror in parity with `DescriptorCatalog::seed_p2b()` by adding `wiki-import`.
 
-Do not modify Rust backend APIs for this pass.
+Do not change Rust backend APIs beyond exposing the already implemented `wiki.import` gadget through the workbench catalog.
+
+---
+
+## Amendment: Bundle Context, Approvals, And Knowledge Sources
+
+After Tasks 1-4, the UI review added four product-level requirements:
+
+- Operators must be able to discuss a specific log finding, server, metric, knowledge page, or future bundle record with Penny.
+- The chat view must show what it is talking about, and the right panel must show related context, logs, monitoring, sources, and actions.
+- Approval/rejection cards must use one backend approval entity, rendered inline in the active chat when conversation-scoped and in the right-panel Actions queue globally.
+- Knowledge needs a visible RAW source import and management workflow, not just hidden `wiki.import` knowledge in the chat prompt.
+
+Tasks 1-4 have already landed on this branch. Execute Tasks 5A-5E next, then continue with the broad page-normalization Task 6.
+
+Approval implementation boundary: the current `ApprovalRequest` does not store `conversation_id`, so this pass keeps real approve/reject controls in the side-panel `Actions` queue and avoids heuristic inline matching. Inline chat cards become executable after the approval record or audit event carries the active conversation id.
+
+### Task 5A: Add Workbench Subject Handoff Tests
+
+**Files:**
+- Create: `crates/gadgetron-web/web/__tests__/workbench/WorkbenchSubjectContext.test.tsx`
+
+- [ ] **Step 1: Write failing tests for subject persistence and Penny handoff**
+
+Create `crates/gadgetron-web/web/__tests__/workbench/WorkbenchSubjectContext.test.tsx` with:
+
+```tsx
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  buildSubjectDraft,
+  readConversationSubject,
+  startPennyDiscussion,
+  writeConversationSubject,
+  type WorkbenchSubject,
+} from "../../app/lib/workbench-subject-context";
+
+const localStorageMock = (() => {
+  let store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => {
+      store[key] = value;
+    },
+    removeItem: (key: string) => {
+      delete store[key];
+    },
+    clear: () => {
+      store = {};
+    },
+  };
+})();
+
+Object.defineProperty(window, "localStorage", { value: localStorageMock });
+Object.defineProperty(window, "sessionStorage", { value: localStorageMock });
+
+const subject: WorkbenchSubject = {
+  id: "finding-1",
+  kind: "log_finding",
+  bundle: "logs",
+  title: "SMART pending sectors",
+  subtitle: "dg5R-PRO6000-8 · critical",
+  href: "/web/findings?host=host-1",
+  summary: "smartd reports 6 pending sectors on /dev/sdb.",
+  facts: {
+    hostId: "host-1",
+    severity: "critical",
+    category: "storage",
+  },
+  prompt:
+    "Review this log finding with me and recommend the next operational step.",
+  createdAt: "2026-05-03T10:00:00.000Z",
+};
+
+describe("workbench subject context", () => {
+  beforeEach(() => {
+    localStorageMock.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("stores and restores a subject by conversation id", () => {
+    writeConversationSubject("conv-1", subject);
+
+    expect(readConversationSubject("conv-1")).toEqual(subject);
+    expect(readConversationSubject("conv-missing")).toBeNull();
+  });
+
+  it("returns null for malformed stored subjects", () => {
+    localStorage.setItem("gadgetron_subject_conv-bad", "{bad json");
+
+    expect(readConversationSubject("conv-bad")).toBeNull();
+  });
+
+  it("builds an English-first draft from structured subject facts", () => {
+    const draft = buildSubjectDraft(subject);
+
+    expect(draft).toContain("Review this log finding with me");
+    expect(draft).toContain("Subject: SMART pending sectors");
+    expect(draft).toContain("Bundle: logs");
+    expect(draft).toContain('"severity": "critical"');
+  });
+
+  it("starts a Penny discussion with draft, subject, and pending submit flag", () => {
+    const assign = vi.fn();
+
+    const convId = startPennyDiscussion(subject, {
+      conversationId: "conv-2",
+      autoSubmit: true,
+      navigateTo: "/web",
+      navigate: assign,
+    });
+
+    expect(convId).toBe("conv-2");
+    expect(readConversationSubject("conv-2")).toEqual(subject);
+    expect(localStorage.getItem("gadgetron_draft_conv-2")).toContain(
+      "SMART pending sectors",
+    );
+    expect(localStorage.getItem("gadgetron_pending_submit_conv-2")).toBe("1");
+    expect(assign).toHaveBeenCalledWith("/web");
+  });
+});
+```
+
+- [ ] **Step 2: Run subject tests and verify they fail**
+
+Run from `crates/gadgetron-web/web`:
+
+```bash
+npm run test -- WorkbenchSubjectContext.test.tsx
+```
+
+Expected: fail with an import error for `../../app/lib/workbench-subject-context`.
+
+- [ ] **Step 3: Commit the failing test**
+
+```bash
+git add crates/gadgetron-web/web/__tests__/workbench/WorkbenchSubjectContext.test.tsx
+git commit -m "test(web): cover workbench subject handoff"
+```
+
+---
+
+### Task 5B: Implement Workbench Subject Context And Side-Panel Context Tab
+
+**Files:**
+- Create: `crates/gadgetron-web/web/app/lib/workbench-subject-context.tsx`
+- Modify: `crates/gadgetron-web/web/app/(shell)/layout.tsx`
+- Modify: `crates/gadgetron-web/web/app/components/shell/evidence-pane.tsx`
+- Modify: `crates/gadgetron-web/web/__tests__/workbench/EvidencePane.test.tsx`
+- Test: `crates/gadgetron-web/web/__tests__/workbench/WorkbenchSubjectContext.test.tsx`
+
+- [ ] **Step 1: Implement `workbench-subject-context.tsx`**
+
+Create `crates/gadgetron-web/web/app/lib/workbench-subject-context.tsx` with the subject types, `readConversationSubject`, `writeConversationSubject`, `clearConversationSubject`, `buildSubjectDraft`, `startPennyDiscussion`, `WorkbenchSubjectProvider`, and `useWorkbenchSubject`. The implementation must:
+
+- store subjects at `gadgetron_subject_${conversationId}`;
+- call `setActiveConversationId(conversationId)` before seeding draft state;
+- write `gadgetron_draft_${conversationId}`;
+- write `gadgetron_pending_submit_${conversationId} = "1"` when `autoSubmit` is true;
+- navigate to `/web` by default;
+- accept an optional `navigate` callback for tests; otherwise use `window.location.assign`;
+- return `null` for malformed stored JSON.
+
+- [ ] **Step 2: Mount the subject provider in the shell layout**
+
+In `crates/gadgetron-web/web/app/(shell)/layout.tsx`, import:
+
+```tsx
+import { WorkbenchSubjectProvider } from "../lib/workbench-subject-context";
+```
+
+Wrap the authenticated shell:
+
+```tsx
+return (
+  <EvidenceProvider>
+    <WorkbenchSubjectProvider>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <WorkbenchShell>{children}</WorkbenchShell>
+      </AssistantRuntimeProvider>
+    </WorkbenchSubjectProvider>
+  </EvidenceProvider>
+);
+```
+
+- [ ] **Step 3: Add a `Context` tab to the side panel**
+
+In `evidence-pane.tsx`, import `MessageSquareText` and `useWorkbenchSubject`, add `"context"` to `TabId`, and render a Context tab before Actions. The tab body must show:
+
+- empty state: `No active context`;
+- active subject title, subtitle, summary, `Open source` link, and compact JSON facts;
+- `data-testid="context-empty"` for empty state and `data-testid="context-panel"` for populated state.
+
+Keep approval auto-open behavior switching to `Actions` when a new pending approval appears.
+
+- [ ] **Step 4: Update side-panel tests**
+
+In `EvidencePane.test.tsx`, replace the stale P2B empty-copy test with:
+
+```tsx
+it("renders the side panel context empty state by default", () => {
+  render(<EvidencePane open={true} onToggle={() => {}} />);
+
+  expect(screen.getByRole("button", { name: "Context" })).toBeTruthy();
+  expect(screen.getByTestId("context-empty").textContent).toContain(
+    "No active context",
+  );
+});
+```
+
+- [ ] **Step 5: Run subject and side-panel tests**
+
+Run from `crates/gadgetron-web/web`:
+
+```bash
+npm run test -- WorkbenchSubjectContext.test.tsx EvidencePane.test.tsx
+```
+
+Expected: pass.
+
+- [ ] **Step 6: Commit subject context and side-panel context**
+
+```bash
+git add 'crates/gadgetron-web/web/app/(shell)/layout.tsx' crates/gadgetron-web/web/app/lib/workbench-subject-context.tsx crates/gadgetron-web/web/app/components/shell/evidence-pane.tsx crates/gadgetron-web/web/__tests__/workbench/WorkbenchSubjectContext.test.tsx crates/gadgetron-web/web/__tests__/workbench/EvidencePane.test.tsx
+git commit -m "feat(web): add workbench chat context rail"
+```
+
+---
+
+### Task 5C: Connect Logs To Penny With Structured Context
+
+**Files:**
+- Modify: `crates/gadgetron-web/web/app/(shell)/findings/page.tsx`
+- Modify: `crates/gadgetron-web/web/app/(shell)/page.tsx`
+- Test: `crates/gadgetron-web/web/__tests__/workbench/FindingsPage.test.tsx`
+
+- [ ] **Step 1: Replace per-page draft building with a subject builder**
+
+In `findings/page.tsx`, import:
+
+```tsx
+import {
+  startPennyDiscussion,
+  type WorkbenchSubject,
+} from "../../lib/workbench-subject-context";
+```
+
+Replace `openChatAboutFinding` with a `buildFindingSubject(f, hostLabel)` helper that returns `kind: "log_finding"`, `bundle: "logs"`, the finding summary as `title`, `${hostLabel} · ${f.severity}` as `subtitle`, `/web/findings?host=${f.host_id}` as `href`, and facts for `hostId`, `source`, `severity`, `category`, `fingerprint`, `count`, `firstSeen`, `lastSeen`, `cause`, `solution`, and a truncated `excerpt`. Its prompt must start:
+
+```text
+Review this log finding with me. Explain the operational risk, likely cause, and the safest next step before taking action.
+```
+
+Then call:
+
+```tsx
+startPennyDiscussion(buildFindingSubject(f, hostLabel), {
+  autoSubmit: true,
+  navigateTo: "/web",
+});
+```
+
+- [ ] **Step 2: Show the active subject in the chat header**
+
+In `page.tsx`, import:
+
+```tsx
+import { useWorkbenchSubject } from "../lib/workbench-subject-context";
+```
+
+Add `ActiveSubjectBanner` with `data-testid="active-subject-banner"`. It must render `Talking about`, the subject title, and an `Open source` link when `subject.href` exists. Render it after `<ActiveConversationBanner />`.
+
+- [ ] **Step 3: Refresh subject when the composer hydrates a seeded conversation**
+
+Inside `Composer`, call `const { refreshSubject } = useWorkbenchSubject();` and invoke `refreshSubject()` after the active conversation id is read in the existing draft hydration effect.
+
+- [ ] **Step 4: Update Findings test expectations**
+
+In `FindingsPage.test.tsx`, add a test that clicks `Ask Penny` and asserts the stored draft is English-first:
+
+```tsx
+expect(localStorage.getItem(`gadgetron_draft_${convId}`)).toContain(
+  "Review this log finding with me",
+);
+expect(localStorage.getItem(`gadgetron_subject_${convId}`)).toContain(
+  "\"kind\":\"log_finding\"",
+);
+```
+
+Read `convId` from `localStorage.getItem("gadgetron_conversation_id")`.
+
+- [ ] **Step 5: Run logs and subject tests**
+
+Run from `crates/gadgetron-web/web`:
+
+```bash
+npm run test -- FindingsPage.test.tsx WorkbenchSubjectContext.test.tsx
+```
+
+Expected: pass.
+
+- [ ] **Step 6: Commit Logs-to-Penny context handoff**
+
+```bash
+git add 'crates/gadgetron-web/web/app/(shell)/findings/page.tsx' 'crates/gadgetron-web/web/app/(shell)/page.tsx' crates/gadgetron-web/web/__tests__/workbench/FindingsPage.test.tsx
+git commit -m "feat(web): connect logs to contextual Penny chat"
+```
+
+---
+
+### Task 5D: Expose `wiki.import` As A Workbench Action
+
+**Files:**
+- Modify: `crates/gadgetron-gateway/src/web/catalog.rs`
+- Modify: `bundles/gadgetron-core/bundle.toml`
+- Test: `crates/gadgetron-gateway/src/web/catalog.rs`
+
+- [ ] **Step 1: Add a failing catalog test for `wiki-import`**
+
+In the `#[cfg(test)]` module of `catalog.rs`, update `visible_actions_no_required_scope_visible`:
+
+```rust
+// seed_p2b ships 6 actions: knowledge-search, wiki-list,
+// wiki-read, wiki-write, wiki-delete (approval-gated), wiki-import.
+assert_eq!(actions.len(), 6);
+assert!(
+    actions.iter().any(|a| {
+        a.id == "wiki-import"
+            && a.gadget_name.as_deref() == Some("wiki.import")
+            && !a.destructive
+            && !a.requires_approval
+    }),
+    "wiki-import must be visible as a normal import action"
+);
+```
+
+Update disabled-action count assertions in the same file from `5` to `6`.
+
+- [ ] **Step 2: Run the catalog test and verify it fails**
+
+Run from repo root:
+
+```bash
+cargo test -p gadgetron-gateway web::catalog::tests::visible_actions_no_required_scope_visible
+```
+
+Expected: fail because `wiki-import` is not in `seed_p2b()`.
+
+- [ ] **Step 3: Add `wiki-import` to `DescriptorCatalog::seed_p2b()`**
+
+In `catalog.rs`, add `"wiki-import".into()` to the seed view `action_ids`. Add a `WorkbenchActionDescriptor` with:
+
+```rust
+id: "wiki-import".into(),
+title: "Knowledge import".into(),
+owner_bundle: "core".into(),
+source_kind: "gadget".into(),
+source_id: "wiki.import".into(),
+gadget_name: Some("wiki.import".into()),
+placement: WorkbenchActionPlacement::CenterMain,
+kind: WorkbenchActionKind::Mutation,
+destructive: false,
+requires_approval: false,
+knowledge_hint: "Imports markdown or plain text through wiki.import and writes an imports/* canonical page.".into(),
+```
+
+Use the exact `wiki.import` input schema from the spec: required `bytes` and `content_type`, optional `target_path`, `title_hint`, `overwrite`, `auto_enrich`, and `source_uri`.
+
+- [ ] **Step 4: Update the first-party bundle manifest**
+
+In `bundles/gadgetron-core/bundle.toml`, add `wiki-import` to the `action_ids` array and add a matching `[[actions]]` entry with `gadget_name = "wiki.import"`, `kind = "mutation"`, `destructive = false`, `requires_approval = false`, and the same schema fields as `catalog.rs`.
+
+- [ ] **Step 5: Run catalog tests**
+
+Run from repo root:
+
+```bash
+cargo test -p gadgetron-gateway web::catalog::tests::visible_actions_no_required_scope_visible web::catalog::tests::first_party_gadgetron_core_bundle_file_loads_cleanly
+```
+
+Expected: pass.
+
+- [ ] **Step 6: Commit catalog import action**
+
+```bash
+git add crates/gadgetron-gateway/src/web/catalog.rs bundles/gadgetron-core/bundle.toml
+git commit -m "feat(gateway): expose wiki import workbench action"
+```
+
+---
+
+### Task 5E: Add Knowledge RAW Source Import UI
+
+**Files:**
+- Modify: `crates/gadgetron-web/web/app/components/shell/left-rail.tsx`
+- Modify: `crates/gadgetron-web/web/app/(shell)/wiki/page.tsx`
+- Test: add coverage to an existing or new wiki page test under `crates/gadgetron-web/web/__tests__/workbench/`
+
+- [ ] **Step 1: Rename visible nav language from Wiki to Knowledge**
+
+In `left-rail.tsx`, keep `id: "wiki"` and `href: "/web/wiki"`, but change the visible label to `Knowledge`. Keep the route stable so existing deep links continue to work.
+
+- [ ] **Step 2: Add Knowledge tabs to the wiki page**
+
+In `wiki/page.tsx`, add:
+
+```tsx
+type KnowledgeTab = "sources" | "pages" | "candidates";
+const [activeTab, setActiveTab] = useState<KnowledgeTab>("sources");
+```
+
+Use `WorkbenchPage` with title `Knowledge` and a tablist containing `Sources`, `Pages`, and `Candidates`. Move the existing wiki list/read/write/search body into the `Pages` tab without changing its handlers.
+
+- [ ] **Step 3: Add RAW source import state and encoder**
+
+Add state for raw text, file name, content type, title hint, target path, source URI, overwrite, importing, import receipt, and import error. Add:
+
+```tsx
+function encodeUtf8Base64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+```
+
+Add a file handler that reads `.md` and `.txt` with `file.text()`, sets `text/markdown` or `text/plain`, and fills `title_hint` from the file name when the title hint is empty.
+
+- [ ] **Step 4: Invoke `wiki-import` from the Sources tab**
+
+Add `importRawSource`, which posts:
+
+```tsx
+await invokeAction(apiKey, "wiki-import", {
+  bytes: encodeUtf8Base64(rawText.trim()),
+  content_type: rawContentType,
+  overwrite: rawOverwrite,
+  ...(rawTitleHint.trim() ? { title_hint: rawTitleHint.trim() } : {}),
+  ...(rawTargetPath.trim() ? { target_path: rawTargetPath.trim() } : {}),
+  ...(rawSourceUri.trim() ? { source_uri: rawSourceUri.trim() } : {}),
+});
+```
+
+On success, show receipt fields `path`, `revision`, `byte_size`, and `content_hash`, then call `refreshPages()`.
+
+- [ ] **Step 5: Add candidate-management empty state**
+
+In the `Candidates` tab, render:
+
+```tsx
+<EmptyState
+  title="No candidate queue yet"
+  description="Knowledge candidates are captured by the backend plane. When pending candidate APIs are exposed to the web UI, accept and reject decisions belong here."
+/>
+```
+
+This tab is a real management location for the current lifecycle boundary while Sources and Pages remain usable.
+
+- [ ] **Step 6: Run focused frontend tests**
+
+Run from `crates/gadgetron-web/web`:
+
+```bash
+npm run test -- WorkbenchShell.test.tsx
+```
+
+Expected: pass after updating any visible nav text assertions from `Wiki` to `Knowledge`.
+
+- [ ] **Step 7: Commit Knowledge import UI**
+
+```bash
+git add crates/gadgetron-web/web/app/components/shell/left-rail.tsx 'crates/gadgetron-web/web/app/(shell)/wiki/page.tsx' crates/gadgetron-web/web/__tests__/workbench
+git commit -m "feat(web): add knowledge raw source import UI"
+```
+
+---
 
 ---
 
@@ -684,7 +1165,7 @@ Run from `crates/gadgetron-web/web`:
 npm run test -- WorkbenchShell.test.tsx
 ```
 
-Expected: fail because `Knowledge` and `Bundles` still render and narrow desktop does not force collapsed shell.
+Expected: fail because the old unwired `Knowledge` and `Bundles` stub entries still render and narrow desktop does not force collapsed shell.
 
 - [ ] **Step 3: Remove stub nav entries from `left-rail.tsx`**
 
@@ -1003,7 +1484,7 @@ git commit -m "feat(web): organize admin around Penny runtime"
 
 ---
 
-### Task 5: Normalize Wiki, Dashboard, Servers, and Logs Page Grammar
+### Task 6: Normalize Knowledge, Dashboard, Servers, and Logs Page Grammar
 
 **Files:**
 - Modify: `crates/gadgetron-web/web/app/(shell)/wiki/page.tsx`
@@ -1032,7 +1513,7 @@ For `servers/page.tsx`, also import:
 import { RecordRow, ResponsiveRecordList } from "../../components/workbench";
 ```
 
-- [ ] **Step 2: Normalize Wiki page frame**
+- [ ] **Step 2: Normalize Knowledge page frame**
 
 In `wiki/page.tsx`, wrap the current returned content with `WorkbenchPage`. The mechanical edit is:
 
@@ -1045,7 +1526,7 @@ Use this header and toolbar:
 
 ```tsx
 <WorkbenchPage
-  title="Wiki"
+  title="Knowledge"
   subtitle="Read and update operational knowledge used by Penny."
   toolbar={
     <PageToolbar status={<StatusBadge status={error ? "degraded" : "ready"} />}>
@@ -1242,7 +1723,7 @@ git commit -m "feat(web): normalize workbench page grammar"
 
 ---
 
-### Task 6: Add Browser Viewport Smoke Coverage
+### Task 7: Add Browser Viewport Smoke Coverage
 
 **Files:**
 - Create: `crates/gadgetron-web/web/e2e/ui-consistency.spec.ts`
@@ -1371,7 +1852,7 @@ git commit -m "test(web): cover console viewport consistency"
 
 ---
 
-### Task 7: Final Verification and Cleanup
+### Task 8: Final Verification and Cleanup
 
 **Files:**
 - Any frontend file touched by prior tasks
@@ -1447,11 +1928,13 @@ git commit -m "feat(web): complete UI consistency pass"
 
 Spec coverage:
 
-- Shell behavior is covered by Task 3 and Task 6.
-- Shared page grammar and primitives are covered by Tasks 1, 2, and 5.
+- Shell behavior is covered by Task 3 and Task 7.
+- Shared page grammar and primitives are covered by Tasks 1, 2, and 6.
 - Admin/Penny Runtime restructuring is covered by Task 4.
-- Status, error, and empty-state presentation is covered by Tasks 2, 4, and 5.
-- Desktop and narrow-desktop verification is covered by Tasks 6 and 7.
+- Bundle-to-chat context is covered by Tasks 5A, 5B, and 5C.
+- Knowledge RAW source import is covered by Tasks 5D and 5E.
+- Status, error, and empty-state presentation is covered by Tasks 2, 4, and 6.
+- Desktop and narrow-desktop verification is covered by Tasks 7 and 8.
 - Mobile-specific UI remains out of scope as required.
 
 No unresolved markers or incomplete task sections remain.
