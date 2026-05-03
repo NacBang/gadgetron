@@ -35,6 +35,7 @@ interface WorkbenchSubjectContextValue {
   activeConversationId: string | null;
   subject: WorkbenchSubject | null;
   refresh: () => void;
+  refreshSubject: () => void;
   clearActiveSubject: () => void;
 }
 
@@ -238,6 +239,7 @@ export function WorkbenchSubjectProvider({
         activeConversationId: state.activeConversationId,
         subject: state.subject,
         refresh,
+        refreshSubject: refresh,
         clearActiveSubject,
       }}
     >
@@ -254,6 +256,7 @@ export function useWorkbenchSubject(): WorkbenchSubjectContextValue {
     activeConversationId: state.activeConversationId,
     subject: state.subject,
     refresh: () => {},
+    refreshSubject: () => {},
     clearActiveSubject: () => {
       if (state.activeConversationId) {
         clearConversationSubject(state.activeConversationId);

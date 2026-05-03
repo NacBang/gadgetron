@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { useAuth } from "../../lib/auth-context";
-import { setActiveConversationId } from "../../lib/conversation-id";
+import {
+  startPennyDiscussion,
+  type WorkbenchSubject,
+} from "../../lib/workbench-subject-context";
 import { Button } from "../../components/ui/button";
 import { safeRandomUUID } from "../../lib/uuid";
 
@@ -130,37 +133,45 @@ function relativeTime(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-/// Mint a fresh conversation and seed the composer with a finding
-/// summary so Penny picks it up as the opening message. Writes the
-/// new conversation id into localStorage (consumed by the chat
-/// transport) and the draft under a per-conversation key (consumed
-/// by the composer on mount), then navigates to /web.
+/// Build structured context for a finding so Penny receives the same
+/// opening draft and the side panel/chat header can display what the
+/// operator is discussing.
+function truncateExcerpt(excerpt: string): string {
+  return excerpt.length > 1200 ? `${excerpt.slice(0, 1200)}...` : excerpt;
+}
+
+function buildFindingSubject(f: Finding, hostLabel: string): WorkbenchSubject {
+  return {
+    id: f.id,
+    kind: "log_finding",
+    bundle: "logs",
+    title: f.summary,
+    subtitle: `${hostLabel} · ${f.severity}`,
+    href: `/web/findings?host=${encodeURIComponent(f.host_id)}`,
+    summary: f.summary,
+    prompt:
+      "Review this log finding with me. Explain the operational risk, likely cause, and the safest next step before taking action.",
+    facts: {
+      hostId: f.host_id,
+      source: f.source,
+      severity: f.severity,
+      category: f.category,
+      fingerprint: f.fingerprint,
+      count: f.count,
+      firstSeen: f.ts_first,
+      lastSeen: f.ts_last,
+      cause: f.cause,
+      solution: f.solution,
+      excerpt: truncateExcerpt(f.excerpt),
+    },
+  };
+}
+
 function openChatAboutFinding(f: Finding, hostLabel: string): void {
-  if (typeof window === "undefined") return;
-  const convId = safeRandomUUID();
-  const lines: string[] = [];
-  lines.push(
-    `이 Log를 같이 봐줘요. 어떻게 할지 같이 정하고 싶어요.`,
-  );
-  lines.push("");
-  lines.push(`host: ${hostLabel} (${f.host_id.slice(0, 8)})`);
-  lines.push(`source: ${f.source} · severity: ${f.severity}`);
-  lines.push(`category: ${f.category}`);
-  lines.push(`summary: ${f.summary}`);
-  if (f.cause) lines.push(`cause: ${f.cause}`);
-  if (f.solution) lines.push(`solution hint: ${f.solution}`);
-  lines.push("");
-  lines.push("excerpt:");
-  lines.push("```");
-  lines.push(
-    f.excerpt.length > 1200 ? `${f.excerpt.slice(0, 1200)}…` : f.excerpt,
-  );
-  lines.push("```");
-  const draft = lines.join("\n");
-  setActiveConversationId(convId);
-  window.localStorage.setItem(`gadgetron_draft_${convId}`, draft);
-  window.localStorage.setItem(`gadgetron_pending_submit_${convId}`, "1");
-  window.location.assign("/web");
+  startPennyDiscussion(buildFindingSubject(f, hostLabel), {
+    autoSubmit: true,
+    navigateTo: "/web",
+  });
 }
 
 // Expandable thread per finding. Collapsed by default so a long incident
