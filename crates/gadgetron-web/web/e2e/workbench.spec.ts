@@ -59,12 +59,14 @@ test("3-panel shell renders: left rail, chat column, evidence pane", async ({
   await expect(page.getByTestId("evidence-pane")).toBeVisible();
 });
 
-test("left rail nav tabs present (Chat functional, others P2B stub)", async ({
-  page,
-}) => {
+test("left rail shows only functional navigation tabs", async ({ page }) => {
   await expect(page.getByTestId("nav-tab-chat")).toBeVisible();
-  await expect(page.getByTestId("nav-tab-knowledge")).toBeVisible();
-  await expect(page.getByTestId("nav-tab-bundles")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-wiki")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-dashboard")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-servers")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-findings")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-knowledge")).toHaveCount(0);
+  await expect(page.getByTestId("nav-tab-bundles")).toHaveCount(0);
 });
 
 test("status strip shows healthy state", async ({ page }) => {

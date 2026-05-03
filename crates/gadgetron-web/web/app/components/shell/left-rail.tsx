@@ -30,10 +30,7 @@ interface NavItem {
   id: LeftRailTab;
   label: string;
   icon: React.ReactNode;
-  functional: boolean;
-  /** Route this tab navigates to. Undefined = stub / P2B-only tab that
-   * shows a "not yet wired" notice instead of navigating. */
-  href?: string;
+  href: string;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -41,42 +38,36 @@ const NAV_ITEMS: NavItem[] = [
     id: "chat",
     label: "Chat",
     icon: <MessageSquare className="size-4" aria-hidden />,
-    functional: true,
     href: "/web",
   },
   {
     id: "wiki",
     label: "Wiki",
     icon: <FileText className="size-4" aria-hidden />,
-    functional: true,
     href: "/web/wiki",
   },
   {
     id: "dashboard",
     label: "Dashboard",
     icon: <Activity className="size-4" aria-hidden />,
-    functional: true,
     href: "/web/dashboard",
   },
   {
     id: "servers",
     label: "Servers",
     icon: <Server className="size-4" aria-hidden />,
-    functional: true,
     href: "/web/servers",
   },
   {
     id: "findings",
     label: "Logs",
     icon: <AlertTriangle className="size-4" aria-hidden />,
-    functional: true,
     href: "/web/findings",
   },
   {
     id: "admin",
     label: "Admin",
     icon: <Shield className="size-4" aria-hidden />,
-    functional: true,
     href: "/web/admin",
   },
 ];
@@ -103,12 +94,14 @@ function tabFromPathname(pathname: string | null): LeftRailTab {
 
 interface LeftRailProps {
   collapsed: boolean;
+  forcedCollapsed?: boolean;
   onCollapse: (collapsed: boolean) => void;
   width?: number;
 }
 
 export function LeftRail({
   collapsed,
+  forcedCollapsed = false,
   onCollapse,
   width = 240,
 }: LeftRailProps) {
@@ -136,10 +129,31 @@ export function LeftRail({
       <div className="flex h-9 items-center justify-end border-b border-zinc-800 px-2">
         <button
           type="button"
-          aria-label={collapsed ? "Expand left rail" : "Collapse left rail"}
+          aria-label={
+            forcedCollapsed
+              ? "Navigation is collapsed on narrow screens"
+              : collapsed
+                ? "Expand left rail"
+                : "Collapse left rail"
+          }
+          title={
+            forcedCollapsed
+              ? "Navigation is collapsed on narrow screens"
+              : collapsed
+                ? "Expand left rail"
+                : "Collapse left rail"
+          }
           data-testid="left-rail-collapse-btn"
-          onClick={() => onCollapse(!collapsed)}
-          className="flex size-6 items-center justify-center rounded text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+          disabled={forcedCollapsed}
+          onClick={() => {
+            if (!forcedCollapsed) onCollapse(!collapsed);
+          }}
+          className={cn(
+            "flex size-6 items-center justify-center rounded text-zinc-600",
+            forcedCollapsed
+              ? "cursor-not-allowed opacity-50"
+              : "hover:bg-zinc-800 hover:text-zinc-300",
+          )}
         >
           <PanelLeft className="size-3.5" aria-hidden />
         </button>
@@ -154,46 +168,20 @@ export function LeftRail({
             isActive
               ? "bg-zinc-800 text-zinc-100"
               : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300",
-            !item.functional && "cursor-default opacity-50",
           );
-          if (item.href && item.functional) {
-            return (
-              <a
-                key={item.id}
-                href={item.href}
-                role="tab"
-                aria-selected={isActive}
-                aria-label={item.label}
-                data-testid={`nav-tab-${item.id}`}
-                className={buttonClass}
-                title={item.label}
-              >
-                {item.icon}
-                {!collapsed && <span>{item.label}</span>}
-              </a>
-            );
-          }
           return (
-            <button
+            <a
               key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
+              href={item.href}
+              aria-current={isActive ? "page" : undefined}
               aria-label={item.label}
               data-testid={`nav-tab-${item.id}`}
-              onClick={() => {
-                /* stub tab — no route yet */
-              }}
-              title={
-                !item.functional
-                  ? `${item.label} — P2B not yet wired`
-                  : item.label
-              }
               className={buttonClass}
+              title={item.label}
             >
               {item.icon}
               {!collapsed && <span>{item.label}</span>}
-            </button>
+            </a>
           );
         })}
       </nav>

@@ -117,15 +117,19 @@ export function WorkbenchShell({
   // passed as a node means "use my custom right rail". Undefined =
   // fall back to the default EvidencePane.
   const resolvedRightRail =
-    preAuth || narrowDesktop || rightRail === null
+    preAuth || rightRail === null
       ? null
-      : rightRail ?? (
-          <EvidencePane
-            open={prefs.evidencePaneOpen}
-            onToggle={(v) => updatePrefs({ evidencePaneOpen: v })}
-            width={prefs.evidencePaneWidth}
-          />
-        );
+      : rightRail !== undefined
+        ? rightRail
+        : narrowDesktop
+          ? null
+          : (
+              <EvidencePane
+                open={prefs.evidencePaneOpen}
+                onToggle={(v) => updatePrefs({ evidencePaneOpen: v })}
+                width={prefs.evidencePaneWidth}
+              />
+            );
 
   return (
     <div
@@ -140,6 +144,7 @@ export function WorkbenchShell({
         {!preAuth && (
           <LeftRail
             collapsed={effectiveLeftRailCollapsed}
+            forcedCollapsed={narrowDesktop}
             onCollapse={(v) => updatePrefs({ leftRailCollapsed: v })}
             width={prefs.leftRailWidth}
           />

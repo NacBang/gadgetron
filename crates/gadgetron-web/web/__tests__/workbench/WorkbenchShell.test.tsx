@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 import { WorkbenchShell } from "../../app/components/shell/workbench-shell";
 
 // ---------------------------------------------------------------------------
@@ -142,6 +142,19 @@ describe("WorkbenchShell", () => {
     );
   });
 
+  it("marks the active nav link as the current page", () => {
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+
+    const chatLink = screen.getByTestId("nav-tab-chat");
+    expect(chatLink.getAttribute("aria-current")).toBe("page");
+    expect(chatLink.getAttribute("role")).toBeNull();
+    expect(chatLink.getAttribute("aria-selected")).toBeNull();
+  });
+
   it("does not render unwired stub nav entries", () => {
     render(
       <WorkbenchShell>
@@ -173,6 +186,54 @@ describe("WorkbenchShell", () => {
 
     const rail = screen.getByTestId("left-rail");
     expect(rail.className).toContain("w-12");
+    expect(screen.queryByTestId("evidence-pane-collapsed")).toBeNull();
+  });
+
+  it("does not persist a collapsed preference while forced collapsed", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 900,
+      writable: true,
+      configurable: true,
+    });
+
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    const button = screen.getByTestId("left-rail-collapse-btn");
+    expect(button).toBeDisabled();
+    expect(button.getAttribute("aria-label")).toBe(
+      "Navigation is collapsed on narrow screens",
+    );
+
+    fireEvent.click(button);
+    expect(localStorageMock.getItem("gadgetron.workbench.prefs")).toBeNull();
+  });
+
+  it("renders caller-supplied right rail on narrow desktop", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 900,
+      writable: true,
+      configurable: true,
+    });
+
+    render(
+      <WorkbenchShell rightRail={<aside data-testid="custom-right-rail" />}>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(screen.getByTestId("custom-right-rail")).toBeTruthy();
     expect(screen.queryByTestId("evidence-pane-collapsed")).toBeNull();
   });
 
