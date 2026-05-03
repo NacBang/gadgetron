@@ -1727,7 +1727,7 @@ function UsersTable({
                         disabled={saving === u.id}
                         className="h-7 px-2 text-[11px]"
                       >
-                        {saving === u.id ? "Saving…" : "Save"}
+                        {saving === u.id ? "Saving…" : "Save profile"}
                       </Button>
                     </div>
                   </td>

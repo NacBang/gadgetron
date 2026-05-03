@@ -203,6 +203,7 @@ describe("AdminPage", () => {
       screen.getByTestId("edit-user-avatar-url"),
       "data:image/jpeg;base64,avatar",
     );
+    expect(screen.getByText("Save profile")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Save profile" }));
 
     await waitFor(() => {
