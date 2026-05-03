@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getActiveConversationId } from "../../app/lib/conversation-id";
 import {
   buildSubjectDraft,
   readConversationSubject,
@@ -7,7 +8,7 @@ import {
   type WorkbenchSubject,
 } from "../../app/lib/workbench-subject-context";
 
-const localStorageMock = (() => {
+const createStorageMock = () => {
   let store: Record<string, string> = {};
   return {
     getItem: (key: string) => store[key] ?? null,
@@ -21,10 +22,13 @@ const localStorageMock = (() => {
       store = {};
     },
   };
-})();
+};
+
+const localStorageMock = createStorageMock();
+const sessionStorageMock = createStorageMock();
 
 Object.defineProperty(window, "localStorage", { value: localStorageMock });
-Object.defineProperty(window, "sessionStorage", { value: localStorageMock });
+Object.defineProperty(window, "sessionStorage", { value: sessionStorageMock });
 
 const subject: WorkbenchSubject = {
   id: "finding-1",
@@ -47,6 +51,7 @@ const subject: WorkbenchSubject = {
 describe("workbench subject context", () => {
   beforeEach(() => {
     localStorageMock.clear();
+    sessionStorageMock.clear();
     vi.restoreAllMocks();
   });
 
@@ -83,6 +88,7 @@ describe("workbench subject context", () => {
     });
 
     expect(convId).toBe("conv-2");
+    expect(getActiveConversationId()).toBe("conv-2");
     expect(readConversationSubject("conv-2")).toEqual(subject);
     expect(localStorage.getItem("gadgetron_draft_conv-2")).toContain(
       "SMART pending sectors",
