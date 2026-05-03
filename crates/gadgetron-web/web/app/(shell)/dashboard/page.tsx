@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
+import {
+  InlineNotice,
+  PageToolbar,
+  StatusBadge,
+  WorkbenchPage,
+} from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
 
 // ---------------------------------------------------------------------------
@@ -122,140 +128,153 @@ export default function DashboardPage() {
     };
   }, [apiKey]);
 
+  const connected = wsStatus === "open";
+
   return (
-    <>
-      <header
-        className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
-        data-testid="dashboard-header"
-      >
-        <div className="flex items-center gap-3">
-          <span className="text-xs font-semibold text-zinc-300">
-            Operator Dashboard
+    <WorkbenchPage
+      title="Dashboard"
+      subtitle="Cross-system activity, usage, and live operational events."
+      headerTestId="dashboard-header"
+      actions={
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void refreshSummary()}
+          className="h-7 px-2 text-[11px]"
+        >
+          Refresh
+        </Button>
+      }
+      toolbar={
+        <PageToolbar
+          status={
+            <StatusBadge status={connected ? "healthy" : "degraded"} />
+          }
+        >
+          <span className="text-xs text-zinc-500">
+            Live feed and usage summary
           </span>
           <span
             className="text-[11px] text-zinc-600"
             data-testid="dashboard-window-label"
           >
-            · last {summary?.window_hours ?? 24}h
+            last {summary?.window_hours ?? 24}h
           </span>
           <span
             data-testid="dashboard-ws-status"
-            className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
-              wsStatus === "open"
-                ? "border-emerald-700/40 bg-emerald-900/20 text-emerald-400"
-                : wsStatus === "connecting"
-                  ? "border-amber-700/40 bg-amber-900/20 text-amber-400"
-                  : "border-zinc-700 bg-zinc-900 text-zinc-500"
-            }`}
+            className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400"
           >
             ws: {wsStatus}
           </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void refreshSummary()}
-            className="h-6 px-2 text-[11px]"
+        </PageToolbar>
+      }
+    >
+      <div className="space-y-3">
+        {!connected && (
+          <InlineNotice tone="warn" title="Live feed disconnected">
+            Gadgetron will keep retrying the activity stream.
+          </InlineNotice>
+        )}
+        {summaryError && (
+          <InlineNotice
+            tone="error"
+            title="Usage summary request failed"
+            details={summaryError}
           >
-            Refresh
-          </Button>
-        </div>
-      </header>
-
-      <div className="flex flex-1 overflow-hidden">
-        {/* Usage tiles */}
-        <main className="flex-1 overflow-auto p-4">
-          {summaryError && (
-            <div className="mb-3 rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-              {summaryError}
-            </div>
-          )}
-          {!summary && !summaryError && (
-            <div className="text-[11px] text-zinc-600">Loading summary…</div>
-          )}
-          {summary && (
-            <div
-              className="grid grid-cols-1 gap-3 md:grid-cols-3"
-              data-testid="dashboard-tiles"
-            >
-              <Tile
-                testId="tile-chat"
-                title="Chat"
-                primary={`${summary.chat.requests}`}
-                primaryLabel="requests"
-                sub={[
-                  [
-                    "tokens",
-                    `${summary.chat.total_input_tokens + summary.chat.total_output_tokens}`,
-                  ],
-                  [
-                    "cost",
-                    `$${(summary.chat.total_cost_cents / 100).toFixed(2)}`,
-                  ],
-                  [
-                    "avg latency",
-                    `${summary.chat.avg_latency_ms.toFixed(0)}ms`,
-                  ],
-                  ["errors", `${summary.chat.errors}`],
-                ]}
-              />
-              <Tile
-                testId="tile-actions"
-                title="Actions"
-                primary={`${summary.actions.total}`}
-                primaryLabel="invocations"
-                sub={[
-                  ["success", `${summary.actions.success}`],
-                  ["error", `${summary.actions.error}`],
-                  ["pending", `${summary.actions.pending_approval}`],
-                  [
-                    "avg elapsed",
-                    `${summary.actions.avg_elapsed_ms.toFixed(0)}ms`,
-                  ],
-                ]}
-              />
-              <Tile
-                testId="tile-tools"
-                title="Tools"
-                primary={`${summary.tools.total}`}
-                primaryLabel="calls"
-                sub={[["errors", `${summary.tools.errors}`]]}
-              />
-            </div>
-          )}
-        </main>
-
-        {/* Live feed */}
-        <aside
-          data-testid="dashboard-live-feed"
-          className="flex w-80 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950"
-        >
-          <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-            Live feed ({events.length})
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            {events.length === 0 && (
-              <div className="px-3 py-2 text-[11px] text-zinc-600">
-                Waiting for events…
+            Gadgetron could not load the current usage summary.
+          </InlineNotice>
+        )}
+        <div className="flex min-h-[520px] overflow-hidden rounded border border-zinc-800">
+          <main className="flex-1 overflow-auto bg-zinc-950/30 p-4">
+            {!summary && !summaryError && (
+              <div className="text-[11px] text-zinc-600">
+                Loading summary...
               </div>
             )}
-            {events.map((e, i) => (
+            {summary && (
               <div
-                key={i}
-                className="border-b border-zinc-900 px-3 py-2 text-[11px]"
-                data-testid="dashboard-live-event"
+                className="grid grid-cols-1 gap-3 md:grid-cols-3"
+                data-testid="dashboard-tiles"
               >
-                <div className="font-mono text-zinc-300">{String(e.type)}</div>
-                <pre className="mt-1 whitespace-pre-wrap break-all text-zinc-500">
-                  {JSON.stringify(e, null, 0).slice(0, 180)}
-                </pre>
+                <Tile
+                  testId="tile-chat"
+                  title="Chat"
+                  primary={`${summary.chat.requests}`}
+                  primaryLabel="requests"
+                  sub={[
+                    [
+                      "tokens",
+                      `${summary.chat.total_input_tokens + summary.chat.total_output_tokens}`,
+                    ],
+                    [
+                      "cost",
+                      `$${(summary.chat.total_cost_cents / 100).toFixed(2)}`,
+                    ],
+                    [
+                      "avg latency",
+                      `${summary.chat.avg_latency_ms.toFixed(0)}ms`,
+                    ],
+                    ["errors", `${summary.chat.errors}`],
+                  ]}
+                />
+                <Tile
+                  testId="tile-actions"
+                  title="Actions"
+                  primary={`${summary.actions.total}`}
+                  primaryLabel="invocations"
+                  sub={[
+                    ["success", `${summary.actions.success}`],
+                    ["error", `${summary.actions.error}`],
+                    ["pending", `${summary.actions.pending_approval}`],
+                    [
+                      "avg elapsed",
+                      `${summary.actions.avg_elapsed_ms.toFixed(0)}ms`,
+                    ],
+                  ]}
+                />
+                <Tile
+                  testId="tile-tools"
+                  title="Tools"
+                  primary={`${summary.tools.total}`}
+                  primaryLabel="calls"
+                  sub={[["errors", `${summary.tools.errors}`]]}
+                />
               </div>
-            ))}
-          </div>
-        </aside>
+            )}
+          </main>
+
+          <aside
+            data-testid="dashboard-live-feed"
+            className="flex w-80 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950"
+          >
+            <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              Live feed ({events.length})
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {events.length === 0 && (
+                <div className="px-3 py-2 text-[11px] text-zinc-600">
+                  Waiting for events...
+                </div>
+              )}
+              {events.map((e, i) => (
+                <div
+                  key={i}
+                  className="border-b border-zinc-900 px-3 py-2 text-[11px]"
+                  data-testid="dashboard-live-event"
+                >
+                  <div className="font-mono text-zinc-300">
+                    {String(e.type)}
+                  </div>
+                  <pre className="mt-1 whitespace-pre-wrap break-all text-zinc-500">
+                    {JSON.stringify(e, null, 0).slice(0, 180)}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </aside>
+        </div>
       </div>
-    </>
+    </WorkbenchPage>
   );
 }
 

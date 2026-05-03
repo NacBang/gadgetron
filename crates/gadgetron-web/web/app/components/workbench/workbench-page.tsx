@@ -9,6 +9,7 @@ export function WorkbenchPage({
   toolbar,
   children,
   className,
+  headerTestId,
 }: {
   title: string;
   subtitle?: ReactNode;
@@ -16,10 +17,14 @@ export function WorkbenchPage({
   toolbar?: ReactNode;
   children: ReactNode;
   className?: string;
+  headerTestId?: string;
 }) {
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", className)}>
-      <header className="shrink-0 border-b border-zinc-800 bg-zinc-950/90 px-5 py-4">
+      <header
+        className="shrink-0 border-b border-zinc-800 bg-zinc-950/90 px-5 py-4"
+        data-testid={headerTestId}
+      >
         <div className="flex min-w-0 items-start justify-between gap-4">
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold tracking-normal text-zinc-100">

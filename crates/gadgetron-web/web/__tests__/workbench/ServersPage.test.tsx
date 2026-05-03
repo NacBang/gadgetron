@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ServersPage from "../../app/(shell)/servers/page";
 
@@ -102,5 +102,34 @@ describe("ServersPage", () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalled();
     });
+  });
+
+  it("shows server inventory errors as shared notices with hidden details", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/workbench/actions/server-list")) {
+        return {
+          ok: false,
+          status: 401,
+          text: () => Promise.resolve("raw invalid api key"),
+        } as Response;
+      }
+      if (url.includes("/workbench/actions/loganalysis-list")) {
+        return jsonResponse(actionPayload({ findings: [] }));
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    render(<ServersPage />);
+
+    expect(await screen.findByTestId("servers-header")).toBeTruthy();
+    expect(
+      await screen.findByText("Server inventory request failed"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/raw invalid api key/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+
+    expect(screen.getByText(/raw invalid api key/i)).toBeTruthy();
   });
 });

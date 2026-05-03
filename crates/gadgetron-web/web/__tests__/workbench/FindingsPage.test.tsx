@@ -101,6 +101,35 @@ describe("FindingsPage", () => {
     });
   });
 
+  it("shows log analysis errors as shared notices with hidden details", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/workbench/actions/loganalysis-list")) {
+        return {
+          ok: false,
+          status: 500,
+          text: () => Promise.resolve("raw journal scanner failed"),
+        } as Response;
+      }
+      if (url.includes("/workbench/actions/server-list")) {
+        return jsonResponse(actionPayload({ hosts: [] }));
+      }
+      if (url.includes("/workbench/actions/loganalysis-status")) {
+        return jsonResponse(actionPayload({ hosts: [] }));
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    render(<FindingsPage />);
+
+    expect(await screen.findByText("Log analysis request failed")).toBeTruthy();
+    expect(screen.queryByText(/raw journal scanner failed/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+
+    expect(screen.getByText(/raw journal scanner failed/i)).toBeTruthy();
+  });
+
   it("seeds an English-first Penny draft with structured finding subject context", async () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

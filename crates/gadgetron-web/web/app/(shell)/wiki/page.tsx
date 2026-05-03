@@ -555,6 +555,7 @@ export default function WikiWorkbenchPage() {
       <WorkbenchPage
         title="Knowledge"
         subtitle={`${pages.length} pages available for Penny and operators.`}
+        headerTestId="wiki-header"
         actions={
           <div className="flex items-center gap-2">
             <Button

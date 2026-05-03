@@ -8,6 +8,13 @@ import {
   type WorkbenchSubject,
 } from "../../lib/workbench-subject-context";
 import { Button } from "../../components/ui/button";
+import {
+  EmptyState,
+  InlineNotice,
+  PageToolbar,
+  StatusBadge,
+  WorkbenchPage,
+} from "../../components/workbench";
 import { safeRandomUUID } from "../../lib/uuid";
 
 // /web/findings — log analyzer triage view.
@@ -211,7 +218,9 @@ function CommentsSection({
       const payload = unwrapPayload(resp) as { comments?: Comment[] } | undefined;
       setComments(payload?.comments ?? []);
     } catch (e) {
-      toast.error(`댓글 로드 실패: ${(e as Error).message}`);
+      toast.error("Failed to load comments", {
+        description: (e as Error).message,
+      });
     } finally {
       setLoading(false);
     }
@@ -241,7 +250,9 @@ function CommentsSection({
       }
       setDraft("");
     } catch (e) {
-      toast.error(`댓글 작성 실패: ${(e as Error).message}`);
+      toast.error("Failed to post comment", {
+        description: (e as Error).message,
+      });
     } finally {
       setPosting(false);
     }
@@ -250,7 +261,7 @@ function CommentsSection({
   const remove = useCallback(
     async (c: Comment) => {
       if (!identity?.user_id) return;
-      if (!window.confirm("이 댓글을 삭제할까요?")) return;
+      if (!window.confirm("Delete this comment?")) return;
       try {
         await invokeAction(apiKey, "loganalysis-comment-delete", {
           comment_id: c.id,
@@ -260,7 +271,9 @@ function CommentsSection({
         setComments((prev) => prev.filter((x) => x.id !== c.id));
         onCountChange(finding.id, Math.max(0, count - 1));
       } catch (e) {
-        toast.error(`댓글 삭제 실패: ${(e as Error).message}`);
+        toast.error("Failed to delete comment", {
+          description: (e as Error).message,
+        });
       }
     },
     [apiKey, identity?.user_id, isAdmin, finding.id, count, onCountChange],
@@ -274,7 +287,7 @@ function CommentsSection({
         className="flex items-center gap-1.5 text-[11px] text-zinc-400 hover:text-zinc-200"
       >
         <span>{open ? "▾" : "▸"}</span>
-        <span>💬 댓글</span>
+        <span>Comments</span>
         {count > 0 && (
           <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-200">
             {count}
@@ -284,11 +297,11 @@ function CommentsSection({
       {open && (
         <div className="mt-2 space-y-2">
           {loading && (
-            <div className="text-[11px] text-zinc-500">불러오는 중…</div>
+            <div className="text-[11px] text-zinc-500">Loading...</div>
           )}
           {!loading && comments.length === 0 && (
             <div className="text-[11px] text-zinc-600">
-              아직 댓글이 없습니다. 해결책이나 감상을 남겨보세요.
+              No comments yet. Add remediation notes or context.
             </div>
           )}
           {comments.map((c) => {
@@ -308,7 +321,7 @@ function CommentsSection({
                   ) : (
                     <span className="font-semibold text-zinc-400">
                       {c.author_user_id === identity?.user_id
-                        ? identity?.display_name || identity?.email || "나"
+                        ? identity?.display_name || identity?.email || "Me"
                         : (c.author_user_id ?? "").slice(0, 8)}
                     </span>
                   )}
@@ -318,7 +331,7 @@ function CommentsSection({
                       type="button"
                       onClick={() => void remove(c)}
                       className="ml-auto text-zinc-600 hover:text-red-400"
-                      title="삭제"
+                      title="Delete"
                     >
                       ✕
                     </button>
@@ -341,7 +354,7 @@ function CommentsSection({
                     void submit();
                   }
                 }}
-                placeholder="댓글 달기… (Ctrl+Enter 전송)"
+                placeholder="Add a comment... (Ctrl+Enter to send)"
                 className="min-h-[48px] flex-1 resize-y rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-[12px] text-zinc-200 placeholder:text-zinc-600 focus:border-zinc-600 focus:outline-none"
               />
               <Button
@@ -350,7 +363,7 @@ function CommentsSection({
                 onClick={() => void submit()}
                 disabled={posting || draft.trim().length === 0}
               >
-                {posting ? "…" : "올리기"}
+                {posting ? "..." : "Post"}
               </Button>
             </div>
           )}
@@ -448,7 +461,9 @@ export default function FindingsPage() {
     async (host_id: string) => {
       try {
         await invokeAction(apiKey, "loganalysis-scan-now", { host_id });
-        toast.success("스캔 큐잉됨 (≤ 30초 안에 실행)");
+        toast.success("Scan queued", {
+          description: "It should run within 30 seconds.",
+        });
       } catch (e) {
         toast.error((e as Error).message);
       }
@@ -484,7 +499,7 @@ export default function FindingsPage() {
         return;
       }
       const label = f.remediation.label ?? f.remediation.tool;
-      if (!window.confirm(`실행: ${label} (${f.host_id.slice(0, 8)})?`)) {
+      if (!window.confirm(`Run ${label} on ${f.host_id.slice(0, 8)}?`)) {
         return;
       }
       try {
@@ -496,7 +511,7 @@ export default function FindingsPage() {
           | { payload?: Array<{ text?: string }> }
           | undefined;
         const out = result?.payload?.[0]?.text ?? "";
-        toast.success(`${label} 실행 완료`, {
+        toast.success(`${label} completed`, {
           description: out.slice(0, 200),
         });
         // Auto-dismiss; the next scan tick will surface a fresh
@@ -573,24 +588,91 @@ export default function FindingsPage() {
       : "No open findings after the latest scan.";
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-6xl space-y-4 p-6">
-        <header className="flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-semibold text-zinc-100">Logs</h1>
-          </div>
-          <div className="flex items-center gap-2">
+    <>
+      <WorkbenchPage
+        title="Logs"
+        subtitle="Triage grouped findings from managed host journals and system logs."
+        toolbar={
+          <PageToolbar
+            status={
+              <StatusBadge
+                status={allRelevantScansDisabled ? "needs_setup" : "ready"}
+              />
+            }
+          >
+            <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+              Host
+              <select
+                value={hostFilter ?? ""}
+                onChange={(e) => {
+                  const value = e.target.value || null;
+                  setHostFilter(value);
+                  if (typeof window !== "undefined") {
+                    const url = new URL(window.location.href);
+                    if (value) url.searchParams.set("host", value);
+                    else url.searchParams.delete("host");
+                    window.history.replaceState(null, "", url.toString());
+                  }
+                }}
+                className="h-8 rounded-md border border-zinc-800 bg-zinc-900 px-2 text-xs text-zinc-100"
+              >
+                <option value="">All hosts ({hosts.length})</option>
+                {hosts.map((host) => (
+                  <option key={host.id} value={host.id}>
+                    {host.alias ?? host.host}
+                  </option>
+                ))}
+              </select>
+            </label>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => void refresh()}
               disabled={loading}
-              className="h-7 px-2 text-[11px]"
+              className="h-8 px-2.5 text-xs"
             >
-              {loading ? "…" : "Refresh"}
+              {loading ? "Refreshing" : "Refresh"}
             </Button>
-          </div>
-        </header>
+            <button
+              type="button"
+              onClick={() => setSevFilter(null)}
+              className={`h-8 rounded-md border px-2.5 text-xs ${
+                sevFilter == null
+                  ? "border-zinc-500 bg-zinc-800 text-zinc-100"
+                  : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              All ({findings.length})
+            </button>
+            {SEVERITY_ORDER.map((severity) => (
+              <button
+                key={severity}
+                type="button"
+                onClick={() =>
+                  setSevFilter(severity === sevFilter ? null : severity)
+                }
+                className={`h-8 rounded-md border px-2.5 text-xs ${
+                  sevFilter === severity
+                    ? SEVERITY_TONES[severity]
+                    : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {severity} ({severityCounts[severity]})
+              </button>
+            ))}
+            {hostFilter && (
+              <button
+                type="button"
+                onClick={() => void scanNow(hostFilter)}
+                className="h-8 rounded-md border border-zinc-800 px-2.5 text-xs text-zinc-300 hover:bg-zinc-900"
+              >
+                Scan now
+              </button>
+            )}
+          </PageToolbar>
+        }
+      >
+      <div className="mx-auto max-w-6xl space-y-4">
 
         {/* Per-host scan status + interval slider */}
         <details className="rounded border border-zinc-800 bg-zinc-900/50">
@@ -672,72 +754,27 @@ export default function FindingsPage() {
           </div>
         </details>
 
-        {/* Filter row — host dropdown + severity pills */}
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-            Host
-            <select
-              value={hostFilter ?? ""}
-              onChange={(e) => {
-                const v = e.target.value || null;
-                setHostFilter(v);
-                if (typeof window !== "undefined") {
-                  const url = new URL(window.location.href);
-                  if (v) url.searchParams.set("host", v);
-                  else url.searchParams.delete("host");
-                  window.history.replaceState(null, "", url.toString());
-                }
-              }}
-              className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200 hover:border-zinc-600"
-            >
-              <option value="">All hosts ({hosts.length})</option>
-              {hosts.map((h) => (
-                <option key={h.id} value={h.id}>
-                  {h.alias ?? h.host}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="mx-1 h-4 w-px bg-zinc-800" aria-hidden />
-          <button
-            type="button"
-            onClick={() => setSevFilter(null)}
-            className={`rounded border px-2 py-0.5 text-[11px] ${
-              sevFilter == null
-                ? "border-zinc-500 bg-zinc-800 text-zinc-100"
-                : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300"
-            }`}
-          >
-            All ({findings.length})
-          </button>
-          {SEVERITY_ORDER.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setSevFilter(s === sevFilter ? null : s)}
-              className={`rounded border px-2 py-0.5 text-[11px] ${
-                sevFilter === s
-                  ? SEVERITY_TONES[s]
-                  : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:text-zinc-300"
-              }`}
-            >
-              {s} ({severityCounts[s]})
-            </button>
-          ))}
-        </div>
-
         {err && (
-          <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-            {err}
-          </div>
+          <InlineNotice
+            tone="error"
+            title="Log analysis request failed"
+            details={err}
+          >
+            The log analyzer could not load findings or scan status.
+          </InlineNotice>
         )}
 
         {!loading && visibleFindings.length === 0 && !err && (
-          <div className="rounded border border-zinc-800 bg-zinc-900/50 px-4 py-8 text-center text-[12px] text-zinc-500">
-            {findings.length === 0
-              ? emptyStateText
-              : `No findings match the current filter (${findings.length} total).`}
-          </div>
+          <EmptyState
+            title={
+              findings.length === 0 ? "No open findings" : "No matching findings"
+            }
+            description={
+              findings.length === 0
+                ? emptyStateText
+                : `No findings match the current filter (${findings.length} total).`
+            }
+          />
         )}
 
         {SEVERITY_ORDER.map((sev) =>
@@ -852,7 +889,8 @@ export default function FindingsPage() {
           ),
         )}
       </div>
+      </WorkbenchPage>
       <Toaster theme="dark" position="top-right" richColors />
-    </div>
+    </>
   );
 }
