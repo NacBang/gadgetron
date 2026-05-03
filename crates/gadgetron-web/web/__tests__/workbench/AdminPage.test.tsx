@@ -62,6 +62,10 @@ describe("AdminPage", () => {
     expect(screen.getByRole("tab", { name: "Access" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Penny Runtime" })).toBeTruthy();
     expect(screen.getByText("Applied configuration")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Access" }));
+    expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
   });
 
   it("submits avatar_url when creating a user with a profile photo URL", async () => {
@@ -196,6 +200,7 @@ describe("AdminPage", () => {
 
     await userEvent.click(await screen.findByRole("tab", { name: "Users" }));
     await screen.findByText("bob@example.com");
+    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
     await userEvent.clear(screen.getByTestId("edit-user-display-name"));
     await userEvent.type(screen.getByTestId("edit-user-display-name"), "Robert Lee");
@@ -478,7 +483,9 @@ describe("AdminPage", () => {
     render(<AdminPage />);
 
     await screen.findByText("gemma4");
+    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Create CCR" }));
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Create bridge" }));
 
     await waitFor(() => {

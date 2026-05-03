@@ -777,7 +777,7 @@ function PennyBrainSettings({
           ANTHROPIC_CUSTOM_MODEL_OPTION 사용
         </label>
         <Button onClick={() => void save()} disabled={saving || !canCall}>
-          {saving ? "저장 중…" : "저장"}
+          {saving ? "Saving…" : "Save"}
         </Button>
       </div>
     </section>
@@ -1247,7 +1247,7 @@ function LlmEndpointSettings({
               onClick={() => setBridgeSource(null)}
               className="h-7 px-2 text-[11px]"
             >
-              닫기
+              Close
             </Button>
           </div>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-7">
@@ -1421,7 +1421,7 @@ function LlmEndpointSettings({
                       disabled={busy === `delete:${endpoint.id}`}
                       className="h-6 px-2 text-[11px] text-red-400 hover:text-red-300"
                     >
-                      삭제
+                      Delete
                     </Button>
                   </div>
                 </td>
@@ -1678,7 +1678,7 @@ function UsersTable({
                       disabled={deleting === u.id}
                       onClick={() => void remove(u)}
                     >
-                      {deleting === u.id ? "…" : "삭제"}
+                      {deleting === u.id ? "…" : "Delete"}
                     </Button>
                   </div>
                 </td>
@@ -1782,7 +1782,7 @@ function ApiKeyOverride({
             if (value.trim()) onSet(value.trim());
           }}
         >
-          교체
+          Replace
         </Button>
       </div>
     </div>
