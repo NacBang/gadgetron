@@ -130,6 +130,7 @@ impl Classifier for GatewayClassifier {
         };
         Some(Classification {
             severity: Severity::parse(&parsed.severity).unwrap_or(Severity::Info),
+            fingerprint: category.clone(),
             category,
             summary: truncate(&parsed.summary, 200),
             cause: parsed.cause.map(|s| truncate(&s, 600)),

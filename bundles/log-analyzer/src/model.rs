@@ -44,6 +44,9 @@ impl Severity {
 pub struct Classification {
     pub severity: Severity,
     pub category: String,
+    /// Stable roll-up key for duplicate suppression. Same open
+    /// `(tenant, host, source, fingerprint)` stays one finding row.
+    pub fingerprint: String,
     pub summary: String,
     pub cause: Option<String>,
     pub solution: Option<String>,
@@ -60,6 +63,7 @@ pub struct Finding {
     pub source: String,
     pub severity: String,
     pub category: String,
+    pub fingerprint: String,
     pub summary: String,
     pub excerpt: String,
     pub ts_first: DateTime<Utc>,

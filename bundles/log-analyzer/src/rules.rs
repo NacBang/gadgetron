@@ -217,6 +217,36 @@ static RULES: Lazy<Vec<Rule>> = Lazy::new(|| {
                        4) Don't wait for the read errors to start.",
             remediation: None,
         },
+        Rule {
+            pattern: r(
+                r"(?i)smartd.*Device:\s+(/dev/\S+).*?(Currently unreadable \(pending\) sectors|Offline uncorrectable sectors)",
+            ),
+            category: "smartd_disk_health",
+            severity: Severity::Critical,
+            summary: "SMART disk media errors",
+            cause: "smartd reports pending or offline-uncorrectable sectors. \
+                    The disk has unreadable media and should be treated as a \
+                    near-term data-loss risk.",
+            solution: "1) Back up or evacuate data now; 2) Run `smartctl -a \
+                       <device>` to capture the full report; 3) Replace the \
+                       disk; 4) Verify array/filesystem health after replacement.",
+            remediation: None,
+        },
+        Rule {
+            pattern: r(
+                r"(?i)smartd.*(run-parts: .*/10mail exited with return code 1|mailx or mailutils package|does not have /usr/bin/mail)",
+            ),
+            category: "smartd_alert_delivery",
+            severity: Severity::Medium,
+            summary: "smartd alert email delivery failed",
+            cause: "smartd detected a condition worth notifying, but the host \
+                    cannot send the configured warning email because the mail \
+                    helper is missing or failing.",
+            solution: "Install `mailx` or `mailutils`, or reconfigure smartd \
+                       warning delivery to the team's alerting path. This does \
+                       not fix the underlying disk warning.",
+            remediation: None,
+        },
         // ── high: security / auth ─────────────────────────────────────
         Rule {
             pattern: r(r"(?i)sshd\[\d+\]:.*Failed password.*from"),
@@ -344,6 +374,7 @@ pub fn classify(line: &str) -> Option<Classification> {
             return Some(Classification {
                 severity: rule.severity,
                 category: rule.category.to_string(),
+                fingerprint: fingerprint_for(rule.category, line),
                 summary: rule.summary.to_string(),
                 cause: Some(rule.cause.to_string()),
                 solution: Some(solution),
@@ -352,6 +383,19 @@ pub fn classify(line: &str) -> Option<Classification> {
         }
     }
     None
+}
+
+fn fingerprint_for(category: &str, line: &str) -> String {
+    if category == "smartd_disk_health" {
+        static DEVICE_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"Device:\s+(/dev/\S+)").expect("static regex compiles"));
+        if let Some(caps) = DEVICE_RE.captures(line) {
+            if let Some(device) = caps.get(1) {
+                return format!("{category}:{}", device.as_str());
+            }
+        }
+    }
+    category.to_string()
 }
 
 /// Cheap "is this line worth sending to the LLM?" gate. Skip lines
@@ -397,6 +441,40 @@ mod tests {
     #[test]
     fn benign_lines_dont_match() {
         assert!(classify("just a normal message").is_none());
+    }
+
+    #[test]
+    fn smartd_pending_sector_matches_critical_disk_health() {
+        let c = classify(
+            "May 03 18:09:48 dg5R-PRO6000-8 smartd[3040]: Device: /dev/sdb [SAT], 6 Currently unreadable (pending) sectors",
+        )
+        .unwrap();
+        assert_eq!(c.category, "smartd_disk_health");
+        assert_eq!(c.severity, Severity::Critical);
+        assert_eq!(c.fingerprint, "smartd_disk_health:/dev/sdb");
+        assert!(c.summary.contains("SMART"));
+    }
+
+    #[test]
+    fn smartd_offline_uncorrectable_uses_same_device_fingerprint() {
+        let c = classify(
+            "May 03 18:09:48 dg5R-PRO6000-8 smartd[3040]: Device: /dev/sdb [SAT], 6 Offline uncorrectable sectors",
+        )
+        .unwrap();
+        assert_eq!(c.category, "smartd_disk_health");
+        assert_eq!(c.severity, Severity::Critical);
+        assert_eq!(c.fingerprint, "smartd_disk_health:/dev/sdb");
+    }
+
+    #[test]
+    fn smartd_mail_delivery_failure_is_separate_finding() {
+        let c = classify(
+            "May 03 14:39:48 dg5R-PRO6000-8 smartd[3040]: run-parts: /etc/smartmontools/run.d/10mail exited with return code 1",
+        )
+        .unwrap();
+        assert_eq!(c.category, "smartd_alert_delivery");
+        assert_eq!(c.severity, Severity::Medium);
+        assert_eq!(c.fingerprint, "smartd_alert_delivery");
     }
 
     #[test]
