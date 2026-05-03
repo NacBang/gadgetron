@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getActiveConversationId } from "../../app/lib/conversation-id";
+import { act, render, screen } from "@testing-library/react";
+import {
+  getActiveConversationId,
+  setActiveConversationId,
+} from "../../app/lib/conversation-id";
 import {
   buildSubjectDraft,
   readConversationSubject,
   startPennyDiscussion,
+  useWorkbenchSubject,
+  WorkbenchSubjectProvider,
   writeConversationSubject,
   type WorkbenchSubject,
 } from "../../app/lib/workbench-subject-context";
@@ -47,6 +53,13 @@ const subject: WorkbenchSubject = {
     "Review this log finding with me and recommend the next operational step.",
   createdAt: "2026-05-03T10:00:00.000Z",
 };
+
+function SubjectTitleProbe() {
+  const { subject: activeSubject } = useWorkbenchSubject();
+  return (
+    <div data-testid="subject-title">{activeSubject?.title ?? "none"}</div>
+  );
+}
 
 describe("workbench subject context", () => {
   beforeEach(() => {
@@ -95,5 +108,37 @@ describe("workbench subject context", () => {
     );
     expect(localStorage.getItem("gadgetron_pending_submit_conv-2")).toBe("1");
     expect(assign).toHaveBeenCalledWith("/web");
+  });
+
+  it("refreshes the provider when the active conversation changes", () => {
+    writeConversationSubject("conv-1", {
+      ...subject,
+      id: "finding-1",
+      title: "First finding",
+    });
+    writeConversationSubject("conv-2", {
+      ...subject,
+      id: "finding-2",
+      title: "Second finding",
+    });
+    setActiveConversationId("conv-1");
+
+    render(
+      <WorkbenchSubjectProvider>
+        <SubjectTitleProbe />
+      </WorkbenchSubjectProvider>,
+    );
+
+    expect(screen.getByTestId("subject-title").textContent).toBe(
+      "First finding",
+    );
+
+    act(() => {
+      setActiveConversationId("conv-2");
+    });
+
+    expect(screen.getByTestId("subject-title").textContent).toBe(
+      "Second finding",
+    );
   });
 });

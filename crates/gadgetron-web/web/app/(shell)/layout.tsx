@@ -7,6 +7,7 @@ import { OpenAIChatTransport } from "../openai-transport";
 import { WorkbenchShell } from "../components/shell/workbench-shell";
 import { AuthProvider, useAuth } from "../lib/auth-context";
 import { EvidenceProvider } from "../lib/evidence-context";
+import { WorkbenchSubjectProvider } from "../lib/workbench-subject-context";
 import {
   getActiveConversationId,
   setActiveConversationId,
@@ -122,9 +123,11 @@ function AuthedShell({ children }: { children: ReactNode }) {
 
   return (
     <EvidenceProvider>
-      <AssistantRuntimeProvider runtime={runtime}>
-        <WorkbenchShell>{children}</WorkbenchShell>
-      </AssistantRuntimeProvider>
+      <WorkbenchSubjectProvider>
+        <AssistantRuntimeProvider runtime={runtime}>
+          <WorkbenchShell>{children}</WorkbenchShell>
+        </AssistantRuntimeProvider>
+      </WorkbenchSubjectProvider>
     </EvidenceProvider>
   );
 }
