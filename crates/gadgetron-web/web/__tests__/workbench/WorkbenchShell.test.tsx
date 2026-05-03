@@ -134,6 +134,9 @@ describe("WorkbenchShell", () => {
     expect(screen.getByTestId("nav-tab-wiki").getAttribute("href")).toBe(
       "/web/wiki",
     );
+    expect(screen.getByTestId("nav-tab-wiki").textContent).toContain(
+      "Knowledge",
+    );
     expect(screen.getByTestId("nav-tab-dashboard").getAttribute("href")).toBe(
       "/web/dashboard",
     );

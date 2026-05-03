@@ -42,7 +42,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     id: "wiki",
-    label: "Wiki",
+    label: "Knowledge",
     icon: <FileText className="size-4" aria-hidden />,
     href: "/web/wiki",
   },
