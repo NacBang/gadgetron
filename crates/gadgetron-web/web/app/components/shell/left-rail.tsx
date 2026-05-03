@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   MessageSquare,
@@ -47,42 +46,42 @@ const NAV_ITEMS: NavItem[] = [
     label: "Chat",
     icon: <MessageSquare className="size-4" aria-hidden />,
     functional: true,
-    href: "/",
+    href: "/web",
   },
   {
     id: "wiki",
     label: "Wiki",
     icon: <FileText className="size-4" aria-hidden />,
     functional: true,
-    href: "/wiki",
+    href: "/web/wiki",
   },
   {
     id: "dashboard",
     label: "Dashboard",
     icon: <Activity className="size-4" aria-hidden />,
     functional: true,
-    href: "/dashboard",
+    href: "/web/dashboard",
   },
   {
     id: "servers",
     label: "Servers",
     icon: <Server className="size-4" aria-hidden />,
     functional: true,
-    href: "/servers",
+    href: "/web/servers",
   },
   {
     id: "findings",
     label: "Logs",
     icon: <AlertTriangle className="size-4" aria-hidden />,
     functional: true,
-    href: "/findings",
+    href: "/web/findings",
   },
   {
     id: "admin",
     label: "Admin",
     icon: <Shield className="size-4" aria-hidden />,
     functional: true,
-    href: "/admin",
+    href: "/web/admin",
   },
   {
     id: "knowledge",
@@ -98,16 +97,19 @@ const NAV_ITEMS: NavItem[] = [
   },
 ];
 
-// Next.js basePath is `/web`, so `usePathname()` returns `"/"` for the
-// chat page, `"/wiki"` for the wiki, `"/dashboard"` for the dashboard.
-// Map pathname → tab id.
+// The embedded gateway serves exported pages under `/web`. Depending on
+// whether the path comes from Next internals or the browser URL, pathname
+// may include that prefix.
 function tabFromPathname(pathname: string | null): LeftRailTab {
   if (!pathname) return "chat";
-  if (pathname.startsWith("/wiki")) return "wiki";
-  if (pathname.startsWith("/dashboard")) return "dashboard";
-  if (pathname.startsWith("/servers")) return "servers";
-  if (pathname.startsWith("/findings")) return "findings";
-  if (pathname.startsWith("/admin")) return "admin";
+  const normalized = pathname.startsWith("/web")
+    ? pathname.slice("/web".length) || "/"
+    : pathname;
+  if (normalized.startsWith("/wiki")) return "wiki";
+  if (normalized.startsWith("/dashboard")) return "dashboard";
+  if (normalized.startsWith("/servers")) return "servers";
+  if (normalized.startsWith("/findings")) return "findings";
+  if (normalized.startsWith("/admin")) return "admin";
   return "chat";
 }
 
@@ -172,7 +174,7 @@ export function LeftRail({
           );
           if (item.href && item.functional) {
             return (
-              <Link
+              <a
                 key={item.id}
                 href={item.href}
                 role="tab"
@@ -184,7 +186,7 @@ export function LeftRail({
               >
                 {item.icon}
                 {!collapsed && <span>{item.label}</span>}
-              </Link>
+              </a>
             );
           }
           return (

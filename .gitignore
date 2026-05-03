@@ -39,3 +39,6 @@ graphify-out/.graphify_*
 # regenerate.
 ui-*-review.png
 .playwright-mcp/
+
+# Superpowers visual brainstorming companion session state.
+.superpowers/

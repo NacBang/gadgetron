@@ -447,6 +447,22 @@ pub struct BrainConfig {
     #[serde(default)]
     pub external_base_url: String,
 
+    /// Optional Claude Code model string. Passed to Claude Code as
+    /// `--model <model>` and `ANTHROPIC_MODEL` when non-empty.
+    #[serde(default)]
+    pub model: String,
+
+    /// Optional process env var name whose value is forwarded to Claude Code
+    /// as `ANTHROPIC_AUTH_TOKEN`. The secret value itself is never persisted
+    /// in config.
+    #[serde(default)]
+    pub external_auth_token_env: String,
+
+    /// Expose `model` as `ANTHROPIC_CUSTOM_MODEL_OPTION` for non-standard
+    /// gateway model ids.
+    #[serde(default)]
+    pub custom_model_option: bool,
+
     /// gadgetron_local mode: `<provider_name>/<model_id>` from the router's
     /// provider map. Must NOT reference penny or an Anthropic-family
     /// provider (recursion guard — V9).
@@ -468,6 +484,9 @@ impl Default for BrainConfig {
             mode: BrainMode::default(),
             external_anthropic_api_key_env: default_external_anthropic_env(),
             external_base_url: String::new(),
+            model: String::new(),
+            external_auth_token_env: String::new(),
+            custom_model_option: false,
             local_model: String::new(),
             shim: BrainShimConfig::default(),
         }
@@ -489,6 +508,93 @@ pub enum BrainMode {
     /// in Phase 2C. P2A accepts the config for forward compatibility but
     /// treats it as a startup error until the shim lands.
     GadgetronLocal,
+}
+
+impl BrainMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeMax => "claude_max",
+            Self::ExternalAnthropic => "external_anthropic",
+            Self::ExternalProxy => "external_proxy",
+            Self::GadgetronLocal => "gadgetron_local",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "claude_max" => Some(Self::ClaudeMax),
+            "external_anthropic" => Some(Self::ExternalAnthropic),
+            "external_proxy" => Some(Self::ExternalProxy),
+            "gadgetron_local" => Some(Self::GadgetronLocal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentBrainSettingsSource {
+    ConfigFile,
+    Database,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentBrainSettings {
+    pub mode: BrainMode,
+    pub external_base_url: String,
+    pub model: String,
+    pub external_auth_token_env: String,
+    pub custom_model_option: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<uuid::Uuid>,
+    pub source: AgentBrainSettingsSource,
+}
+
+impl AgentBrainSettings {
+    pub fn from_brain(
+        brain: &BrainConfig,
+        source: AgentBrainSettingsSource,
+        updated_at: Option<chrono::DateTime<chrono::Utc>>,
+        updated_by: Option<uuid::Uuid>,
+    ) -> Self {
+        Self {
+            mode: brain.mode,
+            external_base_url: brain.external_base_url.clone(),
+            model: brain.model.clone(),
+            external_auth_token_env: brain.external_auth_token_env.clone(),
+            custom_model_option: brain.custom_model_option,
+            updated_at,
+            updated_by,
+            source,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateAgentBrainSettingsRequest {
+    pub mode: BrainMode,
+    #[serde(default)]
+    pub external_base_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub external_auth_token_env: String,
+    #[serde(default)]
+    pub custom_model_option: bool,
+}
+
+impl UpdateAgentBrainSettingsRequest {
+    pub fn overlay_brain(&self, base: &BrainConfig) -> BrainConfig {
+        let mut next = base.clone();
+        next.mode = self.mode;
+        next.external_base_url = self.external_base_url.clone();
+        next.model = self.model.clone();
+        next.external_auth_token_env = self.external_auth_token_env.clone();
+        next.custom_model_option = self.custom_model_option;
+        next
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,6 +657,52 @@ impl BrainConfig {
         providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
         env: &dyn EnvResolver,
     ) -> Result<()> {
+        if self.model.len() > 256 {
+            return Err(GadgetronError::Config(
+                "agent.brain.model must be at most 256 bytes".into(),
+            ));
+        }
+        if contains_control_char(&self.model) {
+            return Err(GadgetronError::Config(
+                "agent.brain.model must not contain control characters".into(),
+            ));
+        }
+        if contains_control_char(&self.external_base_url) {
+            return Err(GadgetronError::Config(
+                "agent.brain.external_base_url must not contain control characters".into(),
+            ));
+        }
+        if !self.external_base_url.is_empty()
+            && !self.external_base_url.starts_with("http://")
+            && !self.external_base_url.starts_with("https://")
+        {
+            return Err(GadgetronError::Config(
+                "agent.brain.external_base_url must start with http:// or https://".into(),
+            ));
+        }
+        if self.custom_model_option && self.model.is_empty() {
+            return Err(GadgetronError::Config(
+                "agent.brain.custom_model_option requires agent.brain.model".into(),
+            ));
+        }
+        if !self.external_auth_token_env.is_empty() {
+            if !is_valid_env_var_name(&self.external_auth_token_env) {
+                return Err(GadgetronError::Config(
+                    "agent.brain.external_auth_token_env must be an env var name matching [A-Z_][A-Z0-9_]*".into(),
+                ));
+            }
+            if env
+                .get(&self.external_auth_token_env)
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err(GadgetronError::Config(format!(
+                    "agent.brain.external_auth_token_env {:?} is not set in the environment",
+                    self.external_auth_token_env
+                )));
+            }
+        }
         // V12 — recursion depth floor
         if self.shim.max_recursion_depth < 1 {
             return Err(GadgetronError::Config(
@@ -638,6 +790,19 @@ impl BrainConfig {
             }
         }
     }
+}
+
+fn contains_control_char(value: &str) -> bool {
+    value.chars().any(|c| c.is_control())
+}
+
+fn is_valid_env_var_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1200,106 @@ mod config_tests {
         brain.external_anthropic_api_key_env = "MY_FAKE_KEY_VAR".into();
         let env = FakeEnv::new().with("MY_FAKE_KEY_VAR", "");
         assert!(brain.validate_with_env(&empty_providers(), &env).is_err());
+    }
+
+    #[test]
+    fn external_proxy_validates_gateway_model_and_auth_token_env() {
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ExternalProxy;
+        brain.external_base_url = "http://127.0.0.1:3456".into();
+        brain.model = "openai/Qwen3-Coder-30B-A3B-Instruct".into();
+        brain.external_auth_token_env = "PENNY_CCR_AUTH_TOKEN".into();
+        brain.custom_model_option = true;
+        let env = FakeEnv::new().with("PENNY_CCR_AUTH_TOKEN", "test-token");
+
+        assert!(brain.validate_with_env(&empty_providers(), &env).is_ok());
+    }
+
+    #[test]
+    fn external_proxy_rejects_invalid_gateway_url() {
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ExternalProxy;
+        brain.external_base_url = "ftp://127.0.0.1:3456".into();
+
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("must start with http:// or https://"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn brain_model_rejects_control_characters() {
+        let mut brain = BrainConfig::default();
+        brain.model = "local\nmodel".into();
+
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("control characters"), "err: {err}");
+    }
+
+    #[test]
+    fn custom_model_option_requires_model() {
+        let mut brain = BrainConfig::default();
+        brain.custom_model_option = true;
+
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("custom_model_option requires agent.brain.model"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn auth_token_env_name_must_be_uppercase_identifier() {
+        let mut brain = BrainConfig::default();
+        brain.external_auth_token_env = "penny-token".into();
+
+        let err = brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("external_auth_token_env must be an env var name"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn update_agent_brain_settings_overlays_only_runtime_fields() {
+        let mut base = BrainConfig::default();
+        base.external_anthropic_api_key_env = "ANTHROPIC_REAL_KEY".into();
+        base.local_model = "vllm/llama".into();
+        base.shim.max_recursion_depth = 3;
+        let patch = UpdateAgentBrainSettingsRequest {
+            mode: BrainMode::ExternalProxy,
+            external_base_url: "http://127.0.0.1:3456".into(),
+            model: "openai/local-model".into(),
+            external_auth_token_env: "PENNY_CCR_AUTH_TOKEN".into(),
+            custom_model_option: true,
+        };
+
+        let next = patch.overlay_brain(&base);
+
+        assert_eq!(next.mode, BrainMode::ExternalProxy);
+        assert_eq!(next.external_base_url, "http://127.0.0.1:3456");
+        assert_eq!(next.model, "openai/local-model");
+        assert_eq!(next.external_auth_token_env, "PENNY_CCR_AUTH_TOKEN");
+        assert!(next.custom_model_option);
+        assert_eq!(next.external_anthropic_api_key_env, "ANTHROPIC_REAL_KEY");
+        assert_eq!(next.local_model, "vllm/llama");
+        assert_eq!(next.shim.max_recursion_depth, 3);
     }
 
     // ---- AgentConfig new fields (04 v2 §11.1 migration targets) ----

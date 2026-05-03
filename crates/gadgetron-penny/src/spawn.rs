@@ -32,6 +32,10 @@
 //! - `ANTHROPIC_API_KEY` — only for `external_anthropic` mode, read from
 //!   the operator-specified env var name (`brain.external_anthropic_api_key_env`)
 //!   via the injected `EnvResolver`
+//! - `ANTHROPIC_AUTH_TOKEN` — only when `brain.external_auth_token_env` names
+//!   an env var, read via the injected `EnvResolver`
+//! - `ANTHROPIC_MODEL` and `ANTHROPIC_CUSTOM_MODEL_OPTION` — only when
+//!   `brain.model` is configured
 //!
 //! # `kill_on_drop(true)` (SEC-B3)
 //!
@@ -408,6 +412,9 @@ pub enum SpawnError {
     #[error("agent.brain.external_anthropic_api_key_env {env_name:?} is not set")]
     MissingAnthropicKey { env_name: String },
 
+    #[error("agent.brain.external_auth_token_env {env_name:?} is not set")]
+    MissingAuthToken { env_name: String },
+
     #[error(
         "agent.brain.mode = 'gadgetron_local' is not functional in Phase 2A \
          (Path 1 — ADR-P2A-06); the shim lands in P2C"
@@ -556,12 +563,39 @@ fn apply_brain_mode_env(
         }
     }
 
+    if !config.brain.external_auth_token_env.is_empty() {
+        let token = env
+            .get(&config.brain.external_auth_token_env)
+            .unwrap_or_default();
+        if token.is_empty() {
+            return Err(SpawnError::MissingAuthToken {
+                env_name: config.brain.external_auth_token_env.clone(),
+            });
+        }
+        cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+    }
+
+    if !config.brain.model.is_empty() {
+        cmd.env("ANTHROPIC_MODEL", &config.brain.model);
+        if config.brain.custom_model_option {
+            cmd.env("ANTHROPIC_CUSTOM_MODEL_OPTION", &config.brain.model);
+        }
+    }
+
     Ok(())
 }
 
-fn apply_claude_args(cmd: &mut Command, mcp_config_path: &Path, allowed_tools: &[String]) {
+fn apply_claude_args(
+    cmd: &mut Command,
+    config: &AgentConfig,
+    mcp_config_path: &Path,
+    allowed_tools: &[String],
+) {
     // Command-line args — see `02-penny-agent.md Appendix B`.
     cmd.arg("-p");
+    if !config.brain.model.is_empty() {
+        cmd.arg("--model").arg(&config.brain.model);
+    }
     cmd.arg("--verbose");
     cmd.arg("--output-format").arg("stream-json");
     cmd.arg("--include-partial-messages");
@@ -622,7 +656,7 @@ pub fn build_claude_command_with_env(
     cmd.env_clear();
     apply_base_env_allowlist(&mut cmd, env);
     apply_brain_mode_env(&mut cmd, config, env)?;
-    apply_claude_args(&mut cmd, mcp_config_path, allowed_tools);
+    apply_claude_args(&mut cmd, config, mcp_config_path, allowed_tools);
 
     // `current_dir` pin for native-session continuity (ADR-P2A-06
     // addendum item 7 / §5.2.2 load-bearing): Claude Code derives the
@@ -943,6 +977,68 @@ mod tests {
         assert_eq!(base.as_deref(), Some("http://127.0.0.1:4000"));
         // No API key in proxy mode.
         assert!(!envs.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn build_claude_command_external_proxy_injects_model_auth_and_custom_option() {
+        let mut cfg = default_cfg();
+        cfg.brain.mode = BrainMode::ExternalProxy;
+        cfg.brain.external_base_url = "http://127.0.0.1:4000".into();
+        cfg.brain.model = "openai/Qwen3-Coder-30B-A3B-Instruct".into();
+        cfg.brain.external_auth_token_env = "PENNY_CCR_AUTH_TOKEN".into();
+        cfg.brain.custom_model_option = true;
+        let env = FakeEnv::new()
+            .with("HOME", "/h")
+            .with("PENNY_CCR_AUTH_TOKEN", "gateway-token");
+
+        let cmd = build_claude_command_with_env(&cfg, &mcp_path(), &[], &env).unwrap();
+        let args = args_of(&cmd);
+        let envs = envs_of(&cmd);
+
+        let model_flag = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("--model must be present");
+        assert_eq!(
+            args.get(model_flag + 1).map(String::as_str),
+            Some("openai/Qwen3-Coder-30B-A3B-Instruct")
+        );
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("gateway-token")
+        );
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "ANTHROPIC_MODEL")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("openai/Qwen3-Coder-30B-A3B-Instruct")
+        );
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "ANTHROPIC_CUSTOM_MODEL_OPTION")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("openai/Qwen3-Coder-30B-A3B-Instruct")
+        );
+    }
+
+    #[test]
+    fn build_claude_command_external_proxy_missing_auth_token_returns_err() {
+        let mut cfg = default_cfg();
+        cfg.brain.mode = BrainMode::ExternalProxy;
+        cfg.brain.external_base_url = "http://127.0.0.1:4000".into();
+        cfg.brain.external_auth_token_env = "PENNY_CCR_AUTH_TOKEN".into();
+        let env = FakeEnv::new().with("HOME", "/h");
+
+        let err = build_claude_command_with_env(&cfg, &mcp_path(), &[], &env).unwrap_err();
+
+        match err {
+            SpawnError::MissingAuthToken { env_name } => {
+                assert_eq!(env_name, "PENNY_CCR_AUTH_TOKEN")
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]

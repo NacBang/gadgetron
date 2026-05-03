@@ -11,6 +11,8 @@ import { useEffect, useState } from "react";
 // to wire OAuth in the demo.
 // ---------------------------------------------------------------------------
 
+const LEGACY_API_KEY_STORAGE_KEY = "gadgetron_api_key";
+
 function getServerRoot(): string {
   if (typeof document === "undefined") return "";
   const meta = document.querySelector<HTMLMetaElement>(
@@ -66,6 +68,7 @@ export default function LoginPage() {
             `HTTP ${res.status}`,
         );
       }
+      localStorage.removeItem(LEGACY_API_KEY_STORAGE_KEY);
       window.location.assign("/web/");
     } catch (e) {
       setErr((e as Error).message);

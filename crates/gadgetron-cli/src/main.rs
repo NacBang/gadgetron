@@ -1164,17 +1164,19 @@ struct PennyRouterRegistration {
     audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
     session_store: Arc<gadgetron_penny::SessionStore>,
     config_path_for_mcp: PathBuf,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
 }
 
 impl PennyRouterRegistration {
     fn register(self, providers: &mut HashMap<String, Arc<dyn LlmProvider>>) {
-        gadgetron_penny::register_with_router(
+        gadgetron_penny::register_with_router_and_brain_config(
             self.agent_cfg,
             self.registry,
             self.audit_sink,
             self.session_store,
             providers,
             Some(self.config_path_for_mcp),
+            self.brain_config,
         );
     }
 }
@@ -1194,6 +1196,7 @@ fn prepare_penny_router_registration(
     config_path: &std::path::Path,
     app_config: &AppConfig,
     pg_pool: Option<sqlx::PgPool>,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
@@ -1263,6 +1266,7 @@ fn prepare_penny_router_registration(
         audit_sink,
         session_store,
         config_path_for_mcp: canonicalize_config_path_for_mcp(config_path),
+        brain_config,
     }))
 }
 
@@ -1593,6 +1597,7 @@ async fn cmd_user_create(
         DEFAULT_TENANT_ID,
         &email,
         &name,
+        None,
         role_parsed,
         password.as_deref(),
     )
@@ -1853,6 +1858,7 @@ fn build_provider_maps(
     config: &AppConfig,
     config_path: &std::path::Path,
     pg_pool: Option<sqlx::PgPool>,
+    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
@@ -1881,12 +1887,24 @@ fn build_provider_maps(
         config_path,
         config,
         &mut providers_for_router,
-        pg_pool,
-        activity_bus,
-        candidate_coordinator,
-        approval_store,
+        PennyRegistrationRuntime {
+            pg_pool,
+            agent_brain,
+            activity_bus,
+            candidate_coordinator,
+            approval_store,
+        },
     );
     Ok((providers_ss, providers_for_router, penny_registry))
+}
+
+struct PennyRegistrationRuntime {
+    pg_pool: Option<sqlx::PgPool>,
+    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
+    candidate_coordinator:
+        Option<Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>>,
+    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
 }
 
 fn build_llm_router(providers: RouterProviderMap, config: &AppConfig) -> Arc<LlmRouter> {
@@ -1943,6 +1961,7 @@ fn build_workbench(
     >,
     penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
     pg_pool: Option<sqlx::PgPool>,
+    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
     catalog_path: Option<String>,
     bundles_dir: Option<String>,
     bundle_signing: gadgetron_core::config::BundleSigningConfig,
@@ -2040,6 +2059,7 @@ fn build_workbench(
         bundle_signing,
         gadget_modes,
         gadget_mode_reconfigurer,
+        agent_brain,
         agent_config_base: Some(agent_config),
     });
     // Prime the catalog from `[web] bundles_dir` / `catalog_path` at
@@ -2333,10 +2353,60 @@ async fn init_serve_runtime(
     let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> =
         Arc::new(gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new());
 
+    let mut startup_brain = config.agent.brain.clone();
+    if let Some(pool) = pg_pool.as_ref() {
+        match gadgetron_xaas::agent_brain::get_agent_brain_settings(
+            pool,
+            gadgetron_xaas::auth::bootstrap::DEFAULT_TENANT_ID,
+        )
+        .await
+        {
+            Ok(Some(saved)) => {
+                let request = gadgetron_core::agent::UpdateAgentBrainSettingsRequest {
+                    mode: saved.mode,
+                    external_base_url: saved.external_base_url,
+                    model: saved.model,
+                    external_auth_token_env: saved.external_auth_token_env,
+                    custom_model_option: saved.custom_model_option,
+                };
+                let candidate = request.overlay_brain(&startup_brain);
+                match candidate
+                    .validate_with_env(&config.providers, &gadgetron_core::agent::config::StdEnv)
+                {
+                    Ok(()) => {
+                        startup_brain = candidate;
+                        tracing::info!(
+                            target: "agent_config",
+                            mode = %startup_brain.mode.as_str(),
+                            has_model = !startup_brain.model.is_empty(),
+                            has_base_url = !startup_brain.external_base_url.is_empty(),
+                            has_auth_token_env = !startup_brain.external_auth_token_env.is_empty(),
+                            custom_model_option = startup_brain.custom_model_option,
+                            "agent brain settings loaded from database"
+                        );
+                    }
+                    Err(e) => tracing::warn!(
+                        target: "agent_config",
+                        error = %e,
+                        "persisted agent brain settings are invalid in this process environment; falling back to gadgetron.toml"
+                    ),
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                target: "agent_config",
+                error = %e,
+                "failed to load persisted agent brain settings; falling back to gadgetron.toml"
+            ),
+        }
+    }
+    let agent_brain = Arc::new(arc_swap::ArcSwap::from_pointee(startup_brain));
+
     let (providers_ss, providers_for_router, penny_registry) = build_provider_maps(
         config,
         config_path,
         pg_pool.clone(),
+        Some(agent_brain.clone()),
         Some(activity_bus.clone()),
         candidate_coordinator.clone(),
         Some(approval_store.clone()),
@@ -2350,6 +2420,7 @@ async fn init_serve_runtime(
         candidate_coordinator.clone(),
         penny_registry.clone(),
         pg_pool.clone(),
+        Some(agent_brain.clone()),
         config.web.catalog_path.clone(),
         config.web.bundles_dir.clone(),
         config.web.bundle_signing.clone(),
@@ -2709,12 +2780,7 @@ fn register_penny_if_configured(
     config_path: &std::path::Path,
     app_config: &AppConfig,
     providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
-    pg_pool: Option<sqlx::PgPool>,
-    activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
-    candidate_coordinator: Option<
-        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
-    >,
-    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
+    runtime: PennyRegistrationRuntime,
 ) -> Option<Arc<gadgetron_penny::GadgetRegistry>> {
     // We re-read the toml file to extract the `[knowledge]` section.
     // The main AppConfig load path doesn't include a `knowledge`
@@ -2724,10 +2790,11 @@ fn register_penny_if_configured(
     let registration = match prepare_penny_router_registration(
         config_path,
         app_config,
-        pg_pool,
-        activity_bus,
-        candidate_coordinator,
-        approval_store,
+        runtime.pg_pool,
+        runtime.agent_brain,
+        runtime.activity_bus,
+        runtime.candidate_coordinator,
+        runtime.approval_store,
     ) {
         Ok(Some(registration)) => registration,
         Ok(None) => {
@@ -4503,6 +4570,7 @@ wiki_max_page_bytes = 1048576
             None,
             None,
             None,
+            None,
             Default::default(),
             std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
             std::sync::Arc::new(
@@ -4612,6 +4680,7 @@ wiki_max_page_bytes = 1048576
         // build_workbench(None, None, None, None, None, None, Default::default(), ...) → Some (degraded-mode projection —
         // always wired so the endpoint returns a degraded bootstrap rather than 404).
         let workbench = build_workbench(
+            None,
             None,
             None,
             None,

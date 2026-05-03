@@ -124,6 +124,7 @@ fn make_state_with_coordinator(
             bundle_signing: Default::default(),
             gadget_modes: None,
             gadget_mode_reconfigurer: None,
+            agent_brain: None,
             agent_config_base: None,
         })),
         penny_shared_surface: None,

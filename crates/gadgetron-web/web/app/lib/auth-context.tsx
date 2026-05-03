@@ -98,6 +98,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         avatar_url: body.avatar_url ?? null,
         user_id: body.user_id ?? null,
       });
+      // A valid browser session should win over the legacy pasted API-key
+      // flow. Leaving an old localStorage key active makes the gateway reject
+      // requests before it can consider the session cookie.
+      if (typeof localStorage !== "undefined") {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+      setApiKey(null);
     } catch {
       setIdentity(null);
     }

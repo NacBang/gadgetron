@@ -176,7 +176,7 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
        * /web/brand/manycoresoft.png (wide aspect, e.g. 5:1) — drop
        * a different file at the same path to override. */}
       <span
-        className="flex items-baseline gap-2"
+        className="flex items-end gap-2"
         data-testid="brand"
         aria-label="ManyCoreSoft Gadgetron"
       >
@@ -184,9 +184,9 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
         <img
           src="/web/brand/manycoresoft.png"
           alt="ManyCoreSoft"
-          className="block h-5 w-auto shrink-0 self-end"
+          className="block h-[18px] w-auto shrink-0"
         />
-        <span className="text-sm font-semibold text-zinc-100">
+        <span className="translate-y-[3px] text-sm font-semibold leading-none text-zinc-100">
           Gadgetron
         </span>
       </span>
@@ -256,9 +256,9 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
               type="button"
               onClick={() => void handleLogout()}
               className="ml-1 rounded border border-zinc-800 px-1 py-0.5 text-[9px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
-              title="로그아웃"
+              title="Log out"
             >
-              logout
+              Log out
             </button>
           )}
         </span>
