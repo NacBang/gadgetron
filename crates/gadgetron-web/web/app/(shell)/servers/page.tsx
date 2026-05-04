@@ -15,6 +15,7 @@ import {
   WorkbenchPage,
 } from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
+import { counterToRollingRate } from "../../lib/metric-series";
 import { safeRandomUUID } from "../../lib/uuid";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,19 @@ interface Host {
   cpu_model?: string | null;
   cpu_cores?: number | null;
   gpus?: string[] | null;
+  gadgetini?: GadgetiniConfig | null;
+}
+
+interface GadgetiniConfig {
+  enabled: boolean;
+  host_name?: string | null;
+  ssh_user?: string | null;
+  ssh_port?: number | null;
+  parent_iface?: string | null;
+  ipv6_link_local?: string | null;
+  mac?: string | null;
+  web_port?: number | null;
+  last_ok_at?: string | null;
 }
 
 interface GpuStats {
@@ -75,6 +89,21 @@ interface NetworkStats {
   tx_bytes_total: number;
 }
 
+interface GadgetiniStats {
+  air_humidity_pct?: number | null;
+  air_temp_c?: number | null;
+  chassis_stable?: boolean | null;
+  coolant_delta_t_c?: number | null;
+  coolant_leak_detected?: boolean | null;
+  coolant_level_ok?: boolean | null;
+  coolant_temp_c?: number | null;
+  coolant_temp_inlet1_c?: number | null;
+  coolant_temp_inlet2_c?: number | null;
+  coolant_temp_outlet1_c?: number | null;
+  coolant_temp_outlet2_c?: number | null;
+  host_status_code?: number | null;
+}
+
 interface ServerStats {
   cpu: { util_pct: number; load_1m: number; load_5m: number; cores: number } | null;
   mem: {
@@ -89,6 +118,7 @@ interface ServerStats {
   gpus: GpuStats[];
   power: { psu_watts: number | null; gpu_watts: number | null } | null;
   network: NetworkStats[];
+  gadgetini?: GadgetiniStats | null;
   uptime_secs: number | null;
   fetched_at: string;
   warnings: string[];
@@ -428,6 +458,9 @@ function AddHostForm({
   const [keyPaste, setKeyPaste] = useState("");
   const [sshPw, setSshPw] = useState("");
   const [sudoPw, setSudoPw] = useState("");
+  const [includeGadgetini, setIncludeGadgetini] = useState(false);
+  const [customGadgetiniPassword, setCustomGadgetiniPassword] = useState(false);
+  const [gadgetiniPassword, setGadgetiniPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [progress, setProgress] = useState<Array<{ status: StepStatus; elapsed: number | null }>>(
     [],
@@ -502,6 +535,21 @@ function AddHostForm({
           notes?: string[];
         };
       };
+      let gadgetiniError: string | null = null;
+      if (includeGadgetini) {
+        const gadgetini: Record<string, unknown> = { enabled: true };
+        if (customGadgetiniPassword && gadgetiniPassword.trim()) {
+          gadgetini.password = gadgetiniPassword;
+        }
+        try {
+          await invokeAction(apiKey, "server-update", {
+            id: payload.id,
+            gadgetini,
+          });
+        } catch (e) {
+          gadgetiniError = (e as Error).message;
+        }
+      }
       // Cancel remaining timers and mark everything done.
       timers.forEach((t) => clearTimeout(t));
       setProgress((prev) => {
@@ -520,13 +568,18 @@ function AddHostForm({
           (payload.bootstrap.installed_pkgs?.join(", ") || "no pkg install") +
           (payload.bootstrap.gpu_detected
             ? ` · GPU(${payload.bootstrap.dcgm_enabled ? "DCGM" : "nvidia-smi"})`
-            : ""),
+            : "") +
+          (includeGadgetini && !gadgetiniError ? " · Gadgetini" : ""),
       });
+      if (gadgetiniError) {
+        toast.error("Gadgetini setup failed", { description: gadgetiniError });
+      }
       setHost("");
       setUser("");
       setSshPw("");
       setSudoPw("");
       setKeyPaste("");
+      setGadgetiniPassword("");
       onAdded();
       // Auto-minimize 2.5s after success so the operator can see the
       // final ✓ row before the form collapses out of the way. Cancelled
@@ -676,6 +729,39 @@ function AddHostForm({
           />
         </div>
       )}
+      <div className="rounded border border-zinc-800 bg-zinc-900/40 p-2">
+        <label className="flex items-center gap-2 text-[11px] text-zinc-300">
+          <input
+            type="checkbox"
+            checked={includeGadgetini}
+            onChange={(e) => setIncludeGadgetini(e.target.checked)}
+            className="accent-blue-500"
+          />
+          Include Gadgetini
+        </label>
+        {includeGadgetini && (
+          <div className="mt-2 flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-[11px] text-zinc-500">
+              <input
+                type="checkbox"
+                checked={customGadgetiniPassword}
+                onChange={(e) => setCustomGadgetiniPassword(e.target.checked)}
+                className="accent-blue-500"
+              />
+              Custom Gadgetini password
+            </label>
+            {customGadgetiniPassword && (
+              <Input
+                type="password"
+                placeholder="Gadgetini password"
+                value={gadgetiniPassword}
+                onChange={(e) => setGadgetiniPassword(e.target.value)}
+                className="font-mono text-xs"
+              />
+            )}
+          </div>
+        )}
+      </div>
       <div className="flex items-center justify-between gap-2">
         <p className="text-[10px] text-zinc-600">
           {mode === "password_bootstrap"
@@ -924,10 +1010,13 @@ function HostCard({
     }
     const firstNic = stats?.network?.[0];
     if (firstNic) {
-      m.push(`nic.${firstNic.iface}.rx_bps`);
+      m.push(`nic.${firstNic.iface}.rx_bytes_total`);
+    }
+    if (stats?.gadgetini) {
+      m.push("cooling.coolant_temp");
     }
     return m;
-  }, [stats?.gpus, stats?.network]);
+  }, [stats?.gadgetini, stats?.gpus, stats?.network]);
 
   const history = useHostMetricHistory(apiKey, host.id, sparkMetrics);
 
@@ -940,7 +1029,24 @@ function HostCard({
       ? `${stats.gpus[0].util_pct.toFixed(0)}%`
       : "—";
   const nic0 = stats?.network?.[0];
-  const nicCurrent = nic0 ? fmtBps(nic0.rx_bps) : "—";
+  const nicRxHistory = useMemo(
+    () =>
+      nic0
+        ? counterToRollingRate(
+            history[`nic.${nic0.iface}.rx_bytes_total`] ?? [],
+          )
+        : [],
+    [history, nic0],
+  );
+  const nicCurrent =
+    nicRxHistory.length > 0
+      ? fmtBps(nicRxHistory[nicRxHistory.length - 1].avg)
+      : nic0
+        ? fmtBps(nic0.rx_bps)
+        : "—";
+  const cooling = stats?.gadgetini;
+  const coolantCurrent =
+    cooling?.coolant_temp_c != null ? `${cooling.coolant_temp_c.toFixed(1)}°C` : "—";
   return (
     <div
       data-testid={`host-card-${host.host}`}
@@ -1261,6 +1367,23 @@ function HostCard({
           </span>
         </div>
       )}
+      {cooling && (
+        <div
+          className="flex items-center justify-between gap-2 text-[10px] text-zinc-500"
+          data-testid={`host-cooling-${host.id}`}
+        >
+          <span>cooling</span>
+          <span className="truncate font-mono text-zinc-300">
+            {coolantCurrent}
+            {cooling.coolant_delta_t_c != null
+              ? ` · Δ ${cooling.coolant_delta_t_c.toFixed(1)}°C`
+              : ""}
+            {cooling.air_temp_c != null ? ` · air ${cooling.air_temp_c.toFixed(0)}°C` : ""}
+            {cooling.coolant_leak_detected ? " · leak" : ""}
+            {cooling.coolant_level_ok === false ? " · level" : ""}
+          </span>
+        </div>
+      )}
       {stats?.uptime_secs != null && (
         <div className="flex items-center justify-between text-[10px] text-zinc-500">
           <span>uptime</span>
@@ -1330,9 +1453,17 @@ function HostCard({
             <Sparkline
               label={`nic ${nic0.iface} rx (5m)`}
               current={nicCurrent}
-              points={history[`nic.${nic0.iface}.rx_bps`] ?? []}
+              points={nicRxHistory}
               tone="zinc"
               yMin={0}
+            />
+          )}
+          {cooling && (
+            <Sparkline
+              label="coolant (5m)"
+              current={coolantCurrent}
+              points={history["cooling.coolant_temp"] ?? []}
+              tone="blue"
             />
           )}
         </div>
@@ -1654,7 +1785,6 @@ export default function ServersPage() {
       <Toaster theme="dark" richColors position="bottom-right" />
       <WorkbenchPage
         title="Servers"
-        subtitle="Register and monitor managed hosts for bundles, LLM serving, and CCR placement."
         headerTestId="servers-header"
         actions={
           <Button
@@ -1766,6 +1896,7 @@ export default function ServersPage() {
               statsMap[detailHost.id]?.stats?.temps.map(
                 (t) => `temp.${t.chip}.${t.label}`,
               ) ?? [],
+            cooling: Boolean(statsMap[detailHost.id]?.stats?.gadgetini),
           }}
           context={{
             totalRamBytes: statsMap[detailHost.id]?.stats?.mem?.total_bytes,

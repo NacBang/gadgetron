@@ -39,7 +39,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "../components/ui/dialog";
-import { useAuth } from "../lib/auth-context";
+import { authHeaders, useAuth } from "../lib/auth-context";
 import {
   ACTIVE_CONVERSATION_EVENT,
   getActiveConversationId,
@@ -70,6 +70,67 @@ interface HistoryMsg {
 interface ActiveHistoryState {
   past: HistoryMsg[];
   err: string | null;
+}
+
+interface PennyBrainSettings {
+  mode?: string;
+  external_base_url?: string;
+  model?: string;
+}
+
+function getApiBase(): string {
+  if (typeof document === "undefined") return "/api/v1/web";
+  const meta = document.querySelector<HTMLMetaElement>(
+    'meta[name="gadgetron-api-base"]',
+  );
+  const chatBase = meta?.content || "/v1";
+  return chatBase.replace(/\/v1$/, "/api/v1/web");
+}
+
+function endpointHost(baseUrl: string | undefined): string {
+  const trimmed = (baseUrl ?? "").trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return trimmed.replace(/^https?:\/\//, "").split("/")[0] ?? trimmed;
+  }
+}
+
+function pennyRuntimeSummary(settings: PennyBrainSettings): string {
+  const model = settings.model?.trim() || settings.mode?.trim() || "Penny";
+  const host = endpointHost(settings.external_base_url);
+  return host ? `${model} @ ${host}` : model;
+}
+
+function usePennyRuntimeSummary(enabled: boolean): string | null {
+  const { apiKey, identity } = useAuth();
+  const [summary, setSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled || (!apiKey && identity?.role !== "admin")) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/workbench/admin/agent/brain`, {
+          credentials: "include",
+          headers: authHeaders(apiKey),
+          cache: "no-store",
+        });
+        if (!res.ok || cancelled) return;
+        const body = (await res.json()) as PennyBrainSettings;
+        if (!cancelled) setSummary(pennyRuntimeSummary(body));
+      } catch {
+        // Runtime details are supplemental; keep the running badge visible.
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey, enabled, identity?.role]);
+
+  return summary;
 }
 
 function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
@@ -520,11 +581,21 @@ export default function Home() {
 
 function ActiveTaskIndicator() {
   const isRunning = useThread((s) => s.isRunning);
+  const runtimeSummary = usePennyRuntimeSummary(isRunning);
   if (!isRunning) return null;
   return (
-    <span className="flex items-center gap-1 rounded border border-blue-900/50 bg-blue-900/20 px-1.5 py-0.5 font-mono text-[10px] text-blue-400 motion-safe:animate-in motion-safe:fade-in duration-200">
+    <span
+      className="flex min-w-0 items-center gap-1 rounded border border-blue-900/50 bg-blue-900/20 px-1.5 py-0.5 font-mono text-[10px] text-blue-400 motion-safe:animate-in motion-safe:fade-in duration-200"
+      data-testid="active-task-indicator"
+      title={runtimeSummary ? `Penny runtime: ${runtimeSummary}` : undefined}
+    >
       <span className="size-1.5 rounded-full bg-blue-400 motion-safe:animate-pulse" />
-      running
+      <span className="shrink-0">running</span>
+      {runtimeSummary && (
+        <span className="min-w-0 max-w-[min(36vw,22rem)] truncate text-blue-300/80">
+          · {runtimeSummary}
+        </span>
+      )}
     </span>
   );
 }

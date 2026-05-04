@@ -25,6 +25,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::gadgetini::GadgetiniRecord;
 use crate::ssh::InventoryError;
 
 /// One registered host. Serialized to JSON verbatim.
@@ -89,6 +90,11 @@ pub struct HostRecord {
     pub cpu_cores: Option<u32>,
     #[serde(default)]
     pub gpus: Vec<String>,
+    /// Optional liquid-cooling MCU attached to this host. Stored as a
+    /// child monitor because the operational identity remains the
+    /// parent server. No passwords are serialized here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gadgetini: Option<GadgetiniRecord>,
 }
 
 fn default_ssh_port() -> u16 {
@@ -267,6 +273,7 @@ impl InventoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gadgetini::GadgetiniRecord;
 
     fn tmp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gsm-inv-{}", Uuid::new_v4()));
@@ -291,6 +298,7 @@ mod tests {
             cpu_model: None,
             cpu_cores: None,
             gpus: Vec::new(),
+            gadgetini: None,
         }
     }
 
@@ -341,5 +349,63 @@ mod tests {
         store.upsert(sample("b")).await.unwrap();
         let all = store.load().await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn legacy_inventory_without_gadgetini_deserializes() {
+        let raw = format!(
+            r#"[{{
+                "id":"{}",
+                "host":"10.0.0.10",
+                "ssh_user":"ubuntu",
+                "ssh_port":22,
+                "key_path":"/tmp/test-key",
+                "created_at":"2026-05-04T00:00:00Z",
+                "last_ok_at":null,
+                "tenant_id":"00000000-0000-0000-0000-000000000000",
+                "machine_id":null,
+                "dmi_uuid":null,
+                "dmi_serial":null,
+                "alias":null,
+                "cpu_model":null,
+                "cpu_cores":null,
+                "gpus":[]
+            }}]"#,
+            Uuid::new_v4()
+        );
+
+        let hosts: Vec<HostRecord> = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(hosts.len(), 1);
+        assert!(hosts[0].gadgetini.is_none());
+    }
+
+    #[test]
+    fn gadgetini_inventory_roundtrip_stores_no_password() {
+        let mut rec = sample("10.0.0.20");
+        rec.gadgetini = Some(GadgetiniRecord {
+            enabled: true,
+            host_name: Some("gadgetini.local".into()),
+            ssh_user: "gadgetini".into(),
+            ssh_port: 22,
+            parent_iface: "enp3s0f1np1".into(),
+            ipv6_link_local: "fe80::584d:7732:805c:a8f9".into(),
+            mac: Some("d8:3a:dd:71:ee:b5".into()),
+            key_path: PathBuf::from("/tmp/gadgetini-key"),
+            web_port: Some(80),
+            last_ok_at: None,
+        });
+
+        let serialized = serde_json::to_string(&rec).unwrap();
+        let restored: HostRecord = serde_json::from_str(&serialized).unwrap();
+
+        assert!(!serialized.contains("password"));
+        assert_eq!(
+            restored
+                .gadgetini
+                .as_ref()
+                .map(|g| g.ipv6_link_local.as_str()),
+            Some("fe80::584d:7732:805c:a8f9")
+        );
     }
 }

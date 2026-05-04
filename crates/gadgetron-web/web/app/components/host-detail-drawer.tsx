@@ -11,6 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { counterToRollingRate } from "../lib/metric-series";
 import { Button } from "./ui/button";
 
 // Drawer (full-height right panel) opened when an operator clicks a
@@ -63,6 +64,8 @@ function getApiBase(): string {
 /** A single series drawn as one line on the chart. */
 interface SeriesSpec {
   metric: string;
+  sourceMetric?: string;
+  derive?: "counter_rate";
   /** Legend label (e.g. "GPU 0" when the metric is `gpu.0.util`). */
   label: string;
   /** Hex color for the line/area. */
@@ -139,7 +142,12 @@ function wattsFmt(v: number): string {
 }
 
 function defaultGroups(
-  available: { gpus: Array<{ index: number; name: string }>; nics: string[]; temps: string[] },
+  available: {
+    gpus: Array<{ index: number; name: string }>;
+    nics: string[];
+    temps: string[];
+    cooling?: boolean;
+  },
 ): MetricGroup[] {
   const groups: MetricGroup[] = [
     {
@@ -256,6 +264,8 @@ function defaultGroups(
       fmt: bpsFmt,
       series: available.nics.map((iface, i) => ({
         metric: `nic.${iface}.rx_bps`,
+        sourceMetric: `nic.${iface}.rx_bytes_total`,
+        derive: "counter_rate",
         label: iface,
         tone: SERIES_PALETTE[i % SERIES_PALETTE.length],
       })),
@@ -267,6 +277,8 @@ function defaultGroups(
       fmt: bpsFmt,
       series: available.nics.map((iface, i) => ({
         metric: `nic.${iface}.tx_bps`,
+        sourceMetric: `nic.${iface}.tx_bytes_total`,
+        derive: "counter_rate",
         label: iface,
         tone: SERIES_PALETTE[i % SERIES_PALETTE.length],
       })),
@@ -287,6 +299,32 @@ function defaultGroups(
         label: metric.replace(/^temp\./, ""),
         tone: SERIES_PALETTE[i % SERIES_PALETTE.length],
       })),
+    });
+  }
+
+  if (available.cooling) {
+    groups.push({
+      id: "cooling",
+      label: "Liquid cooling",
+      unit: "°C",
+      fmt: celsiusFmt,
+      series: [
+        {
+          metric: "cooling.coolant_temp",
+          label: "coolant",
+          tone: SERIES_PALETTE[5],
+        },
+        {
+          metric: "cooling.air_temp",
+          label: "air",
+          tone: SERIES_PALETTE[2],
+        },
+        {
+          metric: "cooling.coolant_delta_t",
+          label: "delta",
+          tone: SERIES_PALETTE[6],
+        },
+      ],
     });
   }
 
@@ -318,7 +356,12 @@ export function HostDetailDrawer({
   apiKey: string | null;
   hostId: string;
   hostLabel: string;
-  available: { gpus: Array<{ index: number; name: string }>; nics: string[]; temps: string[] };
+  available: {
+    gpus: Array<{ index: number; name: string }>;
+    nics: string[];
+    temps: string[];
+    cooling?: boolean;
+  };
   context: HostDetailContext;
 }) {
   const groups = useMemo(() => defaultGroups(available), [available]);
@@ -433,7 +476,7 @@ export function HostDetailDrawer({
         if (!enabled.has(g.id)) continue;
         for (const s of g.series) {
           if (hiddenSeries.has(s.metric)) continue;
-          wantMetrics.add(s.metric);
+          wantMetrics.add(s.sourceMetric ?? s.metric);
         }
       }
       const results = await Promise.all(
@@ -627,12 +670,16 @@ export function HostDetailDrawer({
               let metaResolution: string | undefined;
               let metaLag = 0;
               for (const s of g.series) {
-                const body = series[s.metric];
+                const body = series[s.sourceMetric ?? s.metric];
                 if (!body) continue;
                 metaResolution = body.resolution;
                 metaLag = Math.max(metaLag, body.refresh_lag_seconds);
                 const bucket = new Map<number, number>();
-                for (const p of body.points) {
+                const points =
+                  s.derive === "counter_rate"
+                    ? counterToRollingRate(body.points)
+                    : body.points;
+                for (const p of points) {
                   const ts = new Date(p.ts).getTime();
                   const v = g.transform
                     ? g.transform(p.avg, context)

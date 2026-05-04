@@ -44,6 +44,7 @@
 
 pub mod bootstrap;
 pub mod collectors;
+pub mod gadgetini;
 pub mod gadgets;
 pub mod inventory;
 pub mod metrics;

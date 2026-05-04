@@ -27,6 +27,10 @@ const subjectHook = vi.hoisted(() => ({
   },
 }));
 
+const threadHook = vi.hoisted(() => ({
+  isRunning: false,
+}));
+
 vi.mock("@assistant-ui/react", () => ({
   ThreadPrimitive: {
     Root: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -54,7 +58,7 @@ vi.mock("@assistant-ui/react", () => ({
   },
   useComposerRuntime: () => composerMocks,
   useThread: (selector: (state: { isRunning: boolean; messages: unknown[] }) => unknown) =>
-    selector({ isRunning: false, messages: [] }),
+    selector({ isRunning: threadHook.isRunning, messages: [] }),
   useMessage: (selector: (state: { content: unknown[]; status: null }) => unknown) =>
     selector({ content: [], status: null }),
   useThreadViewport: (selector: (state: { isAtBottom: boolean }) => unknown) =>
@@ -67,8 +71,15 @@ vi.mock("../../app/components/slash-autocomplete", () => ({
 
 vi.mock("../../app/lib/auth-context", () => ({
   useAuth: () => ({
+    apiKey: null,
+    identity: {
+      role: "admin",
+      display_name: "Local Admin",
+      email: "admin@example.local",
+    },
     clearKey: vi.fn(),
   }),
+  authHeaders: () => ({}),
 }));
 
 vi.mock("../../app/lib/workbench-subject-context", () => ({
@@ -118,6 +129,7 @@ describe("Chat page subject context", () => {
       refreshSubject: vi.fn(),
       clearActiveSubject: vi.fn(),
     };
+    threadHook.isRunning = false;
   });
 
   it("uses English-first composer copy", () => {
@@ -226,6 +238,42 @@ describe("Chat page subject context", () => {
       expect(
         screen.getByText("Penny returned with the stored answer."),
       ).toBeTruthy();
+    });
+  });
+
+  it("shows the active Penny runtime next to the running indicator", async () => {
+    threadHook.isRunning = true;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/workbench/admin/agent/brain")) {
+        return {
+          ok: true,
+          json: async () => ({
+            mode: "external_proxy",
+            external_base_url: "http://10.100.1.5:8101",
+            model: "gemma4",
+            external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+            custom_model_option: false,
+            source: "database",
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({}),
+      } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Home />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("active-task-indicator").textContent).toContain(
+        "running",
+      );
+      expect(screen.getByTestId("active-task-indicator").textContent).toContain(
+        "gemma4 @ 10.100.1.5:8101",
+      );
     });
   });
 });

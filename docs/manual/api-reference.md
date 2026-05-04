@@ -180,7 +180,7 @@ These bodies surface from the Penny subprocess boundary (`gadgetron-penny`) and 
 }
 ```
 
-`penny_timeout` (HTTP 504, `server_error`) — wallclock exceeded `penny.request_timeout_secs`. 504 carries RFC 9110 §15.5.5 semantics: the upstream (Penny subprocess) did not respond in time; the caller may retry with a simpler request or raise the limit:
+`penny_timeout` (HTTP 504, `server_error`) — Penny subprocess produced no first stdout event/tool call for `penny.request_timeout_secs`. This is a startup/no-first-event watchdog, not a total wall-clock cap: once Penny emits text or starts a tool call, long-running silent tool work is not killed by this timeout. 504 carries RFC 9110 §15.5.5 semantics; the caller may retry with a simpler request, check the CCR/upstream LLM, or raise the startup idle limit:
 
 ```json
 {

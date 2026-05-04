@@ -304,6 +304,158 @@ describe("AdminPage", () => {
     });
   });
 
+  it("saves a Penny gateway token value without requiring an env var name", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("/workbench/admin/users?")) {
+        return jsonResponse({ users: [], returned: 0 });
+      }
+
+      if (
+        url.endsWith("/workbench/admin/agent/brain") &&
+        init?.method === "PATCH"
+      ) {
+        return jsonResponse({
+          mode: "external_proxy",
+          external_base_url: "http://10.100.1.5:8101",
+          model: "gemma4",
+          external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+          custom_model_option: false,
+          source: "database",
+        });
+      }
+
+      if (url.includes("/workbench/admin/agent/brain")) {
+        return jsonResponse({
+          mode: "claude_max",
+          external_base_url: "",
+          model: "",
+          external_auth_token_env: "",
+          custom_model_option: false,
+          source: "config_file",
+        });
+      }
+
+      if (url.includes("/workbench/admin/llm/endpoints")) {
+        return jsonResponse({ endpoints: [], returned: 0 });
+      }
+
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    global.fetch = fetchMock;
+
+    render(<AdminPage />);
+
+    await userEvent.selectOptions(
+      await screen.findByDisplayValue("claude_max"),
+      "external_proxy",
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("Leave empty to use the Claude Code default model"),
+      "gemma4",
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("http://127.0.0.1:8080"),
+      "http://10.100.1.5:8101",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Penny Auth Token"),
+      "test-secret-token",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const updateCall = fetchMock.mock.calls.find(([input, init]) => {
+        return (
+          String(input).endsWith("/workbench/admin/agent/brain") &&
+          init?.method === "PATCH"
+        );
+      });
+      expect(updateCall).toBeTruthy();
+      const body = JSON.parse(String(updateCall?.[1]?.body));
+      expect(body).toMatchObject({
+        mode: "external_proxy",
+        external_base_url: "http://10.100.1.5:8101",
+        model: "gemma4",
+        external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+        external_auth_token_value: "test-secret-token",
+      });
+    });
+    expect((screen.getByLabelText("Penny Auth Token") as HTMLInputElement).value).toBe("");
+  });
+
+  it("hides external gateway fields and clears stale external settings for Claude Max", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("/workbench/admin/users?")) {
+        return jsonResponse({ users: [], returned: 0 });
+      }
+
+      if (
+        url.endsWith("/workbench/admin/agent/brain") &&
+        init?.method === "PATCH"
+      ) {
+        return jsonResponse({
+          mode: "claude_max",
+          external_base_url: "",
+          model: "",
+          external_auth_token_env: "",
+          custom_model_option: false,
+          source: "database",
+        });
+      }
+
+      if (url.includes("/workbench/admin/agent/brain")) {
+        return jsonResponse({
+          mode: "claude_max",
+          external_base_url: "http://127.0.0.1:8080",
+          model: "",
+          external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+          custom_model_option: true,
+          source: "database",
+        });
+      }
+
+      if (url.includes("/workbench/admin/llm/endpoints")) {
+        return jsonResponse({ endpoints: [], returned: 0 });
+      }
+
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    global.fetch = fetchMock;
+
+    render(<AdminPage />);
+
+    await screen.findByDisplayValue("claude_max");
+    expect(screen.queryByText("Gateway URL")).toBeNull();
+    expect(screen.queryByText("Auth Token")).toBeNull();
+    expect(screen.queryByText("Advanced auth reference")).toBeNull();
+    expect(screen.queryByText("Use ANTHROPIC_CUSTOM_MODEL_OPTION")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const updateCall = fetchMock.mock.calls.find(([input, init]) => {
+        return (
+          String(input).endsWith("/workbench/admin/agent/brain") &&
+          init?.method === "PATCH"
+        );
+      });
+      expect(updateCall).toBeTruthy();
+      const body = JSON.parse(String(updateCall?.[1]?.body));
+      expect(body).toMatchObject({
+        mode: "claude_max",
+        external_base_url: "",
+        model: "",
+        external_auth_token_env: "",
+        custom_model_option: false,
+      });
+      expect(body).not.toHaveProperty("external_auth_token_value");
+    });
+  });
+
   it("auto-detects an LLM endpoint from host and port", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -486,6 +638,8 @@ describe("AdminPage", () => {
     expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Create CCR" }));
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    expect(screen.getByTestId("ccr-bridge-direction-icon")).toBeTruthy();
+    expect(screen.queryByText("gemma4 → Anthropic-compatible endpoint")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Create bridge" }));
 
     await waitFor(() => {
@@ -504,6 +658,86 @@ describe("AdminPage", () => {
         base_url: "http://127.0.0.1:3456",
         port: 3456,
         auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+      });
+    });
+  });
+
+  it("applies a CCR endpoint to Penny with a write-only token value", async () => {
+    const ccrEndpoint = {
+      id: "77777777-7777-7777-7777-777777777777",
+      name: "gemma4-ccr",
+      kind: "ccr",
+      protocol: "anthropic_messages",
+      base_url: "http://10.100.1.5:8101",
+      model_id: "gemma4",
+      auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+      health_status: "ok",
+      last_latency_ms: 12,
+      created_at: "2026-05-03T00:00:00Z",
+      updated_at: "2026-05-03T00:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("/workbench/admin/users?")) {
+        return jsonResponse({ users: [], returned: 0 });
+      }
+
+      if (url.includes("/workbench/admin/agent/brain")) {
+        return jsonResponse({
+          mode: "claude_max",
+          external_base_url: "",
+          model: "",
+          external_auth_token_env: "",
+          custom_model_option: false,
+          source: "config_file",
+        });
+      }
+
+      if (
+        url.endsWith("/workbench/admin/llm/endpoints/77777777-7777-7777-7777-777777777777/use") &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({
+          endpoint: ccrEndpoint,
+          brain: {
+            mode: "external_proxy",
+            external_base_url: ccrEndpoint.base_url,
+            model: ccrEndpoint.model_id,
+            external_auth_token_env: ccrEndpoint.auth_token_env,
+            custom_model_option: true,
+            source: "database",
+          },
+        });
+      }
+
+      if (url.endsWith("/workbench/admin/llm/endpoints")) {
+        return jsonResponse({ endpoints: [ccrEndpoint], returned: 1 });
+      }
+
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    global.fetch = fetchMock;
+
+    render(<AdminPage />);
+
+    await screen.findByText("gemma4-ccr");
+    await userEvent.click(screen.getByRole("button", { name: "Use" }));
+    expect(screen.getByText("Apply gemma4-ccr to Penny")).toBeTruthy();
+    await userEvent.type(screen.getByLabelText("Endpoint Auth Token"), "test-secret-token");
+    await userEvent.click(screen.getByRole("button", { name: "Apply to Penny" }));
+
+    await waitFor(() => {
+      const useCall = fetchMock.mock.calls.find(([input, init]) => {
+        return (
+          String(input).endsWith(
+            "/workbench/admin/llm/endpoints/77777777-7777-7777-7777-777777777777/use",
+          ) && init?.method === "POST"
+        );
+      });
+      expect(useCall).toBeTruthy();
+      expect(JSON.parse(String(useCall?.[1]?.body))).toMatchObject({
+        external_auth_token_value: "test-secret-token",
       });
     });
   });

@@ -14,6 +14,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::gadgetini::GadgetiniStats;
 use crate::ssh::{exec, SshError, SshTarget};
 
 /// Composite snapshot returned by `server.stats`.
@@ -26,6 +27,8 @@ pub struct ServerStats {
     pub gpus: Vec<GpuStats>,
     pub power: Option<PowerStats>,
     pub network: Vec<NetworkStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gadgetini: Option<GadgetiniStats>,
     pub uptime_secs: Option<u64>,
     pub fetched_at: chrono::DateTime<chrono::Utc>,
     pub warnings: Vec<String>,

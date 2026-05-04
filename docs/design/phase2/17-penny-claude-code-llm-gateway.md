@@ -240,7 +240,7 @@ CREATE TABLE agent_brain_settings (
 );
 ```
 
-actual token 값은 저장하지 않는다. `external_auth_token_env` 는 env var 이름만 저장한다.
+actual token 값은 DB에 저장하지 않는다. `external_auth_token_env` 는 env var 이름만 저장한다. Admin UI는 usability를 위해 token 값을 받을 수 있지만, PATCH handler는 이를 현재 서버 프로세스 env에 주입한 뒤 reference 이름만 persist한다.
 
 #### 2.2.3 Claude Code subprocess env/args
 
@@ -583,7 +583,7 @@ Reviewer note: graphify confirms the hot node to modify, but current graph label
 `gadgetron-web`:
 
 - Admin page loads current settings.
-- Save sends PATCH body with `mode`, `external_base_url`, `model`, `external_auth_token_env`, `custom_model_option`.
+- Save sends PATCH body with `mode`, `external_base_url`, `model`, `external_auth_token_env`, optional write-only `external_auth_token_value`, and `custom_model_option`.
 - non-admin / 403 path keeps existing admin key override behavior.
 
 ### 4.2 테스트 하네스
