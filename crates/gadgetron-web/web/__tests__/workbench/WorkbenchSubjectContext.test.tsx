@@ -75,6 +75,54 @@ describe("workbench subject context", () => {
     expect(readConversationSubject("conv-missing")).toBeNull();
   });
 
+  it("stores and restores compact related refs", () => {
+    writeConversationSubject("conv-related", {
+      id: "server-1",
+      kind: "server",
+      bundle: "servers",
+      title: "dg5R-PRO6000-8",
+      related: [
+        {
+          id: "finding-1",
+          kind: "log_finding",
+          title: "SMART pending sectors",
+          status: "critical",
+          href: "/web/findings?host=server-1",
+        },
+      ],
+    });
+
+    const stored = readConversationSubject("conv-related");
+    expect(stored?.related?.[0]).toMatchObject({
+      id: "finding-1",
+      kind: "log_finding",
+      title: "SMART pending sectors",
+      status: "critical",
+    });
+  });
+
+  it("drops malformed related refs without dropping the subject", () => {
+    window.localStorage.setItem(
+      "gadgetron_subject_conv-bad-related",
+      JSON.stringify({
+        id: "server-1",
+        kind: "server",
+        bundle: "servers",
+        title: "dg5R-PRO6000-8",
+        related: [
+          { id: 42, title: "bad" },
+          { id: "ok", kind: "server", title: "OK" },
+        ],
+      }),
+    );
+
+    const stored = readConversationSubject("conv-bad-related");
+    expect(stored?.title).toBe("dg5R-PRO6000-8");
+    expect(stored?.related).toEqual([
+      { id: "ok", kind: "server", title: "OK" },
+    ]);
+  });
+
   it("returns null for malformed stored subjects", () => {
     localStorage.setItem("gadgetron_subject_conv-bad", "{bad json");
 
