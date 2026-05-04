@@ -46,7 +46,9 @@ vi.mock("@assistant-ui/react", () => ({
       children: ReactNode;
       onSubmit?: (event: FormEvent<HTMLFormElement>) => void;
     }) => <form onSubmit={onSubmit}>{children}</form>,
-    Input: () => <textarea data-testid="composer-input" />,
+    Input: (props: { placeholder?: string }) => (
+      <textarea data-testid="composer-input" placeholder={props.placeholder} />
+    ),
     Cancel: ({ children }: { children: ReactNode }) => <>{children}</>,
     Send: ({ children }: { children: ReactNode }) => <>{children}</>,
   },
@@ -112,6 +114,14 @@ describe("Chat page subject context", () => {
       refreshSubject: vi.fn(),
       clearActiveSubject: vi.fn(),
     };
+  });
+
+  it("uses English-first composer copy", () => {
+    render(<Home />);
+
+    expect(screen.getByTestId("composer-input").getAttribute("placeholder")).toBe(
+      "Ask Penny or type /command",
+    );
   });
 
   it("renders the active subject banner with source link", () => {

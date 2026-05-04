@@ -857,27 +857,27 @@ function AssistantStatusBadge() {
   const reason = status.reason;
   const labelMap: Record<string, { text: string; tint: string }> = {
     cancelled: {
-      text: "중지됨",
+      text: "Stopped",
       tint: "text-amber-300/90 border-amber-400/30 bg-amber-400/10",
     },
     length: {
-      text: "길이 제한",
+      text: "Length limit",
       tint: "text-sky-300/90 border-sky-400/30 bg-sky-400/10",
     },
     "content-filter": {
-      text: "필터 차단",
+      text: "Filtered",
       tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
     },
     "tool-calls": {
-      text: "도구 보류",
+      text: "Tool pending",
       tint: "text-blue-300/90 border-blue-400/30 bg-blue-400/10",
     },
     error: {
-      text: "오류 종료",
+      text: "Error",
       tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
     },
     other: {
-      text: "조기 종료",
+      text: "Interrupted",
       tint: "text-muted-foreground border-border/60 bg-muted/40",
     },
   };
@@ -981,7 +981,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
     >
       <SlashAutocomplete onLocalExecute={executeLocalCommand} />
       <ComposerPrimitive.Input
-        placeholder="질문하거나 /command 를 입력하세요"
+        placeholder="Ask Penny or type /command"
         rows={1}
         autoFocus
         className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
