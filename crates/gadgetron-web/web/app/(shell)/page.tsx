@@ -40,7 +40,10 @@ import {
   DialogFooter,
 } from "../components/ui/dialog";
 import { useAuth } from "../lib/auth-context";
-import { getActiveConversationId } from "../lib/conversation-id";
+import {
+  ACTIVE_CONVERSATION_EVENT,
+  getActiveConversationId,
+} from "../lib/conversation-id";
 import { useWorkbenchSubject } from "../lib/workbench-subject-context";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +65,11 @@ interface HistoryMsg {
   content: string;
   blocks?: HistoryBlock[];
   ts?: string | null;
+}
+
+interface ActiveHistoryState {
+  past: HistoryMsg[];
+  err: string | null;
 }
 
 function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
@@ -135,36 +143,51 @@ function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
 /// conversation is active — callers can use `.length === 0` as the
 /// "no history" signal. Shared between `<PastMessages>` and the
 /// `<HistoryAwareEmpty>` wrapper so both render off the same fetch.
-function useActiveHistory(): { past: HistoryMsg[]; err: string | null } {
+function useActiveHistory(): ActiveHistoryState {
   const [past, setPast] = useState<HistoryMsg[]>([]);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    const id = getActiveConversationId();
-    if (!id) {
-      setPast([]);
-      return;
-    }
-    const base =
-      document
-        .querySelector<HTMLMetaElement>('meta[name="gadgetron-api-base"]')
-        ?.content ?? "/v1";
-    const root = base.replace(/\/v\d+$/, "");
     let cancelled = false;
-    (async () => {
+    let seq = 0;
+    const load = async () => {
+      const requestSeq = ++seq;
+      const id = getActiveConversationId();
+      if (!id) {
+        setPast([]);
+        setErr(null);
+        return;
+      }
+      const base =
+        document
+          .querySelector<HTMLMetaElement>('meta[name="gadgetron-api-base"]')
+          ?.content ?? "/v1";
+      const root = base.replace(/\/v\d+$/, "");
       try {
+        setErr(null);
         const res = await fetch(
           `${root}/api/v1/web/workbench/conversations/${id}/messages`,
           { credentials: "include" },
         );
         if (!res.ok) return;
         const body = (await res.json()) as { messages: HistoryMsg[] };
-        if (!cancelled) setPast(body.messages ?? []);
+        if (!cancelled && requestSeq === seq) setPast(body.messages ?? []);
       } catch (e) {
-        if (!cancelled) setErr((e as Error).message);
+        if (!cancelled && requestSeq === seq) setErr((e as Error).message);
       }
-    })();
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "hidden") return;
+      void load();
+    };
+    void load();
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener(ACTIVE_CONVERSATION_EVENT, refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener(ACTIVE_CONVERSATION_EVENT, refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, []);
   return { past, err };
@@ -175,8 +198,13 @@ function useActiveHistory(): { past: HistoryMsg[]; err: string | null } {
 /// resumed conversation jumps straight into the past-messages render
 /// followed by the date divider, making it feel like a continuous
 /// thread instead of a "new chat" welcome landing.
-function HistoryAwareEmpty({ children }: { children: ReactNode }) {
-  const { past } = useActiveHistory();
+function HistoryAwareEmpty({
+  children,
+  past,
+}: {
+  children: ReactNode;
+  past: HistoryMsg[];
+}) {
   if (past.length > 0) return null;
   return <ThreadPrimitive.Empty>{children}</ThreadPrimitive.Empty>;
 }
@@ -227,8 +255,8 @@ function coalesce(past: HistoryMsg[]): RenderGroup[] {
   return groups;
 }
 
-function PastMessages() {
-  const { past, err } = useActiveHistory();
+function PastMessages({ history }: { history: ActiveHistoryState }) {
+  const { past, err } = history;
   const { identity } = useAuth();
   const groups = useMemo(() => coalesce(past), [past]);
   if (groups.length === 0) return null;
@@ -437,6 +465,7 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [slashHelpOpen, setSlashHelpOpen] = useState(false);
   const { clearKey } = useAuth();
+  const history = useActiveHistory();
 
   return (
     <>
@@ -455,8 +484,8 @@ export default function Home() {
         <div className="relative flex flex-1 flex-col overflow-hidden">
           <ThreadPrimitive.Viewport className="penny-scroll flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-[min(1400px,92vw)] px-4 py-6">
-              <PastMessages />
-              <HistoryAwareEmpty>
+              <PastMessages history={history} />
+              <HistoryAwareEmpty past={history.past}>
                 <EmptyState />
               </HistoryAwareEmpty>
               <ThreadPrimitive.Messages
