@@ -29,6 +29,23 @@ export interface WorkbenchSubject {
   facts?: Record<string, unknown>;
   prompt?: string;
   createdAt?: string;
+  related?: WorkbenchRelatedRef[];
+}
+
+export interface WorkbenchRelatedRef {
+  id: string;
+  kind:
+    | "server"
+    | "log_finding"
+    | "metric"
+    | "knowledge_page"
+    | "approval"
+    | "activity";
+  title: string;
+  subtitle?: string;
+  href?: string;
+  status?: "ok" | "info" | "warning" | "critical" | "pending";
+  summary?: string;
 }
 
 interface WorkbenchSubjectContextValue {
@@ -61,6 +78,51 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function parseRelatedRef(value: unknown): WorkbenchRelatedRef | null {
+  if (!isRecord(value)) return null;
+  const id = value.id;
+  const kind = value.kind;
+  const title = value.title;
+  if (
+    typeof id !== "string" ||
+    typeof kind !== "string" ||
+    typeof title !== "string"
+  ) {
+    return null;
+  }
+  const allowedKinds = new Set([
+    "server",
+    "log_finding",
+    "metric",
+    "knowledge_page",
+    "approval",
+    "activity",
+  ]);
+  if (!allowedKinds.has(kind)) return null;
+  const status =
+    typeof value.status === "string" &&
+    ["ok", "info", "warning", "critical", "pending"].includes(value.status)
+      ? (value.status as WorkbenchRelatedRef["status"])
+      : undefined;
+  return {
+    id,
+    kind: kind as WorkbenchRelatedRef["kind"],
+    title,
+    subtitle: optionalString(value.subtitle),
+    href: optionalString(value.href),
+    status,
+    summary: optionalString(value.summary),
+  };
+}
+
+function parseRelated(value: unknown): WorkbenchRelatedRef[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const related = value
+    .map(parseRelatedRef)
+    .filter((ref): ref is WorkbenchRelatedRef => Boolean(ref));
+  return related.length > 0 ? related : undefined;
+}
+
 function parseSubject(value: unknown): WorkbenchSubject | null {
   if (!isRecord(value)) return null;
   const id = value.id;
@@ -87,6 +149,7 @@ function parseSubject(value: unknown): WorkbenchSubject | null {
     facts,
     prompt: optionalString(value.prompt),
     createdAt: optionalString(value.createdAt),
+    related: parseRelated(value.related),
   };
 }
 
@@ -146,6 +209,15 @@ export function buildSubjectDraft(subject: WorkbenchSubject): string {
     lines.push("```json");
     lines.push(JSON.stringify(subject.facts, null, 2));
     lines.push("```");
+  }
+  if (subject.related && subject.related.length > 0) {
+    lines.push("");
+    lines.push("Related:");
+    for (const ref of subject.related) {
+      const parts = [ref.kind, ref.status, ref.href].filter(Boolean).join(" | ");
+      lines.push(`- ${ref.title}${parts ? ` (${parts})` : ""}`);
+      if (ref.summary) lines.push(`  ${ref.summary}`);
+    }
   }
   return lines.join("\n");
 }

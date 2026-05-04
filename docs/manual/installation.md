@@ -1014,7 +1014,7 @@ Seven signals that catch most real production failures. Each row gives the signa
 | Migration failure | `_sqlx_migrations.success = false` OR last row `installed_on` is older than the deploy | sqlx rolls back failed migrations — re-deploy or hand-apply per §6.4. |
 | 401 surge | `rate({target="gadgetron_audit",status="error"}[5m]) > baseline×10` | Brute-force attempt or client regression — cross-check `api_keys.revoked_at` for legitimate keys, `audit_log.api_key_id = nil` for anonymous 401s. |
 | 429 pressure | `/admin/billing/events` showing bursts near `quota_configs.daily_used_cents` limits | Quota too tight for observed load — tune `[quota_rate_limit]` per `configuration.md §Production tuning recipes`. |
-| Penny subprocess stuck | `{target="penny_subprocess"}` entries without a matching completion for > `request_timeout_secs` | Claude Code subprocess hung — check `ps -ef \| grep claude`, verify `[agent].request_timeout_secs` isn't higher than the reverse-proxy read timeout. |
+| Penny subprocess stuck | no first Penny stream event/tool call for > `request_timeout_secs` | Claude Code subprocess, CCR, or upstream LLM hung before first activity — check `ps -ef \| grep claude`, CCR logs, and verify reverse-proxy read timeout is higher than `[agent].request_timeout_secs`. |
 | Disk growth | `audit_log` / `billing_events` / `tool_audit_events` row count growing with no pruning cron | Apply `auth.md §Audit log retention and tenant lifecycle` pruning recipe. |
 
 #### 7.4 What's not provided

@@ -37,10 +37,12 @@
 //!
 //! # Timeout
 //!
-//! `AgentConfig.request_timeout_secs` caps the total time between
-//! subprocess spawn and `message_stop`. On timeout, the driver
-//! SIGTERMs the child via `start_kill` and emits
-//! `PennyErrorKind::Timeout`.
+//! `AgentConfig.request_timeout_secs` is a startup/no-first-event
+//! watchdog. Once Claude Code emits a user-visible text chunk or tool
+//! call, the turn is allowed to run longer than this; long-running MCP
+//! tool calls can be silent while they wait on remote work. If no
+//! event arrives within the configured window, the driver SIGTERMs the
+//! child via `start_kill` and emits `PennyErrorKind::Timeout`.
 //!
 //! # Stdin contract (ADR-P2A-01 Part 2, verified 2026-04-13 on 2.1.104)
 //!
@@ -82,6 +84,7 @@ use crate::stream::{event_to_chat_chunks_ex, parse_event, StreamJsonEvent};
 /// P2A — Claude Code emits chunks faster than HTTP can drain them
 /// anyway, and back-pressure is desired on slow clients.
 const CHUNK_CHANNEL_CAPACITY: usize = 32;
+const SILENT_AGENT_ERROR_RETRIES: usize = 1;
 
 /// Internal session-driver state resolved from `AgentConfig.session_mode`,
 /// `ChatRequest.conversation_id`, and `SessionStore` lookup. Not public —
@@ -351,7 +354,7 @@ fn emit_tool_audit_if_needed(
     audit_sink: &dyn GadgetAuditEventSink,
     conversation_id: Option<&str>,
     claude_session_uuid: Option<&str>,
-) {
+) -> bool {
     // Tool use arrives in two shapes on the stream-json wire:
     //   1. Legacy top-level `StreamJsonEvent::ToolUse` — kept for
     //      forward compat / older Claude Code versions.
@@ -370,8 +373,9 @@ fn emit_tool_audit_if_needed(
                 _ => None,
             })
             .collect(),
-        _ => return,
+        _ => return false,
     };
+    let mut emitted = false;
     for (name, input) in calls {
         // Claude Code sanitizes dots in MCP tool identifiers to
         // underscores (`wiki.list` → `wiki_list` on the wire). Undo
@@ -399,7 +403,9 @@ fn emit_tool_audit_if_needed(
             tenant_id: None,
             arguments_summary,
         });
+        emitted = true;
     }
+    emitted
 }
 
 /// Render a tool-call input JSON into a short one-line preview for
@@ -511,15 +517,16 @@ fn spawn_claude_process(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn stream_stdout_until_deadline(
+async fn stream_stdout_with_idle_timeout(
     stdout: ChildStdout,
     request: &ChatRequest,
     tool_metadata: &HashMap<String, GadgetMetadata>,
     audit_sink: &dyn GadgetAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
-    deadline: tokio::time::Instant,
+    idle_timeout_secs: u64,
     audit_conv_id: Option<&str>,
     audit_session_uuid_ref: Option<&str>,
+    emitted_chunks: &mut bool,
 ) -> Result<StreamLoopOutcome> {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
@@ -531,51 +538,57 @@ async fn stream_stdout_until_deadline(
 
     loop {
         line.clear();
-        tokio::select! {
-            read = reader.read_line(&mut line) => {
-                let n = read.map_err(|e| GadgetronError::Penny {
-                    kind: PennyErrorKind::AgentError {
-                        exit_code: -1,
-                        stderr_redacted: String::new(),
-                    },
-                    message: format!("stdout read error: {e}"),
-                })?;
-                if n == 0 {
-                    return Ok(StreamLoopOutcome::Eof);
-                }
-                match parse_event(&line) {
-                    Ok(Some(event)) => {
-                        if matches!(&event, StreamJsonEvent::StreamEvent { .. }) {
-                            has_streamed_deltas = true;
-                        }
-                        emit_tool_audit_if_needed(
-                            &event,
-                            tool_metadata,
-                            audit_sink,
-                            audit_conv_id,
-                            audit_session_uuid_ref,
-                        );
-                        for chunk in event_to_chat_chunks_ex(event, request, has_streamed_deltas) {
-                            // Back-pressure: if the receiver is gone,
-                            // stop driving — the caller will cleanly
-                            // terminate the subprocess.
-                            if tx.send(Ok(chunk)).await.is_err() {
-                                return Ok(StreamLoopOutcome::ReceiverDropped);
-                            }
-                        }
-                    }
-                    Ok(None) => { /* empty line or unknown variant */ }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "penny_stream",
-                            error = %e,
-                            "stream-json line did not parse; skipping"
-                        );
-                    }
+        let read = if !*emitted_chunks {
+            tokio::select! {
+                read = reader.read_line(&mut line) => read,
+                _ = tokio::time::sleep(Duration::from_secs(idle_timeout_secs)) => {
+                    return Ok(StreamLoopOutcome::TimedOut);
                 }
             }
-            _ = tokio::time::sleep_until(deadline) => {
-                return Ok(StreamLoopOutcome::TimedOut);
+        } else {
+            reader.read_line(&mut line).await
+        };
+        let n = read.map_err(|e| GadgetronError::Penny {
+            kind: PennyErrorKind::AgentError {
+                exit_code: -1,
+                stderr_redacted: String::new(),
+            },
+            message: format!("stdout read error: {e}"),
+        })?;
+        if n == 0 {
+            return Ok(StreamLoopOutcome::Eof);
+        }
+        match parse_event(&line) {
+            Ok(Some(event)) => {
+                if matches!(&event, StreamJsonEvent::StreamEvent { .. }) {
+                    has_streamed_deltas = true;
+                }
+                if emit_tool_audit_if_needed(
+                    &event,
+                    tool_metadata,
+                    audit_sink,
+                    audit_conv_id,
+                    audit_session_uuid_ref,
+                ) {
+                    *emitted_chunks = true;
+                }
+                for chunk in event_to_chat_chunks_ex(event, request, has_streamed_deltas) {
+                    // Back-pressure: if the receiver is gone,
+                    // stop driving — the caller will cleanly
+                    // terminate the subprocess.
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        return Ok(StreamLoopOutcome::ReceiverDropped);
+                    }
+                    *emitted_chunks = true;
+                }
+            }
+            Ok(None) => { /* empty line or unknown variant */ }
+            Err(e) => {
+                tracing::warn!(
+                    target: "penny_stream",
+                    error = %e,
+                    "stream-json line did not parse; skipping"
+                );
             }
         }
     }
@@ -711,6 +724,73 @@ async fn drive(
     // 0. Resolve spawn mode (native session branching).
     let spawn_mode = resolve_spawn_mode(config, request, session_store).await?;
     let driver_ctx = DriverContext::from_spawn_mode(&spawn_mode);
+    let mut attempt = 0;
+
+    loop {
+        let mut emitted_chunks = false;
+        match drive_attempt(
+            config,
+            allowed_tools,
+            request,
+            tool_metadata,
+            audit_sink,
+            tx,
+            penny_home,
+            config_path,
+            &driver_ctx,
+            &mut emitted_chunks,
+        )
+        .await
+        {
+            Ok(()) => break,
+            Err(e) if should_retry_agent_error(&e, attempt, emitted_chunks) => {
+                tracing::warn!(
+                    target: "penny_subprocess",
+                    attempt = attempt + 1,
+                    "penny subprocess failed before output; retrying once"
+                );
+                attempt += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // 9. Success: bump session bookkeeping (last_used + turn_count).
+    if let Some(store) = session_store {
+        if let Some(id) = request.conversation_id.as_deref() {
+            store.touch(id);
+        }
+    }
+
+    Ok(())
+}
+
+fn should_retry_agent_error(err: &GadgetronError, attempt: usize, emitted_chunks: bool) -> bool {
+    attempt < SILENT_AGENT_ERROR_RETRIES
+        && !emitted_chunks
+        && matches!(
+            err,
+            GadgetronError::Penny {
+                kind: PennyErrorKind::AgentError { .. },
+                ..
+            }
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_attempt(
+    config: &AgentConfig,
+    allowed_tools: &[String],
+    request: &ChatRequest,
+    tool_metadata: &HashMap<String, GadgetMetadata>,
+    audit_sink: &dyn GadgetAuditEventSink,
+    tx: &mpsc::Sender<Result<ChatChunk>>,
+    penny_home: Option<&PennyHome>,
+    config_path: Option<&std::path::Path>,
+    driver_ctx: &DriverContext,
+    emitted_chunks: &mut bool,
+) -> Result<()> {
     let mut process = spawn_claude_process(
         config,
         allowed_tools,
@@ -719,28 +799,24 @@ async fn drive(
         config_path,
     )?;
 
-    // 5. Compute the deadline BEFORE writing stdin — per ADR-P2A-06
-    //    Implementation status addendum item 5 (B-2 regression). The
-    //    `request_timeout_secs` contract in `02-penny-agent.md §5` covers
-    //    the full subprocess span from spawn to `message_stop`; computing
-    //    the deadline after `feed_stdin` would let long chat histories or
-    //    slow OS pipe buffers consume seconds outside the timeout window.
-    //    Regression-locked by `deadline_covers_stdin_write_time`.
-    let timeout_secs = config.request_timeout_secs;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    // 5. `request_timeout_secs` is an idle watchdog, not a total wall-clock
+    //    cap. Long active turns must keep running as long as stream-json
+    //    events continue to arrive.
+    let idle_timeout_secs = config.request_timeout_secs;
 
     // 6. Feed stdin with mode-appropriate payload and close.
     feed_stdin_with_mode(process.stdin, request, driver_ctx.stdin_mode).await?;
 
-    match stream_stdout_until_deadline(
+    match stream_stdout_with_idle_timeout(
         process.stdout,
         request,
         tool_metadata,
         audit_sink,
         tx,
-        deadline,
+        idle_timeout_secs,
         driver_ctx.audit_conversation_id.as_deref(),
         driver_ctx.audit_session_uuid.as_deref(),
+        emitted_chunks,
     )
     .await?
     {
@@ -766,9 +842,10 @@ async fn drive(
             let _ = tokio::time::timeout(Duration::from_secs(2), stderr_handle).await;
             return Err(GadgetronError::Penny {
                 kind: PennyErrorKind::Timeout {
-                    seconds: timeout_secs,
+                    seconds: idle_timeout_secs,
                 },
-                message: "penny subprocess exceeded request_timeout_secs".to_string(),
+                message: "penny subprocess produced no output before request_timeout_secs"
+                    .to_string(),
             });
         }
         StreamLoopOutcome::Eof => {}
@@ -780,13 +857,6 @@ async fn drive(
     // 8. Collect stderr from the sink task.
     let stderr_redacted = collect_stderr(process.stderr_handle).await;
     ensure_successful_exit(status, stderr_redacted)?;
-
-    // 9. Success: bump session bookkeeping (last_used + turn_count).
-    if let Some(store) = session_store {
-        if let Some(id) = request.conversation_id.as_deref() {
-            store.touch(id);
-        }
-    }
 
     Ok(())
 }
@@ -1359,38 +1429,29 @@ mod tests {
         assert_eq!(err.error_code(), "penny_session_corrupted");
     }
 
-    // ---- B-2 regression lock (ADR-P2A-06 addendum item 5) ----
+    // ---- Timeout semantics regression locks ----
 
     #[test]
-    fn deadline_covers_stdin_write_time() {
-        // Source-level witness that `let deadline = Instant::now() + timeout`
-        // is computed BEFORE `feed_stdin(stdin, request)` is called in the
-        // `drive` function. Otherwise stdin write time escapes
-        // `request_timeout_secs` — on long chat histories or a slow OS pipe
-        // buffer, `feed_stdin` can consume seconds that the contract says
-        // MUST be inside the deadline (see 02-penny-agent.md §5 contract
-        // language: "caps the total time between subprocess spawn and
-        // `message_stop`"). A behavioral test would require a fake claude
-        // that blocks stdin reads; Step 21's `fake_claude` will add it, but
-        // this regression lock closes the door until then.
-        //
-        // The needles are split into two fragments per test fragment to
-        // avoid matching the test body itself via include_str! recursion.
+    fn penny_stream_uses_idle_timeout_not_total_wallclock_deadline() {
+        // Long-running Penny turns are valid as long as Claude Code keeps
+        // producing stream-json events. The request timeout is therefore an
+        // idle watchdog, not a total wall-clock deadline.
         const SOURCE: &str = include_str!("session.rs");
-        let deadline_needle = ["let dead", "line = tokio::time::Instant::now"].concat();
-        let feed_needle = ["feed_stdin_with_mo", "de(stdin, request, stdin_mode)"].concat();
-        let deadline_idx = SOURCE
-            .find(&deadline_needle)
-            .expect("`let deadline = tokio::time::Instant::now()` not found in session.rs");
-        let feed_idx = SOURCE
-            .find(&feed_needle)
-            .expect("`feed_stdin_with_mode(stdin, request, stdin_mode)` not found in session.rs");
+        let total_deadline_needle = ["sleep_until", "(deadline)"].concat();
         assert!(
-            deadline_idx < feed_idx,
-            "B-2 regression: `let deadline` (byte {deadline_idx}) must precede \
-             `feed_stdin_with_mode` (byte {feed_idx}) so stdin write time \
-             is included in request_timeout_secs. Per ADR-P2A-06 Implementation \
-             status addendum item 5 and 02-penny-agent.md §5 contract."
+            !SOURCE.contains(&total_deadline_needle),
+            "Penny must not kill active long-running turns on a fixed total wall-clock deadline"
+        );
+        let idle_timeout_needle = ["Duration::from_secs", "(idle_timeout_secs)"].concat();
+        assert!(
+            SOURCE.contains(&idle_timeout_needle),
+            "Penny should still stop truly silent subprocesses via an idle timeout"
+        );
+        let first_event_guard_needle = ["if !*", "emitted_chunks"].concat();
+        assert!(
+            SOURCE.contains(&first_event_guard_needle),
+            "The idle timeout must only apply before the first user-visible event/tool call; \
+             long-running tool calls can be silent for more than request_timeout_secs"
         );
     }
 
@@ -1427,6 +1488,44 @@ mod tests {
              addendum item 6 — without the wrapper the drive task hangs on \
              SIGTERM-noop subprocesses."
         );
+    }
+
+    #[test]
+    fn retry_policy_silently_retries_first_agent_error_before_output() {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::AgentError {
+                exit_code: 1,
+                stderr_redacted: String::new(),
+            },
+            message: "penny subprocess exited with error".to_string(),
+        };
+
+        assert!(should_retry_agent_error(&err, 0, false));
+        assert!(
+            !should_retry_agent_error(&err, 0, true),
+            "do not auto-retry after user-visible chunks or tool calls were emitted"
+        );
+        assert!(
+            !should_retry_agent_error(&err, 1, false),
+            "only one silent retry is allowed"
+        );
+    }
+
+    #[test]
+    fn retry_policy_does_not_retry_timeout_or_spawn_failures() {
+        let timeout = GadgetronError::Penny {
+            kind: PennyErrorKind::Timeout { seconds: 120 },
+            message: "timeout".to_string(),
+        };
+        let spawn_failed = GadgetronError::Penny {
+            kind: PennyErrorKind::SpawnFailed {
+                reason: "missing binary".to_string(),
+            },
+            message: "spawn failed".to_string(),
+        };
+
+        assert!(!should_retry_agent_error(&timeout, 0, false));
+        assert!(!should_retry_agent_error(&spawn_failed, 0, false));
     }
 
     // ---- §5.2.10 items 1-6: resolve_spawn_mode tests ----

@@ -195,3 +195,101 @@ test("shell chrome persists across Chat → Wiki → Dashboard navigation", asyn
   await expect(page.getByTestId("left-rail")).toBeVisible();
   await expect(page.getByTestId("chat-header")).toBeVisible();
 });
+
+test("finding discussion opens chat with side-panel context", async ({
+  page,
+}) => {
+  const finding = {
+    id: "finding-smart-1",
+    host_id: "host-1",
+    source: "journal",
+    severity: "critical",
+    category: "storage",
+    fingerprint: "smartd-sdb-pending",
+    summary: "SMART pending sectors on /dev/sdb",
+    excerpt:
+      "smartd: Device: /dev/sdb [SAT], 6 Currently unreadable sectors",
+    ts_first: "2026-05-04T00:00:00Z",
+    ts_last: "2026-05-04T00:30:00Z",
+    count: 6,
+    classified_by: "rule",
+    cause: "Disk media is reporting unreadable sectors.",
+    solution: "Plan replacement and avoid write-heavy repair attempts.",
+    remediation: null,
+    comment_count: 0,
+  };
+
+  await page.route("**/workbench/actions/loganalysis-list", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        result: {
+          payload: [
+            {
+              text: JSON.stringify({ findings: [finding] }),
+            },
+          ],
+        },
+      }),
+    });
+  });
+  await page.route("**/workbench/actions/server-list", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        result: {
+          payload: [
+            {
+              text: JSON.stringify({
+                hosts: [
+                  {
+                    id: "host-1",
+                    host: "10.100.1.110",
+                    alias: "dg5R-PRO6000-8",
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      }),
+    });
+  });
+  await page.route("**/workbench/actions/loganalysis-status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        result: {
+          payload: [
+            {
+              text: JSON.stringify({ hosts: [] }),
+            },
+          ],
+        },
+      }),
+    });
+  });
+
+  await page.goto("/web/findings");
+  await expect(page.getByText("SMART pending sectors on /dev/sdb")).toBeVisible();
+  await page.getByRole("button", { name: "Ask Penny" }).first().click();
+
+  await page.waitForURL(/\/web\/?$/);
+  await expect(page.getByTestId("active-subject-banner")).toContainText(
+    "Talking about",
+  );
+  await expect(page.getByTestId("active-subject-banner")).toContainText(
+    "SMART pending sectors",
+  );
+
+  await page.getByTestId("evidence-pane-expand-btn").click();
+  await expect(page.getByTestId("context-panel")).toContainText(
+    "SMART pending sectors",
+  );
+  await expect(page.getByTestId("context-panel")).toContainText(
+    "dg5R-PRO6000-8",
+  );
+});

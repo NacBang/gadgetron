@@ -16,6 +16,7 @@ import {
   StatusBadge,
   WorkbenchPage,
 } from "../../components/workbench";
+import { ArrowRight } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { useAuth } from "../../lib/auth-context";
@@ -71,6 +72,7 @@ interface UpdateAgentBrainSettingsRequest {
   external_base_url: string;
   model: string;
   external_auth_token_env: string;
+  external_auth_token_value?: string;
   custom_model_option: boolean;
 }
 
@@ -109,6 +111,7 @@ interface ManagedHostRow {
 type AdminTab = "penny-runtime" | "users" | "access";
 
 const MAX_AVATAR_FILE_BYTES = 2 * 1024 * 1024;
+const DEFAULT_PENNY_AUTH_TOKEN_ENV = "PENNY_CCR_AUTH_TOKEN";
 
 function authHeaders(apiKey: string | null): Record<string, string> {
   return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
@@ -395,13 +398,18 @@ async function probeLlmEndpoint(
 async function useLlmEndpoint(
   apiKey: string | null,
   endpointId: string,
+  body?: { external_auth_token_value?: string },
 ): Promise<void> {
   const res = await fetch(
     `${getApiBase()}/workbench/admin/llm/endpoints/${endpointId}/use`,
     {
       method: "POST",
       credentials: "include",
-      headers: authHeaders(apiKey),
+      headers: {
+        ...authHeaders(apiKey),
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
     },
   );
   if (!res.ok) {
@@ -640,6 +648,7 @@ function PennyBrainSettings({
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [authEnv, setAuthEnv] = useState("");
+  const [authTokenValue, setAuthTokenValue] = useState("");
   const [customModel, setCustomModel] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -651,6 +660,7 @@ function PennyBrainSettings({
     setBaseUrl(next.external_base_url);
     setModel(next.model);
     setAuthEnv(next.external_auth_token_env);
+    setAuthTokenValue("");
     setCustomModel(next.custom_model_option);
   }, []);
 
@@ -675,12 +685,18 @@ function PennyBrainSettings({
     setSaving(true);
     setErr(null);
     try {
+      const usesExternalRuntime = mode !== "claude_max";
+      const tokenValue = usesExternalRuntime ? authTokenValue.trim() : "";
+      const tokenEnv = usesExternalRuntime
+        ? authEnv.trim() || (tokenValue ? DEFAULT_PENNY_AUTH_TOKEN_ENV : "")
+        : "";
       const next = await updateAgentBrainSettings(apiKey, {
         mode,
-        external_base_url: baseUrl.trim(),
+        external_base_url: usesExternalRuntime ? baseUrl.trim() : "",
         model: model.trim(),
-        external_auth_token_env: authEnv.trim(),
-        custom_model_option: customModel,
+        external_auth_token_env: tokenEnv,
+        ...(tokenValue ? { external_auth_token_value: tokenValue } : {}),
+        custom_model_option: usesExternalRuntime ? customModel : false,
       });
       applySettings(next);
       toast.success("Penny LLM settings saved");
@@ -689,7 +705,18 @@ function PennyBrainSettings({
     } finally {
       setSaving(false);
     }
-  }, [apiKey, applySettings, authEnv, baseUrl, customModel, mode, model]);
+  }, [
+    apiKey,
+    applySettings,
+    authEnv,
+    authTokenValue,
+    baseUrl,
+    customModel,
+    mode,
+    model,
+  ]);
+
+  const usesExternalRuntime = mode !== "claude_max";
 
   return (
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
@@ -746,36 +773,71 @@ function PennyBrainSettings({
             autoComplete="off"
           />
         </div>
-        <div>
-          <label className="mb-1 block text-[11px] text-zinc-500">Gateway URL</label>
-          <Input
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="http://127.0.0.1:8080"
-            autoComplete="off"
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-[11px] text-zinc-500">Auth Token Env</label>
-          <Input
-            value={authEnv}
-            onChange={(e) => setAuthEnv(e.target.value)}
-            placeholder="PENNY_CCR_AUTH_TOKEN"
-            autoComplete="off"
-          />
-        </div>
+        {usesExternalRuntime && (
+          <>
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">Gateway URL</label>
+              <Input
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="http://127.0.0.1:8080"
+                autoComplete="off"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">Auth Token</label>
+              <Input
+                type="password"
+                value={authTokenValue}
+                onChange={(e) => setAuthTokenValue(e.target.value)}
+                placeholder="Paste gateway token value"
+                autoComplete="new-password"
+                aria-label="Penny Auth Token"
+              />
+            </div>
+            <details className="md:col-span-2 rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+              <summary className="cursor-pointer text-[11px] text-zinc-400">
+                Advanced auth reference
+              </summary>
+              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] md:items-end">
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">
+                    Token reference
+                  </label>
+                  <Input
+                    value={authEnv}
+                    onChange={(e) => setAuthEnv(e.target.value)}
+                    placeholder={DEFAULT_PENNY_AUTH_TOKEN_ENV}
+                    autoComplete="off"
+                    aria-label="Penny Auth Token Env"
+                  />
+                </div>
+                <p className="text-[11px] leading-5 text-zinc-500">
+                  The token value is applied to the running server and is not returned
+                  by this screen. Gadgetron stores only the reference name.
+                </p>
+              </div>
+            </details>
+          </>
+        )}
       </div>
 
       <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <label className="inline-flex items-center gap-2 text-[11px] text-zinc-400">
-          <input
-            type="checkbox"
-            checked={customModel}
-            onChange={(e) => setCustomModel(e.target.checked)}
-            className="h-4 w-4 rounded border-zinc-700 bg-zinc-950"
-          />
-          Use ANTHROPIC_CUSTOM_MODEL_OPTION
-        </label>
+        {usesExternalRuntime ? (
+          <label className="inline-flex items-center gap-2 text-[11px] text-zinc-400">
+            <input
+              type="checkbox"
+              checked={customModel}
+              onChange={(e) => setCustomModel(e.target.checked)}
+              className="h-4 w-4 rounded border-zinc-700 bg-zinc-950"
+            />
+            Use ANTHROPIC_CUSTOM_MODEL_OPTION
+          </label>
+        ) : (
+          <p className="text-[11px] text-zinc-500">
+            Claude Max uses the local Claude Code login. Gateway settings are cleared on save.
+          </p>
+        )}
         <Button onClick={() => void save()} disabled={saving || !canCall}>
           {saving ? "Saving…" : "Save"}
         </Button>
@@ -812,6 +874,8 @@ function LlmEndpointSettings({
   const [bridgePort, setBridgePort] = useState("3456");
   const [bridgeBaseUrl, setBridgeBaseUrl] = useState("http://127.0.0.1:3456");
   const [bridgeAuthEnv, setBridgeAuthEnv] = useState("PENNY_CCR_AUTH_TOKEN");
+  const [useTokenEndpoint, setUseTokenEndpoint] = useState<LlmEndpointRow | null>(null);
+  const [useTokenValue, setUseTokenValue] = useState("");
 
   const refresh = useCallback(async () => {
     if (!canCall) return;
@@ -928,11 +992,18 @@ function LlmEndpointSettings({
   );
 
   const useForPenny = useCallback(
-    async (endpoint: LlmEndpointRow) => {
+    async (endpoint: LlmEndpointRow, authTokenValue?: string) => {
       setBusy(`use:${endpoint.id}`);
       setErr(null);
       try {
-        await useLlmEndpoint(apiKey, endpoint.id);
+        const token = authTokenValue?.trim();
+        await useLlmEndpoint(
+          apiKey,
+          endpoint.id,
+          token ? { external_auth_token_value: token } : undefined,
+        );
+        setUseTokenEndpoint(null);
+        setUseTokenValue("");
         toast.success(`Penny endpoint applied: ${endpoint.name}`);
       } catch (e) {
         setErr((e as Error).message);
@@ -941,6 +1012,19 @@ function LlmEndpointSettings({
       }
     },
     [apiKey],
+  );
+
+  const startUseForPenny = useCallback(
+    (endpoint: LlmEndpointRow) => {
+      if (endpoint.auth_token_env) {
+        setUseTokenEndpoint(endpoint);
+        setUseTokenValue("");
+        setErr(null);
+        return;
+      }
+      void useForPenny(endpoint);
+    },
+    [useForPenny],
   );
 
   const openBridgeForm = useCallback(
@@ -1236,8 +1320,14 @@ function LlmEndpointSettings({
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
               <h3 className="text-xs font-medium text-zinc-200">CCR bridge</h3>
-              <p className="text-[11px] text-zinc-500">
-                {bridgeSource.name} → Anthropic-compatible endpoint
+              <p className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                <span>{bridgeSource.name}</span>
+                <ArrowRight
+                  className="size-3 text-zinc-600"
+                  aria-hidden="true"
+                  data-testid="ccr-bridge-direction-icon"
+                />
+                <span>Anthropic-compatible endpoint</span>
               </p>
             </div>
             <Button
@@ -1328,6 +1418,68 @@ function LlmEndpointSettings({
         </div>
       )}
 
+      {useTokenEndpoint && (
+        <div className="mt-3 rounded border border-blue-900/50 bg-blue-950/20 p-3">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-xs font-medium text-blue-100">
+                Apply {useTokenEndpoint.name} to Penny
+              </h3>
+              <p className="text-[11px] leading-5 text-blue-200/70">
+                Paste the auth token for {useTokenEndpoint.auth_token_env}. If the
+                server already has that environment variable, use the existing env.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setUseTokenEndpoint(null);
+                setUseTokenValue("");
+              }}
+              className="h-7 px-2 text-[11px]"
+            >
+              Close
+            </Button>
+          </div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-end">
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">
+                Endpoint Auth Token
+              </label>
+              <Input
+                type="password"
+                value={useTokenValue}
+                onChange={(e) => setUseTokenValue(e.target.value)}
+                placeholder="Paste token value"
+                autoComplete="new-password"
+                aria-label="Endpoint Auth Token"
+              />
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void useForPenny(useTokenEndpoint)}
+              disabled={busy === `use:${useTokenEndpoint.id}` || !canCall}
+            >
+              Use existing env
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void useForPenny(useTokenEndpoint, useTokenValue)}
+              disabled={
+                busy === `use:${useTokenEndpoint.id}` ||
+                !canCall ||
+                !useTokenValue.trim()
+              }
+            >
+              Apply to Penny
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="mt-4 overflow-x-auto rounded border border-zinc-800">
         <table className="w-full text-sm">
           <thead className="bg-zinc-950 text-[11px] uppercase text-zinc-500">
@@ -1400,7 +1552,7 @@ function LlmEndpointSettings({
                       variant="ghost"
                       onClick={() =>
                         endpoint.protocol === "anthropic_messages"
-                          ? void useForPenny(endpoint)
+                          ? startUseForPenny(endpoint)
                           : void openBridgeForm(endpoint)
                       }
                       disabled={busy === `use:${endpoint.id}` || busy === `hosts:${endpoint.id}`}

@@ -341,6 +341,107 @@ pub fn stats_to_samples(tenant_id: Uuid, host_id: Uuid, stats: &ServerStats) -> 
         }
     }
 
+    // --- Liquid cooling MCU (Gadgetini) ---
+    if let Some(cooling) = &stats.gadgetini {
+        let labels = json!({ "source": "gadgetini" });
+        if let Some(v) = cooling.air_humidity_pct {
+            out.push(mk(
+                "cooling.air_humidity".into(),
+                v as f64,
+                Some("pct"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.air_temp_c {
+            out.push(mk(
+                "cooling.air_temp".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.chassis_stable {
+            out.push(mk(
+                "cooling.chassis_stable".into(),
+                if v { 1.0 } else { 0.0 },
+                None,
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_delta_t_c {
+            out.push(mk(
+                "cooling.coolant_delta_t".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_leak_detected {
+            out.push(mk(
+                "cooling.coolant_leak_detected".into(),
+                if v { 1.0 } else { 0.0 },
+                None,
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_level_ok {
+            out.push(mk(
+                "cooling.coolant_level_ok".into(),
+                if v { 1.0 } else { 0.0 },
+                None,
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_temp_c {
+            out.push(mk(
+                "cooling.coolant_temp".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_temp_inlet1_c {
+            out.push(mk(
+                "cooling.coolant_inlet1_temp".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_temp_inlet2_c {
+            out.push(mk(
+                "cooling.coolant_inlet2_temp".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_temp_outlet1_c {
+            out.push(mk(
+                "cooling.coolant_outlet1_temp".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.coolant_temp_outlet2_c {
+            out.push(mk(
+                "cooling.coolant_outlet2_temp".into(),
+                v as f64,
+                Some("celsius"),
+                labels.clone(),
+            ));
+        }
+        if let Some(v) = cooling.host_status_code {
+            out.push(mk(
+                "cooling.host_status_code".into(),
+                v as f64,
+                Some("code"),
+                labels,
+            ));
+        }
+    }
+
     // --- Uptime ---
     if let Some(uptime) = stats.uptime_secs {
         out.push(mk(
@@ -483,6 +584,7 @@ mod tests {
     use crate::collectors::{
         CpuStats, DiskStats, GpuStats, MemStats, NetworkStats, PowerStats, ServerStats, TempReading,
     };
+    use crate::gadgetini::GadgetiniStats;
 
     fn fixture() -> ServerStats {
         ServerStats {
@@ -537,6 +639,7 @@ mod tests {
                 rx_bytes_total: 1_000_000_000,
                 tx_bytes_total: 500_000_000,
             }],
+            gadgetini: None,
             uptime_secs: Some(3600),
             fetched_at: Utc::now(),
             warnings: vec![],
@@ -602,6 +705,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stats_to_samples_fans_out_gadgetini_cooling_metrics() {
+        let mut stats = fixture();
+        stats.gadgetini = Some(GadgetiniStats {
+            air_humidity_pct: Some(21.0),
+            air_temp_c: Some(34.0),
+            chassis_stable: Some(true),
+            coolant_delta_t_c: Some(0.8),
+            coolant_leak_detected: Some(false),
+            coolant_level_ok: Some(true),
+            coolant_temp_c: Some(-27.9),
+            coolant_temp_inlet1_c: Some(39.2),
+            coolant_temp_inlet2_c: Some(40.9),
+            coolant_temp_outlet1_c: Some(40.0),
+            coolant_temp_outlet2_c: Some(40.8),
+            host_status_code: Some(0),
+        });
+
+        let samples = stats_to_samples(Uuid::nil(), Uuid::nil(), &stats);
+        let names: Vec<&str> = samples.iter().map(|s| s.metric.as_str()).collect();
+
+        assert!(names.contains(&"cooling.air_humidity"));
+        assert!(names.contains(&"cooling.air_temp"));
+        assert!(names.contains(&"cooling.coolant_temp"));
+        assert!(names.contains(&"cooling.coolant_inlet1_temp"));
+        assert!(names.contains(&"cooling.coolant_outlet1_temp"));
+        assert!(names.contains(&"cooling.coolant_delta_t"));
+        assert!(names.contains(&"cooling.coolant_leak_detected"));
+        assert!(names.contains(&"cooling.coolant_level_ok"));
+        assert!(names.contains(&"cooling.host_status_code"));
+
+        let coolant_temp = samples
+            .iter()
+            .find(|s| s.metric == "cooling.coolant_temp")
+            .expect("coolant temp sample");
+        assert!((coolant_temp.value - -27.9).abs() < 0.001);
+        assert_eq!(coolant_temp.unit.as_deref(), Some("celsius"));
+        assert_eq!(coolant_temp.labels, json!({ "source": "gadgetini" }));
     }
 
     #[test]

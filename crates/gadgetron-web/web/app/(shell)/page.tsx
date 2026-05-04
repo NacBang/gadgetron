@@ -39,8 +39,11 @@ import {
   DialogDescription,
   DialogFooter,
 } from "../components/ui/dialog";
-import { useAuth } from "../lib/auth-context";
-import { getActiveConversationId } from "../lib/conversation-id";
+import { authHeaders, useAuth } from "../lib/auth-context";
+import {
+  ACTIVE_CONVERSATION_EVENT,
+  getActiveConversationId,
+} from "../lib/conversation-id";
 import { useWorkbenchSubject } from "../lib/workbench-subject-context";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +65,72 @@ interface HistoryMsg {
   content: string;
   blocks?: HistoryBlock[];
   ts?: string | null;
+}
+
+interface ActiveHistoryState {
+  past: HistoryMsg[];
+  err: string | null;
+}
+
+interface PennyBrainSettings {
+  mode?: string;
+  external_base_url?: string;
+  model?: string;
+}
+
+function getApiBase(): string {
+  if (typeof document === "undefined") return "/api/v1/web";
+  const meta = document.querySelector<HTMLMetaElement>(
+    'meta[name="gadgetron-api-base"]',
+  );
+  const chatBase = meta?.content || "/v1";
+  return chatBase.replace(/\/v1$/, "/api/v1/web");
+}
+
+function endpointHost(baseUrl: string | undefined): string {
+  const trimmed = (baseUrl ?? "").trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return trimmed.replace(/^https?:\/\//, "").split("/")[0] ?? trimmed;
+  }
+}
+
+function pennyRuntimeSummary(settings: PennyBrainSettings): string {
+  const model = settings.model?.trim() || settings.mode?.trim() || "Penny";
+  const host = endpointHost(settings.external_base_url);
+  return host ? `${model} @ ${host}` : model;
+}
+
+function usePennyRuntimeSummary(enabled: boolean): string | null {
+  const { apiKey, identity } = useAuth();
+  const [summary, setSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled || (!apiKey && identity?.role !== "admin")) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/workbench/admin/agent/brain`, {
+          credentials: "include",
+          headers: authHeaders(apiKey),
+          cache: "no-store",
+        });
+        if (!res.ok || cancelled) return;
+        const body = (await res.json()) as PennyBrainSettings;
+        if (!cancelled) setSummary(pennyRuntimeSummary(body));
+      } catch {
+        // Runtime details are supplemental; keep the running badge visible.
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey, enabled, identity?.role]);
+
+  return summary;
 }
 
 function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
@@ -135,36 +204,51 @@ function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
 /// conversation is active — callers can use `.length === 0` as the
 /// "no history" signal. Shared between `<PastMessages>` and the
 /// `<HistoryAwareEmpty>` wrapper so both render off the same fetch.
-function useActiveHistory(): { past: HistoryMsg[]; err: string | null } {
+function useActiveHistory(): ActiveHistoryState {
   const [past, setPast] = useState<HistoryMsg[]>([]);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    const id = getActiveConversationId();
-    if (!id) {
-      setPast([]);
-      return;
-    }
-    const base =
-      document
-        .querySelector<HTMLMetaElement>('meta[name="gadgetron-api-base"]')
-        ?.content ?? "/v1";
-    const root = base.replace(/\/v\d+$/, "");
     let cancelled = false;
-    (async () => {
+    let seq = 0;
+    const load = async () => {
+      const requestSeq = ++seq;
+      const id = getActiveConversationId();
+      if (!id) {
+        setPast([]);
+        setErr(null);
+        return;
+      }
+      const base =
+        document
+          .querySelector<HTMLMetaElement>('meta[name="gadgetron-api-base"]')
+          ?.content ?? "/v1";
+      const root = base.replace(/\/v\d+$/, "");
       try {
+        setErr(null);
         const res = await fetch(
           `${root}/api/v1/web/workbench/conversations/${id}/messages`,
           { credentials: "include" },
         );
         if (!res.ok) return;
         const body = (await res.json()) as { messages: HistoryMsg[] };
-        if (!cancelled) setPast(body.messages ?? []);
+        if (!cancelled && requestSeq === seq) setPast(body.messages ?? []);
       } catch (e) {
-        if (!cancelled) setErr((e as Error).message);
+        if (!cancelled && requestSeq === seq) setErr((e as Error).message);
       }
-    })();
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "hidden") return;
+      void load();
+    };
+    void load();
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener(ACTIVE_CONVERSATION_EVENT, refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener(ACTIVE_CONVERSATION_EVENT, refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, []);
   return { past, err };
@@ -175,8 +259,13 @@ function useActiveHistory(): { past: HistoryMsg[]; err: string | null } {
 /// resumed conversation jumps straight into the past-messages render
 /// followed by the date divider, making it feel like a continuous
 /// thread instead of a "new chat" welcome landing.
-function HistoryAwareEmpty({ children }: { children: ReactNode }) {
-  const { past } = useActiveHistory();
+function HistoryAwareEmpty({
+  children,
+  past,
+}: {
+  children: ReactNode;
+  past: HistoryMsg[];
+}) {
   if (past.length > 0) return null;
   return <ThreadPrimitive.Empty>{children}</ThreadPrimitive.Empty>;
 }
@@ -227,8 +316,8 @@ function coalesce(past: HistoryMsg[]): RenderGroup[] {
   return groups;
 }
 
-function PastMessages() {
-  const { past, err } = useActiveHistory();
+function PastMessages({ history }: { history: ActiveHistoryState }) {
+  const { past, err } = history;
   const { identity } = useAuth();
   const groups = useMemo(() => coalesce(past), [past]);
   if (groups.length === 0) return null;
@@ -437,6 +526,7 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [slashHelpOpen, setSlashHelpOpen] = useState(false);
   const { clearKey } = useAuth();
+  const history = useActiveHistory();
 
   return (
     <>
@@ -455,8 +545,8 @@ export default function Home() {
         <div className="relative flex flex-1 flex-col overflow-hidden">
           <ThreadPrimitive.Viewport className="penny-scroll flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-[min(1400px,92vw)] px-4 py-6">
-              <PastMessages />
-              <HistoryAwareEmpty>
+              <PastMessages history={history} />
+              <HistoryAwareEmpty past={history.past}>
                 <EmptyState />
               </HistoryAwareEmpty>
               <ThreadPrimitive.Messages
@@ -491,11 +581,21 @@ export default function Home() {
 
 function ActiveTaskIndicator() {
   const isRunning = useThread((s) => s.isRunning);
+  const runtimeSummary = usePennyRuntimeSummary(isRunning);
   if (!isRunning) return null;
   return (
-    <span className="flex items-center gap-1 rounded border border-blue-900/50 bg-blue-900/20 px-1.5 py-0.5 font-mono text-[10px] text-blue-400 motion-safe:animate-in motion-safe:fade-in duration-200">
+    <span
+      className="flex min-w-0 items-center gap-1 rounded border border-blue-900/50 bg-blue-900/20 px-1.5 py-0.5 font-mono text-[10px] text-blue-400 motion-safe:animate-in motion-safe:fade-in duration-200"
+      data-testid="active-task-indicator"
+      title={runtimeSummary ? `Penny runtime: ${runtimeSummary}` : undefined}
+    >
       <span className="size-1.5 rounded-full bg-blue-400 motion-safe:animate-pulse" />
-      running
+      <span className="shrink-0">running</span>
+      {runtimeSummary && (
+        <span className="min-w-0 max-w-[min(36vw,22rem)] truncate text-blue-300/80">
+          · {runtimeSummary}
+        </span>
+      )}
     </span>
   );
 }
@@ -857,27 +957,27 @@ function AssistantStatusBadge() {
   const reason = status.reason;
   const labelMap: Record<string, { text: string; tint: string }> = {
     cancelled: {
-      text: "중지됨",
+      text: "Stopped",
       tint: "text-amber-300/90 border-amber-400/30 bg-amber-400/10",
     },
     length: {
-      text: "길이 제한",
+      text: "Length limit",
       tint: "text-sky-300/90 border-sky-400/30 bg-sky-400/10",
     },
     "content-filter": {
-      text: "필터 차단",
+      text: "Filtered",
       tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
     },
     "tool-calls": {
-      text: "도구 보류",
+      text: "Tool pending",
       tint: "text-blue-300/90 border-blue-400/30 bg-blue-400/10",
     },
     error: {
-      text: "오류 종료",
+      text: "Error",
       tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
     },
     other: {
-      text: "조기 종료",
+      text: "Interrupted",
       tint: "text-muted-foreground border-border/60 bg-muted/40",
     },
   };
@@ -981,7 +1081,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
     >
       <SlashAutocomplete onLocalExecute={executeLocalCommand} />
       <ComposerPrimitive.Input
-        placeholder="질문하거나 /command 를 입력하세요"
+        placeholder="Ask Penny or type /command"
         rows={1}
         autoFocus
         className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-600"

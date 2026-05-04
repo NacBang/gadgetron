@@ -19,6 +19,10 @@ use uuid::Uuid;
 
 use crate::bootstrap::{run_bootstrap, verify_key_only};
 use crate::collectors::{collect_info, collect_machine_identity, collect_stats};
+use crate::gadgetini::{
+    collect_gadgetini_stats, disable_child_wlan0, install_child_key_with_password, GadgetiniRecord,
+    DEFAULT_USB_IPV6, DEFAULT_USB_PARENT_IFACE, FACTORY_PASSWORD_ENV,
+};
 use crate::inventory::{HostRecord, InventoryStore};
 use crate::metrics::{stats_to_samples, try_ship, IngestionCounters, MetricSample};
 use crate::ssh::{
@@ -405,6 +409,7 @@ impl ServerMonitorProvider {
                 } else {
                     gpu_models.clone()
                 },
+                gadgetini: prior.gadgetini.clone(),
             };
             self.inventory
                 .upsert(updated.clone())
@@ -440,6 +445,7 @@ impl ServerMonitorProvider {
             cpu_model: cpu_model.clone(),
             cpu_cores,
             gpus: gpu_models.clone(),
+            gadgetini: None,
         };
         self.inventory
             .upsert(record.clone())
@@ -479,6 +485,7 @@ impl ServerMonitorProvider {
                     "cpu_model": h.cpu_model,
                     "cpu_cores": h.cpu_cores,
                     "gpus": h.gpus,
+                    "gadgetini": h.gadgetini.as_ref().map(gadgetini_summary),
                 })
             })
             .collect();
@@ -625,12 +632,37 @@ impl ServerMonitorProvider {
         let inv_ms = t_inv.elapsed().as_millis();
         let target = to_target(&rec, self.known_hosts_path());
         let t_ssh = std::time::Instant::now();
-        let stats = collect_stats(&target)
+        let mut stats = collect_stats(&target)
             .await
             .map_err(|e| GadgetError::Execution(format!("stats collect: {e}")))?;
         let ssh_ms = t_ssh.elapsed().as_millis();
         let t_mark = std::time::Instant::now();
-        let _ = self.inventory.mark_ok(id, Utc::now()).await;
+        let now = Utc::now();
+        let mut updated_rec: Option<HostRecord> = None;
+        if let Some(gadgetini) = rec.gadgetini.as_ref().filter(|g| g.enabled) {
+            match collect_gadgetini_stats(&target, gadgetini).await {
+                Ok(parsed) => {
+                    stats.warnings.extend(parsed.warnings);
+                    stats.gadgetini = Some(parsed.stats);
+                    let mut next = rec.clone();
+                    next.last_ok_at = Some(now);
+                    if let Some(g) = next.gadgetini.as_mut() {
+                        g.last_ok_at = Some(now);
+                    }
+                    updated_rec = Some(next);
+                }
+                Err(e) => {
+                    stats
+                        .warnings
+                        .push(format!("gadgetini collect failed: {e}"));
+                }
+            }
+        }
+        if let Some(next) = updated_rec {
+            let _ = self.inventory.upsert(next).await;
+        } else {
+            let _ = self.inventory.mark_ok(id, now).await;
+        }
         let mark_ms = t_mark.elapsed().as_millis();
 
         let t_ship = std::time::Instant::now();
@@ -1013,6 +1045,107 @@ impl ServerMonitorProvider {
                 changed.push("ssh_port");
             }
         }
+        if let Some(v) = args.get("gadgetini") {
+            if v.is_null() {
+                if rec.gadgetini.is_some() {
+                    rec.gadgetini = None;
+                    changed.push("gadgetini");
+                }
+            } else {
+                let gadgetini_value = v.clone();
+                let next = parse_gadgetini_record(
+                    &gadgetini_value,
+                    rec.gadgetini.as_ref(),
+                    rec.id,
+                    &self.inventory,
+                )
+                .map_err(GadgetError::InvalidArgs)?;
+                let key_path_supplied = gadgetini_value
+                    .as_object()
+                    .and_then(|obj| obj.get("key_path"))
+                    .and_then(|p| p.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                let key_exists = tokio::fs::try_exists(&next.key_path).await.unwrap_or(false);
+                let mut key_ready = key_exists;
+                if next.enabled && !key_path_supplied && !key_exists {
+                    let password =
+                        gadgetini_bootstrap_password(&gadgetini_value).ok_or_else(|| {
+                            GadgetError::InvalidArgs(format!(
+                                "gadgetini key is not installed yet. Set {FACTORY_PASSWORD_ENV} \
+                             on the Gadgetron server for factory-default bootstrap, or pass \
+                             gadgetini.password once for a custom password."
+                            ))
+                        })?;
+                    let secret = OneShotSecret::new(password);
+                    generate_keypair(&next.key_path, &format!("gadgetron-gadgetini:{id}"))
+                        .await
+                        .map_err(|e| {
+                            GadgetError::Execution(format!("gadgetini ssh-keygen: {e}"))
+                        })?;
+                    let pubkey = read_pubkey(&next.key_path).await.map_err(|e| {
+                        GadgetError::Execution(format!("read gadgetini pubkey: {e}"))
+                    })?;
+                    let parent = to_target(&rec, self.known_hosts_path());
+                    match install_child_key_with_password(&parent, &next, secret.as_str(), &pubkey)
+                        .await
+                    {
+                        Ok(out) if out.ok() => {}
+                        Ok(out) => {
+                            let _ = tokio::fs::remove_file(&next.key_path).await;
+                            let _ =
+                                tokio::fs::remove_file(next.key_path.with_extension("pub")).await;
+                            return Err(GadgetError::Execution(format!(
+                                "gadgetini key install failed (exit={}): {}{}",
+                                out.code,
+                                out.stderr.trim(),
+                                if out.stdout.trim().is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" stdout={}", out.stdout.trim())
+                                }
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tokio::fs::remove_file(&next.key_path).await;
+                            let _ =
+                                tokio::fs::remove_file(next.key_path.with_extension("pub")).await;
+                            return Err(GadgetError::Execution(format!(
+                                "gadgetini key install: {e}"
+                            )));
+                        }
+                    }
+                    key_ready = true;
+                }
+                if next.enabled && key_ready {
+                    let parent = to_target(&rec, self.known_hosts_path());
+                    match disable_child_wlan0(&parent, &next).await {
+                        Ok(out) if out.ok() => {}
+                        Ok(out) => {
+                            tracing::warn!(
+                                target: "server_monitor_gadgetini",
+                                host_id = %id,
+                                exit = out.code,
+                                stderr = %out.stderr.trim(),
+                                "gadgetini wlan0 disable command returned non-zero"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "server_monitor_gadgetini",
+                                host_id = %id,
+                                error = %e,
+                                "gadgetini wlan0 disable command failed"
+                            );
+                        }
+                    }
+                }
+                if rec.gadgetini.as_ref() != Some(&next) {
+                    rec.gadgetini = Some(next);
+                    changed.push("gadgetini");
+                }
+            }
+        }
 
         if !changed.is_empty() {
             self.inventory
@@ -1027,9 +1160,163 @@ impl ServerMonitorProvider {
             "ssh_user": rec.ssh_user,
             "ssh_port": rec.ssh_port,
             "alias": rec.alias,
+            "gadgetini": rec.gadgetini.as_ref().map(gadgetini_summary),
             "changed": changed,
         }))
     }
+}
+
+fn parse_gadgetini_record(
+    value: &Value,
+    prior: Option<&GadgetiniRecord>,
+    host_id: Uuid,
+    inventory: &InventoryStore,
+) -> Result<GadgetiniRecord, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "gadgetini must be an object or null".to_string())?;
+    let enabled = obj.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let ssh_user = obj
+        .get("ssh_user")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| prior.map(|g| g.ssh_user.as_str()))
+        .unwrap_or("gadgetini")
+        .to_string();
+    if !is_safe_ssh_user(&ssh_user) {
+        return Err(format!("gadgetini.ssh_user '{ssh_user}' invalid"));
+    }
+    let ssh_port = match obj.get("ssh_port").and_then(|v| v.as_u64()) {
+        Some(p) if (1..=65535).contains(&p) => p as u16,
+        Some(p) => return Err(format!("gadgetini.ssh_port {p} out of range")),
+        None => prior.map(|g| g.ssh_port).unwrap_or(22),
+    };
+    let parent_iface = obj
+        .get("parent_iface")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| prior.map(|g| g.parent_iface.as_str()))
+        .unwrap_or(DEFAULT_USB_PARENT_IFACE)
+        .to_string();
+    if !is_safe_iface(&parent_iface) {
+        return Err(format!("gadgetini.parent_iface '{parent_iface}' invalid"));
+    }
+    let ipv6_link_local = obj
+        .get("ipv6_link_local")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| prior.map(|g| g.ipv6_link_local.as_str()))
+        .unwrap_or(DEFAULT_USB_IPV6)
+        .trim_end_matches('%')
+        .to_string();
+    if !is_safe_host(&ipv6_link_local) || !ipv6_link_local.contains(':') {
+        return Err(format!(
+            "gadgetini.ipv6_link_local '{ipv6_link_local}' invalid"
+        ));
+    }
+    let host_name = match obj.get("host_name") {
+        Some(v) if v.is_null() => None,
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "gadgetini.host_name must be a string or null".to_string())?
+                .trim()
+                .to_string();
+            if s.is_empty() {
+                None
+            } else {
+                if !is_safe_host(&s) {
+                    return Err(format!("gadgetini.host_name '{s}' invalid"));
+                }
+                Some(s)
+            }
+        }
+        None => prior.and_then(|g| g.host_name.clone()),
+    };
+    let mac = match obj.get("mac") {
+        Some(v) if v.is_null() => None,
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "gadgetini.mac must be a string or null".to_string())?
+                .trim()
+                .to_string();
+            if s.is_empty() {
+                None
+            } else {
+                if !is_safe_mac(&s) {
+                    return Err(format!("gadgetini.mac '{s}' invalid"));
+                }
+                Some(s)
+            }
+        }
+        None => prior.and_then(|g| g.mac.clone()),
+    };
+    let key_path = obj
+        .get("key_path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(expand_home)
+        .or_else(|| prior.map(|g| g.key_path.clone()))
+        .unwrap_or_else(|| inventory.keys_dir().join(format!("{host_id}.gadgetini")));
+    let web_port = match obj.get("web_port").and_then(|v| v.as_u64()) {
+        Some(p) if (1..=65535).contains(&p) => Some(p as u16),
+        Some(p) => return Err(format!("gadgetini.web_port {p} out of range")),
+        None => prior.and_then(|g| g.web_port),
+    };
+    if obj.get("password").is_some() {
+        tracing::debug!(
+            target: "server_monitor_gadgetini",
+            host_id = %host_id,
+            "gadgetini password supplied for bootstrap/update; not persisted"
+        );
+    }
+
+    Ok(GadgetiniRecord {
+        enabled,
+        host_name,
+        ssh_user,
+        ssh_port,
+        parent_iface,
+        ipv6_link_local,
+        mac,
+        key_path,
+        web_port,
+        last_ok_at: prior.and_then(|g| g.last_ok_at),
+    })
+}
+
+fn gadgetini_summary(g: &GadgetiniRecord) -> Value {
+    json!({
+        "enabled": g.enabled,
+        "host_name": g.host_name,
+        "ssh_user": g.ssh_user,
+        "ssh_port": g.ssh_port,
+        "parent_iface": g.parent_iface,
+        "ipv6_link_local": g.ipv6_link_local,
+        "mac": g.mac,
+        "web_port": g.web_port,
+        "last_ok_at": g.last_ok_at,
+    })
+}
+
+fn gadgetini_bootstrap_password(value: &Value) -> Option<String> {
+    value
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var(FACTORY_PASSWORD_ENV)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
 }
 
 fn is_safe_alias(s: &str) -> bool {
@@ -1053,6 +1340,21 @@ fn is_safe_ssh_user(s: &str) -> bool {
         && !s.starts_with('-')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+fn is_safe_iface(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+}
+
+fn is_safe_mac(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '-'))
 }
 
 fn is_safe_grep_pattern(s: &str) -> bool {
@@ -1383,7 +1685,23 @@ fn schema_server_update() -> GadgetSchema {
                 "alias":    { "type": ["string", "null"], "maxLength": 64 },
                 "host":     { "type": "string", "maxLength": 253 },
                 "ssh_user": { "type": "string", "maxLength": 64 },
-                "ssh_port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                "ssh_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                "gadgetini": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "enabled": { "type": "boolean" },
+                        "host_name": { "type": ["string", "null"], "maxLength": 253 },
+                        "ssh_user": { "type": "string", "maxLength": 64 },
+                        "ssh_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                        "parent_iface": { "type": "string", "maxLength": 64 },
+                        "ipv6_link_local": { "type": "string", "maxLength": 128 },
+                        "mac": { "type": ["string", "null"], "maxLength": 32 },
+                        "key_path": { "type": "string" },
+                        "web_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                        "password": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }
             },
             "required": ["id"],
             "additionalProperties": false
@@ -1395,6 +1713,28 @@ fn schema_server_update() -> GadgetSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn test_host_record(id: Uuid) -> HostRecord {
+        HostRecord {
+            id,
+            host: "10.0.0.20".into(),
+            ssh_user: "ubuntu".into(),
+            ssh_port: 22,
+            key_path: PathBuf::from("/tmp/parent-key"),
+            created_at: Utc::now(),
+            last_ok_at: None,
+            tenant_id: Uuid::nil(),
+            machine_id: None,
+            dmi_uuid: None,
+            dmi_serial: None,
+            alias: None,
+            cpu_model: None,
+            cpu_cores: None,
+            gpus: Vec::new(),
+            gadgetini: None,
+        }
+    }
 
     #[test]
     fn category_is_infrastructure() {
@@ -1424,6 +1764,12 @@ mod tests {
         assert_eq!(props.as_bool(), Some(false));
     }
 
+    #[test]
+    fn update_schema_accepts_gadgetini_object() {
+        let schema = schema_server_update();
+        assert!(schema.input_schema["properties"]["gadgetini"].is_object());
+    }
+
     #[tokio::test]
     async fn list_on_empty_inventory_returns_zero_count() {
         let p = ServerMonitorProvider::new(InventoryStore::new(
@@ -1433,5 +1779,121 @@ mod tests {
         let text = r.content[0]["text"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
         assert_eq!(parsed["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn update_attaches_gadgetini_without_storing_password() {
+        let id = Uuid::new_v4();
+        let store = InventoryStore::new(
+            std::env::temp_dir().join(format!("gsm-gadgetini-update-{}", Uuid::new_v4())),
+        );
+        store.upsert(test_host_record(id)).await.unwrap();
+        let p = ServerMonitorProvider::new(store.clone());
+
+        let r = p
+            .call_update(json!({
+                "id": id.to_string(),
+                "gadgetini": {
+                    "enabled": true,
+                    "host_name": "gadgetini.local",
+                    "ssh_user": "gadgetini",
+                    "ssh_port": 22,
+                    "parent_iface": "enp3s0f1np1",
+                    "ipv6_link_local": "fe80::584d:7732:805c:a8f9",
+                    "mac": "d8:3a:dd:71:ee:b5",
+                    "key_path": "/tmp/gadgetini-key",
+                    "web_port": 80,
+                    "password": "must-not-persist"
+                }
+            }))
+            .await
+            .unwrap();
+        let text = r.content[0]["text"].as_str().unwrap();
+        assert!(!text.contains("must-not-persist"));
+
+        let stored = store.get(id).await.unwrap().unwrap();
+        let serialized = serde_json::to_string(&stored).unwrap();
+        assert!(!serialized.contains("must-not-persist"));
+        assert_eq!(
+            stored.gadgetini.as_ref().map(|g| g.parent_iface.as_str()),
+            Some("enp3s0f1np1")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_includes_gadgetini_summary_without_key_path() {
+        let id = Uuid::new_v4();
+        let store = InventoryStore::new(
+            std::env::temp_dir().join(format!("gsm-gadgetini-list-{}", Uuid::new_v4())),
+        );
+        let mut rec = test_host_record(id);
+        rec.gadgetini = Some(crate::gadgetini::GadgetiniRecord {
+            enabled: true,
+            host_name: Some("gadgetini.local".into()),
+            ssh_user: "gadgetini".into(),
+            ssh_port: 22,
+            parent_iface: "enp3s0f1np1".into(),
+            ipv6_link_local: "fe80::584d:7732:805c:a8f9".into(),
+            mac: Some("d8:3a:dd:71:ee:b5".into()),
+            key_path: PathBuf::from("/tmp/gadgetini-key"),
+            web_port: Some(80),
+            last_ok_at: None,
+        });
+        store.upsert(rec).await.unwrap();
+        let p = ServerMonitorProvider::new(store);
+
+        let r = p.call_list().await.unwrap();
+        let text = r.content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        assert_eq!(parsed["hosts"][0]["gadgetini"]["enabled"], true);
+        assert_eq!(
+            parsed["hosts"][0]["gadgetini"]["ipv6_link_local"],
+            "fe80::584d:7732:805c:a8f9"
+        );
+        assert!(!text.contains("gadgetini-key"));
+        assert!(!text.contains("key_path"));
+    }
+
+    #[test]
+    fn gadgetini_rejects_out_of_range_ports_without_wrapping() {
+        let err = parse_gadgetini_record(
+            &json!({
+                "enabled": true,
+                "ssh_port": 70000,
+                "parent_iface": "enp3s0f1np1",
+                "ipv6_link_local": "fe80::584d:7732:805c:a8f9",
+                "key_path": "/tmp/gadgetini-key"
+            }),
+            None,
+            Uuid::new_v4(),
+            &InventoryStore::new(std::env::temp_dir()),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("out of range"));
+    }
+
+    #[test]
+    fn gadgetini_defaults_to_usb_endpoint_when_fields_are_omitted() {
+        let id = Uuid::new_v4();
+        let rec = parse_gadgetini_record(
+            &json!({ "enabled": true }),
+            None,
+            id,
+            &InventoryStore::new(std::env::temp_dir()),
+        )
+        .unwrap();
+
+        assert_eq!(rec.ipv6_link_local, "fd12:3456:789a:1::2");
+        assert_eq!(rec.parent_iface, "usb0");
+        assert_eq!(rec.ssh_user, "gadgetini");
+        assert_eq!(rec.ssh_port, 22);
+        assert_eq!(
+            rec.key_path,
+            std::env::temp_dir()
+                .join("keys")
+                .join(format!("{id}.gadgetini"))
+        );
     }
 }

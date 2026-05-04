@@ -85,6 +85,41 @@ describe("EvidencePane", () => {
     );
   });
 
+  it("renders related context refs in the Context tab", () => {
+    setActiveConversationId("conv-related-panel");
+    writeConversationSubject("conv-related-panel", {
+      id: "server-1",
+      kind: "server",
+      bundle: "servers",
+      title: "dg5R-PRO6000-8",
+      related: [
+        {
+          id: "finding-1",
+          kind: "log_finding",
+          title: "SMART pending sectors",
+          status: "critical",
+          href: "/web/findings?host=server-1",
+        },
+      ],
+    });
+
+    render(
+      <EvidencePane open={true} onToggle={() => {}} />,
+    );
+
+    expect(screen.getByTestId("context-panel").textContent).toContain(
+      "Related",
+    );
+    expect(screen.getByTestId("context-panel").textContent).toContain(
+      "SMART pending sectors",
+    );
+    expect(
+      screen.getByRole("link", { name: /SMART pending sectors/i }).getAttribute(
+        "href",
+      ),
+    ).toBe("/web/findings?host=server-1");
+  });
+
   it("does NOT render any mocked citation content", () => {
     render(
       <EvidencePane open={true} onToggle={() => {}} />,

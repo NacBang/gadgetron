@@ -68,9 +68,9 @@ binary = "/Users/<name>/.local/bin/claude"
 
 ### `penny_timeout`
 
-**증상**: 504 timeout after 300s.
-**원인**: Claude Code subprocess가 제한시간 초과.
-**대응**: `gadgetron.toml`의 `[agent].request_timeout_secs` 상향. 단, 길수록 subprocess 점유 증가 → `max_concurrent_subprocesses` 체크.
+**증상**: 504 timeout before Penny shows first activity.
+**원인**: Claude Code subprocess, CCR, upstream LLM, 또는 네트워크 경로가 첫 stdout 이벤트/툴 호출을 내보내지 못함. 이 값은 전체 실행시간 제한이 아니라 startup/no-first-event 감시 시간.
+**대응**: CCR/upstream LLM 상태와 서버 로그를 먼저 확인. 첫 텍스트 chunk 또는 첫 tool 호출까지 오래 걸리는 환경이면 `gadgetron.toml`의 `[agent].request_timeout_secs` 상향. 단, 길수록 멈춘 subprocess가 슬롯을 오래 점유하므로 `max_concurrent_subprocesses` 체크.
 
 ## 위키 에러
 

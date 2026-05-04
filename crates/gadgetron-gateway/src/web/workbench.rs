@@ -794,7 +794,7 @@ pub async fn get_agent_brain_settings(
 pub async fn patch_agent_brain_settings(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
-    Json(body): Json<gadgetron_core::agent::UpdateAgentBrainSettingsRequest>,
+    Json(body): Json<PatchAgentBrainSettingsRequest>,
 ) -> Result<Json<gadgetron_core::agent::AgentBrainSettings>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
     let brain = svc.agent_brain.as_ref().ok_or_else(|| {
@@ -802,6 +802,10 @@ pub async fn patch_agent_brain_settings(
             "agent brain settings are not wired in this build".into(),
         ))
     })?;
+    let (body, runtime_auth_token) = normalize_agent_brain_settings_patch(body)?;
+    if let Some(token) = runtime_auth_token {
+        std::env::set_var(&token.env_name, &token.value);
+    }
     let current = brain.load_full();
     let next = body.overlay_brain(&current);
     next.validate_with_env(
@@ -911,6 +915,81 @@ pub type AutoDetectLlmEndpointResponse = ProbeLlmEndpointResponse;
 pub struct UseLlmEndpointResponse {
     pub endpoint: gadgetron_xaas::llm_endpoints::LlmEndpointRow,
     pub brain: gadgetron_core::agent::AgentBrainSettings,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UseLlmEndpointRequest {
+    #[serde(default)]
+    pub external_auth_token_value: Option<String>,
+}
+
+const DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV: &str = "PENNY_CCR_AUTH_TOKEN";
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PatchAgentBrainSettingsRequest {
+    #[serde(flatten)]
+    pub settings: gadgetron_core::agent::UpdateAgentBrainSettingsRequest,
+    #[serde(default)]
+    pub external_auth_token_value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeAuthToken {
+    env_name: String,
+    value: String,
+}
+
+fn normalize_agent_brain_settings_patch(
+    body: PatchAgentBrainSettingsRequest,
+) -> Result<
+    (
+        gadgetron_core::agent::UpdateAgentBrainSettingsRequest,
+        Option<RuntimeAuthToken>,
+    ),
+    WorkbenchHttpError,
+> {
+    let mut settings = body.settings;
+    settings.external_auth_token_env = settings.external_auth_token_env.trim().to_string();
+    let token_value = normalize_optional_text(body.external_auth_token_value);
+
+    if settings.mode == gadgetron_core::agent::BrainMode::ClaudeMax {
+        settings.external_base_url.clear();
+        settings.external_auth_token_env.clear();
+        settings.custom_model_option = false;
+        return Ok((settings, None));
+    }
+
+    if let Some(value) = token_value {
+        if value.contains('\0') {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "agent brain auth token must not contain NUL bytes".into(),
+            )));
+        }
+        if settings.external_auth_token_env.is_empty() {
+            settings.external_auth_token_env = DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV.to_string();
+        }
+        if !is_valid_runtime_auth_env_name(&settings.external_auth_token_env) {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "agent brain auth token env must match [A-Z_][A-Z0-9_]*".into(),
+            )));
+        }
+        let token = RuntimeAuthToken {
+            env_name: settings.external_auth_token_env.clone(),
+            value,
+        };
+        return Ok((settings, Some(token)));
+    }
+
+    Ok((settings, None))
+}
+
+fn is_valid_runtime_auth_env_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1450,6 +1529,7 @@ pub async fn use_llm_endpoint_handler(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(endpoint_id): axum::extract::Path<uuid::Uuid>,
+    body: Option<Json<UseLlmEndpointRequest>>,
 ) -> Result<Json<UseLlmEndpointResponse>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
     let brain = svc.agent_brain.as_ref().ok_or_else(|| {
@@ -1469,11 +1549,36 @@ pub async fn use_llm_endpoint_handler(
         )));
     }
 
+    let token_value =
+        body.and_then(|Json(body)| normalize_optional_text(body.external_auth_token_value));
+    let mut external_auth_token_env = endpoint
+        .auth_token_env
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    if let Some(token_value) = token_value {
+        if token_value.contains('\0') {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "endpoint auth token must not contain NUL bytes".into(),
+            )));
+        }
+        if external_auth_token_env.is_empty() {
+            external_auth_token_env = DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV.to_string();
+        }
+        if !is_valid_runtime_auth_env_name(&external_auth_token_env) {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "endpoint auth token env must match [A-Z_][A-Z0-9_]*".into(),
+            )));
+        }
+        std::env::set_var(&external_auth_token_env, token_value);
+    }
+
     let request = gadgetron_core::agent::UpdateAgentBrainSettingsRequest {
         mode: gadgetron_core::agent::BrainMode::ExternalProxy,
         external_base_url: endpoint.base_url.clone(),
         model: endpoint.model_id.clone().unwrap_or_default(),
-        external_auth_token_env: endpoint.auth_token_env.clone().unwrap_or_default(),
+        external_auth_token_env,
         custom_model_option: endpoint.model_id.is_some(),
     };
     let current = brain.load_full();
@@ -3919,6 +4024,68 @@ mod tests {
         assert_eq!(
             body.model_id.as_deref(),
             Some("cyankiwi/gemma-4-31B-it-AWQ-4bit")
+        );
+    }
+
+    #[test]
+    fn patch_agent_brain_settings_request_accepts_token_value_without_env_name() {
+        let body: PatchAgentBrainSettingsRequest = serde_json::from_value(serde_json::json!({
+            "mode": "external_proxy",
+            "external_base_url": "http://10.100.1.5:8101",
+            "model": "gemma4",
+            "external_auth_token_env": "",
+            "external_auth_token_value": "test-secret-token",
+            "custom_model_option": false
+        }))
+        .expect("patch agent brain request");
+
+        let (settings, token) =
+            normalize_agent_brain_settings_patch(body).expect("patch with token value is valid");
+
+        assert_eq!(
+            settings.mode,
+            gadgetron_core::agent::BrainMode::ExternalProxy
+        );
+        assert_eq!(settings.external_base_url, "http://10.100.1.5:8101");
+        assert_eq!(settings.model, "gemma4");
+        assert_eq!(settings.external_auth_token_env, "PENNY_CCR_AUTH_TOKEN");
+        let token = token.expect("runtime token");
+        assert_eq!(token.env_name, "PENNY_CCR_AUTH_TOKEN");
+        assert_eq!(token.value, "test-secret-token");
+    }
+
+    #[test]
+    fn patch_agent_brain_settings_request_clears_external_fields_for_claude_max() {
+        let body: PatchAgentBrainSettingsRequest = serde_json::from_value(serde_json::json!({
+            "mode": "claude_max",
+            "external_base_url": "http://127.0.0.1:8080",
+            "model": "",
+            "external_auth_token_env": "PENNY_CCR_AUTH_TOKEN",
+            "external_auth_token_value": "test-secret-token",
+            "custom_model_option": true
+        }))
+        .expect("patch agent brain request");
+
+        let (settings, token) =
+            normalize_agent_brain_settings_patch(body).expect("claude max patch is valid");
+
+        assert_eq!(settings.mode, gadgetron_core::agent::BrainMode::ClaudeMax);
+        assert_eq!(settings.external_base_url, "");
+        assert_eq!(settings.external_auth_token_env, "");
+        assert!(!settings.custom_model_option);
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn use_llm_endpoint_request_accepts_write_only_token_value() {
+        let body: UseLlmEndpointRequest = serde_json::from_value(serde_json::json!({
+            "external_auth_token_value": "test-secret-token"
+        }))
+        .expect("use endpoint request");
+
+        assert_eq!(
+            body.external_auth_token_value.as_deref(),
+            Some("test-secret-token")
         );
     }
 

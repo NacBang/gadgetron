@@ -604,7 +604,7 @@ session_store_max_entries = 10000
 
 - `binary`: Claude Code CLI 경로 또는 basename
 - `claude_code_min_version`: 허용되는 최소 Claude Code 버전
-- `request_timeout_secs`: 단일 Penny 요청 제한 시간 (범위: [10, 3600])
+- `request_timeout_secs`: Penny subprocess 시작 후 첫 stdout 이벤트/툴 호출까지의 무응답 감시 시간. 전체 실행시간 상한이 아니며, 첫 이벤트 이후의 긴 tool 실행은 이 값으로 중단하지 않습니다. (범위: [10, 3600])
 - `max_concurrent_subprocesses`: 동시 Claude Code subprocess 상한 (범위: [1, 32])
 - `session_mode`: 네이티브 Claude Code 세션 정책. `native_with_fallback` (기본) — 네이티브 세션 먼저 시도, 실패 시 stateless fallback. `native_only` — 네이티브 세션 필수; 세션 초기화 실패 시 요청 거부. `stateless_only` — 항상 stateless 모드로 동작.
 - `session_ttl_secs`: `SessionStore` 항목의 TTL(초). 범위 [60, 604800]. 기본값 86400 (24시간).
@@ -646,7 +646,7 @@ mode = "claude_max"
 - `custom_model_option`: `model`을 `ANTHROPIC_CUSTOM_MODEL_OPTION`으로도 전달합니다. CCR/local model id처럼 Claude Code 기본 model picker에 없는 문자열을 쓸 때 켭니다.
 - `local_model`: `gadgetron_local` 모드에서 router provider map의 `<provider_name>/<model_id>`. P2A에서는 동작하지 않으며 startup error입니다.
 
-`/web/admin`의 **Penny LLM Gateway** 섹션에서 같은 값을 저장하면 Postgres에 runtime setting으로 보존되고, 다음 Penny 요청부터 서버 재시작 없이 적용됩니다. 실행 중인 Claude Code subprocess는 기존 설정으로 마무리됩니다.
+`/web/admin`의 **Penny Runtime** 화면에서 같은 값을 저장하면 Postgres에 runtime setting으로 보존되고, 다음 Penny 요청부터 서버 재시작 없이 적용됩니다. Admin이 `Auth Token`에 token 값을 붙여 넣으면 Gadgetron은 현재 서버 프로세스에 기본 reference인 `PENNY_CCR_AUTH_TOKEN`으로 즉시 주입하고 DB에는 reference 이름만 저장합니다. Token 값은 화면 응답이나 DB에 저장하지 않으므로 서버 재시작 뒤에도 유지하려면 기존처럼 `.env` 또는 launch 환경에 같은 reference를 설정해야 합니다.
 
 ### `[agent.gadgets]`
 
