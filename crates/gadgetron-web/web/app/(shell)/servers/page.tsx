@@ -7,6 +7,13 @@ import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { Sparkline, type SparkPoint } from "../../components/sparkline";
 import { HostDetailDrawer } from "../../components/host-detail-drawer";
+import {
+  EmptyState,
+  InlineNotice,
+  PageToolbar,
+  StatusBadge,
+  WorkbenchPage,
+} from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
 import { safeRandomUUID } from "../../lib/uuid";
 
@@ -736,9 +743,9 @@ function ShellRunner({
   const run = useCallback(async () => {
     const trimmed = cmd.trim();
     if (!trimmed || running) return;
-    const preview = trimmed.length > 120 ? trimmed.slice(0, 117) + "…" : trimmed;
+    const preview = trimmed.length > 120 ? trimmed.slice(0, 117) + "..." : trimmed;
     const ok = window.confirm(
-      `${label}에서 실행할까요?\n\n${useSudo ? "[sudo] " : ""}${preview}`,
+      `Run on ${label}?\n\n${useSudo ? "[sudo] " : ""}${preview}`,
     );
     if (!ok) return;
     setRunning(true);
@@ -775,7 +782,7 @@ function ShellRunner({
       >
         <div className="flex items-center justify-between">
           <div className="text-sm font-semibold text-zinc-100">
-            🔧 shell @ <span className="font-mono text-blue-300">{label}</span>
+            Shell @ <span className="font-mono text-blue-300">{label}</span>
           </div>
           <button
             type="button"
@@ -786,7 +793,8 @@ function ShellRunner({
           </button>
         </div>
         <div className="text-[11px] text-zinc-500">
-          모든 실행은 확인 다이얼로그를 거칩니다. sudo는 NOPASSWD 설치된 상태에서만 동작.
+          Every run requires a confirmation dialog. sudo only works when
+          NOPASSWD is installed.
         </div>
         <Textarea
           value={cmd}
@@ -797,7 +805,7 @@ function ShellRunner({
               void run();
             }
           }}
-          placeholder="예) systemctl restart nvidia-dcgm && dmesg | tail -20"
+          placeholder="e.g. systemctl restart nvidia-dcgm && dmesg | tail -20"
           rows={4}
           className="font-mono text-xs"
           disabled={running}
@@ -810,7 +818,7 @@ function ShellRunner({
               onChange={(e) => setUseSudo(e.target.checked)}
               className="accent-blue-500"
             />
-            sudo 로 실행
+            Run with sudo
           </label>
           <Button
             type="button"
@@ -818,7 +826,7 @@ function ShellRunner({
             onClick={() => void run()}
             disabled={running || cmd.trim().length === 0}
           >
-            {running ? "실행 중…" : "실행 (Ctrl+Enter)"}
+            {running ? "Running..." : "Run (Ctrl+Enter)"}
           </Button>
         </div>
         {result && (
@@ -938,10 +946,10 @@ function HostCard({
       data-testid={`host-card-${host.host}`}
       className="group/card flex h-[500px] flex-col gap-2 overflow-hidden rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="min-w-0" data-testid="host-card-title-row">
           {editing ? (
-            <div className="flex items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1">
               <Input
                 autoFocus
                 value={draft}
@@ -981,9 +989,9 @@ function HostCard({
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1">
               <div
-                className="truncate text-sm font-semibold text-zinc-100"
+                className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100"
                 title={host.alias ?? host.host}
               >
                 {host.alias ?? host.host}
@@ -1036,7 +1044,10 @@ function HostCard({
             </div>
           )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div
+          className="flex flex-wrap items-center justify-end gap-1"
+          data-testid={`host-card-actions-${host.id}`}
+        >
           {findingsCount && (() => {
             const total =
               findingsCount.critical +
@@ -1077,7 +1088,7 @@ function HostCard({
             data-testid={`host-shell-${host.host}`}
             onClick={() => setShellOpen(true)}
             className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:border-blue-600 hover:text-blue-300"
-            title="원격 bash 실행 (매 호출 승인 필요)"
+            title="Run remote bash (approval required per call)"
           >
             🔧 shell
           </button>
@@ -1100,9 +1111,15 @@ function HostCard({
         />
       )}
       {err && (
-        <div className="rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-[10px] text-red-300">
-          {err}
-        </div>
+        <InlineNotice
+          tone="warn"
+          title="Host check reported a problem"
+          details={err}
+          className="p-2 text-[10px]"
+        >
+          This host returned an operational warning. Open details for the raw
+          output.
+        </InlineNotice>
       )}
       {stats?.cpu && (
         <ProgressBar
@@ -1630,35 +1647,52 @@ export default function ServersPage() {
   }, [apiKey, hosts, refreshStats]);
 
   const hostList = useMemo(() => hosts, [hosts]);
+  const hasHostErrors = Object.values(statsMap).some((entry) => entry.error);
 
   return (
     <>
       <Toaster theme="dark" richColors position="bottom-right" />
-      <header
-        className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
-        data-testid="servers-header"
-      >
-        <div className="flex items-center gap-3">
-          <span className="text-xs font-semibold text-zinc-300">Servers</span>
-          <span className="text-[11px] text-zinc-600" data-testid="servers-count">
-            · {hostList.length} host{hostList.length === 1 ? "" : "s"}
-          </span>
-          {hostList.length > 0 && (
+      <WorkbenchPage
+        title="Servers"
+        subtitle="Register and monitor managed hosts for bundles, LLM serving, and CCR placement."
+        headerTestId="servers-header"
+        actions={
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void refreshList()}
+            className="h-7 px-2 text-[11px]"
+          >
+            Refresh
+          </Button>
+        }
+        toolbar={
+          <PageToolbar
+            status={
+              <StatusBadge
+                status={listError || hasHostErrors ? "degraded" : "ready"}
+              />
+            }
+          >
             <span
-              className="rounded border border-emerald-700/40 bg-emerald-900/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-400"
-              title={`server.stats is polled every ${POLL_INTERVAL_MS / 1000}s per host`}
-              data-testid="servers-poll-badge"
+              className="text-[11px] text-zinc-600"
+              data-testid="servers-count"
             >
-              polling · {POLL_INTERVAL_MS / 1000}s
+              {hostList.length} host{hostList.length === 1 ? "" : "s"}
             </span>
-          )}
-        </div>
-        <Button variant="ghost" size="sm" onClick={refreshList} className="h-6 px-2 text-[11px]">
-          Refresh
-        </Button>
-      </header>
-
-      <div className="flex flex-1 flex-col overflow-auto">
+            {hostList.length > 0 && (
+              <span
+                className="rounded border border-emerald-700/40 bg-emerald-900/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-400"
+                title={`server.stats is polled every ${POLL_INTERVAL_MS / 1000}s per host`}
+                data-testid="servers-poll-badge"
+              >
+                polling · {POLL_INTERVAL_MS / 1000}s
+              </span>
+            )}
+          </PageToolbar>
+        }
+      >
+      <div className="space-y-4">
         <AddHostForm
           apiKey={apiKey ?? ""}
           onAdded={refreshList}
@@ -1667,21 +1701,22 @@ export default function ServersPage() {
         />
 
         {listError && (
-          <div className="m-4 rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-            {listError}
-          </div>
+          <InlineNotice
+            tone="error"
+            title="Server inventory request failed"
+            details={listError}
+          >
+            Gadgetron could not load or update the managed server list.
+          </InlineNotice>
         )}
 
-        <section className="flex-1 p-4">
+        <section>
           {hostList.length === 0 ? (
-            <div
-              className="flex min-h-[200px] items-center justify-center text-center text-[11px] text-zinc-600"
-              data-testid="servers-empty"
-            >
-              <div>
-                <p>No hosts registered yet.</p>
-                <p className="mt-1">Use the form above to add one.</p>
-              </div>
+            <div data-testid="servers-empty">
+              <EmptyState
+                title="No hosts registered yet"
+                description="Use the registration form to add a managed server."
+              />
             </div>
           ) : (
             <div
@@ -1711,6 +1746,7 @@ export default function ServersPage() {
           )}
         </section>
       </div>
+      </WorkbenchPage>
       {detailHost && (
         <HostDetailDrawer
           open={true}

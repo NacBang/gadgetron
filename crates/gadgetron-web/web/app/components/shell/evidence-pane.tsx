@@ -7,10 +7,12 @@ import {
   Zap,
   BookOpen,
   Activity,
+  MessageSquareText,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { useEvidence, type EvidenceItem } from "../../lib/evidence-context";
 import { useAuth } from "../../lib/auth-context";
+import { useWorkbenchSubject } from "../../lib/workbench-subject-context";
 
 // ---------------------------------------------------------------------------
 // Side panel (ex-Evidence)
@@ -36,7 +38,7 @@ interface EvidencePaneProps {
   width?: number;
 }
 
-type TabId = "actions" | "sources" | "activity" | "settings";
+type TabId = "context" | "actions" | "sources" | "activity" | "settings";
 
 function getApiBase(): string {
   if (typeof document === "undefined") return "/api/v1/web";
@@ -750,6 +752,72 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
 }
 
 // ---------------------------------------------------------------------------
+// Context tab — current bundle-to-chat subject
+// ---------------------------------------------------------------------------
+
+function ContextTab() {
+  const { subject } = useWorkbenchSubject();
+
+  if (!subject) {
+    return (
+      <div
+        className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center"
+        data-testid="context-empty"
+      >
+        <MessageSquareText className="size-4 text-zinc-700" aria-hidden />
+        <p className="text-xs font-medium text-zinc-400">No active context</p>
+        <p className="text-[11px] leading-relaxed text-zinc-600">
+          Start a Penny discussion from a bundle to keep its source details here.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="flex-1 overflow-y-auto px-3 py-3 text-[11px]"
+      data-testid="context-panel"
+    >
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+        Talking About
+      </div>
+      <div className="mt-1 text-sm font-semibold leading-snug text-zinc-100">
+        {subject.title}
+      </div>
+      {subject.subtitle && (
+        <div className="mt-1 truncate text-[11px] text-zinc-500">
+          {subject.subtitle}
+        </div>
+      )}
+      <div className="mt-2 flex items-center gap-1 text-[10px] text-zinc-500">
+        <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono">
+          {subject.bundle}
+        </span>
+        <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono">
+          {subject.kind}
+        </span>
+      </div>
+      {subject.summary && (
+        <p className="mt-3 leading-relaxed text-zinc-300">{subject.summary}</p>
+      )}
+      {subject.href && (
+        <a
+          href={subject.href}
+          className="mt-3 inline-flex rounded border border-zinc-800 px-2 py-1 text-[11px] font-medium text-zinc-300 hover:border-zinc-600 hover:text-zinc-100"
+        >
+          Open source
+        </a>
+      )}
+      {subject.facts && Object.keys(subject.facts).length > 0 && (
+        <pre className="mt-3 max-h-72 overflow-auto rounded border border-zinc-800 bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">
+          {JSON.stringify(subject.facts, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Sources tab — current-conversation citations
 // ---------------------------------------------------------------------------
 
@@ -909,7 +977,7 @@ function EvidenceRow({ item }: { item: EvidenceItem }) {
 export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps) {
   const { items, wsStatus, clear } = useEvidence();
   const { apiKey } = useAuth();
-  const [tab, setTab] = useState<TabId>("actions");
+  const [tab, setTab] = useState<TabId>("context");
 
   const actionsBadge = useActionsFeed(apiKey);
   const approvalsBadge = usePendingApprovalsFeed(apiKey);
@@ -1000,6 +1068,13 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
       {/* Tab row + controls — icon-only so the narrow panel isn't dominated by labels */}
       <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-zinc-800 px-1">
         <TabButton
+          active={tab === "context"}
+          onClick={() => setTab("context")}
+          label="Context"
+          count={0}
+          icon={<MessageSquareText className="size-3.5" aria-hidden />}
+        />
+        <TabButton
           active={tab === "actions"}
           onClick={() => setTab("actions")}
           label="Actions"
@@ -1074,6 +1149,7 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
       </div>
 
       {/* Tab body */}
+      {tab === "context" && <ContextTab />}
       {tab === "actions" && <ActionsTab apiKey={apiKey} />}
       {tab === "sources" && <SourcesTab items={items} />}
       {tab === "activity" && <ActivityTab items={items} />}

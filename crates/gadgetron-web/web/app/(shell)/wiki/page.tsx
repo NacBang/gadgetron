@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Toaster, toast } from "sonner";
@@ -15,6 +21,11 @@ import {
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
+import {
+  EmptyState,
+  PageToolbar,
+  WorkbenchPage,
+} from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
 import { safeRandomUUID } from "../../lib/uuid";
 
@@ -167,9 +178,29 @@ type ActionResponse = {
       name?: string;
       content?: string;
       hits?: Array<{ name?: string; snippet?: string; score?: number }>;
+      path?: string;
+      revision?: string;
+      byte_size?: number;
+      content_hash?: string;
     };
   };
 };
+
+type KnowledgeTab = "sources" | "pages" | "candidates";
+
+interface ImportReceipt {
+  path?: string;
+  revision?: string;
+  byte_size?: number;
+  content_hash?: string;
+}
+
+function encodeUtf8Base64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 async function invokeAction(
   apiKey: string | null,
@@ -196,6 +227,8 @@ async function invokeAction(
 export default function WikiWorkbenchPage() {
   const { apiKey } = useAuth();
 
+  const [activeTab, setActiveTab] = useState<KnowledgeTab>("sources");
+
   const [pages, setPages] = useState<string[]>([]);
   const [pagesError, setPagesError] = useState<string | null>(null);
   const [loadingPages, setLoadingPages] = useState(false);
@@ -213,6 +246,17 @@ export default function WikiWorkbenchPage() {
     Array<{ name?: string; snippet?: string; score?: number }>
   >([]);
   const [searching, setSearching] = useState(false);
+
+  const [rawText, setRawText] = useState("");
+  const [rawFileName, setRawFileName] = useState("");
+  const [rawContentType, setRawContentType] = useState("text/markdown");
+  const [rawTitleHint, setRawTitleHint] = useState("");
+  const [rawTargetPath, setRawTargetPath] = useState("");
+  const [rawSourceUri, setRawSourceUri] = useState("");
+  const [rawOverwrite, setRawOverwrite] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importReceipt, setImportReceipt] = useState<ImportReceipt | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // -------- wiki-list -------------------------------------------------------
   const refreshPages = useCallback(async () => {
@@ -329,6 +373,62 @@ export default function WikiWorkbenchPage() {
     }
   }, [apiKey, searchQuery]);
 
+  const handleRawFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      setRawText(text);
+      setRawFileName(file.name);
+      setRawContentType(
+        /\.(md|markdown)$/i.test(file.name) ? "text/markdown" : "text/plain",
+      );
+      if (!rawTitleHint.trim()) {
+        setRawTitleHint(file.name.replace(/\.(md|markdown|txt)$/i, ""));
+      }
+    },
+    [rawTitleHint],
+  );
+
+  const importRawSource = useCallback(async () => {
+    if (!rawText.trim() || importing) return;
+    setImporting(true);
+    setImportError(null);
+    setImportReceipt(null);
+    try {
+      const resp = await invokeAction(apiKey, "wiki-import", {
+        bytes: encodeUtf8Base64(rawText),
+        content_type: rawContentType,
+        overwrite: rawOverwrite,
+        ...(rawTitleHint.trim() ? { title_hint: rawTitleHint.trim() } : {}),
+        ...(rawTargetPath.trim() ? { target_path: rawTargetPath.trim() } : {}),
+        ...(rawSourceUri.trim() ? { source_uri: rawSourceUri.trim() } : {}),
+      });
+      const receipt = resp.result?.payload as ImportReceipt | undefined;
+      setImportReceipt(receipt ?? {});
+      toast.success("Source imported", {
+        description: receipt?.path ?? "wiki.import completed.",
+      });
+      await refreshPages();
+    } catch (e) {
+      const msg = (e as Error).message;
+      setImportError(msg);
+      toast.error("Import failed", { description: msg });
+    } finally {
+      setImporting(false);
+    }
+  }, [
+    apiKey,
+    importing,
+    rawContentType,
+    rawOverwrite,
+    rawSourceUri,
+    rawTargetPath,
+    rawText,
+    rawTitleHint,
+    refreshPages,
+  ]);
+
   // Deep-link support: Evidence pane emits `/web/wiki?page=<name>` and
   // `/web/wiki?q=<query>`. Prime the matching action once per mount and
   // clear the query so a manual refresh doesn't re-trigger.
@@ -408,6 +508,12 @@ export default function WikiWorkbenchPage() {
     });
   }, [selected]);
 
+  const tabs: Array<{ id: KnowledgeTab; label: string }> = [
+    { id: "sources", label: "Sources" },
+    { id: "pages", label: "Pages" },
+    { id: "candidates", label: "Candidates" },
+  ];
+
   return (
     <>
       <Toaster theme="dark" richColors position="bottom-right" />
@@ -416,12 +522,13 @@ export default function WikiWorkbenchPage() {
         <DialogContent className="border-zinc-800 bg-zinc-950">
           <DialogHeader>
             <DialogTitle className="text-zinc-100">
-              페이지를 삭제할까요?
+              Delete this page?
             </DialogTitle>
             <DialogDescription className="text-zinc-400">
               <span className="font-mono text-zinc-200">{selected}</span>
-              을(를) <code>_archived/</code>로 이동하고 git에 커밋합니다. 복구는 git
-              히스토리에서 가능하거나 Penny에게 되돌려 달라고 요청할 수 있어요.
+              {" "}will be moved to <code>_archived/</code> and committed to
+              git. You can restore it from git history or ask Penny to recover
+              it.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -431,7 +538,7 @@ export default function WikiWorkbenchPage() {
               disabled={deleting}
               className="text-zinc-400"
             >
-              취소
+              Cancel
             </Button>
             <Button
               onClick={() => void deletePage()}
@@ -439,263 +546,395 @@ export default function WikiWorkbenchPage() {
               className="bg-red-800 text-red-50 hover:bg-red-700"
               data-testid="wiki-delete-confirm"
             >
-              {deleting ? "삭제 중…" : "삭제"}
+              {deleting ? "Deleting..." : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Page header — title + actions. Sign-out moved into the shell's
-       * settings dialog so it lives in one place across all pages. */}
-      <header
-        className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
-        data-testid="wiki-header"
-      >
-        <div className="flex items-center gap-3">
-          <span className="text-xs font-semibold text-zinc-300">
-            Wiki Workbench
-          </span>
-          <span className="text-[11px] text-zinc-600">
-            · {pages.length} pages
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={newPage}
-            className="h-6 px-2 text-[11px]"
-          >
-            + New page
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void refreshPages()}
-            className="h-6 px-2 text-[11px]"
-          >
-            Refresh
-          </Button>
-        </div>
-      </header>
-
-      {/* Search bar */}
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-zinc-800 bg-zinc-900/40 px-4">
-        <Input
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search wiki (knowledge-search)"
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void runSearch();
-          }}
-          className="h-7 max-w-md border-zinc-800 bg-zinc-900 font-mono text-[12px] text-zinc-200"
-          data-testid="wiki-search-input"
-        />
-        <Button
-          size="sm"
-          onClick={() => void runSearch()}
-          disabled={searching}
-          className="h-7 px-3 text-[11px]"
-          data-testid="wiki-search-button"
-        >
-          {searching ? "..." : "Search"}
-        </Button>
-      </div>
-
-      {/* Body: 3-column (pages | content | search hits) */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left: page list */}
-        <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
-          <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-            Pages
+      <WorkbenchPage
+        title="Knowledge"
+        subtitle={`${pages.length} pages available for Penny and operators.`}
+        headerTestId="wiki-header"
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={newPage}
+              className="h-7 px-2 text-[11px]"
+            >
+              + New page
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void refreshPages()}
+              className="h-7 px-2 text-[11px]"
+            >
+              Refresh
+            </Button>
           </div>
-          <div
-            className="flex-1 overflow-y-auto"
-            data-testid="wiki-page-list"
-          >
-            {loadingPages && (
-              <div className="px-3 py-2 text-[11px] text-zinc-600">
-                Loading...
-              </div>
-            )}
-            {pagesError && (
-              <div className="px-3 py-2 text-[11px] text-red-400">
-                {pagesError}
-              </div>
-            )}
-            {!loadingPages && !pagesError && pages.length === 0 && (
-              <div className="px-3 py-2 text-[11px] text-zinc-600">
-                No pages. Use &quot;+ New page&quot; to create one.
-              </div>
-            )}
-            {!loadingPages && pages.length > 0 && (
-              <div className="py-1">
-                <TreeBranch
-                  nodes={pageTree}
-                  depth={0}
-                  selected={selected}
-                  onOpen={(path) => void openPage(path)}
-                  expanded={expandedFolders}
-                  toggle={toggleFolder}
-                />
-              </div>
-            )}
-          </div>
-        </aside>
-
-        {/* Center: page content (read/edit) */}
-        <main className="flex flex-1 flex-col overflow-hidden">
-          <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/40 px-4 py-1.5">
-            {selected ? (
-              <div className="flex items-center justify-between">
-                <span
-                  className="font-mono text-[12px] text-zinc-300"
-                  data-testid="wiki-current-page-name"
+        }
+        toolbar={
+          <PageToolbar>
+            <div role="tablist" aria-label="Knowledge sections" className="flex flex-wrap gap-2">
+              {tabs.map((tab) => (
+                <Button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  variant={activeTab === tab.id ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setActiveTab(tab.id)}
+                  className="h-7 px-2 text-[11px]"
                 >
-                  {selected}
-                </span>
-                <div className="flex items-center gap-2">
-                  {editing ? (
-                    <>
-                      <Button
-                        size="sm"
-                        onClick={() => void savePage()}
-                        disabled={saving}
-                        className="h-6 px-3 text-[11px]"
-                        data-testid="wiki-save-button"
-                      >
-                        {saving ? "Saving..." : "Save"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          setEditing(false);
-                          void openPage(selected);
-                        }}
-                        className="h-6 px-3 text-[11px]"
-                      >
-                        Cancel
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setEditing(true)}
-                        className="h-6 px-3 text-[11px]"
-                        data-testid="wiki-edit-button"
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setConfirmDeleteOpen(true)}
-                        className="h-6 px-3 text-[11px] text-zinc-500 hover:bg-red-950/40 hover:text-red-300"
-                        data-testid="wiki-delete-button"
-                        title="페이지 삭제 (soft: _archived/ 로 이동)"
-                      >
-                        🗑️ Delete
-                      </Button>
-                    </>
+                  {tab.label}
+                </Button>
+              ))}
+            </div>
+            {activeTab === "pages" && (
+              <div className="ml-auto flex min-w-[320px] items-center gap-2">
+                <Input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search pages"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void runSearch();
+                  }}
+                  className="h-7 border-zinc-800 bg-zinc-900 font-mono text-[12px] text-zinc-200"
+                  data-testid="wiki-search-input"
+                />
+                <Button
+                  size="sm"
+                  onClick={() => void runSearch()}
+                  disabled={searching}
+                  className="h-7 px-3 text-[11px]"
+                  data-testid="wiki-search-button"
+                >
+                  {searching ? "..." : "Search"}
+                </Button>
+              </div>
+            )}
+          </PageToolbar>
+        }
+      >
+        {activeTab === "sources" && (
+          <div className="grid min-h-[560px] grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)] gap-4">
+            <section className="flex min-h-0 flex-col overflow-hidden rounded border border-zinc-800 bg-zinc-950">
+              <div className="shrink-0 border-b border-zinc-800 px-4 py-3">
+                <div className="text-sm font-semibold text-zinc-100">RAW source import</div>
+                <div className="mt-1 text-[11px] text-zinc-500">
+                  Markdown and plain text are imported through <code>wiki.import</code>.
+                </div>
+              </div>
+              <div className="grid flex-1 grid-cols-[minmax(0,1fr)_240px] gap-4 overflow-auto p-4">
+                <div className="flex min-w-0 flex-col gap-3">
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    File
+                    <input
+                      type="file"
+                      accept=".md,.markdown,.txt,text/markdown,text/plain"
+                      onChange={(e) => void handleRawFile(e)}
+                      className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 file:mr-2 file:rounded file:border-0 file:bg-zinc-800 file:px-2 file:py-0.5 file:text-zinc-300"
+                      data-testid="knowledge-raw-file"
+                    />
+                  </label>
+                  {rawFileName && (
+                    <div className="truncate font-mono text-[10px] text-zinc-600">
+                      {rawFileName}
+                    </div>
                   )}
+                  <label className="flex min-h-0 flex-1 flex-col gap-1 text-[11px] text-zinc-400">
+                    Source text
+                    <Textarea
+                      value={rawText}
+                      onChange={(e) => setRawText(e.target.value)}
+                      placeholder="# Runbook title"
+                      className="min-h-[320px] flex-1 resize-none border-zinc-800 bg-zinc-950 font-mono text-[13px] leading-relaxed text-zinc-200"
+                      data-testid="knowledge-raw-text"
+                    />
+                  </label>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    Content type
+                    <select
+                      value={rawContentType}
+                      onChange={(e) => setRawContentType(e.target.value)}
+                      className="h-8 rounded border border-zinc-800 bg-zinc-900 px-2 font-mono text-[12px] text-zinc-200"
+                      data-testid="knowledge-raw-content-type"
+                    >
+                      <option value="text/markdown">text/markdown</option>
+                      <option value="text/plain">text/plain</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    Title hint
+                    <Input
+                      value={rawTitleHint}
+                      onChange={(e) => setRawTitleHint(e.target.value)}
+                      className="h-8 border-zinc-800 bg-zinc-900 text-[12px] text-zinc-200"
+                      data-testid="knowledge-raw-title-hint"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    Target path
+                    <Input
+                      value={rawTargetPath}
+                      onChange={(e) => setRawTargetPath(e.target.value)}
+                      placeholder="imports/runbook"
+                      className="h-8 border-zinc-800 bg-zinc-900 font-mono text-[12px] text-zinc-200"
+                      data-testid="knowledge-raw-target-path"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    Source URI
+                    <Input
+                      value={rawSourceUri}
+                      onChange={(e) => setRawSourceUri(e.target.value)}
+                      placeholder="https://..."
+                      className="h-8 border-zinc-800 bg-zinc-900 text-[12px] text-zinc-200"
+                      data-testid="knowledge-raw-source-uri"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-[11px] text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={rawOverwrite}
+                      onChange={(e) => setRawOverwrite(e.target.checked)}
+                      data-testid="knowledge-raw-overwrite"
+                    />
+                    Overwrite existing target
+                  </label>
+                  <Button
+                    type="button"
+                    onClick={() => void importRawSource()}
+                    disabled={!rawText.trim() || importing}
+                    className="mt-1 h-8 text-[12px]"
+                    data-testid="knowledge-import-button"
+                  >
+                    {importing ? "Importing..." : "Import source"}
+                  </Button>
                 </div>
               </div>
-            ) : (
-              <span className="text-[11px] text-zinc-600">
-                Pick a page from the list or create a new one.
-              </span>
-            )}
-          </div>
+            </section>
 
-          <div className="flex-1 overflow-auto p-4">
-            {pageError && (
-              <div className="mb-3 rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-                {pageError}
+            <section className="flex min-h-0 flex-col overflow-hidden rounded border border-zinc-800 bg-zinc-950">
+              <div className="shrink-0 border-b border-zinc-800 px-4 py-3">
+                <div className="text-sm font-semibold text-zinc-100">Import receipt</div>
               </div>
-            )}
-            {selected && editing && (
-              <Textarea
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                className="h-full w-full resize-none border-zinc-800 bg-zinc-950 font-mono text-[13px] leading-relaxed text-zinc-200"
-                data-testid="wiki-edit-textarea"
-              />
-            )}
-            {selected && !editing && (
-              <div
-                className="prose prose-invert prose-sm max-w-none
-                  prose-p:my-2 prose-p:leading-relaxed
-                  prose-pre:my-3 prose-pre:rounded-lg prose-pre:border
-                  prose-pre:border-zinc-800 prose-pre:bg-zinc-950/60
-                  prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
-                  prose-code:text-[13px] prose-code:bg-zinc-800/80
-                  prose-code:px-1 prose-code:py-0.5 prose-code:rounded
-                  prose-code:before:content-none prose-code:after:content-none
-                  prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
-                  prose-headings:font-semibold prose-headings:text-zinc-100
-                  prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
-                  prose-strong:text-zinc-50
-                  prose-blockquote:border-l-blue-400/40
-                  prose-blockquote:text-zinc-400 prose-blockquote:italic
-                  prose-table:my-2 prose-th:border-zinc-700 prose-td:border-zinc-700
-                  prose-hr:border-zinc-700"
-                data-testid="wiki-content-readonly"
-              >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {content}
-                </ReactMarkdown>
-              </div>
-            )}
-            {!selected && (
-              <div className="flex h-full items-center justify-center text-[11px] text-zinc-600">
-                No page selected.
-              </div>
-            )}
-          </div>
-        </main>
-
-        {/* Right: search hits */}
-        <aside
-          className="flex w-64 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950"
-          data-testid="wiki-search-hits"
-        >
-          <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-            Search hits ({searchHits.length})
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            {searchHits.length === 0 && (
-              <div className="px-3 py-2 text-[11px] text-zinc-600">
-                No search yet. Use the bar above.
-              </div>
-            )}
-            {searchHits.map((h, i) => (
-              <button
-                key={`${h.name || "hit"}-${i}`}
-                type="button"
-                onClick={() => h.name && void openPage(h.name)}
-                className="block w-full border-b border-zinc-900 px-3 py-2 text-left text-[11px] transition-colors hover:bg-zinc-900"
-              >
-                <div className="truncate font-mono text-zinc-300">
-                  {h.name || "(unnamed hit)"}
-                </div>
-                {typeof h.score === "number" && (
-                  <div className="mt-0.5 text-[10px] text-zinc-600">
-                    score: {h.score.toFixed(3)}
+              <div className="flex-1 overflow-auto p-4">
+                {importError && (
+                  <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                    {importError}
                   </div>
                 )}
-                {h.snippet && (
-                  <div className="mt-1 line-clamp-3 text-zinc-500">
-                    {h.snippet}
+                {importReceipt ? (
+                  <dl
+                    className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[11px]"
+                    data-testid="knowledge-import-receipt"
+                  >
+                    <dt className="text-zinc-500">path</dt>
+                    <dd className="truncate font-mono text-zinc-200">{importReceipt.path ?? "unknown"}</dd>
+                    <dt className="text-zinc-500">revision</dt>
+                    <dd className="truncate font-mono text-zinc-200">{importReceipt.revision ?? "unknown"}</dd>
+                    <dt className="text-zinc-500">byte_size</dt>
+                    <dd className="font-mono text-zinc-200">{importReceipt.byte_size ?? "unknown"}</dd>
+                    <dt className="text-zinc-500">content_hash</dt>
+                    <dd className="break-all font-mono text-zinc-200">{importReceipt.content_hash ?? "unknown"}</dd>
+                  </dl>
+                ) : (
+                  <EmptyState
+                    title="No import receipt yet"
+                    description="After a RAW source is imported, the canonical wiki path and content hash appear here."
+                  />
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {activeTab === "pages" && (
+          <div className="flex h-[calc(100vh-220px)] min-h-[560px] overflow-hidden rounded border border-zinc-800">
+            <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
+              <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Pages
+              </div>
+              <div className="flex-1 overflow-y-auto" data-testid="wiki-page-list">
+                {loadingPages && (
+                  <div className="px-3 py-2 text-[11px] text-zinc-600">Loading...</div>
+                )}
+                {pagesError && (
+                  <div className="px-3 py-2 text-[11px] text-red-400">{pagesError}</div>
+                )}
+                {!loadingPages && !pagesError && pages.length === 0 && (
+                  <div className="px-3 py-2 text-[11px] text-zinc-600">
+                    No pages. Use &quot;+ New page&quot; to create one.
                   </div>
                 )}
-              </button>
-            ))}
+                {!loadingPages && pages.length > 0 && (
+                  <div className="py-1">
+                    <TreeBranch
+                      nodes={pageTree}
+                      depth={0}
+                      selected={selected}
+                      onOpen={(path) => void openPage(path)}
+                      expanded={expandedFolders}
+                      toggle={toggleFolder}
+                    />
+                  </div>
+                )}
+              </div>
+            </aside>
+
+            <main className="flex flex-1 flex-col overflow-hidden">
+              <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/40 px-4 py-1.5">
+                {selected ? (
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[12px] text-zinc-300" data-testid="wiki-current-page-name">
+                      {selected}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {editing ? (
+                        <>
+                          <Button
+                            size="sm"
+                            onClick={() => void savePage()}
+                            disabled={saving}
+                            className="h-6 px-3 text-[11px]"
+                            data-testid="wiki-save-button"
+                          >
+                            {saving ? "Saving..." : "Save"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setEditing(false);
+                              void openPage(selected);
+                            }}
+                            className="h-6 px-3 text-[11px]"
+                          >
+                            Cancel
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setEditing(true)}
+                            className="h-6 px-3 text-[11px]"
+                            data-testid="wiki-edit-button"
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setConfirmDeleteOpen(true)}
+                            className="h-6 px-3 text-[11px] text-zinc-500 hover:bg-red-950/40 hover:text-red-300"
+                            data-testid="wiki-delete-button"
+                            title="Soft delete to _archived/"
+                          >
+                            Delete
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <span className="text-[11px] text-zinc-600">
+                    Pick a page from the list or create a new one.
+                  </span>
+                )}
+              </div>
+
+              <div className="flex-1 overflow-auto p-4">
+                {pageError && (
+                  <div className="mb-3 rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+                    {pageError}
+                  </div>
+                )}
+                {selected && editing && (
+                  <Textarea
+                    value={content}
+                    onChange={(e) => setContent(e.target.value)}
+                    className="h-full w-full resize-none border-zinc-800 bg-zinc-950 font-mono text-[13px] leading-relaxed text-zinc-200"
+                    data-testid="wiki-edit-textarea"
+                  />
+                )}
+                {selected && !editing && (
+                  <div
+                    className="prose prose-invert prose-sm max-w-none
+                      prose-p:my-2 prose-p:leading-relaxed
+                      prose-pre:my-3 prose-pre:rounded-lg prose-pre:border
+                      prose-pre:border-zinc-800 prose-pre:bg-zinc-950/60
+                      prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
+                      prose-code:text-[13px] prose-code:bg-zinc-800/80
+                      prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+                      prose-code:before:content-none prose-code:after:content-none
+                      prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
+                      prose-headings:font-semibold prose-headings:text-zinc-100
+                      prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
+                      prose-strong:text-zinc-50
+                      prose-blockquote:border-l-blue-400/40
+                      prose-blockquote:text-zinc-400 prose-blockquote:italic
+                      prose-table:my-2 prose-th:border-zinc-700 prose-td:border-zinc-700
+                      prose-hr:border-zinc-700"
+                    data-testid="wiki-content-readonly"
+                  >
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+                  </div>
+                )}
+                {!selected && (
+                  <div className="flex h-full items-center justify-center text-[11px] text-zinc-600">
+                    No page selected.
+                  </div>
+                )}
+              </div>
+            </main>
+
+            <aside className="flex w-64 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950" data-testid="wiki-search-hits">
+              <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Search hits ({searchHits.length})
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {searchHits.length === 0 && (
+                  <div className="px-3 py-2 text-[11px] text-zinc-600">
+                    No search yet. Use the bar above.
+                  </div>
+                )}
+                {searchHits.map((h, i) => (
+                  <button
+                    key={`${h.name || "hit"}-${i}`}
+                    type="button"
+                    onClick={() => h.name && void openPage(h.name)}
+                    className="block w-full border-b border-zinc-900 px-3 py-2 text-left text-[11px] transition-colors hover:bg-zinc-900"
+                  >
+                    <div className="truncate font-mono text-zinc-300">{h.name || "(unnamed hit)"}</div>
+                    {typeof h.score === "number" && (
+                      <div className="mt-0.5 text-[10px] text-zinc-600">
+                        score: {h.score.toFixed(3)}
+                      </div>
+                    )}
+                    {h.snippet && <div className="mt-1 line-clamp-3 text-zinc-500">{h.snippet}</div>}
+                  </button>
+                ))}
+              </div>
+            </aside>
           </div>
-        </aside>
-      </div>
+        )}
+
+        {activeTab === "candidates" && (
+          <EmptyState
+            title="No candidate queue yet"
+            description="Knowledge candidates are captured by the backend plane. When pending candidate APIs are exposed to the web UI, accept and reject decisions belong here."
+          />
+        )}
+      </WorkbenchPage>
     </>
   );
 }

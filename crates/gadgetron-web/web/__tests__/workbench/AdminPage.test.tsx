@@ -29,6 +29,45 @@ describe("AdminPage", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows Admin sections as internal tabs with Penny Runtime first", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/workbench/admin/users?")) {
+        return jsonResponse({ users: [], returned: 0 });
+      }
+
+      if (url.includes("/workbench/admin/agent/brain")) {
+        return jsonResponse({
+          mode: "claude_max",
+          external_base_url: "",
+          model: "",
+          external_auth_token_env: "",
+          custom_model_option: false,
+          source: "config_file",
+        });
+      }
+
+      if (url.includes("/workbench/admin/llm/endpoints")) {
+        return jsonResponse({ endpoints: [], returned: 0 });
+      }
+
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    render(<AdminPage />);
+
+    expect(await screen.findByRole("tab", { name: "Penny Runtime" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Users" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Access" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Penny Runtime" })).toBeTruthy();
+    expect(screen.getByText("Applied configuration")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Access" }));
+    expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
+  });
+
   it("submits avatar_url when creating a user with a profile photo URL", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -70,6 +109,7 @@ describe("AdminPage", () => {
 
     render(<AdminPage />);
 
+    await userEvent.click(await screen.findByRole("tab", { name: "Users" }));
     await userEvent.type(
       screen.getByPlaceholderText("alice@example.com"),
       "alice@example.com",
@@ -80,7 +120,7 @@ describe("AdminPage", () => {
       "https://cdn.example.com/alice.png",
     );
     await userEvent.type(screen.getByPlaceholderText("temporary"), "temporary");
-    await userEvent.click(screen.getByRole("button", { name: "추가" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add user" }));
 
     await waitFor(() => {
       const createCall = fetchMock.mock.calls.find(([input, init]) => {
@@ -158,15 +198,18 @@ describe("AdminPage", () => {
 
     render(<AdminPage />);
 
+    await userEvent.click(await screen.findByRole("tab", { name: "Users" }));
     await screen.findByText("bob@example.com");
-    await userEvent.click(screen.getByRole("button", { name: "수정" }));
+    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
     await userEvent.clear(screen.getByTestId("edit-user-display-name"));
     await userEvent.type(screen.getByTestId("edit-user-display-name"), "Robert Lee");
     await userEvent.type(
       screen.getByTestId("edit-user-avatar-url"),
       "data:image/jpeg;base64,avatar",
     );
-    await userEvent.click(screen.getByRole("button", { name: "프로필 저장" }));
+    expect(screen.getByText("Save profile")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Save profile" }));
 
     await waitFor(() => {
       const updateCall = fetchMock.mock.calls.find(([input, init]) => {
@@ -230,7 +273,7 @@ describe("AdminPage", () => {
 
     render(<AdminPage />);
 
-    await userEvent.click(screen.getByText("고급 등록"));
+    await userEvent.click(screen.getByText("Advanced registration"));
     await userEvent.type(screen.getByPlaceholderText("Gemma 4"), "Gemma 4");
     await userEvent.type(
       screen.getByPlaceholderText("http://10.100.1.5:8100"),
@@ -240,7 +283,7 @@ describe("AdminPage", () => {
       screen.getByPlaceholderText("cyankiwi/gemma-4-31B-it-AWQ-4bit"),
       "cyankiwi/gemma-4-31B-it-AWQ-4bit",
     );
-    await userEvent.click(screen.getByRole("button", { name: "Endpoint 추가" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add endpoint" }));
 
     await waitFor(() => {
       const createCall = fetchMock.mock.calls.find(([input, init]) => {
@@ -315,7 +358,7 @@ describe("AdminPage", () => {
     await userEvent.type(screen.getByLabelText("Endpoint Alias"), "gemma4");
     await userEvent.type(screen.getByLabelText("Endpoint Host"), "10.100.1.5");
     await userEvent.type(screen.getByLabelText("Endpoint Port"), "8100");
-    await userEvent.click(screen.getByRole("button", { name: "자동 감지" }));
+    await userEvent.click(screen.getByRole("button", { name: "Auto-detect" }));
 
     await waitFor(() => {
       const detectCall = fetchMock.mock.calls.find(([input, init]) => {
@@ -440,8 +483,10 @@ describe("AdminPage", () => {
     render(<AdminPage />);
 
     await screen.findByText("gemma4");
-    await userEvent.click(screen.getByRole("button", { name: "CCR 만들기" }));
-    await userEvent.click(screen.getByRole("button", { name: "Bridge 생성" }));
+    expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Create CCR" }));
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Create bridge" }));
 
     await waitFor(() => {
       const createCall = fetchMock.mock.calls.find(([input, init]) => {

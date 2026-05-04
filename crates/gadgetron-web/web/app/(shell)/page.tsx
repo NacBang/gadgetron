@@ -41,6 +41,7 @@ import {
 } from "../components/ui/dialog";
 import { useAuth } from "../lib/auth-context";
 import { getActiveConversationId } from "../lib/conversation-id";
+import { useWorkbenchSubject } from "../lib/workbench-subject-context";
 
 // ---------------------------------------------------------------------------
 // /web — Chat page. Runs inside `(shell)/layout.tsx`, which owns the
@@ -406,6 +407,32 @@ function ActiveConversationBanner() {
   );
 }
 
+function ActiveSubjectBanner() {
+  const { subject } = useWorkbenchSubject();
+  if (!subject) return null;
+  return (
+    <div
+      className="shrink-0 border-b border-zinc-800 bg-blue-950/20 px-4 py-2"
+      data-testid="active-subject-banner"
+    >
+      <div className="mx-auto flex w-full max-w-[min(1400px,92vw)] items-center gap-2 text-[11px]">
+        <span className="shrink-0 text-blue-300">Talking about</span>
+        <span className="min-w-0 flex-1 truncate text-zinc-100" title={subject.title}>
+          {subject.title}
+        </span>
+        {subject.href && (
+          <a
+            href={subject.href}
+            className="shrink-0 rounded border border-blue-800/60 px-1.5 py-0.5 text-[10px] text-blue-200 hover:border-blue-600 hover:text-blue-100"
+          >
+            Open source
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [slashHelpOpen, setSlashHelpOpen] = useState(false);
@@ -424,6 +451,7 @@ export default function Home() {
 
       <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
         <ActiveConversationBanner />
+        <ActiveSubjectBanner />
         <div className="relative flex flex-1 flex-col overflow-hidden">
           <ThreadPrimitive.Viewport className="penny-scroll flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-[min(1400px,92vw)] px-4 py-6">
@@ -867,6 +895,7 @@ function AssistantStatusBadge() {
 function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   const composer = useComposerRuntime();
   const isRunning = useThread((s) => s.isRunning);
+  const { refreshSubject } = useWorkbenchSubject();
 
   // Preserve the in-progress draft across chat switches / reloads.
   // Keyed by active conversation id so each chat gets its own pending
@@ -875,6 +904,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const convId = getActiveConversationId() ?? "default";
+    refreshSubject();
     const storageKey = `gadgetron_draft_${convId}`;
     const pendingSubmitKey = `gadgetron_pending_submit_${convId}`;
     const saved = window.localStorage.getItem(storageKey);
@@ -910,7 +940,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
     return () => {
       unsub?.();
     };
-  }, [composer]);
+  }, [composer, refreshSubject]);
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     // Clear any saved draft — the message is heading out.

@@ -9,6 +9,13 @@ import {
   useState,
 } from "react";
 import { Toaster, toast } from "sonner";
+import {
+  InlineNotice,
+  OperationalPanel,
+  PageToolbar,
+  StatusBadge,
+  WorkbenchPage,
+} from "../../components/workbench";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { useAuth } from "../../lib/auth-context";
@@ -98,6 +105,8 @@ interface ManagedHostRow {
   host: string;
   alias?: string | null;
 }
+
+type AdminTab = "penny-runtime" | "users" | "access";
 
 const MAX_AVATAR_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -441,11 +450,11 @@ function AvatarProfileField({
       event.target.value = "";
       if (!file) return;
       if (!file.type.startsWith("image/")) {
-        toast.error("이미지 파일만 사용할 수 있습니다");
+        toast.error("Only image files are supported");
         return;
       }
       if (file.size > MAX_AVATAR_FILE_BYTES) {
-        toast.error("프로필 사진은 2MB 이하만 지원합니다");
+        toast.error("Profile photos must be 2MB or smaller");
         return;
       }
 
@@ -456,7 +465,7 @@ function AvatarProfileField({
         setZoom(1.15);
         setSource(String(reader.result || ""));
       };
-      reader.onerror = () => toast.error("사진 파일을 읽지 못했습니다");
+      reader.onerror = () => toast.error("Could not read the photo file");
       reader.readAsDataURL(file);
     },
     [],
@@ -465,7 +474,7 @@ function AvatarProfileField({
   const applyCrop = useCallback(() => {
     const image = sourceImageRef.current;
     if (!image || !image.naturalWidth || !image.naturalHeight) {
-      toast.error("사진을 아직 불러오지 못했습니다");
+      toast.error("The photo has not loaded yet");
       return;
     }
 
@@ -475,7 +484,7 @@ function AvatarProfileField({
     canvas.height = outputSize;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
-      toast.error("브라우저가 이미지 편집을 지원하지 않습니다");
+      toast.error("This browser does not support image editing");
       return;
     }
 
@@ -499,7 +508,7 @@ function AvatarProfileField({
               referrerPolicy="no-referrer"
             />
           ) : (
-            "사진"
+            "Photo"
           )}
         </div>
         <Input
@@ -513,7 +522,7 @@ function AvatarProfileField({
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <input
-          aria-label="사진 파일"
+          aria-label="Photo file"
           type="file"
           accept="image/png,image/jpeg,image/webp"
           onChange={onFileChange}
@@ -527,7 +536,7 @@ function AvatarProfileField({
             onClick={() => onChange("")}
             className="h-6 px-2 text-[11px]"
           >
-            사진 제거
+            Remove photo
           </Button>
         )}
       </div>
@@ -537,7 +546,7 @@ function AvatarProfileField({
             <div className="relative size-32 shrink-0 overflow-hidden rounded-full border border-zinc-700 bg-zinc-900">
               <img
                 src={source}
-                alt="선택한 사진 미리보기"
+              alt="Selected photo preview"
                 className="size-full object-cover"
                 style={{
                   objectPosition: `${cropX}% ${cropY}%`,
@@ -555,7 +564,7 @@ function AvatarProfileField({
             />
             <div className="min-w-0 flex-1 space-y-2">
               <label className="block text-[11px] text-zinc-500">
-                좌우
+                Horizontal position
                 <input
                   type="range"
                   min="0"
@@ -566,7 +575,7 @@ function AvatarProfileField({
                 />
               </label>
               <label className="block text-[11px] text-zinc-500">
-                상하
+                Vertical position
                 <input
                   type="range"
                   min="0"
@@ -577,7 +586,7 @@ function AvatarProfileField({
                 />
               </label>
               <label className="block text-[11px] text-zinc-500">
-                확대
+                Zoom
                 <input
                   type="range"
                   min="1"
@@ -596,7 +605,7 @@ function AvatarProfileField({
                   onClick={() => setSource(null)}
                   className="h-7 px-2 text-[11px]"
                 >
-                  취소
+                  Cancel
                 </Button>
                 <Button
                   type="button"
@@ -604,7 +613,7 @@ function AvatarProfileField({
                   onClick={applyCrop}
                   className="h-7 px-2 text-[11px]"
                 >
-                  얼굴 영역 적용
+                  Apply face crop
                 </Button>
               </div>
             </div>
@@ -674,7 +683,7 @@ function PennyBrainSettings({
         custom_model_option: customModel,
       });
       applySettings(next);
-      toast.success("Penny LLM 설정 저장됨");
+      toast.success("Penny LLM settings saved");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -686,16 +695,16 @@ function PennyBrainSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Penny LLM Gateway</h2>
+          <h2 className="text-sm font-medium text-zinc-200">Applied configuration</h2>
           <p className="text-[11px] text-zinc-500">
             {settings
               ? settings.source === "database"
-                ? "DB 설정"
-                : "Config 기본값"
+                ? "Database settings"
+                : "Config defaults"
               : loading
-                ? "설정 로드 중"
-                : "설정 미로드"}{" "}
-            · 다음 Penny 요청부터 적용
+                ? "Loading settings"
+                : "Settings not loaded"}{" "}
+            · Applies to the next Penny request
           </p>
         </div>
         <Button
@@ -733,7 +742,7 @@ function PennyBrainSettings({
           <Input
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="비워두면 Claude Code 기본 모델"
+            placeholder="Leave empty to use the Claude Code default model"
             autoComplete="off"
           />
         </div>
@@ -765,10 +774,10 @@ function PennyBrainSettings({
             onChange={(e) => setCustomModel(e.target.checked)}
             className="h-4 w-4 rounded border-zinc-700 bg-zinc-950"
           />
-          ANTHROPIC_CUSTOM_MODEL_OPTION 사용
+          Use ANTHROPIC_CUSTOM_MODEL_OPTION
         </label>
         <Button onClick={() => void save()} disabled={saving || !canCall}>
-          {saving ? "저장 중…" : "저장"}
+          {saving ? "Saving…" : "Save"}
         </Button>
       </div>
     </section>
@@ -823,7 +832,7 @@ function LlmEndpointSettings({
 
   const submit = useCallback(async () => {
     if (!name.trim() || !baseUrl.trim()) {
-      toast.error("endpoint 이름과 URL은 필수입니다");
+      toast.error("Endpoint name and URL are required");
       return;
     }
     setBusy("create");
@@ -836,7 +845,7 @@ function LlmEndpointSettings({
         base_url: baseUrl.trim(),
         model_id: modelId.trim() || undefined,
       });
-      toast.success(`Endpoint 추가: ${name.trim()}`);
+      toast.success(`Endpoint added: ${name.trim()}`);
       setName("");
       setBaseUrl("");
       setModelId("");
@@ -851,7 +860,7 @@ function LlmEndpointSettings({
   const autodetect = useCallback(async () => {
     const port = Number(detectPort);
     if (!detectHost.trim() || !Number.isInteger(port) || port < 1 || port > 65535) {
-      toast.error("host와 port를 확인하세요");
+      toast.error("Check the host and port");
       return;
     }
     setBusy("autodetect");
@@ -902,12 +911,12 @@ function LlmEndpointSettings({
 
   const remove = useCallback(
     async (endpoint: LlmEndpointRow) => {
-      if (!window.confirm(`${endpoint.name} endpoint 삭제?`)) return;
+      if (!window.confirm(`Delete endpoint ${endpoint.name}?`)) return;
       setBusy(`delete:${endpoint.id}`);
       setErr(null);
       try {
         await deleteLlmEndpoint(apiKey, endpoint.id);
-        toast.success(`Endpoint 삭제: ${endpoint.name}`);
+        toast.success(`Endpoint deleted: ${endpoint.name}`);
         await refresh();
       } catch (e) {
         setErr((e as Error).message);
@@ -924,7 +933,7 @@ function LlmEndpointSettings({
       setErr(null);
       try {
         await useLlmEndpoint(apiKey, endpoint.id);
-        toast.success(`Penny endpoint 적용: ${endpoint.name}`);
+        toast.success(`Penny endpoint applied: ${endpoint.name}`);
       } catch (e) {
         setErr((e as Error).message);
       } finally {
@@ -947,7 +956,7 @@ function LlmEndpointSettings({
       try {
         setManagedHosts(await listRegisteredServers(apiKey));
       } catch (e) {
-        toast.error("registered server 목록을 불러오지 못했습니다", {
+        toast.error("Could not load registered servers", {
           description: (e as Error).message,
         });
       } finally {
@@ -1005,15 +1014,15 @@ function LlmEndpointSettings({
     if (!bridgeSource) return;
     const port = Number(bridgePort);
     if (!bridgeName.trim() || !bridgeBaseUrl.trim()) {
-      toast.error("bridge 이름과 URL은 필수입니다");
+      toast.error("Bridge name and URL are required");
       return;
     }
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      toast.error("bridge port를 확인하세요");
+      toast.error("Check the bridge port");
       return;
     }
     if (bridgeTargetKind === "registered_server" && !bridgeHostId) {
-      toast.error("registered server target을 선택하세요");
+      toast.error("Select a registered server target");
       return;
     }
     setBusy("ccr:create");
@@ -1029,7 +1038,7 @@ function LlmEndpointSettings({
       });
       setEndpoints((prev) => [next, ...prev.filter((endpoint) => endpoint.id !== next.id)]);
       setBridgeSource(null);
-      toast.success(`CCR bridge 생성: ${next.name}`);
+      toast.success(`CCR bridge created: ${next.name}`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -1050,9 +1059,9 @@ function LlmEndpointSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Penny LLM Wiring</h2>
+          <h2 className="text-sm font-medium text-zinc-200">Penny Runtime</h2>
           <p className="text-[11px] text-zinc-500">
-            IP/port 감지 · 모델 목록 자동 수집 · CCR/Anthropic endpoint만 Penny 연결
+            IP/port detection · automatic model discovery · CCR/Anthropic endpoints connect to Penny
           </p>
         </div>
         <Button
@@ -1149,7 +1158,7 @@ function LlmEndpointSettings({
               disabled={busy === "autodetect" || !canCall}
               className="w-full"
             >
-              {busy === "autodetect" ? "감지 중…" : "자동 감지"}
+              {busy === "autodetect" ? "Detecting…" : "Auto-detect"}
             </Button>
           </div>
         </div>
@@ -1157,7 +1166,7 @@ function LlmEndpointSettings({
 
       <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/30 p-3">
         <summary className="cursor-pointer text-[11px] text-zinc-400">
-          고급 등록
+          Advanced registration
         </summary>
         <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-6">
           <div>
@@ -1217,7 +1226,7 @@ function LlmEndpointSettings({
         </div>
         <div className="mt-3 flex justify-end">
           <Button onClick={() => void submit()} disabled={busy === "create" || !canCall}>
-            {busy === "create" ? "추가 중…" : "Endpoint 추가"}
+            {busy === "create" ? "Adding…" : "Add endpoint"}
           </Button>
         </div>
       </details>
@@ -1238,7 +1247,7 @@ function LlmEndpointSettings({
               onClick={() => setBridgeSource(null)}
               className="h-7 px-2 text-[11px]"
             >
-              닫기
+              Close
             </Button>
           </div>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-7">
@@ -1271,7 +1280,7 @@ function LlmEndpointSettings({
                   onChange={(e) => chooseBridgeHost(e.target.value)}
                   className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
                 >
-                  <option value="">선택</option>
+                  <option value="">Select</option>
                   {managedHosts.map((host) => (
                     <option key={host.id} value={host.id}>
                       {host.alias || host.host}
@@ -1312,7 +1321,7 @@ function LlmEndpointSettings({
                 disabled={busy === "ccr:create" || !canCall}
                 className="w-full"
               >
-                {busy === "ccr:create" ? "생성 중…" : "Bridge 생성"}
+                {busy === "ccr:create" ? "Creating…" : "Create bridge"}
               </Button>
             </div>
           </div>
@@ -1348,7 +1357,7 @@ function LlmEndpointSettings({
                   {endpoint.base_url}
                 </td>
                 <td className="max-w-56 truncate px-3 py-2 font-mono text-xs">
-                  {endpoint.model_id || "자동"}
+                  {endpoint.model_id || "Auto"}
                 </td>
                 <td className="px-3 py-2">
                   <span
@@ -1398,11 +1407,11 @@ function LlmEndpointSettings({
                       className="h-6 px-2 text-[11px]"
                       title={
                         endpoint.protocol === "anthropic_messages"
-                          ? "Penny LLM Gateway에 적용"
-                          : "OpenAI-compatible endpoint 앞에 CCR bridge를 만듭니다"
+                          ? "Apply to Penny runtime"
+                          : "Create a CCR bridge in front of the OpenAI-compatible endpoint"
                       }
                     >
-                      {endpoint.protocol === "anthropic_messages" ? "Use" : "CCR 만들기"}
+                      {endpoint.protocol === "anthropic_messages" ? "Use" : "Create CCR"}
                     </Button>
                     <Button
                       type="button"
@@ -1412,7 +1421,7 @@ function LlmEndpointSettings({
                       disabled={busy === `delete:${endpoint.id}`}
                       className="h-6 px-2 text-[11px] text-red-400 hover:text-red-300"
                     >
-                      삭제
+                      Delete
                     </Button>
                   </div>
                 </td>
@@ -1421,7 +1430,7 @@ function LlmEndpointSettings({
             {endpoints.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-3 py-6 text-center text-[11px] text-zinc-600">
-                  등록된 LLM endpoint가 없습니다.
+                  No LLM endpoints registered.
                 </td>
               </tr>
             )}
@@ -1452,7 +1461,7 @@ function AddUserForm({
 
   const submit = useCallback(async () => {
     if (!email.trim() || !name.trim() || !password.trim()) {
-      toast.error("email, name, password 모두 필수");
+      toast.error("Email, name, and password are required");
       return;
     }
     setBusy(true);
@@ -1464,7 +1473,7 @@ function AddUserForm({
         role,
         password,
       });
-      toast.success(`유저 생성: ${email}`);
+      toast.success(`User created: ${email}`);
       setEmail("");
       setName("");
       setAvatarUrl("");
@@ -1480,7 +1489,7 @@ function AddUserForm({
 
   return (
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
-      <h2 className="mb-3 text-sm font-medium text-zinc-200">새 유저 추가</h2>
+      <h2 className="mb-3 text-sm font-medium text-zinc-200">Add user</h2>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-6">
         <div className="lg:col-span-2">
           <label className="mb-1 block text-[11px] text-zinc-500">Email</label>
@@ -1493,7 +1502,7 @@ function AddUserForm({
           />
         </div>
         <div>
-          <label className="mb-1 block text-[11px] text-zinc-500">이름</label>
+          <label className="mb-1 block text-[11px] text-zinc-500">Name</label>
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -1502,11 +1511,11 @@ function AddUserForm({
           />
         </div>
         <div className="lg:col-span-2">
-          <label className="mb-1 block text-[11px] text-zinc-500">프로필 사진 URL</label>
+          <label className="mb-1 block text-[11px] text-zinc-500">Profile photo URL</label>
           <AvatarProfileField value={avatarUrl} onChange={setAvatarUrl} />
         </div>
         <div>
-          <label className="mb-1 block text-[11px] text-zinc-500">그룹</label>
+          <label className="mb-1 block text-[11px] text-zinc-500">Group</label>
           <select
             value={role}
             onChange={(e) => setRole(e.target.value as "member" | "admin")}
@@ -1517,7 +1526,7 @@ function AddUserForm({
           </select>
         </div>
         <div>
-          <label className="mb-1 block text-[11px] text-zinc-500">임시 비밀번호</label>
+          <label className="mb-1 block text-[11px] text-zinc-500">Temporary password</label>
           <Input
             type="text"
             value={password}
@@ -1529,7 +1538,7 @@ function AddUserForm({
       </div>
       <div className="mt-3 flex justify-end">
         <Button onClick={() => void submit()} disabled={busy}>
-          {busy ? "추가 중…" : "추가"}
+          {busy ? "Adding…" : "Add user"}
         </Button>
       </div>
     </section>
@@ -1564,7 +1573,7 @@ function UsersTable({
   const saveEdit = useCallback(
     async (u: UserRow) => {
       if (!editName.trim()) {
-        toast.error("이름은 필수입니다");
+        toast.error("Name is required");
         return;
       }
       setSaving(u.id);
@@ -1573,7 +1582,7 @@ function UsersTable({
           display_name: editName.trim(),
           avatar_url: editAvatarUrl.trim() || null,
         });
-        toast.success(`프로필 저장: ${u.email}`);
+        toast.success(`Profile saved: ${u.email}`);
         setEditing(null);
         onChanged();
       } catch (e) {
@@ -1587,11 +1596,11 @@ function UsersTable({
 
   const remove = useCallback(
     async (u: UserRow) => {
-      if (!window.confirm(`${u.email} 삭제?`)) return;
+      if (!window.confirm(`Delete user ${u.email}?`)) return;
       setDeleting(u.id);
       try {
         await deleteUser(apiKey, u.id);
-        toast.success(`삭제: ${u.email}`);
+        toast.success(`Deleted: ${u.email}`);
         onChanged();
       } catch (e) {
         toast.error((e as Error).message);
@@ -1606,16 +1615,16 @@ function UsersTable({
     <section className="rounded border border-zinc-800 bg-zinc-900">
       <header className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
         <h2 className="text-sm font-medium text-zinc-200">
-          유저 목록 <span className="text-zinc-500">({users.length})</span>
+          Users <span className="text-zinc-500">({users.length})</span>
         </h2>
       </header>
       <table className="w-full text-sm">
         <thead className="bg-zinc-950 text-[11px] uppercase text-zinc-500">
           <tr>
-            <th className="w-12 px-4 py-2 text-left font-normal">사진</th>
+            <th className="w-12 px-4 py-2 text-left font-normal">Photo</th>
             <th className="px-4 py-2 text-left font-normal">Email</th>
-            <th className="px-4 py-2 text-left font-normal">이름</th>
-            <th className="px-4 py-2 text-left font-normal">그룹</th>
+            <th className="px-4 py-2 text-left font-normal">Name</th>
+            <th className="px-4 py-2 text-left font-normal">Group</th>
             <th className="w-36 px-4 py-2 text-right font-normal"></th>
           </tr>
         </thead>
@@ -1660,7 +1669,7 @@ function UsersTable({
                       className="h-6 px-2 text-[11px]"
                       onClick={() => startEdit(u)}
                     >
-                      수정
+                      Edit
                     </Button>
                     <Button
                       size="sm"
@@ -1669,7 +1678,7 @@ function UsersTable({
                       disabled={deleting === u.id}
                       onClick={() => void remove(u)}
                     >
-                      {deleting === u.id ? "…" : "삭제"}
+                      {deleting === u.id ? "…" : "Delete"}
                     </Button>
                   </div>
                 </td>
@@ -1680,7 +1689,7 @@ function UsersTable({
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                       <div>
                         <label className="mb-1 block text-[11px] text-zinc-500">
-                          이름
+                          Name
                         </label>
                         <Input
                           value={editName}
@@ -1691,7 +1700,7 @@ function UsersTable({
                       </div>
                       <div>
                         <label className="mb-1 block text-[11px] text-zinc-500">
-                          프로필 사진
+                          Profile photo
                         </label>
                         <AvatarProfileField
                           value={editAvatarUrl}
@@ -1708,17 +1717,17 @@ function UsersTable({
                         onClick={() => setEditing(null)}
                         className="h-7 px-2 text-[11px]"
                       >
-                        취소
+                        Cancel
                       </Button>
                       <Button
                         type="button"
                         size="sm"
-                        aria-label="프로필 저장"
+                        aria-label="Save profile"
                         onClick={() => void saveEdit(u)}
                         disabled={saving === u.id}
                         className="h-7 px-2 text-[11px]"
                       >
-                        {saving === u.id ? "저장 중…" : "저장"}
+                        {saving === u.id ? "Saving…" : "Save profile"}
                       </Button>
                     </div>
                   </td>
@@ -1732,7 +1741,7 @@ function UsersTable({
                 colSpan={5}
                 className="px-4 py-6 text-center text-[11px] text-zinc-600"
               >
-                등록된 유저가 없습니다.
+                No users registered.
               </td>
             </tr>
           )}
@@ -1755,8 +1764,8 @@ function ApiKeyOverride({
   return (
     <div className="rounded border border-amber-900/60 bg-amber-950/20 p-3">
       <p className="text-[11px] text-amber-300">
-        현재 저장된 API 키가 Management scope를 갖고 있지 않습니다. 관리자 키로
-        교체하세요 (CLI에서 생성: <code className="font-mono">gadgetron key create --scope "OpenAiCompat,Management"</code>).
+        The saved API key does not have Management scope. Replace it here with
+        an admin key (create one with: <code className="font-mono">gadgetron key create --scope "OpenAiCompat,Management"</code>).
       </p>
       <div className="mt-2 flex gap-2">
         <Input
@@ -1773,7 +1782,7 @@ function ApiKeyOverride({
             if (value.trim()) onSet(value.trim());
           }}
         >
-          교체
+          Replace
         </Button>
       </div>
     </div>
@@ -1785,6 +1794,7 @@ export default function AdminPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AdminTab>("penny-runtime");
   // Either an API key OR a logged-in session grants access; the
   // backend middleware accepts the session cookie when Bearer is absent.
   const canCall = !!apiKey || !!identity;
@@ -1808,16 +1818,18 @@ export default function AdminPage() {
     void refresh();
   }, [refresh]);
 
+  const tabs: Array<{ id: AdminTab; label: string }> = [
+    { id: "penny-runtime", label: "Penny Runtime" },
+    { id: "users", label: "Users" },
+    { id: "access", label: "Access" },
+  ];
+
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-4 p-6">
-        <header className="flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-semibold text-zinc-100">Admin</h1>
-            <p className="text-[11px] text-zinc-500">
-              유저 관리 — Management scope 필요
-            </p>
-          </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <WorkbenchPage
+        title="Admin"
+        subtitle="Configure Penny runtime, users, and access controls."
+        actions={
           <Button
             variant="ghost"
             size="sm"
@@ -1827,29 +1839,73 @@ export default function AdminPage() {
           >
             {loading ? "…" : "Refresh"}
           </Button>
-        </header>
+        }
+        toolbar={
+          <PageToolbar
+            status={
+              <StatusBadge
+                status={!canCall ? "unauthorized" : loading ? "pending" : "ready"}
+              />
+            }
+          >
+            <div role="tablist" aria-label="Admin sections" className="flex flex-wrap gap-2">
+              {tabs.map((tab) => (
+                <Button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  variant={activeTab === tab.id ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setActiveTab(tab.id)}
+                  className="h-7 px-2 text-[11px]"
+                >
+                  {tab.label}
+                </Button>
+              ))}
+            </div>
+          </PageToolbar>
+        }
+      >
+        <div className="mx-auto max-w-5xl space-y-4">
+          {!canCall && (
+            <InlineNotice tone="warn" title="Sign in required">
+              Admin requests require an authenticated session or API key.
+            </InlineNotice>
+          )}
 
-        {!canCall && (
-          <div className="rounded border border-amber-900/60 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
-            로그인이 필요합니다.
-          </div>
-        )}
+          {err && (
+            <InlineNotice tone="error" title="Admin request failed" details={err}>
+              Check the details and retry after resolving access or service state.
+            </InlineNotice>
+          )}
 
-        {err && (
-          <div className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-            {err}
-          </div>
-        )}
+          {activeTab === "penny-runtime" && (
+            <div role="tabpanel" className="space-y-4">
+              <PennyBrainSettings apiKey={requestApiKey} canCall={canCall} />
+              <LlmEndpointSettings apiKey={requestApiKey} canCall={canCall} />
+            </div>
+          )}
 
-        {err && err.includes("403") && (
-          <ApiKeyOverride onSet={(k) => saveKey(k)} />
-        )}
+          {activeTab === "users" && (
+            <div role="tabpanel" className="space-y-4">
+              <AddUserForm apiKey={requestApiKey} onAdded={refresh} />
+              <UsersTable users={users} apiKey={requestApiKey} onChanged={refresh} />
+            </div>
+          )}
 
-        <PennyBrainSettings apiKey={requestApiKey} canCall={canCall} />
-        <LlmEndpointSettings apiKey={requestApiKey} canCall={canCall} />
-        <AddUserForm apiKey={requestApiKey} onAdded={refresh} />
-        <UsersTable users={users} apiKey={requestApiKey} onChanged={refresh} />
-      </div>
+          {activeTab === "access" && (
+            <div role="tabpanel">
+              <OperationalPanel
+                title="Access"
+                description="Override the management API key for this browser session."
+              >
+                <ApiKeyOverride onSet={(k) => saveKey(k)} />
+              </OperationalPanel>
+            </div>
+          )}
+        </div>
+      </WorkbenchPage>
       <Toaster theme="dark" position="top-right" richColors />
     </div>
   );

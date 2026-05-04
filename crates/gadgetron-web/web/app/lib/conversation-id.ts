@@ -19,6 +19,12 @@
 // access for `gadgetron_conversation_id` is now a bug.
 
 const KEY = "gadgetron_conversation_id";
+export const ACTIVE_CONVERSATION_EVENT = "gadgetron:active-conversation";
+
+function emitActiveConversationChange(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(ACTIVE_CONVERSATION_EVENT));
+}
 
 // Cheap per-call check: if this tab's sessionStorage already holds a
 // value, skip immediately. Otherwise, adopt the cross-tab `localStorage`
@@ -54,6 +60,7 @@ export function setActiveConversationId(id: string): void {
   // a "last seen" seed. Each new tab promotes this seed into its own
   // sessionStorage on first read; subsequent writes diverge.
   window.localStorage.setItem(KEY, id);
+  emitActiveConversationChange();
 }
 
 /// Clear this tab's active conversation. Sibling tabs are unaffected.
@@ -63,4 +70,5 @@ export function clearActiveConversationId(): void {
   maybeMigrate();
   window.sessionStorage.removeItem(KEY);
   window.localStorage.removeItem(KEY);
+  emitActiveConversationChange();
 }

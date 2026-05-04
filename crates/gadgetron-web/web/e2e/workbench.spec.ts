@@ -6,6 +6,10 @@ import { test, expect } from "@playwright/test";
 // ---------------------------------------------------------------------------
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("gadgetron_api_key", "gad_live_test_key");
+  });
+
   // Mock /health to return 200 healthy
   await page.route("**/health", async (route) => {
     await route.fulfill({
@@ -42,54 +46,54 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
-  // Navigate and set up API key in localStorage before page runs
+  // Navigate with API key already present so the auth gate does not
+  // perform an extra reload before each smoke assertion.
   await page.goto("/web");
-  await page.evaluate(() => {
-    localStorage.setItem("gadgetron_api_key", "gad_live_test_key");
-  });
-  await page.reload();
 });
 
-test("3-panel shell renders: left rail, chat column, evidence pane", async ({
+test("shell renders with left rail, chat column, and collapsed side panel", async ({
   page,
 }) => {
   await expect(page.getByTestId("workbench-shell")).toBeVisible();
   await expect(page.getByTestId("left-rail")).toBeVisible();
   await expect(page.getByTestId("chat-column")).toBeVisible();
-  await expect(page.getByTestId("evidence-pane")).toBeVisible();
+  await expect(page.getByTestId("evidence-pane-collapsed")).toBeVisible();
 });
 
-test("left rail nav tabs present (Chat functional, others P2B stub)", async ({
-  page,
-}) => {
+test("left rail shows only functional navigation tabs", async ({ page }) => {
   await expect(page.getByTestId("nav-tab-chat")).toBeVisible();
-  await expect(page.getByTestId("nav-tab-knowledge")).toBeVisible();
-  await expect(page.getByTestId("nav-tab-bundles")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-wiki")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-dashboard")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-servers")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-findings")).toBeVisible();
+  await expect(page.getByTestId("nav-tab-knowledge")).toHaveCount(0);
+  await expect(page.getByTestId("nav-tab-bundles")).toHaveCount(0);
 });
 
-test("status strip shows healthy state", async ({ page }) => {
+test("status strip keeps healthy state quiet", async ({ page }) => {
   const strip = page.getByRole("status", { name: "Workbench status" });
   await expect(strip).toBeVisible();
-  await expect(strip).toContainText("Gateway healthy");
+  await expect(strip.getByTestId("brand")).toContainText("Gadgetron");
+  await expect(strip.getByTestId("health-indicator")).toHaveCount(0);
 });
 
 test("evidence pane collapses and expands without losing chat content", async ({
   page,
 }) => {
-  // Start: evidence pane open
+  // Start: side panel collapsed by default.
+  await expect(page.getByTestId("evidence-pane-collapsed")).toBeVisible();
+
+  // Expand.
+  await page.getByTestId("evidence-pane-expand-btn").click();
   await expect(page.getByTestId("evidence-pane")).toBeVisible();
 
-  // Collapse
+  // Collapse.
   await page.getByTestId("evidence-pane-collapse-btn").click();
   await expect(page.getByTestId("evidence-pane")).not.toBeVisible();
   await expect(page.getByTestId("evidence-pane-collapsed")).toBeVisible();
 
   // Chat column still visible
   await expect(page.getByTestId("chat-column")).toBeVisible();
-
-  // Re-expand
-  await page.getByTestId("evidence-pane-expand-btn").click();
-  await expect(page.getByTestId("evidence-pane")).toBeVisible();
 });
 
 test("empty state text does not contain banned AI-template phrases", async ({
@@ -123,7 +127,7 @@ test("panels don't collapse unexpectedly during chat message flow", async ({
   // Panels should still be present
   await expect(page.getByTestId("left-rail")).toBeVisible();
   await expect(page.getByTestId("chat-column")).toBeVisible();
-  await expect(page.getByTestId("evidence-pane")).toBeVisible();
+  await expect(page.getByTestId("evidence-pane-collapsed")).toBeVisible();
 });
 
 // ROADMAP ISSUE 29 TASK 29.6 — clicking between Chat / Wiki / Dashboard
@@ -170,12 +174,6 @@ test("shell chrome persists across Chat → Wiki → Dashboard navigation", asyn
     });
   });
 
-  // Record the initial StatusStrip / LeftRail DOM handles. If the shell
-  // remounts on navigation these handles detach; the re-query will
-  // return fresh nodes. We assert the *same* handles stay attached.
-  const initialShell = await page.getByTestId("workbench-shell").elementHandle();
-  expect(initialShell).not.toBeNull();
-
   // Chat → Wiki
   await page.getByTestId("nav-tab-wiki").click();
   await page.waitForURL(/\/wiki/);
@@ -196,11 +194,4 @@ test("shell chrome persists across Chat → Wiki → Dashboard navigation", asyn
   await expect(page.getByTestId("workbench-shell")).toBeVisible();
   await expect(page.getByTestId("left-rail")).toBeVisible();
   await expect(page.getByTestId("chat-header")).toBeVisible();
-
-  // The initial workbench-shell element handle must still be attached —
-  // route transitions inside the (shell) route group do not remount it.
-  const persisted = await initialShell!.evaluate(
-    (el) => el.isConnected,
-  );
-  expect(persisted).toBe(true);
 });

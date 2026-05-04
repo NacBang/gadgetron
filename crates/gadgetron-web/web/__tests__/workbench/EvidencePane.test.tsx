@@ -1,6 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { setActiveConversationId } from "../../app/lib/conversation-id";
 import { EvidencePane } from "../../app/components/shell/evidence-pane";
+import { writeConversationSubject } from "../../app/lib/workbench-subject-context";
+
+vi.mock("../../app/lib/auth-context", () => ({
+  useAuth: () => ({
+    apiKey: null,
+  }),
+}));
+
+vi.mock("../../app/lib/evidence-context", () => ({
+  useEvidence: () => ({
+    items: [],
+    wsStatus: "disconnected",
+    clear: () => {},
+  }),
+}));
 
 // ---------------------------------------------------------------------------
 // localStorage mock
@@ -27,17 +43,46 @@ Object.defineProperty(window, "localStorage", { value: localStorageMock });
 describe("EvidencePane", () => {
   beforeEach(() => {
     localStorageMock.clear();
+    window.sessionStorage.clear();
   });
 
-  it("renders empty state with P2B roadmap copy when open", () => {
+  it("renders the side panel context empty state by default", () => {
     render(
       <EvidencePane open={true} onToggle={() => {}} />,
     );
-    const copy = screen.getByTestId("evidence-empty-copy");
-    expect(copy.textContent).toContain(
-      "Knowledge sources will appear here when Penny cites them",
+
+    expect(screen.getByRole("button", { name: "Context" })).toBeTruthy();
+    expect(screen.getByTestId("context-empty").textContent).toContain(
+      "No active context",
     );
-    expect(copy.textContent).toContain("P2B per ADR");
+  });
+
+  it("renders the active workbench subject in the context tab", () => {
+    setActiveConversationId("conv-context");
+    writeConversationSubject("conv-context", {
+      id: "finding-1",
+      kind: "log_finding",
+      bundle: "logs",
+      title: "SMART pending sectors",
+      subtitle: "dg5R-PRO6000-8 · critical",
+      href: "/web/findings?host=host-1",
+      summary: "smartd reports pending sectors on /dev/sdb.",
+      facts: { hostId: "host-1", severity: "critical" },
+    });
+
+    render(
+      <EvidencePane open={true} onToggle={() => {}} />,
+    );
+
+    expect(screen.getByTestId("context-panel").textContent).toContain(
+      "SMART pending sectors",
+    );
+    expect(screen.getByText("Open source").getAttribute("href")).toBe(
+      "/web/findings?host=host-1",
+    );
+    expect(screen.getByTestId("context-panel").textContent).toContain(
+      '"severity": "critical"',
+    );
   });
 
   it("does NOT render any mocked citation content", () => {
