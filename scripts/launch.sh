@@ -41,7 +41,7 @@ read_config_bind() {
 }
 
 CONFIG_BIND="$(read_config_bind || true)"
-BIND="${GADGETRON_BIND:-${CONFIG_BIND:-127.0.0.1:8080}}"
+BIND="${GADGETRON_BIND:-${CONFIG_BIND:-127.0.0.1:18080}}"
 
 # User-space Node.js install — covers machines without system nodejs.
 if [[ -x "${HOME}/.local/bin/npm" ]]; then
