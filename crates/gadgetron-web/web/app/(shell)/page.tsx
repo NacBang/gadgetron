@@ -621,7 +621,7 @@ function ChatHeader({
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium text-zinc-300">Penny</span>
         <span className="hidden text-[11px] text-zinc-600 md:inline">
-          · Gadgetron knowledge workbench
+          Gadgetron Knowledge Agent
         </span>
       </div>
       <div className="flex items-center gap-1.5">

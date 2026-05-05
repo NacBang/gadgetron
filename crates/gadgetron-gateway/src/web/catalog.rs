@@ -959,6 +959,34 @@ input_schema = { type = "object" }
     }
 
     #[test]
+    fn first_party_server_monitor_update_schema_accepts_gadgetini() {
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("crate nested under workspace root")
+            .to_path_buf();
+        let bundle_path = workspace_root.join("bundles/server-monitor/bundle.toml");
+        let catalog = DescriptorCatalog::from_toml_file(&bundle_path)
+            .expect("server-monitor bundle must parse");
+        let snapshot = catalog.into_snapshot();
+        let validator = snapshot
+            .validators
+            .get("server-update")
+            .expect("server-update validator must compile");
+        let args = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "gadgetini": {
+                "enabled": true
+            }
+        });
+        let errors: Vec<_> = validator.iter_errors(&args).collect();
+        assert!(
+            errors.is_empty(),
+            "server-update descriptor must allow gadgetini, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn from_bundle_dir_merges_multiple_bundles() {
         // ISSUE 9 TASK 9.2 — two bundle subdirectories, each with its
         // own `bundle.toml`, merge into one catalog.

@@ -12,7 +12,7 @@
 
 [server]
 # Bind address. Localhost-only by default for single-user demo.
-bind = "0.0.0.0:8080"
+bind = "0.0.0.0:18080"
 
 # --- Phase 1: LLM providers ---------------------------------------------
 # Declare upstream LLM providers (vLLM, SGLang, OpenAI, Anthropic, Ollama...).
