@@ -1,0 +1,70 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Local env / secrets
+.env
+.env.local
+.env.*.local
+gadgetron.toml
+.buildenv
+
+# Cryptographic material (never commit)
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Runtime state
+.gadgetron/
+.gadgetron-*.pid
+*.log
+
+# Tooling session caches (per-machine scratch — never commit)
+.playwright-mcp/
+.superpowers/
+.gstack/
+.gstack/state/
+
+# Web build artifacts
+crates/gadgetron-web/web/node_modules/
+crates/gadgetron-web/web/.next/
+crates/gadgetron-web/web/out/
+crates/gadgetron-web/web/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# AI agent / coding-assistant configuration & metadata
+# (Never commit personal agent setup or notes — they are local development scaffolding.)
+CLAUDE.md
+AGENTS.md
+AGENT.md
+GEMINI.md
+COPILOT.md
+COPILOT-INSTRUCTIONS.md
+.claude/
+.agents/
+.codex/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.aider*
+.continue/
+.gpt/
+.github/copilot-instructions.md
+
+# Agent tooling outputs
+graphify-out/

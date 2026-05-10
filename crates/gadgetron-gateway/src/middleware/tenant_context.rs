@@ -1,0 +1,73 @@
+use std::sync::Arc;
+use std::time::Instant;
+
+use axum::{
+    extract::Request,
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use gadgetron_core::context::{QuotaSnapshot, TenantContext};
+use gadgetron_core::error::GadgetronError;
+use gadgetron_xaas::auth::validator::ValidatedKey;
+use uuid::Uuid;
+
+use crate::error::ApiError;
+
+/// Builds a `TenantContext` from the `Arc<ValidatedKey>` inserted by `AuthLayer`
+/// and injects it into request extensions for handler use.
+///
+/// The `request_id` UUID is reused from extensions if `RequestIdLayer` already
+/// inserted one; otherwise a fresh `Uuid::new_v4()` is generated.
+///
+/// QuotaSnapshot is a placeholder (unlimited).
+/// `InMemoryQuotaEnforcer` manages real usage tracking separately.
+///
+/// Budget: ~10µs (Arc clone + struct initialization).
+///
+/// Defensive: if `ValidatedKey` is absent (should never happen when layer order
+/// is correct), returns 401 immediately.
+pub async fn tenant_context_middleware(mut req: Request, next: Next) -> Response {
+    let validated_key = match req.extensions().get::<Arc<ValidatedKey>>() {
+        Some(k) => k.clone(),
+        None => {
+            // Layer ordering guarantee: AuthLayer runs before TenantContextLayer.
+            // This branch is unreachable in production; defensive for test isolation.
+            return ApiError(GadgetronError::TenantNotFound).into_response();
+        }
+    };
+
+    // Reuse the request_id that RequestIdLayer already generated, if present.
+    let request_id = req
+        .extensions()
+        .get::<Uuid>()
+        .copied()
+        .unwrap_or_else(Uuid::new_v4);
+
+    // Thread user_id + api_key_id from ValidatedKey.
+    // `api_key_id` kept as-is for backward-compat with existing
+    // reads; `actor_api_key_id` is None for cookie sessions where
+    // `api_key_id == Uuid::nil()` is the sentinel.
+    let actor_api_key_id = if validated_key.api_key_id == Uuid::nil() {
+        None
+    } else {
+        Some(validated_key.api_key_id)
+    };
+    let ctx = TenantContext {
+        tenant_id: validated_key.tenant_id,
+        api_key_id: validated_key.api_key_id,
+        scopes: validated_key.scopes.clone(),
+        quota_snapshot: Arc::new(QuotaSnapshot {
+            daily_limit_cents: i64::MAX, // placeholder
+            daily_used_cents: 0,
+            monthly_limit_cents: i64::MAX,
+            monthly_used_cents: 0,
+        }),
+        request_id,
+        started_at: Instant::now(),
+        actor_user_id: validated_key.user_id,
+        actor_api_key_id,
+    };
+
+    req.extensions_mut().insert(ctx);
+    next.run(req).await
+}

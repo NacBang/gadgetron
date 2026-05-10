@@ -1,0 +1,41 @@
+[package]
+name = "gadgetron-penny"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Penny agent adapter — Claude Code subprocess + GadgetRegistry dispatch"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gadgetron-core = { workspace = true }
+gadgetron-knowledge = { workspace = true }
+
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+arc-swap = { workspace = true }
+reqwest = { workspace = true }
+
+# subprocess management
+regex = { workspace = true }
+once_cell = { workspace = true }
+tempfile = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }

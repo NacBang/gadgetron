@@ -1,0 +1,13 @@
+[package]
+name = "gadgetron-tui"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+[dependencies]
+gadgetron-core = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+anyhow.workspace = true

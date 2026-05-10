@@ -1,0 +1,41 @@
+[package]
+name = "gadgetron-cli"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+[[bin]]
+name = "gadgetron"
+path = "src/main.rs"
+
+[dependencies]
+gadgetron-core = { workspace = true }
+gadgetron-provider = { workspace = true }
+gadgetron-router = { workspace = true }
+gadgetron-gateway = { workspace = true }
+gadgetron-xaas = { workspace = true }
+gadgetron-tui = { workspace = true }
+gadgetron-penny = { workspace = true }
+gadgetron-knowledge = { workspace = true }
+gadgetron-bundle-server-monitor = { path = "../../bundles/server-monitor" }
+gadgetron-bundle-log-analyzer = { path = "../../bundles/log-analyzer" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+sqlx = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+arc-swap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = ["web-ui"]
+web-ui = ["gadgetron-gateway/web-ui"]

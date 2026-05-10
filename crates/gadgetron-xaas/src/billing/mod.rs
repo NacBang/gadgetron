@@ -1,0 +1,12 @@
+//! Billing module — integer-cent ledger writer.
+//!
+//! Thin helpers that persist one `billing_events` row per billable
+//! event. Called fire-and-forget from the quota path's `record_post`
+//! hook so failures surface as tracing warnings without blocking
+//! the request.
+
+pub mod events;
+pub mod failures;
+
+pub use events::{insert_billing_event, BillingEventInsert, BillingEventKind, BillingEventRow};
+pub use failures::{BillingFailureCounter, BillingFailureSnapshot};

@@ -1,0 +1,948 @@
+//! In-memory implementations of the Knowledge Candidate lifecycle contract.
+//!
+//! This module is the in-memory slice that replaces the stubs in
+//! `gadgetron-gateway::penny::shared_context` with real behavior. A
+//! Postgres-backed implementation lives alongside.
+//!
+//! # What lives here
+//!
+//! - [`InMemoryActivityCaptureStore`] — `tokio::sync::Mutex`-guarded
+//!   `Vec` / `BTreeMap` persistence that satisfies
+//!   [`gadgetron_core::knowledge::candidate::ActivityCaptureStore`].
+//! - [`InProcessCandidateCoordinator`] — a `KnowledgeCandidateCoordinator`
+//!   that clamps hint counts to `max_candidates_per_request`, expands
+//!   `path_rules` templates for hint-less proposed paths, and routes
+//!   accepted candidates through `KnowledgeService::write` when the
+//!   service is wired via [`InProcessCandidateCoordinator::with_knowledge_service`].
+//!
+//! # `{date}` / `{topic}` / `{author}` template expansion
+//!
+//! `path_rules` uses a minimal 3-variable grammar: `{date}`
+//! (YYYY-MM-DD UTC from the activity event's `created_at`), `{topic}`
+//! (the snake_case `ActivityKind`, e.g. `direct_action`), and `{author}`
+//! (the `actor_user_id` rendered as a bare UUID). Operators target a
+//! key that matches the snake_case `ActivityKind` variant — a hint with
+//! no `proposed_path` + a `DirectAction` event looks up the
+//! `"direct_action"` key, expands it, and falls back to
+//! `ops/journal/<YYYY-MM-DD>/<candidate_uuid>` when no rule matches.
+//! Anything richer (e.g. `{tenant}`, `{request_id}`) is future work so
+//! the current surface stays small and wire-stable.
+//!
+//! # Concurrency model
+//!
+//! We use `tokio::sync::Mutex` rather than `std::sync::Mutex` so the locks
+//! can be held across `.await` boundaries without tripping Send issues when
+//! the store is hosted inside a multi-threaded tokio runtime. The critical
+//! sections are short (pure in-memory manipulation) so contention is never
+//! the bottleneck; the Postgres-backed storage replaces this with
+//! row-level locking instead of a process-global mutex.
+//!
+//! # Error model
+//!
+//! Unknown `candidate_id` → `GadgetronError::Knowledge { kind: DocumentNotFound, ... }`.
+//! "Materialize called on non-accepted candidate" → `GadgetronError::Knowledge
+//! { kind: InvalidQuery, ... }`. Both reuse existing error kinds so callers
+//! get typed 404 / 400 responses without a new enum variant.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use gadgetron_core::{
+    error::{GadgetronError, KnowledgeErrorKind},
+    knowledge::{
+        candidate::{
+            snake_case_label, ActivityCaptureStore, ActivityKind, CandidateDecision,
+            CandidateDecisionKind, CandidateHint, CaptureResult, CapturedActivityEvent,
+            KnowledgeCandidate, KnowledgeCandidateCoordinator, KnowledgeCandidateDisposition,
+            KnowledgeDocumentWrite,
+        },
+        AuthenticatedContext, KnowledgePutRequest,
+    },
+};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use crate::service::KnowledgeService;
+
+/// In-memory append-only store for activity events, candidates, and decisions.
+///
+/// Suitable for unit tests, the in-memory gateway slice, and the fixture-diff
+/// contract test. Not persistent — restart drops all rows.
+#[derive(Debug, Default)]
+pub struct InMemoryActivityCaptureStore {
+    events: Mutex<Vec<CapturedActivityEvent>>,
+    candidates: Mutex<BTreeMap<Uuid, KnowledgeCandidate>>,
+    decisions: Mutex<Vec<CandidateDecision>>,
+    require_user_confirmation_for: Vec<String>,
+}
+
+impl InMemoryActivityCaptureStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the confirmation gate. Hints whose `tags` intersect with `gates`
+    /// receive an initial disposition of `PendingUserConfirmation` instead of
+    /// `PendingPennyDecision`. Matches the builder style of `PgActivityCaptureStore`.
+    pub fn with_confirmation_gate(mut self, gates: Vec<String>) -> Self {
+        self.require_user_confirmation_for = gates;
+        self
+    }
+
+    /// Test helper: snapshot the number of recorded events.
+    #[doc(hidden)]
+    pub async fn event_count(&self) -> usize {
+        self.events.lock().await.len()
+    }
+
+    /// Test helper: snapshot the number of recorded decisions.
+    #[doc(hidden)]
+    pub async fn decision_count(&self) -> usize {
+        self.decisions.lock().await.len()
+    }
+
+    /// Test-only snapshot of captured activity events. Used by integration
+    /// tests to assert capture call sites without exposing the internal
+    /// Mutex<Vec<_>> directly.
+    ///
+    /// Mirrors the existing `event_count` / `decision_count` helpers on
+    /// this struct.
+    #[doc(hidden)]
+    pub async fn events_snapshot(&self) -> Vec<CapturedActivityEvent> {
+        self.events.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl ActivityCaptureStore for InMemoryActivityCaptureStore {
+    async fn append_activity(
+        &self,
+        _actor: &AuthenticatedContext,
+        event: CapturedActivityEvent,
+    ) -> CaptureResult<()> {
+        let mut events = self.events.lock().await;
+        events.push(event);
+        Ok(())
+    }
+
+    async fn append_candidate(
+        &self,
+        _actor: &AuthenticatedContext,
+        activity_event_id: Uuid,
+        hint: CandidateHint,
+    ) -> CaptureResult<KnowledgeCandidate> {
+        // We look up the event and mirror its identity fields so the
+        // candidate still shows a consistent tenant/actor pair.
+        let (tenant_id, actor_user_id) = {
+            let events = self.events.lock().await;
+            let found = events.iter().find(|e| e.id == activity_event_id);
+            match found {
+                Some(e) => (e.tenant_id, e.actor_user_id),
+                None => {
+                    return Err(GadgetronError::Knowledge {
+                        kind: KnowledgeErrorKind::DocumentNotFound {
+                            path: format!("activity_event/{activity_event_id}"),
+                        },
+                        message: format!(
+                            "cannot append candidate: activity event {activity_event_id} \
+                             not found in capture store"
+                        ),
+                    });
+                }
+            }
+        };
+
+        let mut provenance: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(reason) = hint.reason.as_deref() {
+            provenance.insert("hint_reason".to_string(), reason.to_string());
+        }
+        if !hint.tags.is_empty() {
+            // BTreeMap serialization is deterministic, so joining tags with
+            // a comma keeps the provenance bytes stable for fixture-diff.
+            provenance.insert("hint_tags".to_string(), hint.tags.join(","));
+        }
+
+        let disposition = resolve_initial_disposition(&hint, &self.require_user_confirmation_for);
+        let candidate = KnowledgeCandidate {
+            id: Uuid::new_v4(),
+            activity_event_id,
+            tenant_id,
+            actor_user_id,
+            summary: hint.summary,
+            proposed_path: hint.proposed_path,
+            provenance,
+            disposition,
+            created_at: chrono::Utc::now(),
+        };
+
+        let mut candidates = self.candidates.lock().await;
+        candidates.insert(candidate.id, candidate.clone());
+        Ok(candidate)
+    }
+
+    async fn decide_candidate(
+        &self,
+        _actor: &AuthenticatedContext,
+        decision: CandidateDecision,
+    ) -> CaptureResult<KnowledgeCandidate> {
+        let mut candidates = self.candidates.lock().await;
+        let candidate = candidates.get_mut(&decision.candidate_id).ok_or_else(|| {
+            GadgetronError::Knowledge {
+                kind: KnowledgeErrorKind::DocumentNotFound {
+                    path: format!("candidate/{}", decision.candidate_id),
+                },
+                message: format!(
+                    "cannot decide candidate {candidate_id}: not found in capture store",
+                    candidate_id = decision.candidate_id
+                ),
+            }
+        })?;
+
+        let next_disposition = match decision.decision {
+            CandidateDecisionKind::Accept => KnowledgeCandidateDisposition::Accepted,
+            CandidateDecisionKind::Reject => KnowledgeCandidateDisposition::Rejected,
+            CandidateDecisionKind::EscalateToUser => {
+                KnowledgeCandidateDisposition::PendingUserConfirmation
+            }
+            // Any future `CandidateDecisionKind` variant falls through as
+            // "leave disposition alone" until an explicit arm is added;
+            // `#[non_exhaustive]` requires the wildcard.
+            _ => {
+                return Err(GadgetronError::Knowledge {
+                    kind: KnowledgeErrorKind::InvalidQuery {
+                        reason: format!(
+                            "unsupported decision kind {:?}; only Accept / Reject / EscalateToUser are supported",
+                            decision.decision
+                        ),
+                    },
+                    message: "unknown candidate decision kind".to_string(),
+                });
+            }
+        };
+
+        candidate.disposition = next_disposition;
+        let snapshot = candidate.clone();
+
+        // Release the candidate lock before touching decisions to avoid
+        // accidentally holding both at once; tokio::Mutex only allows one
+        // holder per task anyway, but the two-lock pattern matches what a
+        // real DB transaction would do.
+        drop(candidates);
+
+        let mut decisions = self.decisions.lock().await;
+        decisions.push(decision);
+
+        Ok(snapshot)
+    }
+
+    async fn list_candidates(
+        &self,
+        _actor: &AuthenticatedContext,
+        limit: usize,
+        only_pending: bool,
+    ) -> CaptureResult<Vec<KnowledgeCandidate>> {
+        let candidates = self.candidates.lock().await;
+        let mut rows: Vec<KnowledgeCandidate> = candidates
+            .values()
+            .filter(|c| {
+                !only_pending
+                    || matches!(
+                        c.disposition,
+                        KnowledgeCandidateDisposition::PendingPennyDecision
+                            | KnowledgeCandidateDisposition::PendingUserConfirmation
+                    )
+            })
+            .cloned()
+            .collect();
+        // Newest-first; stable tie-break on id so the fixture-diff test gets
+        // a deterministic ordering when two candidates share a timestamp.
+        rows.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn get_candidate(
+        &self,
+        _actor: &AuthenticatedContext,
+        id: Uuid,
+    ) -> CaptureResult<Option<KnowledgeCandidate>> {
+        // `BTreeMap::get` is O(log n); cloning the row keeps the lock
+        // scope tight so other capture-plane callers are not blocked on a
+        // hot path.
+        let candidates = self.candidates.lock().await;
+        Ok(candidates.get(&id).cloned())
+    }
+}
+
+/// In-process coordinator — appends activity + candidates, clamps to
+/// `max_candidates_per_request`, expands `path_rules` templates when a hint
+/// leaves `proposed_path` unset, and routes accepted candidates through
+/// `KnowledgeService::write` when a service is wired.
+///
+/// Construction is intentionally builder-style so tests that only exercise
+/// the capture plane (no canonical writeback) stay unchanged:
+///
+/// ```ignore
+/// let coord = InProcessCandidateCoordinator::new(store, 8)
+///     .with_knowledge_service(knowledge_service)
+///     .with_path_rules(BTreeMap::from([(
+///         "direct_action".into(),
+///         "ops/journal/{date}/{topic}".into(),
+///     )]));
+/// ```
+#[derive(Debug)]
+pub struct InProcessCandidateCoordinator {
+    pub store: Arc<dyn ActivityCaptureStore>,
+    /// Optional canonical writeback target. `None` keeps the
+    /// synthetic-path fallback behavior for tests that only want to
+    /// exercise the capture plane.
+    pub knowledge_service: Option<Arc<KnowledgeService>>,
+    pub max_candidates_per_request: usize,
+    /// Template rules keyed by `ActivityKind` snake_case label (e.g.
+    /// `"direct_action"`). An empty map disables template expansion —
+    /// hints without a `proposed_path` then fall back to
+    /// `ops/journal/<YYYY-MM-DD>/<candidate_uuid>`.
+    pub path_rules: BTreeMap<String, String>,
+}
+
+impl InProcessCandidateCoordinator {
+    pub fn new(store: Arc<dyn ActivityCaptureStore>, max_candidates_per_request: usize) -> Self {
+        Self {
+            store,
+            knowledge_service: None,
+            max_candidates_per_request,
+            path_rules: BTreeMap::new(),
+        }
+    }
+
+    /// Wire the canonical knowledge writeback target. Consumers who omit
+    /// this keep the synthetic-path fallback, which is what the
+    /// fixture-diff test and the in-memory tests rely on.
+    pub fn with_knowledge_service(mut self, svc: Arc<KnowledgeService>) -> Self {
+        self.knowledge_service = Some(svc);
+        self
+    }
+
+    /// Provide `path_rules` for `{date}` / `{topic}` / `{author}` template
+    /// expansion. Called by the CLI with
+    /// `config.knowledge.curation.path_rules.clone()`.
+    pub fn with_path_rules(mut self, rules: BTreeMap<String, String>) -> Self {
+        self.path_rules = rules;
+        self
+    }
+
+    // Note: an earlier draft exposed `with_confirmation_gate(gates)` here for
+    // "API symmetry with the stores". It was a no-op — the coordinator never
+    // owned the gate list, and `build_candidate_plane` calls
+    // `store.with_confirmation_gate(...)` BEFORE wrapping the store in `Arc`,
+    // so the coordinator method could not forward to the store even if it
+    // wanted to. The no-op was removed.
+    // If a future coordinator-level gate is needed, add a real impl
+    // (requires extending the `ActivityCaptureStore` trait with a
+    // `set_confirmation_gate` method or similar) — DO NOT reintroduce
+    // the no-op.
+}
+
+/// Postgres-backed implementation. Gated on the `sqlx` dependency already
+/// present in `gadgetron-knowledge`. No separate feature flag needed.
+pub mod pg;
+
+/// Decide initial disposition for a newly-captured candidate.
+///
+/// Returns `PendingUserConfirmation` if any of `hint.tags` matches an entry
+/// in `require_user_confirmation_for`; otherwise `PendingPennyDecision`.
+pub(crate) fn resolve_initial_disposition(
+    hint: &CandidateHint,
+    require_user_confirmation_for: &[String],
+) -> KnowledgeCandidateDisposition {
+    let match_any = hint
+        .tags
+        .iter()
+        .any(|t| require_user_confirmation_for.iter().any(|g| g == t));
+    if match_any {
+        KnowledgeCandidateDisposition::PendingUserConfirmation
+    } else {
+        KnowledgeCandidateDisposition::PendingPennyDecision
+    }
+}
+
+// `snake_case_label` lives in `gadgetron_core::knowledge::candidate` —
+// single source of truth for every `snake_case` enum render across the
+// candidate plane. The import is at the top of this file.
+
+/// Expand `{date}` / `{topic}` / `{author}` in a `path_rules` template
+/// against a captured activity event.
+///
+/// - `{date}` → UTC `YYYY-MM-DD` of `event.created_at`.
+/// - `{topic}` → snake_case `ActivityKind` label (e.g. `direct_action`).
+/// - `{author}` → `event.actor_user_id` rendered as a bare UUID.
+///
+/// Unknown placeholders are left untouched; future work will add validation at
+/// config-load time once the vocabulary stabilizes.
+fn expand_path_rule(rule: &str, event: &CapturedActivityEvent) -> String {
+    let date = event.created_at.format("%Y-%m-%d").to_string();
+    let topic = snake_case_label(&event.kind);
+    let author = event.actor_user_id.to_string();
+    rule.replace("{date}", &date)
+        .replace("{topic}", &topic)
+        .replace("{author}", &author)
+}
+
+/// Look up a `path_rules` key for an `ActivityKind` and expand against
+/// the event. Returns `None` when the coordinator has no rule for this
+/// kind so the caller can decide on the journal-style fallback.
+fn resolve_path_from_rules(
+    rules: &BTreeMap<String, String>,
+    event: &CapturedActivityEvent,
+) -> Option<String> {
+    let key = snake_case_label(&event.kind);
+    rules.get(&key).map(|rule| expand_path_rule(rule, event))
+}
+
+#[async_trait]
+impl KnowledgeCandidateCoordinator for InProcessCandidateCoordinator {
+    async fn capture_action(
+        &self,
+        actor: &AuthenticatedContext,
+        event: CapturedActivityEvent,
+        hints: Vec<CandidateHint>,
+    ) -> CaptureResult<Vec<KnowledgeCandidate>> {
+        let event_id = event.id;
+        // Snapshot the two fields we need for template expansion before
+        // the event is moved into `append_activity`. Kind is `Copy`;
+        // `created_at` is `DateTime<Utc>` which is also `Copy`.
+        let event_snapshot_kind: ActivityKind = event.kind;
+        let event_snapshot = event.clone();
+        self.store.append_activity(actor, event).await?;
+
+        let clamp = self.max_candidates_per_request.min(hints.len());
+        let mut created = Vec::with_capacity(clamp);
+        for mut hint in hints.into_iter().take(clamp) {
+            if hint.proposed_path.is_none() {
+                // Try path_rules expansion first; fall back to the
+                // journal-style synthetic path. Keeps the legacy
+                // behavior for tests that wire an empty `path_rules` map.
+                let resolved_str = resolve_path_from_rules(&self.path_rules, &event_snapshot)
+                    .unwrap_or_else(|| {
+                        // Cheap deterministic fallback — uses event date +
+                        // a sentinel so the path is predictable in the
+                        // "no rules, no hint" case.
+                        format!(
+                            "ops/journal/{}/{}",
+                            event_snapshot.created_at.format("%Y-%m-%d"),
+                            snake_case_label(&event_snapshot_kind)
+                        )
+                    });
+                // Validate through `KnowledgePath::new` — malformed
+                // path_rules templates now surface at hint-creation time
+                // rather than silently flowing to the store.
+                let validated = gadgetron_core::knowledge::KnowledgePath::new(resolved_str)
+                    .map_err(|e| GadgetronError::Knowledge {
+                        kind: KnowledgeErrorKind::InvalidQuery {
+                            reason: format!(
+                                "path_rules expansion produced an invalid knowledge path: {e}"
+                            ),
+                        },
+                        message: "path_rules expansion produced an invalid knowledge path"
+                            .to_string(),
+                    })?;
+                hint.proposed_path = Some(validated);
+            }
+            let candidate = self.store.append_candidate(actor, event_id, hint).await?;
+            created.push(candidate);
+        }
+        Ok(created)
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        name = "candidate.materialize",
+        skip(self, actor, write),
+        fields(
+            candidate_id = %candidate_id,
+            has_knowledge_service = self.knowledge_service.is_some()
+        )
+    )]
+    async fn materialize_accepted_candidate(
+        &self,
+        actor: &AuthenticatedContext,
+        candidate_id: Uuid,
+        write: KnowledgeDocumentWrite,
+    ) -> CaptureResult<gadgetron_core::knowledge::KnowledgePath> {
+        let candidate = self
+            .store
+            .get_candidate(actor, candidate_id)
+            .await?
+            .ok_or_else(|| GadgetronError::Knowledge {
+                kind: KnowledgeErrorKind::DocumentNotFound {
+                    path: format!("candidate/{candidate_id}"),
+                },
+                message: format!(
+                    "cannot materialize candidate {candidate_id}: not found in capture store"
+                ),
+            })?;
+
+        if candidate.disposition != KnowledgeCandidateDisposition::Accepted {
+            return Err(GadgetronError::Knowledge {
+                kind: KnowledgeErrorKind::InvalidQuery {
+                    reason: format!(
+                        "candidate disposition must be accepted to materialize; got {:?}",
+                        candidate.disposition
+                    ),
+                },
+                message: "cannot materialize a non-accepted candidate".to_string(),
+            });
+        }
+
+        // Happy path: canonical writeback through `KnowledgeService::write`.
+        if let Some(svc) = self.knowledge_service.as_ref() {
+            // `write.provenance` threads into
+            // `KnowledgePutRequest.provenance` — stores that persist
+            // frontmatter (e.g. `LlmWikiStore`) embed the map under the
+            // `provenance:` key. `BTreeMap` ordering is deterministic
+            // so the wire shape is byte-stable for audit replay.
+            let request = KnowledgePutRequest {
+                path: write.path.to_string(),
+                markdown: write.content.clone(),
+                create_only: false,
+                overwrite: true,
+                provenance: write.provenance.clone(),
+            };
+            let receipt = svc.write(actor, request).await?;
+            // `KnowledgeWriteReceipt.path` is still `String` — the
+            // store-API path type narrows later. Rewrap here.
+            return gadgetron_core::knowledge::KnowledgePath::new(receipt.path).map_err(|e| {
+                GadgetronError::Knowledge {
+                    kind: KnowledgeErrorKind::InvalidQuery {
+                        reason: format!(
+                            "KnowledgeService::write returned an invalid path: {e}"
+                        ),
+                    },
+                    message: "KnowledgeService::write returned a path that fails KnowledgePath validation".to_string(),
+                }
+            });
+        }
+
+        // Fallback: no KnowledgeService wired — return the proposed path
+        // or synthesize a journal path. Mirrors the legacy behavior the
+        // fixture-diff test + existing in-memory tests depend on.
+        let resolved_path = candidate.proposed_path.clone().unwrap_or_else(|| {
+            // Reconstruct a synthetic path without re-scanning the event
+            // log: the candidate's own id is enough when we don't have a
+            // date-bearing event in reach. The synthetic form
+            // `ops/journal/<uuid>` passes KnowledgePath validation, so
+            // `expect` is safe (tested in
+            // `coordinator_materialize_returns_proposed_path_when_accepted`).
+            gadgetron_core::knowledge::KnowledgePath::new(format!("ops/journal/{candidate_id}"))
+                .expect("synthetic fallback path is always well-formed")
+        });
+        Ok(resolved_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use gadgetron_core::knowledge::candidate::{ActivityKind, ActivityOrigin};
+
+    fn actor() -> AuthenticatedContext {
+        AuthenticatedContext::system()
+    }
+
+    fn make_event(id_seed: u8) -> CapturedActivityEvent {
+        let mut bytes = [0u8; 16];
+        bytes[15] = id_seed;
+        let id = Uuid::from_bytes(bytes);
+        bytes[15] = 200;
+        let tenant_id = Uuid::from_bytes(bytes);
+        bytes[15] = 201;
+        let actor_user_id = Uuid::from_bytes(bytes);
+        CapturedActivityEvent {
+            id,
+            tenant_id,
+            actor_user_id,
+            request_id: None,
+            origin: ActivityOrigin::UserDirect,
+            kind: ActivityKind::DirectAction,
+            title: format!("test-title-{id_seed}"),
+            summary: format!("test-summary-{id_seed}"),
+            source_bundle: None,
+            source_capability: None,
+            audit_event_id: None,
+            facts: serde_json::json!({}),
+            created_at: Utc
+                .with_ymd_and_hms(2026, 4, 18, 12, 0, id_seed as u32)
+                .unwrap(),
+        }
+    }
+
+    fn make_hint(n: u32) -> CandidateHint {
+        CandidateHint {
+            summary: format!("hint summary {n}"),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new(format!("ops/journal/hint-{n}"))
+                    .unwrap(),
+            ),
+            tags: vec!["ops".to_string()],
+            reason: Some("direct_action".to_string()),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // InMemoryActivityCaptureStore tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn inmem_store_append_then_list() {
+        let store = InMemoryActivityCaptureStore::new();
+        let event = make_event(1);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+        let _c = store
+            .append_candidate(&actor(), event_id, make_hint(1))
+            .await
+            .unwrap();
+        let list = store.list_candidates(&actor(), 10, false).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].disposition,
+            KnowledgeCandidateDisposition::PendingPennyDecision
+        );
+        assert_eq!(list[0].activity_event_id, event_id);
+        assert_eq!(store.event_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn inmem_store_decide_updates_disposition_accept() {
+        let store = InMemoryActivityCaptureStore::new();
+        let event = make_event(2);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+        let c = store
+            .append_candidate(&actor(), event_id, make_hint(2))
+            .await
+            .unwrap();
+
+        let decision = CandidateDecision {
+            candidate_id: c.id,
+            decision: CandidateDecisionKind::Accept,
+            decided_by_user_id: None,
+            decided_by_penny: true,
+            rationale: Some("ops-journal worthy".to_string()),
+        };
+        let updated = store.decide_candidate(&actor(), decision).await.unwrap();
+        assert_eq!(updated.disposition, KnowledgeCandidateDisposition::Accepted);
+        assert_eq!(store.decision_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn inmem_store_decide_updates_disposition_reject() {
+        let store = InMemoryActivityCaptureStore::new();
+        let event = make_event(3);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+        let c = store
+            .append_candidate(&actor(), event_id, make_hint(3))
+            .await
+            .unwrap();
+        let updated = store
+            .decide_candidate(
+                &actor(),
+                CandidateDecision {
+                    candidate_id: c.id,
+                    decision: CandidateDecisionKind::Reject,
+                    decided_by_user_id: None,
+                    decided_by_penny: true,
+                    rationale: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.disposition, KnowledgeCandidateDisposition::Rejected);
+    }
+
+    #[tokio::test]
+    async fn inmem_store_decide_updates_disposition_escalate() {
+        let store = InMemoryActivityCaptureStore::new();
+        let event = make_event(4);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+        let c = store
+            .append_candidate(&actor(), event_id, make_hint(4))
+            .await
+            .unwrap();
+        let updated = store
+            .decide_candidate(
+                &actor(),
+                CandidateDecision {
+                    candidate_id: c.id,
+                    decision: CandidateDecisionKind::EscalateToUser,
+                    decided_by_user_id: None,
+                    decided_by_penny: true,
+                    rationale: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.disposition,
+            KnowledgeCandidateDisposition::PendingUserConfirmation
+        );
+    }
+
+    #[tokio::test]
+    async fn inmem_store_list_only_pending_filters() {
+        let store = InMemoryActivityCaptureStore::new();
+        let event = make_event(5);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+        let a = store
+            .append_candidate(&actor(), event_id, make_hint(1))
+            .await
+            .unwrap();
+        let _b = store
+            .append_candidate(&actor(), event_id, make_hint(2))
+            .await
+            .unwrap();
+        // Accept the first → it should drop out of pending listings.
+        store
+            .decide_candidate(
+                &actor(),
+                CandidateDecision {
+                    candidate_id: a.id,
+                    decision: CandidateDecisionKind::Accept,
+                    decided_by_user_id: None,
+                    decided_by_penny: true,
+                    rationale: None,
+                },
+            )
+            .await
+            .unwrap();
+        let pending = store.list_candidates(&actor(), 10, true).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_ne!(pending[0].id, a.id, "accepted candidate must be filtered");
+        let all = store.list_candidates(&actor(), 10, false).await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inmem_store_decide_unknown_candidate_errors() {
+        let store = InMemoryActivityCaptureStore::new();
+        let err = store
+            .decide_candidate(
+                &actor(),
+                CandidateDecision {
+                    candidate_id: Uuid::new_v4(),
+                    decision: CandidateDecisionKind::Accept,
+                    decided_by_user_id: None,
+                    decided_by_penny: true,
+                    rationale: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        match err {
+            GadgetronError::Knowledge {
+                kind: KnowledgeErrorKind::DocumentNotFound { path },
+                ..
+            } => {
+                assert!(path.starts_with("candidate/"), "path was: {path}");
+            }
+            other => panic!("expected DocumentNotFound, got: {other:?}"),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // InProcessCandidateCoordinator tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn coordinator_capture_action_clamps_to_max_candidates() {
+        let store: Arc<dyn ActivityCaptureStore> = Arc::new(InMemoryActivityCaptureStore::new());
+        let coord = InProcessCandidateCoordinator::new(store.clone(), /*max=*/ 2);
+        let event = make_event(6);
+        let hints = vec![make_hint(1), make_hint(2), make_hint(3), make_hint(4)];
+        let created = coord.capture_action(&actor(), event, hints).await.unwrap();
+        assert_eq!(
+            created.len(),
+            2,
+            "coordinator must clamp to max_candidates_per_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_materialize_errors_when_not_accepted() {
+        let store: Arc<dyn ActivityCaptureStore> = Arc::new(InMemoryActivityCaptureStore::new());
+        let coord = InProcessCandidateCoordinator::new(store.clone(), 8);
+        let event = make_event(7);
+        let hints = vec![make_hint(1)];
+        let created = coord.capture_action(&actor(), event, hints).await.unwrap();
+        let candidate_id = created[0].id;
+
+        // Default disposition is PendingPennyDecision → materialize must fail.
+        let write = KnowledgeDocumentWrite {
+            path: gadgetron_core::knowledge::KnowledgePath::new("ops/journal/x").unwrap(),
+            content: "body".to_string(),
+            provenance: BTreeMap::new(),
+        };
+        let err = coord
+            .materialize_accepted_candidate(&actor(), candidate_id, write)
+            .await
+            .unwrap_err();
+        match err {
+            GadgetronError::Knowledge {
+                kind: KnowledgeErrorKind::InvalidQuery { reason },
+                ..
+            } => {
+                assert!(
+                    reason.contains("accepted"),
+                    "reason must mention disposition; was: {reason}"
+                );
+            }
+            other => panic!("expected InvalidQuery, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_materialize_returns_proposed_path_when_accepted() {
+        let store: Arc<dyn ActivityCaptureStore> = Arc::new(InMemoryActivityCaptureStore::new());
+        let coord = InProcessCandidateCoordinator::new(store.clone(), 8);
+        let event = make_event(8);
+        let hints = vec![CandidateHint {
+            summary: "op".into(),
+            proposed_path: Some(
+                gadgetron_core::knowledge::KnowledgePath::new("ops/journal/accepted").unwrap(),
+            ),
+            tags: vec![],
+            reason: None,
+        }];
+        let created = coord.capture_action(&actor(), event, hints).await.unwrap();
+        let candidate_id = created[0].id;
+
+        // Accept the candidate via the store (this is what Penny would trigger
+        // through `decide_candidate`).
+        store
+            .decide_candidate(
+                &actor(),
+                CandidateDecision {
+                    candidate_id,
+                    decision: CandidateDecisionKind::Accept,
+                    decided_by_user_id: None,
+                    decided_by_penny: true,
+                    rationale: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let write = KnowledgeDocumentWrite {
+            path: gadgetron_core::knowledge::KnowledgePath::new("ops/journal/accepted").unwrap(),
+            content: "# body".to_string(),
+            provenance: BTreeMap::new(),
+        };
+        let path = coord
+            .materialize_accepted_candidate(&actor(), candidate_id, write)
+            .await
+            .unwrap();
+        assert_eq!(path.as_str(), "ops/journal/accepted");
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_initial_disposition tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn resolve_initial_disposition_returns_pending_penny_when_tags_empty() {
+        let hint = CandidateHint {
+            summary: "no tags".into(),
+            proposed_path: None,
+            tags: vec![],
+            reason: None,
+        };
+        let gates = vec!["org_write".to_string(), "destructive_action".to_string()];
+        assert_eq!(
+            resolve_initial_disposition(&hint, &gates),
+            KnowledgeCandidateDisposition::PendingPennyDecision,
+            "empty tags must yield PendingPennyDecision"
+        );
+    }
+
+    #[test]
+    fn resolve_initial_disposition_returns_pending_user_when_tag_matches_gate() {
+        let hint = CandidateHint {
+            summary: "org write op".into(),
+            proposed_path: None,
+            tags: vec!["ops".to_string(), "org_write".to_string()],
+            reason: None,
+        };
+        let gates = vec!["org_write".to_string(), "policy_note".to_string()];
+        assert_eq!(
+            resolve_initial_disposition(&hint, &gates),
+            KnowledgeCandidateDisposition::PendingUserConfirmation,
+            "matching tag must yield PendingUserConfirmation"
+        );
+    }
+
+    #[test]
+    fn resolve_initial_disposition_returns_pending_penny_when_no_tag_matches() {
+        let hint = CandidateHint {
+            summary: "safe action".into(),
+            proposed_path: None,
+            tags: vec!["read_only".to_string(), "monitoring".to_string()],
+            reason: None,
+        };
+        let gates = vec!["org_write".to_string(), "destructive_action".to_string()];
+        assert_eq!(
+            resolve_initial_disposition(&hint, &gates),
+            KnowledgeCandidateDisposition::PendingPennyDecision,
+            "non-matching tags must yield PendingPennyDecision"
+        );
+    }
+
+    #[tokio::test]
+    async fn inmem_store_with_confirmation_gate_routes_matching_tags() {
+        let store =
+            InMemoryActivityCaptureStore::new().with_confirmation_gate(vec!["policy_note".into()]);
+        let event = make_event(20);
+        let event_id = event.id;
+        store.append_activity(&actor(), event).await.unwrap();
+
+        // Hint without matching tag → PendingPennyDecision.
+        let h1 = CandidateHint {
+            summary: "safe".into(),
+            proposed_path: None,
+            tags: vec!["ops".into()],
+            reason: None,
+        };
+        let c1 = store
+            .append_candidate(&actor(), event_id, h1)
+            .await
+            .unwrap();
+        assert_eq!(
+            c1.disposition,
+            KnowledgeCandidateDisposition::PendingPennyDecision
+        );
+
+        // Hint with matching tag → PendingUserConfirmation.
+        let h2 = CandidateHint {
+            summary: "policy change".into(),
+            proposed_path: None,
+            tags: vec!["policy_note".into()],
+            reason: None,
+        };
+        let c2 = store
+            .append_candidate(&actor(), event_id, h2)
+            .await
+            .unwrap();
+        assert_eq!(
+            c2.disposition,
+            KnowledgeCandidateDisposition::PendingUserConfirmation
+        );
+    }
+}

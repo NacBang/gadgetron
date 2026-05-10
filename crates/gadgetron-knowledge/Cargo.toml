@@ -1,0 +1,53 @@
+[package]
+name = "gadgetron-knowledge"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Knowledge layer — wiki store, web search proxy, and document ingestion"
+
+[dependencies]
+gadgetron-core = { workspace = true }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+# `FuturesUnordered` fanout for `KnowledgeService` derived-plug apply.
+# `futures` is already in the workspace catalog via gadgetron-core.
+futures = { workspace = true }
+
+# Wiki subsystem — git backend + credential patterns
+git2 = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+libc = { workspace = true }
+include_dir = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
+sha2 = "0.10"
+hex = "0.4"
+# wiki.import arg shape carries bytes as base64 — RFC 4648 std alphabet.
+# Scope: gadget layer only (core trait takes raw &[u8]).
+base64 = "0.22"
+
+# Web search subsystem (SearXNG client)
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+gadgetron-testing = { workspace = true }
+# RAG citation integration test validates the search → footnote pipeline
+# using the `citation` parser in gadgetron-penny. Dev-only dep — the
+# penny crate already depends on knowledge, so runtime-scope inclusion
+# would create a cycle. Integration test compiled against `--test` stage,
+# so cycle-safe.
+gadgetron-penny = { workspace = true }
+gadgetron-bundle-document-formats = { path = "../../bundles/document-formats", features = ["pdf"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+axum = { workspace = true }

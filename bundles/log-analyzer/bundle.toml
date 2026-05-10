@@ -1,0 +1,123 @@
+# log-analyzer — periodic log scan + finding store.
+#
+# Scans dmesg + journalctl + auth.log incrementally on each registered
+# host, classifies via regex rules + Penny LLM fallback, stores
+# findings in `log_findings` for the operator to triage.
+
+[bundle]
+id = "log-analyzer"
+version = "0.1.0"
+
+allow_direct_actions = true
+
+[[actions]]
+id = "loganalysis-list"
+title = "이상 징후 목록"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.list"
+gadget_name = "loganalysis.list"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "open(non-dismissed) findings. host_id/severity/limit 필터."
+input_schema = { type = "object", properties = { host_id = { type = "string", format = "uuid" }, severity = { type = "string", enum = ["critical","high","medium","info"] }, limit = { type = "integer", minimum = 1, maximum = 1000 } }, additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-dismiss"
+title = "이상 징후 처리완료"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.dismiss"
+gadget_name = "loganalysis.dismiss"
+placement = "context_menu"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "finding을 dismissed 처리 (soft delete)."
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid" }, actor_user_id = { type = "string", format = "uuid" } }, required = ["id"], additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-set-interval"
+title = "로그 스캔 주기 설정"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.set_interval"
+gadget_name = "loganalysis.set_interval"
+placement = "context_menu"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "host별 polling 주기 (30-3600초) + enable/disable."
+input_schema = { type = "object", properties = { host_id = { type = "string", format = "uuid" }, interval_secs = { type = "integer", minimum = 30, maximum = 3600 }, enabled = { type = "boolean" } }, required = ["host_id"], additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-status"
+title = "스캔 상태"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.status"
+gadget_name = "loganalysis.status"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "host별 마지막 scan 시점 + 현재 interval/enabled."
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-comment-list"
+title = "로그 댓글 목록"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.comment_list"
+gadget_name = "loganalysis.comment_list"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "해당 finding의 모든 댓글 (author_kind=user|penny 구분)."
+input_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" } }, required = ["finding_id"], additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-comment-add"
+title = "로그 댓글 작성"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.comment_add"
+gadget_name = "loganalysis.comment_add"
+placement = "context_menu"
+kind = "mutation"
+destructive = false
+requires_approval = false
+knowledge_hint = "finding에 댓글 작성. actor_user_id 없으면 Penny 작성으로 기록."
+input_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" }, body = { type = "string", minLength = 1, maxLength = 4000 }, actor_user_id = { type = "string", format = "uuid" } }, required = ["finding_id", "body"], additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-comment-delete"
+title = "로그 댓글 삭제"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.comment_delete"
+gadget_name = "loganalysis.comment_delete"
+placement = "context_menu"
+kind = "mutation"
+destructive = true
+requires_approval = false
+knowledge_hint = "댓글 삭제. 본인 또는 관리자만 가능 (actor_is_admin=true). Penny 댓글은 관리자만."
+input_schema = { type = "object", properties = { comment_id = { type = "string", format = "uuid" }, actor_user_id = { type = "string", format = "uuid" }, actor_is_admin = { type = "boolean" } }, required = ["comment_id", "actor_user_id"], additionalProperties = false }
+
+[[actions]]
+id = "loganalysis-scan-now"
+title = "지금 스캔"
+owner_bundle = "log-analyzer"
+source_kind = "gadget"
+source_id = "loganalysis.scan_now"
+gadget_name = "loganalysis.scan_now"
+placement = "context_menu"
+kind = "query"
+destructive = false
+requires_approval = false
+knowledge_hint = "스케줄러가 30초 안에 해당 호스트를 즉시 스캔하도록 트리거."
+input_schema = { type = "object", properties = { host_id = { type = "string", format = "uuid" } }, required = ["host_id"], additionalProperties = false }
