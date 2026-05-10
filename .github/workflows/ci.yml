@@ -90,12 +90,7 @@ jobs:
           cache: npm
           cache-dependency-path: crates/gadgetron-web/web/package-lock.json
       - run: npm ci
-      # WorkbenchShell.test.tsx is excluded from CI — the suite hits a
-      # vitest worker OOM under jsdom + assistant-ui even with 8 GB heap
-      # and a single-thread pool. Tracked for a follow-up: split the
-      # describe blocks into smaller files or mock the runtime provider.
-      # Run locally with: cd crates/gadgetron-web/web && npm test
-      - run: npm run test -- AdminPage.test.tsx
+      - run: npm run test -- AdminPage.test.tsx WorkbenchShell.test.tsx
       - run: npm run build
 
   security-scan:
