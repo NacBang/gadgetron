@@ -41,43 +41,77 @@ vi.mock("../../app/components/shell/conversations-pane", () => ({
 // test render leaks a fresh interval (cleanup races with the next render),
 // and the accumulated jsdom timers are what blew up the vitest worker
 // heap. Stub the strip + the health hook so the timer never starts.
-vi.mock("../../app/components/shell/status-strip", () => ({
-  StatusStrip: () => <div data-testid="status-strip" />,
-  useGatewayHealth: () => ({
+//
+// `useGatewayHealth` is hoisted via `vi.hoisted` so individual tests can
+// override the return value (e.g. status="blocked") via
+// `mockUseGatewayHealth.mockReturnValue(...)`.
+const { mockUseGatewayHealth } = vi.hoisted(() => ({
+  mockUseGatewayHealth: vi.fn(() => ({
     status: "healthy" as const,
-    httpStatus: 200,
-    degradedReasons: [],
-  }),
+    httpStatus: 200 as number | null,
+    degradedReasons: [] as string[],
+  })),
+}));
+
+vi.mock("../../app/components/shell/status-strip", () => ({
+  StatusStrip: () => <div data-testid="status-strip" role="status" />,
+  useGatewayHealth: () => mockUseGatewayHealth(),
 }));
 
 // EvidencePane runs its own setInterval + fetch loop for live data.
-// Same accumulation problem — stub it. The `collapsed` default matches
-// the production DEFAULT_PREFS so tests that don't manipulate prefs
-// see the testid they expect.
+// Same accumulation problem — stub it. Production prop is `open`
+// (not `collapsed`); the default reflects DEFAULT_PREFS where the
+// pane starts hidden. The collapsed branch exposes the
+// `evidence-pane-expand-btn` testid the reopen test asserts on.
 vi.mock("../../app/components/shell/evidence-pane", () => ({
-  EvidencePane: ({ collapsed = true }: { collapsed?: boolean }) => (
-    <div
-      data-testid={collapsed ? "evidence-pane-collapsed" : "evidence-pane"}
-    />
+  EvidencePane: ({ open = false }: { open?: boolean }) => (
+    <div data-testid={open ? "evidence-pane" : "evidence-pane-collapsed"}>
+      {!open && (
+        <button type="button" data-testid="evidence-pane-expand-btn" />
+      )}
+    </div>
   ),
 }));
 
-// FailurePanel renders only when health != healthy. Tests that probe
-// the unhealthy branch override the useGatewayHealth mock per-test;
-// here we just expose the testid so they can find the panel.
+// FailurePanel renders only when health.status === "blocked".
 vi.mock("../../app/components/shell/failure-panel", () => ({
   FailurePanel: () => <div data-testid="failure-panel" />,
 }));
 
 // LeftRail pulls in a heavier graph than WorkbenchShell tests need.
 // Stub it with a minimal shape that exposes the testids tests assert
-// on (left-rail wrapper + nav-tab-* anchors with the right hrefs).
+// on. The `collapsed` / `forcedCollapsed` props mirror production so
+// the className + collapse-button states match what tests expect.
 vi.mock("../../app/components/shell/left-rail", () => ({
-  LeftRail: ({ collapsed }: { collapsed?: boolean }) => (
+  LeftRail: ({
+    collapsed = false,
+    forcedCollapsed = false,
+    width = 240,
+    onCollapse,
+  }: {
+    collapsed?: boolean;
+    forcedCollapsed?: boolean;
+    width?: number;
+    onCollapse?: (v: boolean) => void;
+  }) => (
     <aside
       data-testid="left-rail"
-      style={{ width: collapsed ? "0px" : "240px" }}
+      className={collapsed ? "w-12" : "w-60"}
+      style={{ width: collapsed ? "48px" : `${width}px` }}
     >
+      <button
+        type="button"
+        data-testid="left-rail-collapse-btn"
+        disabled={forcedCollapsed}
+        aria-label={
+          forcedCollapsed
+            ? "Navigation is collapsed on narrow screens"
+            : "Collapse navigation"
+        }
+        onClick={() => {
+          if (!forcedCollapsed) onCollapse?.(!collapsed);
+        }}
+      />
       <a href="/web" data-testid="nav-tab-chat" aria-current="page">
         Chat
       </a>
@@ -123,6 +157,12 @@ function mockFetch(status: number, body: unknown = {}) {
 beforeEach(() => {
   localStorageMock.clear();
   vi.restoreAllMocks();
+  // Reset health to healthy so per-test overrides are isolated.
+  mockUseGatewayHealth.mockReturnValue({
+    status: "healthy",
+    httpStatus: 200,
+    degradedReasons: [],
+  });
   mockFetch(200, {});
   // navigator.onLine default = true
   Object.defineProperty(navigator, "onLine", {
@@ -225,8 +265,7 @@ describe("WorkbenchShell", () => {
     expect(screen.queryByTestId("nav-tab-bundles")).toBeNull();
   });
 
-  // TODO: re-enable once the LeftRail mock honors innerWidth resize events.
-  it.skip("collapses left rail and hides evidence pane on narrow desktop", async () => {
+  it("collapses left rail and hides evidence pane on narrow desktop", async () => {
     Object.defineProperty(window, "innerWidth", {
       value: 900,
       writable: true,
@@ -249,8 +288,7 @@ describe("WorkbenchShell", () => {
     expect(screen.queryByTestId("evidence-pane-collapsed")).toBeNull();
   });
 
-  // TODO: re-enable once the LeftRail mock exposes the collapse button + persists prefs.
-  it.skip("does not persist a collapsed preference while forced collapsed", async () => {
+  it("does not persist a collapsed preference while forced collapsed", async () => {
     Object.defineProperty(window, "innerWidth", {
       value: 900,
       writable: true,
@@ -298,8 +336,7 @@ describe("WorkbenchShell", () => {
     expect(screen.queryByTestId("evidence-pane-collapsed")).toBeNull();
   });
 
-  // TODO: re-enable once the EvidencePane mock exposes the expand-btn testid.
-  it.skip("evidence pane defaults collapsed and can be reopened", async () => {
+  it("evidence pane defaults collapsed and can be reopened", async () => {
     render(
       <WorkbenchShell>
         <div>chat</div>
@@ -327,10 +364,12 @@ describe("WorkbenchShell", () => {
     expect(screen.queryByTestId("failure-panel")).toBeNull();
   });
 
-  // TODO: re-enable once useGatewayHealth mock can be overridden per-test
-  // (currently hard-coded to "healthy" to break the setInterval leak).
-  it.skip("shows failure overlay when health=blocked (fetch throws)", async () => {
-    global.fetch = vi.fn().mockRejectedValue(new Error("net fail"));
+  it("shows failure overlay when health=blocked (fetch throws)", async () => {
+    mockUseGatewayHealth.mockReturnValue({
+      status: "blocked",
+      httpStatus: null,
+      degradedReasons: ["net fail"],
+    });
     render(
       <WorkbenchShell>
         <div>chat</div>
@@ -362,9 +401,7 @@ describe("WorkbenchShell", () => {
     expect(chatCol.contains(child)).toBe(true);
   });
 
-  // TODO: re-enable once the StatusStrip mock matches the production
-  // wrapper structure the test asserts on.
-  it.skip("renders status strip", () => {
+  it("renders status strip", () => {
     render(
       <WorkbenchShell>
         <div>chat</div>
