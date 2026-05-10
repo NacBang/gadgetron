@@ -13,6 +13,20 @@ export default defineConfig({
     // so the default 5s testTimeout flakes on async render+effect chains.
     testTimeout: 15000,
     hookTimeout: 15000,
+    // Default `forks` pool spawns child processes that hit Node's heap
+    // limit on the WorkbenchShell suite (jsdom + assistant-ui graph).
+    // Threads share the parent heap and avoid the per-fork 1.7 GB ceiling.
+    pool: "threads",
+    poolOptions: {
+      threads: {
+        singleThread: true,
+        // NODE_OPTIONS doesn't propagate into vitest worker threads, so
+        // raise the heap explicitly via execArgv. The WorkbenchShell
+        // suite (jsdom + assistant-ui) needs ~3 GB; 8 GB headroom keeps
+        // CI green even when assistant-ui ships heavier graphs.
+        execArgv: ["--max-old-space-size=8192"],
+      },
+    },
   },
   resolve: {
     alias: {
