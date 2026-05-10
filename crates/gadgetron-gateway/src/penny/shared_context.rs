@@ -305,9 +305,8 @@ impl PennySharedSurfaceService for InProcessPennySharedSurfaceService {
         let Some(store) = self.candidate_store.as_ref() else {
             return Err(GadgetronError::Penny {
                 kind: gadgetron_core::error::PennyErrorKind::ToolDenied {
-                    reason:
-                        "capture store is not wired for this gateway; cannot record decisions"
-                            .to_string(),
+                    reason: "capture store is not wired for this gateway; cannot record decisions"
+                        .to_string(),
                 },
                 message: "decide_candidate requires the capture-plane store to be wired"
                     .to_string(),

@@ -38,10 +38,10 @@ impl std::fmt::Display for BlobId {
 
 /// Caller-supplied metadata accompanying a blob upload.
 ///
-/// The persisted `ingested_blobs` row carries tenant + hash + filename
-/// + importer. The `tenant_id` / `user_id` references resolve to
-/// `String` here because the identity module owns the typed newtypes —
-/// pulling those into core would create a cycle.
+/// The persisted `ingested_blobs` row carries tenant, hash, filename,
+/// and importer. The `tenant_id` / `user_id` references resolve to
+/// `String` here because the identity module owns the typed newtypes
+/// (pulling those into core would create a cycle).
 #[derive(Debug, Clone)]
 pub struct BlobMetadata {
     pub tenant_id: String,
