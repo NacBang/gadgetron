@@ -17,15 +17,15 @@ export default defineConfig({
     // limit on the WorkbenchShell suite (jsdom + assistant-ui graph).
     // Threads share the parent heap and avoid the per-fork 1.7 GB ceiling.
     pool: "threads",
-    poolOptions: {
-      threads: {
-        singleThread: true,
-        // NODE_OPTIONS doesn't propagate into vitest worker threads, so
-        // raise the heap explicitly via execArgv. The WorkbenchShell
-        // suite (jsdom + assistant-ui) needs ~3 GB; 8 GB headroom keeps
-        // CI green even when assistant-ui ships heavier graphs.
-        execArgv: ["--max-old-space-size=8192"],
-      },
+  },
+  // Vitest 4 moved `poolOptions` to the top level (was `test.poolOptions`).
+  poolOptions: {
+    threads: {
+      singleThread: true,
+      // NODE_OPTIONS doesn't propagate into vitest worker threads, so
+      // raise the heap explicitly via execArgv. The WorkbenchShell
+      // suite (jsdom + assistant-ui) needs ~3 GB.
+      execArgv: ["--max-old-space-size=8192"],
     },
   },
   resolve: {
