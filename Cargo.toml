@@ -79,7 +79,7 @@ sysinfo = "0.33"
 
 # TUI
 ratatui = "0.30"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
