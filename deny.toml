@@ -9,6 +9,9 @@ ignore = [
 
 [licenses]
 version = 2
+# Workspace crates are unpublished and use a license-file (PolyForm
+# Noncommercial 1.0.0), not a SPDX expression. Skip them.
+private = { ignore = true }
 allow = [
     "MIT",
     "MIT-0",                              # MIT No Attribution — OSI approved; transitive via jsonschema (borrow-or-share)

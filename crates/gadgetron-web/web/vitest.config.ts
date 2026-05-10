@@ -9,6 +9,10 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./vitest.setup.ts"],
     include: ["__tests__/**/*.{test,spec}.{ts,tsx}"],
+    // CI-friendly: GitHub Actions runners are slower than local dev,
+    // so the default 5s testTimeout flakes on async render+effect chains.
+    testTimeout: 15000,
+    hookTimeout: 15000,
   },
   resolve: {
     alias: {
