@@ -1,0 +1,55 @@
+name: Nightly security audit
+
+# Independent of CI: runs cargo-audit + cargo-deny on the latest main every
+# day. Opens an issue on findings so that a Friday-night CVE doesn't sit
+# unnoticed until the next push.
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 06:00 KST daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: cargo audit + cargo deny
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-audit
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo audit
+        run: cargo audit --deny warnings
+      - name: cargo deny check advisories
+        run: cargo deny check advisories
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly audit found a finding (${new Date().toISOString().slice(0,10)})`,
+              labels: ['security', 'audit'],
+              body: [
+                `Run: ${run}`,
+                ``,
+                `Reproduce locally:`,
+                '```sh',
+                `cargo audit --deny warnings`,
+                `cargo deny check advisories`,
+                '```',
+                ``,
+                `If the finding is benign for our workload, add the RUSTSEC ID`,
+                `to \`deny.toml\`'s \`[advisories] ignore\` list with a one-line`,
+                `rationale.`,
+              ].join('\n'),
+            });
