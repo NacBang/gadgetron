@@ -23,7 +23,7 @@ tracing             = { workspace = true }
 axum                = { workspace = true }
 sqlx                = { workspace = true }
 reqwest             = { workspace = true }
-sha2                = "0.10"
+sha2                = "0.11"
 hex                 = "0.4"
 wiremock            = "0.6"
 
