@@ -10,9 +10,12 @@ ignore = [
 [licenses]
 version = 2
 # Workspace crates are unpublished and use a license-file (PolyForm
-# Noncommercial 1.0.0), not a SPDX expression. Skip them.
-private = { ignore = true }
+# Noncommercial 1.0.0). Skip the no-license-field warning for them.
+private = { ignore = true, registries = ["crates-io"] }
 allow = [
+    # Our own license — cargo-deny detects this from the LICENSE file
+    # via SHA hash even when the manifest only sets `license-file`.
+    "PolyForm-Noncommercial-1.0.0",
     "MIT",
     "MIT-0",                              # MIT No Attribution — OSI approved; transitive via jsonschema (borrow-or-share)
     "Apache-2.0",
@@ -22,8 +25,6 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "OpenSSL",
     "CDLA-Permissive-2.0",
 ]
 

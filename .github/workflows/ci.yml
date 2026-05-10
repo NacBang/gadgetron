@@ -76,6 +76,12 @@ jobs:
     defaults:
       run:
         working-directory: crates/gadgetron-web/web
+    env:
+      # GitHub Actions runners have ~7 GB RAM; the default Node old-space
+      # limit (~1.7 GB) caused vitest workers to OOM during the
+      # WorkbenchShell suite. 4 GB gives plenty of headroom for jsdom +
+      # Vitest worker fork.
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
