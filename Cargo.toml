@@ -121,4 +121,4 @@ mime_guess = "2.0.5"
 percent-encoding = "2.3.1"
 
 # JSON Schema validation (used by workbench direct-action input validation)
-jsonschema = "0.33"
+jsonschema = "0.46"
