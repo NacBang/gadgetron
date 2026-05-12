@@ -1,0 +1,11 @@
+[advisories]
+# Keep in sync with the [advisories].ignore list in `deny.toml`.
+# `cargo audit` and `cargo deny` consume separate config files; the
+# nightly audit workflow runs both, so a finding ignored only in one
+# will still fail the other and reopen an issue.
+ignore = [
+    "RUSTSEC-2023-0071",  # rsa via sqlx-mysql (postgres-only usage)
+    "RUSTSEC-2024-0436",  # paste unmaintained (transitive dep, no alternative)
+    "RUSTSEC-2026-0097",  # rand unsound with custom logger (we don't use custom loggers)
+    "RUSTSEC-2026-0104",  # rustls-webpki CRL parsing panic — we don't parse CRLs; rustls default verifier doesn't use this path
+]
