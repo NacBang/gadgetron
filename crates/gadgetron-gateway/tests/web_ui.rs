@@ -72,7 +72,7 @@ async fn apply_web_headers_sets_csp_on_web_subtree() {
     let mut web = WebConfig::default();
     web.upgrade_insecure_requests = true;
     let web_router = apply_web_headers(gadgetron_web::service(&translate_config(&web)), &web);
-    let server = TestServer::new(web_router).unwrap();
+    let server = TestServer::new(web_router);
 
     let resp = server.get("/").await;
     assert_eq!(resp.status_code(), StatusCode::OK);
@@ -87,7 +87,7 @@ async fn apply_web_headers_sets_csp_on_web_subtree() {
 async fn apply_web_headers_sets_nosniff_and_referrer_policy() {
     let web = WebConfig::default();
     let web_router = apply_web_headers(gadgetron_web::service(&translate_config(&web)), &web);
-    let server = TestServer::new(web_router).unwrap();
+    let server = TestServer::new(web_router);
     let resp = server.get("/").await;
     assert_eq!(
         resp.headers()
@@ -126,7 +126,7 @@ async fn web_service_serves_index_html() {
     // Fallback index.html (populated by build.rs during bootstrap) must respond
     // at `/` with HTML 200 and the Gadgetron title for branding hygiene.
     let web_router = gadgetron_web::service(&translate_config(&WebConfig::default()));
-    let server = TestServer::new(web_router).unwrap();
+    let server = TestServer::new(web_router);
     let resp = server.get("/").await;
     assert_eq!(resp.status_code(), StatusCode::OK);
     let content_type = resp
@@ -148,7 +148,7 @@ async fn web_service_serves_index_html() {
             defense-in-depth check."]
 async fn web_service_rejects_path_traversal() {
     let web_router = gadgetron_web::service(&translate_config(&WebConfig::default()));
-    let server = TestServer::new(web_router).unwrap();
+    let server = TestServer::new(web_router);
     let resp = server.get("/%2e%2e/Cargo.toml").await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
 }
@@ -159,7 +159,7 @@ async fn web_service_rejects_hidden_file_path() {
     // `.env` triggers rule 5 (hidden file) and does NOT get normalized
     // away by hyper. 400 Bad Request proves the validator is wired in.
     let web_router = gadgetron_web::service(&translate_config(&WebConfig::default()));
-    let server = TestServer::new(web_router).unwrap();
+    let server = TestServer::new(web_router);
     let resp = server.get("/.env").await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
 }
