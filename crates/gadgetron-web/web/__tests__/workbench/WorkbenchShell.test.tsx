@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
 import { WorkbenchShell } from "../../app/components/shell/workbench-shell";
+import type { HealthState } from "../../app/components/shell/status-strip";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -46,10 +47,10 @@ vi.mock("../../app/components/shell/conversations-pane", () => ({
 // override the return value (e.g. status="blocked") via
 // `mockUseGatewayHealth.mockReturnValue(...)`.
 const { mockUseGatewayHealth } = vi.hoisted(() => ({
-  mockUseGatewayHealth: vi.fn(() => ({
-    status: "healthy" as const,
-    httpStatus: 200 as number | null,
-    degradedReasons: [] as string[],
+  mockUseGatewayHealth: vi.fn<() => HealthState>(() => ({
+    status: "healthy",
+    httpStatus: 200,
+    degradedReasons: [],
   })),
 }));
 
