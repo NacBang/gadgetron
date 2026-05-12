@@ -75,7 +75,7 @@ eventsource-stream = "0.2"
 async-stream = "0.3"
 
 # System monitoring
-sysinfo = "0.33"
+sysinfo = "0.39"
 
 # TUI
 ratatui = "0.30"

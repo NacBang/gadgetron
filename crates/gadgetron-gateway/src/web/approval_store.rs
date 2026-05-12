@@ -113,7 +113,7 @@ impl ApprovalStore for InMemoryApprovalStore {
             .filter(|r| r.tenant_id == tenant_id && r.state == ApprovalState::Pending)
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         Ok(out)
     }
 }
