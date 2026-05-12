@@ -32,7 +32,7 @@ semver = "1"
 # bundle, never into gadgetron-core / knowledge. Version 0.7.x is the last
 # branch that builds against a stable `lopdf` ABI; 0.10.x churns on API
 # surface.
-pdf-extract = { version = "0.7", optional = true }
+pdf-extract = { version = "0.10", optional = true }
 # Optional — only needed for `PdfExtractor::extract` to off-load the
 # synchronous lopdf walk onto `tokio::task::spawn_blocking`. Gated by the
 # `pdf` feature to preserve the "markdown-only builds pull zero extra
