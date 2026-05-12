@@ -206,10 +206,16 @@ fn extract_web_next_refs(content: &str, refs: &mut std::collections::BTreeSet<St
         let mut end = start + MARKER.len();
         while end < bytes.len() {
             let b = bytes[end];
-            // URL path char set: alnum, `_`, `-`, `.`, `/`. Terminate on
-            // quote / whitespace / tag delimiter / anything else.
-            let is_path_char =
-                b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b'/';
+            // URL path char set: alnum + RFC 3986 unreserved (`-`, `.`,
+            // `_`, `~`) + `/`. Terminate on quote / whitespace / tag
+            // delimiter / anything else. Next.js 16 hashes filenames as
+            // e.g. `02i7dfk78~t~2.js`, so `~` must be a path char.
+            let is_path_char = b.is_ascii_alphanumeric()
+                || b == b'_'
+                || b == b'-'
+                || b == b'.'
+                || b == b'~'
+                || b == b'/';
             if !is_path_char {
                 break;
             }
