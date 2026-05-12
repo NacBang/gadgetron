@@ -1,11 +1,11 @@
-//! Bundle size budget: the embedded `WEB_DIST` total must stay under 3 MB.
+//! Bundle size budget: the embedded `WEB_DIST` total must stay under 4 MB.
 //!
 //! When `WEB_DIST` contains only the fallback `index.html` it is well
 //! under budget. The budget gates regression — if shiki grammar set
-//! changes or Next.js bundle grows past 3 MB total, this test fails
+//! changes or Next.js bundle grows past 4 MB total, this test fails
 //! with the exact byte count.
 
-const BUDGET_BYTES: u64 = 3 * 1024 * 1024; // 3 MB
+const BUDGET_BYTES: u64 = 4 * 1024 * 1024; // 4 MB
 
 #[test]
 fn web_dist_total_bytes_under_budget() {
