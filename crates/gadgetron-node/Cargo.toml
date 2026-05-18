@@ -22,5 +22,5 @@ nix = { version = "0.31", features = ["signal", "process"] }
 nvml = ["nvml-wrapper"]
 
 [dependencies.nvml-wrapper]
-version = "0.10"
+version = "0.12"
 optional = true
