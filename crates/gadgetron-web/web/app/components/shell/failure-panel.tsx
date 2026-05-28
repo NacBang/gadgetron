@@ -41,7 +41,7 @@ function causeFor(httpStatus: number | null): string {
 
 function recoveryFor(status: GatewayHealth, httpStatus: number | null): string {
   if (httpStatus === 401 || httpStatus === 403) {
-    return "Sign in or provide a valid API key via Settings. Generate a key with: gadgetron key create";
+    return "Sign in or provide a valid API key. Generate a key with: gadgetron key create";
   }
   if (status === "blocked") {
     return "Check that the Gadgetron process is running. Restart via: gadgetron serve. Then click Retry.";

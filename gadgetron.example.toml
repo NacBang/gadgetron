@@ -24,18 +24,27 @@ bind = "0.0.0.0:18080"
 [router.default_strategy]
 type = "round_robin"
 
-# --- Agent (Penny) ------------------------------------------------------
-# Requires Claude Code CLI installed and `claude login` completed.
+# --- Agent Backend (Penny) ----------------------------------------------
+# Pick the CLI backend Penny runs behind the scenes.
+# Omit [agent] entirely to disable Penny and expose only raw LLM providers.
+#
+# Defaults:
+#   claude_code -> runs `claude`
+#   codex_exec  -> runs `codex`
+# Set `binary = "/absolute/path"` only for non-standard installs.
+#
 # Without [agent] + [knowledge], Penny is not registered (only raw
 # providers remain available at /v1/chat/completions).
 
 # [agent]
-# # Claude Code binary. Use an absolute path if the binary is not on the
-# # restricted subprocess PATH (/usr/local/bin:/usr/bin:/bin). Example:
-# #   binary = "/Users/<you>/.local/bin/claude"
-# binary = "claude"
+# backend = "claude_code"
 # request_timeout_secs = 300
 # max_concurrent_subprocesses = 4
+#
+# [agent.codex]
+# # Used only with backend = "codex_exec"; most installs only need these.
+# sandbox = "read_only"
+# approval_policy = "never"
 
 # [agent.gadgets]
 # # Read tools must stay "auto"; include this when writing the table

@@ -1,18 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
+import { useRemoteThreadListRuntime } from "@assistant-ui/react";
 import { OpenAIChatTransport } from "../openai-transport";
 import { WorkbenchShell } from "../components/shell/workbench-shell";
 import { AuthProvider, useAuth } from "../lib/auth-context";
 import { EvidenceProvider } from "../lib/evidence-context";
 import { WorkbenchSubjectProvider } from "../lib/workbench-subject-context";
+import { makeGadgetronThreadListAdapter } from "../lib/thread-list-adapter";
 import {
+  ACTIVE_CONVERSATION_EVENT,
   clearActiveConversationId,
+  ensureActiveConversationId,
   getActiveConversationId,
-  setActiveConversationId,
 } from "../lib/conversation-id";
+import { safeRandomUUID } from "../lib/uuid";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Card, CardContent } from "../components/ui/card";
@@ -90,6 +94,37 @@ function LoginCard() {
 }
 
 function AuthedShell({ children }: { children: ReactNode }) {
+  // Active conversation id — kept in React state so the layout can
+  // react to switches initiated from `ConversationsPane.goTo` (which
+  // no longer hard-reloads; it just updates sessionStorage and fires
+  // `ACTIVE_CONVERSATION_EVENT`). Initial read is sync-safe because
+  // `getActiveConversationId` returns null on the server.
+  const [convId, setConvId] = useState<string>(
+    () => getActiveConversationId() ?? safeRandomUUID(),
+  );
+  const convIdRef = useRef(convId);
+  convIdRef.current = convId;
+
+  useEffect(() => {
+    const next = ensureActiveConversationId(
+      () => convIdRef.current || safeRandomUUID(),
+    );
+    if (next) setConvId((prev) => (prev === next ? prev : next));
+  }, []);
+
+  // Keep `convId` in sync with sessionStorage. Fires on every
+  // `setActiveConversationId` call (history click, new chat,
+  // transport-mint of a fresh id during first turn).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = () => {
+      const next = ensureActiveConversationId(() => safeRandomUUID()) ?? "";
+      setConvId((prev) => (prev === next ? prev : next));
+    };
+    window.addEventListener(ACTIVE_CONVERSATION_EVENT, sync);
+    return () => window.removeEventListener(ACTIVE_CONVERSATION_EVENT, sync);
+  }, []);
+
   // Transport sends Bearer when an API key exists, falls back to the
   // session cookie otherwise. Same-origin cookies are sent by default.
   const transport = useMemo(() => {
@@ -106,13 +141,9 @@ function AuthedShell({ children }: { children: ReactNode }) {
         // `sessionStorage` so two parallel browser windows don't
         // stomp on each other's chat state. Helper handles the
         // localStorage→sessionStorage migration on first read.
-        let convId = getActiveConversationId();
-        if (!convId) {
-          // Fresh tab with no inherited id: mint one so the very
-          // first turn lands in a row and the sidebar picks it up.
-          convId = crypto.randomUUID?.() ?? null;
-          if (convId) setActiveConversationId(convId);
-        }
+        const convId = ensureActiveConversationId(
+          () => convIdRef.current || safeRandomUUID(),
+        );
         if (convId) h["X-Gadgetron-Conversation-Id"] = convId;
       }
       return h;
@@ -157,7 +188,20 @@ function AuthedShell({ children }: { children: ReactNode }) {
       headers: buildHeaders,
     });
   }, []);
-  const runtime = useChatRuntime({ transport });
+  // Per-session thread-list adapter (Gadgetron workbench API).
+  const threadListAdapter = useMemo(() => makeGadgetronThreadListAdapter(), []);
+  // Wrap useChatRuntime as the per-thread runtime hook. The
+  // remote-thread-list runtime calls this once per thread and caches
+  // the instance — switching threads no longer unmounts the prior
+  // runtime, so in-progress streaming continues in the background
+  // and the "생성 중" state is preserved when the user comes back.
+  const runtimeHook = () => useChatRuntime({ transport });
+
+  const runtime = useRemoteThreadListRuntime({
+    runtimeHook,
+    adapter: threadListAdapter,
+    threadId: convId || undefined,
+  });
 
   return (
     <EvidenceProvider>

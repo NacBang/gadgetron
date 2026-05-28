@@ -36,10 +36,10 @@ pub fn validate_and_decode(raw: &str) -> Result<String, ()> {
 
     // ASCII-only allowlist. Rejects fullwidth dots and all non-ASCII input.
     // Parentheses `(` `)` permitted for Next.js route-group segments (`app/(shell)/…`).
-    if !decoded
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'(' | b')'))
-    {
+    // `~` permitted for turbopack-generated chunk filenames (RFC 3986 unreserved).
+    if !decoded.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'(' | b')' | b'~')
+    }) {
         return Err(());
     }
 
@@ -68,6 +68,8 @@ mod tests {
             "_next/static/abc123.js",
             "_next/static/def456.css",
             "favicon.ico",
+            "_next/static/chunks/08~pvhfxkn~e1.js",
+            "_next/static/chunks/16rjnlch9~l9_.css",
         ] {
             assert!(validate_and_decode(ok).is_ok(), "should accept: {ok}");
         }

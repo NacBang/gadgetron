@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   MessageSquare,
@@ -41,12 +42,17 @@ interface NavItem {
   href: string;
 }
 
+// hrefs are written WITHOUT the `/web` basePath. Next.js (`basePath`
+// is set to `/web` in `next.config.ts`) automatically prepends it for
+// both the rendered anchor and the client-side router. Including the
+// prefix here would double-prepend at navigate time and silently
+// bounce every click back to the root chat route.
 const NAV_ITEMS: NavItem[] = [
   {
     id: "chat",
     label: "Chat",
     icon: <MessageSquare className="size-4" aria-hidden />,
-    href: "/web",
+    href: "/",
   },
   {
     // Copilot = same chat thread as `/web` rendered side-by-side
@@ -57,37 +63,37 @@ const NAV_ITEMS: NavItem[] = [
     id: "copilot",
     label: "Copilot",
     icon: <LayoutPanelLeft className="size-4" aria-hidden />,
-    href: "/web/copilot",
+    href: "/copilot",
   },
   {
     id: "wiki",
     label: "Knowledge",
     icon: <FileText className="size-4" aria-hidden />,
-    href: "/web/wiki",
+    href: "/wiki",
   },
   {
     id: "dashboard",
     label: "Dashboard",
     icon: <Activity className="size-4" aria-hidden />,
-    href: "/web/dashboard",
+    href: "/dashboard",
   },
   {
     id: "servers",
     label: "Servers",
     icon: <Server className="size-4" aria-hidden />,
-    href: "/web/servers",
+    href: "/servers",
   },
   {
     id: "findings",
     label: "Logs",
     icon: <AlertTriangle className="size-4" aria-hidden />,
-    href: "/web/findings",
+    href: "/findings",
   },
   {
     id: "admin",
     label: "Admin",
     icon: <Shield className="size-4" aria-hidden />,
-    href: "/web/admin",
+    href: "/admin",
   },
 ];
 
@@ -269,7 +275,15 @@ export function LeftRail({
               : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300",
           );
           return (
-            <a
+            // Next.js `<Link>` (not native `<a>`): keeps the
+            // `(shell)` layout mounted across nav clicks so the
+            // `<AssistantRuntimeProvider>` and its in-memory chat
+            // thread survive navigation to /admin, /dashboard, etc.
+            // Pre-fix this was a native anchor → full page reload
+            // → the assistant runtime unmounted → returning to /web
+            // showed an empty chat even though the backend
+            // conversation row was intact.
+            <Link
               key={item.id}
               href={item.href}
               aria-current={isActive ? "page" : undefined}
@@ -287,7 +301,7 @@ export function LeftRail({
               {showBadge && (
                 <NavBadgePill badge={badge} collapsed={collapsed} />
               )}
-            </a>
+            </Link>
           );
         })}
       </nav>

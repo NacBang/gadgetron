@@ -4,6 +4,7 @@ pub mod auth;
 pub mod billing;
 pub mod conversations;
 pub mod error;
+pub mod groups;
 pub mod identity;
 pub mod identity_keys;
 pub mod llm_endpoints;

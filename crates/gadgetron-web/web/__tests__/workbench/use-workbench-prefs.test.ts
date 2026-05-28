@@ -34,7 +34,7 @@ describe("useWorkbenchPrefs", () => {
   it("returns defaults when localStorage is empty", () => {
     const { result } = renderHook(() => useWorkbenchPrefs());
     const [prefs] = result.current;
-    expect(prefs.evidencePaneOpen).toBe(true);
+    expect(prefs.evidencePaneOpen).toBe(false);
     expect(prefs.evidencePaneWidth).toBe(320);
     expect(prefs.leftRailWidth).toBe(240);
     expect(prefs.leftRailCollapsed).toBe(false);
@@ -97,7 +97,7 @@ describe("useWorkbenchPrefs", () => {
     const { result } = renderHook(() => useWorkbenchPrefs());
     act(() => {});
     const [prefs] = result.current;
-    expect(prefs.evidencePaneOpen).toBe(true);
+    expect(prefs.evidencePaneOpen).toBe(false);
     expect(prefs.leftRailWidth).toBe(240);
   });
 

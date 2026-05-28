@@ -157,6 +157,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         }
     }
 
@@ -236,6 +237,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         };
         let app = build_router(state);
 

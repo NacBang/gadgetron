@@ -210,7 +210,7 @@ pub struct GatewayWorkbenchService {
     /// overlaid from DB when available, and swapped by the Management-scoped
     /// `/admin/agent/brain` endpoint. Running Claude Code subprocesses keep
     /// their env/args; the next Penny turn reads the new snapshot.
-    pub agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    pub agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     /// Frozen base `AgentConfig` — used by the `PATCH` handler to
     /// rebuild a full `AgentConfig` with the new `.gadgets` slot so
     /// the reconfigurer's `reconfigure(&AgentConfig)` signature is
@@ -776,7 +776,7 @@ pub async fn get_agent_brain_settings(
     }
 
     let snapshot = brain.load_full();
-    Ok(Json(gadgetron_core::agent::AgentBrainSettings::from_brain(
+    Ok(Json(gadgetron_core::agent::AgentBrainSettings::from_agent(
         &snapshot,
         gadgetron_core::agent::AgentBrainSettingsSource::ConfigFile,
         None,
@@ -802,28 +802,36 @@ pub async fn patch_agent_brain_settings(
     if let Some(token) = runtime_auth_token {
         std::env::set_var(&token.env_name, &token.value);
     }
-    let current = brain.load_full();
-    let next = body.overlay_brain(&current);
-    next.validate_with_env(
-        &std::collections::HashMap::new(),
-        &gadgetron_core::agent::config::StdEnv,
-    )
-    .map_err(|e| {
-        // The HTTP layer collapses every `Config` error into a generic
-        // "check your gadgetron.toml" string for the API consumer, which
-        // hides the actual reason from operators trying to debug live
-        // settings. Log the specific cause at WARN before forwarding so
-        // /tmp/gadgetron-serve.log surfaces it.
-        tracing::warn!(
-            target: "workbench.admin.agent_brain",
-            mode = %next.mode.as_str(),
-            external_base_url_len = next.external_base_url.len(),
-            external_auth_token_env = %next.external_auth_token_env,
-            error = %e,
-            "agent brain settings validate_with_env rejected"
-        );
-        WorkbenchHttpError::Core(e)
-    })?;
+    let current_agent = brain.load_full();
+    // Apply the high-level admin axes (agent/model_source/local_*/effort)
+    // to derive a complete next AgentConfig. This is what powers the
+    // "Mode = Claude / Codex" + "Model = Default / Local" + "Effort"
+    // switch — overlay_agent rewrites `runtime`, `brain.mode`,
+    // `brain.external_*`, `codex.auth_mode`, and `codex.compatible_*_env`
+    // accordingly. `overlay_brain` (the legacy raw fields) is now folded
+    // into this so callers don't double-apply.
+    let next_agent = body.overlay_agent(&current_agent);
+    next_agent
+        .validate_with_env(
+            &std::collections::HashMap::new(),
+            &gadgetron_core::agent::config::StdEnv,
+        )
+        .map_err(|e| {
+            // The HTTP layer collapses every `Config` error into a generic
+            // "check your gadgetron.toml" string for the API consumer, which
+            // hides the actual reason from operators trying to debug live
+            // settings. Log the specific cause at WARN before forwarding so
+            // /tmp/gadgetron-serve.log surfaces it.
+            tracing::warn!(
+                target: "workbench.admin.agent_brain",
+                mode = %next_agent.brain.mode.as_str(),
+                external_base_url_len = next_agent.brain.external_base_url.len(),
+                external_auth_token_env = %next_agent.brain.external_auth_token_env,
+                error = %e,
+                "agent brain settings validate_with_env rejected"
+            );
+            WorkbenchHttpError::Core(e)
+        })?;
 
     let pool = require_pg_pool(&state, "agent brain settings")?;
     let saved = gadgetron_xaas::agent_brain::upsert_agent_brain_settings(
@@ -838,12 +846,15 @@ pub async fn patch_agent_brain_settings(
             "agent brain settings update: {e}"
         )))
     })?;
-    brain.store(Arc::new(next));
+    brain.store(Arc::new(next_agent));
     tracing::info!(
         target: "workbench.admin.agent_brain",
         tenant_id = %ctx.tenant_id,
         actor_user_id = ?ctx.actor_user_id,
         mode = %saved.mode.as_str(),
+        backend = ?saved.backend,
+        model_source = ?saved.model_source,
+        effort = ?saved.effort,
         has_model = !saved.model.is_empty(),
         has_base_url = !saved.external_base_url.is_empty(),
         has_auth_token_env = !saved.external_auth_token_env.is_empty(),
@@ -1585,20 +1596,26 @@ pub async fn use_llm_endpoint_handler(
         std::env::set_var(&external_auth_token_env, token_value);
     }
 
+    let current_agent = brain.load_full();
     let request = gadgetron_core::agent::UpdateAgentBrainSettingsRequest {
         mode: gadgetron_core::agent::BrainMode::ExternalProxy,
         external_base_url: endpoint.base_url.clone(),
         model: endpoint.model_id.clone().unwrap_or_default(),
-        external_auth_token_env,
+        external_auth_token_env: external_auth_token_env.clone(),
         custom_model_option: endpoint.model_id.is_some(),
+        backend: gadgetron_core::agent::AgentBackend::ClaudeCode,
+        model_source: gadgetron_core::agent::ModelSource::Local,
+        local_base_url: endpoint.base_url.clone(),
+        local_api_key_env: external_auth_token_env.clone(),
+        effort: current_agent.brain.effort,
     };
-    let current = brain.load_full();
-    let next = request.overlay_brain(&current);
-    next.validate_with_env(
-        &std::collections::HashMap::new(),
-        &gadgetron_core::agent::config::StdEnv,
-    )
-    .map_err(WorkbenchHttpError::Core)?;
+    let next_agent = request.overlay_agent(&current_agent);
+    next_agent
+        .validate_with_env(
+            &std::collections::HashMap::new(),
+            &gadgetron_core::agent::config::StdEnv,
+        )
+        .map_err(WorkbenchHttpError::Core)?;
     let saved = gadgetron_xaas::agent_brain::upsert_agent_brain_settings(
         pool,
         ctx.tenant_id,
@@ -1611,7 +1628,7 @@ pub async fn use_llm_endpoint_handler(
             "agent brain settings update: {e}"
         )))
     })?;
-    brain.store(Arc::new(next));
+    brain.store(Arc::new(next_agent));
     Ok(Json(UseLlmEndpointResponse {
         endpoint,
         brain: saved,
@@ -1863,6 +1880,17 @@ pub struct UpdateUserProfileRequest {
     pub display_name: String,
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Optional. When provided, replaces the user's group memberships
+    /// with this exact set (transactional). When absent, group
+    /// memberships are not touched. Unknown ids fail the request
+    /// before any mutation.
+    #[serde(default)]
+    pub group_ids: Option<Vec<String>>,
+    /// Optional. When provided, updates the user's role (Admin /
+    /// Member / Service). Demoting the last active admin is rejected
+    /// with the same single-admin guard as DELETE.
+    #[serde(default)]
+    pub role: Option<gadgetron_xaas::identity::Role>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1920,6 +1948,37 @@ pub async fn update_user_profile_handler(
     Json(body): Json<UpdateUserProfileRequest>,
 ) -> Result<Json<gadgetron_xaas::identity::UserRow>, WorkbenchHttpError> {
     let pool = require_pg_pool(&state, "user profile update")?;
+
+    if let Some(group_ids) = body.group_ids.as_deref() {
+        gadgetron_xaas::groups::sync_user_groups(
+            pool,
+            ctx.tenant_id,
+            user_id,
+            group_ids,
+            ctx.actor_user_id,
+        )
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("sync_user_groups: {e}")))
+        })?;
+    }
+
+    if let Some(new_role) = body.role {
+        gadgetron_xaas::identity::update_user_role(pool, ctx.tenant_id, user_id, new_role)
+            .await
+            .map_err(|e| match e {
+                gadgetron_xaas::identity::IdentityError::LastAdmin => WorkbenchHttpError::Core(
+                    GadgetronError::Config("cannot demote the last active admin".to_string()),
+                ),
+                gadgetron_xaas::identity::IdentityError::NotFound => {
+                    WorkbenchHttpError::Core(GadgetronError::Config("user not found".to_string()))
+                }
+                _ => WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "update_user_role: {e}"
+                ))),
+            })?;
+    }
+
     let row = gadgetron_xaas::identity::update_user_profile(
         pool,
         ctx.tenant_id,
@@ -2060,11 +2119,88 @@ pub struct ConversationMessagesResponse {
     pub messages: Vec<HistoryMessage>,
 }
 
+/// `GET /api/v1/web/workbench/conversations/{id}/active-job` —
+/// return JSON metadata for the in-flight (or recently-completed)
+/// chat-completion job tied to this conversation, or 404 when no
+/// job is registered. The frontend polls this on chat mount to
+/// decide whether to attach to `/jobs/{job_id}/sync` and display the
+/// "생성 중" indicator.
+///
+/// Tenant + user boundary: the job's stored `tenant_id` and
+/// `user_id` must match the caller's `TenantContext`. Cross-tenant
+/// inspection is a 404 (not a 403) so we don't leak the existence
+/// of jobs in other tenants.
+pub async fn get_conversation_active_job_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<crate::chat_jobs::JobSnapshot>, WorkbenchHttpError> {
+    let Some(job) = state.chat_jobs.active_for_conversation(id).await else {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "no active job for this conversation".to_string(),
+        )));
+    };
+    if job.tenant_id != ctx.tenant_id {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "no active job for this conversation".to_string(),
+        )));
+    }
+    if let (Some(actor), Some(owner)) = (ctx.actor_user_id, job.user_id) {
+        if actor != owner {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "no active job for this conversation".to_string(),
+            )));
+        }
+    }
+    Ok(Json(job.snapshot().await))
+}
+
+/// `GET /api/v1/web/workbench/jobs/{job_id}/sync?since=N` —
+/// SSE replay + live tail of a chat-completion job's chunk buffer.
+/// `since` defaults to 0 (replay from the start). The response is
+/// the same byte-for-byte SSE stream the original
+/// `POST /v1/chat/completions` foreground client received — minus
+/// the leading `event: job` frame (the caller already knows the
+/// job id from the URL). When the producer marks the job
+/// Complete / Error, the stream terminates.
+///
+/// Tenant + user boundary: same rule as `active-job` above. A
+/// cross-tenant lookup returns 404 so the existence of foreign
+/// jobs is not leaked.
+#[derive(Debug, serde::Deserialize)]
+pub struct JobSyncQuery {
+    #[serde(default)]
+    pub since: usize,
+}
+
+pub async fn get_job_sync_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
+    axum::extract::Query(query): axum::extract::Query<JobSyncQuery>,
+) -> axum::response::Response {
+    let Some(job) = state.chat_jobs.get(job_id).await else {
+        return WorkbenchHttpError::Core(GadgetronError::Config("no such job".to_string()))
+            .into_response();
+    };
+    if job.tenant_id != ctx.tenant_id {
+        return WorkbenchHttpError::Core(GadgetronError::Config("no such job".to_string()))
+            .into_response();
+    }
+    if let (Some(actor), Some(owner)) = (ctx.actor_user_id, job.user_id) {
+        if actor != owner {
+            return WorkbenchHttpError::Core(GadgetronError::Config("no such job".to_string()))
+                .into_response();
+        }
+    }
+    crate::handlers::build_job_response(job, query.since)
+}
+
 /// `GET /api/v1/web/workbench/conversations/{id}/messages` — read
-/// the Claude Code jsonl file for this conversation and return the
-/// user + assistant messages in order. The filename is
-/// `<conversation_id>.jsonl` because `SessionStore::get_or_create`
-/// reuses the conversation uuid as the Claude `--session-id`.
+/// the DB-backed transcript for this conversation and return the user and
+/// assistant messages in order. Older Claude-only conversations may not have
+/// DB transcript rows, so the handler falls back to the legacy Claude Code
+/// jsonl lookup.
 pub async fn get_conversation_messages_handler(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
@@ -2093,6 +2229,30 @@ pub async fn get_conversation_messages_handler(
             "ownership check miss — user has no row with this id"
         );
         return Ok(Json(ConversationMessagesResponse { messages: vec![] }));
+    }
+
+    match gadgetron_xaas::conversations::list_messages(pool, id, ctx.tenant_id, user_id).await {
+        Ok(rows) if !rows.is_empty() => {
+            let messages = rows
+                .into_iter()
+                .map(|row| HistoryMessage {
+                    role: row.role,
+                    content: row.content.clone(),
+                    blocks: vec![HistoryBlock::Text { text: row.content }],
+                    ts: Some(row.created_at.to_rfc3339()),
+                })
+                .collect();
+            return Ok(Json(ConversationMessagesResponse { messages }));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                target: "conversations.history",
+                conv_id = %id,
+                error = %e,
+                "DB transcript lookup failed; falling back to legacy jsonl"
+            );
+        }
     }
 
     let candidates = claude_jsonl_candidates(id);
@@ -2631,6 +2791,152 @@ pub async fn remove_team_member_handler(
     Ok(Json(SimpleOkResponse { ok: true }))
 }
 
+// ---------------------------------------------------------------------------
+// Groups + user_groups admin handlers.
+//
+// Groups are an access-permission bucket, orthogonal to teams
+// (collaboration) and role (admin/member/service settings privilege).
+// Membership CRUD only — permission policies attached to groups are
+// a Phase 2 concern.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListGroupsResponse {
+    pub groups: Vec<gadgetron_xaas::groups::GroupRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateGroupRequest {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ListGroupMembersResponse {
+    pub members: Vec<gadgetron_xaas::groups::UserGroupRow>,
+    pub returned: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct AddGroupMemberRequest {
+    pub user_id: uuid::Uuid,
+}
+
+pub async fn list_groups_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<ListGroupsResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    let groups = gadgetron_xaas::groups::list_groups(pool, ctx.tenant_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("list_groups: {e}")))
+        })?;
+    let returned = groups.len();
+    Ok(Json(ListGroupsResponse { groups, returned }))
+}
+
+pub async fn create_group_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreateGroupRequest>,
+) -> Result<Json<gadgetron_xaas::groups::GroupRow>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    let row = gadgetron_xaas::groups::create_group(
+        pool,
+        ctx.tenant_id,
+        &body.id,
+        &body.display_name,
+        body.description.as_deref(),
+        ctx.actor_user_id,
+    )
+    .await
+    .map_err(|e| WorkbenchHttpError::Core(GadgetronError::Config(format!("create_group: {e}"))))?;
+    Ok(Json(row))
+}
+
+pub async fn delete_group_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+) -> Result<Json<SimpleOkResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    gadgetron_xaas::groups::delete_group(pool, ctx.tenant_id, &group_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("delete_group: {e}")))
+        })?;
+    Ok(Json(SimpleOkResponse { ok: true }))
+}
+
+pub async fn list_group_members_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+) -> Result<Json<ListGroupMembersResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    let members = gadgetron_xaas::groups::list_group_members(pool, ctx.tenant_id, &group_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("list_group_members: {e}")))
+        })?;
+    let returned = members.len();
+    Ok(Json(ListGroupMembersResponse { members, returned }))
+}
+
+pub async fn add_group_member_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+    Json(body): Json<AddGroupMemberRequest>,
+) -> Result<Json<gadgetron_xaas::groups::UserGroupRow>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    let row = gadgetron_xaas::groups::add_user_to_group(
+        pool,
+        ctx.tenant_id,
+        &group_id,
+        body.user_id,
+        ctx.actor_user_id,
+    )
+    .await
+    .map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!("add_group_member: {e}")))
+    })?;
+    Ok(Json(row))
+}
+
+pub async fn remove_group_member_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path((group_id, user_id)): axum::extract::Path<(String, uuid::Uuid)>,
+) -> Result<Json<SimpleOkResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    gadgetron_xaas::groups::remove_user_from_group(pool, ctx.tenant_id, &group_id, user_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("remove_group_member: {e}")))
+        })?;
+    Ok(Json(SimpleOkResponse { ok: true }))
+}
+
+pub async fn list_user_groups_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<ListGroupsResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "groups")?;
+    let groups = gadgetron_xaas::groups::list_groups_for_user(pool, ctx.tenant_id, user_id)
+        .await
+        .map_err(|e| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!("list_user_groups: {e}")))
+        })?;
+    let returned = groups.len();
+    Ok(Json(ListGroupsResponse { groups, returned }))
+}
+
 /// `GET /usage/summary` — tenant-scoped operations rollup.
 ///
 /// Aggregates over the past `window_hours` (default 24, clamped
@@ -3066,6 +3372,30 @@ pub fn workbench_routes() -> Router<AppState> {
             "/admin/teams/{team_id}/members/{user_id}",
             axum::routing::delete(remove_team_member_handler),
         )
+        // Groups + members CRUD (access-permission bucket; orthogonal to teams).
+        .route("/admin/groups", get(list_groups_handler))
+        .route("/admin/groups", post(create_group_handler))
+        .route(
+            "/admin/groups/{group_id}",
+            axum::routing::delete(delete_group_handler),
+        )
+        .route(
+            "/admin/groups/{group_id}/members",
+            get(list_group_members_handler),
+        )
+        .route(
+            "/admin/groups/{group_id}/members",
+            post(add_group_member_handler),
+        )
+        .route(
+            "/admin/groups/{group_id}/members/{user_id}",
+            axum::routing::delete(remove_group_member_handler),
+        )
+        // Per-user group memberships (read; write goes through PATCH /admin/users/{id}).
+        .route(
+            "/admin/users/{user_id}/groups",
+            get(list_user_groups_handler),
+        )
         // Admin audit_log query endpoint.
         .route("/admin/audit/log", get(list_audit_log_handler))
         // §16 server-metrics timeseries — read-side surface. Tier
@@ -3085,6 +3415,17 @@ pub fn workbench_routes() -> Router<AppState> {
             "/conversations/{id}/messages",
             get(get_conversation_messages_handler),
         )
+        // Resumable-stream endpoints. `active-job` returns JSON
+        // metadata (job_id, status, chunk_count). `jobs/{id}/sync`
+        // returns an SSE stream that replays buffered chunks from
+        // `?since=N` and follows the live tail until the producer
+        // marks the job complete. Tenant + user boundary is
+        // re-checked inside each handler (the job carries them).
+        .route(
+            "/conversations/{id}/active-job",
+            get(get_conversation_active_job_handler),
+        )
+        .route("/jobs/{job_id}/sync", get(get_job_sync_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -3974,6 +4315,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         }
     }
 

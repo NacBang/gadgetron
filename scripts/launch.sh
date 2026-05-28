@@ -22,7 +22,7 @@ REPO=$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)
 ENV_FILE="${REPO}/.env"
 CONFIG_FILE="${REPO}/gadgetron.toml"
 BIN="${REPO}/target/release/gadgetron"
-LOG="${GADGETRON_LOG_FILE:-/tmp/gadgetron-serve.log}"
+LOG="${GADGETRON_LOG_FILE:-${REPO}/.gadgetron/gadgetron-serve.log}"
 PIDFILE="${REPO}/.gadgetron-serve.pid"
 
 read_config_bind() {
@@ -147,8 +147,14 @@ start_bg() {
     cmd_stop
     echo "→ starting gadgetron serve (background) on ${BIND}"
     cd "${REPO}"  # See start_fg comment — same rationale.
-    nohup "${BIN}" serve --config "${CONFIG_FILE}" --bind "${BIND}" \
-        >"${LOG}" 2>&1 &
+    mkdir -p "$(dirname -- "${LOG}")"
+    if command -v setsid >/dev/null 2>&1; then
+        setsid nohup "${BIN}" serve --config "${CONFIG_FILE}" --bind "${BIND}" \
+            >"${LOG}" 2>&1 &
+    else
+        nohup "${BIN}" serve --config "${CONFIG_FILE}" --bind "${BIND}" \
+            >"${LOG}" 2>&1 &
+    fi
     local pid=$!
     echo "${pid}" >"${PIDFILE}"
     echo "pid ${pid} (log: ${LOG})"

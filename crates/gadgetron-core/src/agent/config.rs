@@ -69,7 +69,7 @@ impl EnvResolver for FakeEnv {
 /// - `StatelessOnly` — ignore `conversation_id` and always use the
 ///   pre-2026-04-15 history-reship path. Used for regression
 ///   testing and escape-hatch rollback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
     #[default]
@@ -78,9 +78,186 @@ pub enum SessionMode {
     StatelessOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentBackend {
+    #[default]
+    ClaudeCode,
+    CodexExec,
+}
+
+impl AgentBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude_code",
+            Self::CodexExec => "codex_exec",
+        }
+    }
+}
+
+/// Operator's choice of model source — surfaced in the admin UI as the
+/// "Model" toggle next to the agent (Claude / Codex) selector.
+///
+/// * `Default` — let the chosen agent CLI use its built-in model
+///   (Claude entitlement / Codex `gpt-5.5` etc.). No extra fields.
+/// * `Local` — point the agent at an OpenAI-compatible LLM endpoint
+///   (vLLM, SGLang, llama.cpp server …). Requires `local_base_url`
+///   and `local_api_key_env`. The overlay below maps this to
+///   `brain.mode = ExternalProxy` for Claude and
+///   `codex.auth_mode = OpenAiCompatibleProviderEnv` for Codex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    #[default]
+    Default,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexAuthMode {
+    #[default]
+    ChatGptLogin,
+    OpenAiApiKeyEnv,
+    OpenAiCompatibleProviderEnv,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSandboxMode {
+    #[default]
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandboxMode {
+    pub fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexApprovalPolicy {
+    Untrusted,
+    OnFailure,
+    OnRequest,
+    #[default]
+    Never,
+}
+
+impl CodexApprovalPolicy {
+    pub fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::OnFailure => "on-failure",
+            Self::OnRequest => "on-request",
+            Self::Never => "never",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodexConfig {
+    /// Authentication source for Codex CLI. Default uses `codex login`
+    /// account auth so the user's monthly ChatGPT/Codex entitlement is
+    /// consumed. API/provider modes are explicit opt-ins.
+    pub auth_mode: CodexAuthMode,
+
+    /// Sandbox policy passed to `codex exec --sandbox`.
+    pub sandbox: CodexSandboxMode,
+
+    /// Approval policy passed to `codex exec --ask-for-approval`.
+    pub approval_policy: CodexApprovalPolicy,
+
+    /// Run stateless Codex turns without persisting Codex session files.
+    /// Conversation-id based Codex resume disables this for the first
+    /// persistent turn so Codex can return a thread id.
+    pub ephemeral: bool,
+
+    /// Do not load user/project execpolicy `.rules` files.
+    pub ignore_rules: bool,
+
+    /// Do not load `$CODEX_HOME/config.toml`; Gadgetron supplies the
+    /// invocation-specific MCP/backend settings through `-c` overrides.
+    pub ignore_user_config: bool,
+
+    /// Allow `codex exec` to run from Penny's neutral non-git workdir.
+    pub skip_git_repo_check: bool,
+
+    /// Optional profile passed to `codex exec --profile`.
+    pub profile: String,
+
+    /// Optional CODEX_HOME override. When unset, CODEX_HOME is inherited
+    /// from the allow-listed parent env if present; otherwise Codex uses
+    /// its own default.
+    pub home: Option<std::path::PathBuf>,
+
+    /// Parent env var whose value is forwarded as `CODEX_API_KEY` in
+    /// `open_ai_api_key_env` mode.
+    pub api_key_env: String,
+
+    /// Parent env var whose value is forwarded to the generated
+    /// OpenAI-compatible provider as its key env.
+    pub compatible_api_key_env: String,
+
+    /// Parent env var containing the OpenAI-compatible provider base URL.
+    pub compatible_base_url_env: String,
+
+    /// Parent env var optionally forwarded as `OPENAI_ORG_ID` in API modes.
+    pub org_id_env: String,
+
+    /// Generated Codex model provider id for OpenAI-compatible mode.
+    pub compatible_provider_id: String,
+
+    /// Mark the Gadgetron MCP server as required in Codex config.
+    pub mcp_required: bool,
+
+    /// Disable Codex's built-in shell tool through config overrides.
+    pub disable_shell_tool: bool,
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            auth_mode: CodexAuthMode::ChatGptLogin,
+            sandbox: CodexSandboxMode::ReadOnly,
+            approval_policy: CodexApprovalPolicy::Never,
+            ephemeral: true,
+            ignore_rules: true,
+            ignore_user_config: true,
+            skip_git_repo_check: true,
+            profile: String::new(),
+            home: None,
+            api_key_env: "CODEX_API_KEY".to_string(),
+            compatible_api_key_env: "OPENAI_API_KEY".to_string(),
+            compatible_base_url_env: "OPENAI_BASE_URL".to_string(),
+            org_id_env: "OPENAI_ORG_ID".to_string(),
+            compatible_provider_id: "gadgetron_openai_compatible".to_string(),
+            mcp_required: true,
+            disable_shell_tool: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Which agent binary powers Penny. Currently only `"claude"` (Claude Code CLI).
+    /// Which agent backend powers Penny.
+    ///
+    /// TOML accepts legacy `runtime = "..."` as an alias, but
+    /// `backend = "..."` is the canonical spelling.
+    #[serde(default, alias = "runtime")]
+    pub backend: AgentBackend,
+
+    /// Optional executable override for the selected backend. Normal installs
+    /// omit this field: Claude Code resolves to `"claude"` and Codex resolves
+    /// to `"codex"`. Set it only for an absolute path or wrapper script.
     #[serde(default = "default_agent_binary")]
     pub binary: String,
 
@@ -146,10 +323,15 @@ pub struct AgentConfig {
     /// injected into Penny's context.
     #[serde(default)]
     pub shared_context: SharedContextConfig,
+
+    /// Codex CLI backend settings. Ignored unless
+    /// `backend = "codex_exec"`.
+    #[serde(default)]
+    pub codex: CodexConfig,
 }
 
 fn default_agent_binary() -> String {
-    "claude".to_string()
+    String::new()
 }
 fn default_claude_code_min_version() -> String {
     "2.1.104".to_string()
@@ -276,6 +458,7 @@ impl SharedContextConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            backend: AgentBackend::default(),
             binary: default_agent_binary(),
             claude_code_min_version: default_claude_code_min_version(),
             request_timeout_secs: default_request_timeout_secs(),
@@ -287,6 +470,7 @@ impl Default for AgentConfig {
             session_store_max_entries: default_session_store_max_entries(),
             session_store_path: None,
             shared_context: SharedContextConfig::default(),
+            codex: CodexConfig::default(),
         }
     }
 }
@@ -326,7 +510,10 @@ impl AgentConfig {
             )));
         }
         self.gadgets.validate()?;
-        self.brain.validate_with_env(providers, env)?;
+        match self.backend {
+            AgentBackend::ClaudeCode => self.brain.validate_with_env(providers, env)?,
+            AgentBackend::CodexExec => self.validate_codex_with_env(env)?,
+        }
 
         // V15: session_ttl_secs ∈ [60, 7 * 86_400]
         if !(60..=7 * 86_400).contains(&self.session_ttl_secs) {
@@ -370,6 +557,99 @@ impl AgentConfig {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub fn resolved_binary(&self) -> &str {
+        let configured = self.binary.trim();
+        if !configured.is_empty() {
+            // Compatibility for older configs that left the old default
+            // `binary = "claude"` while selecting the Codex backend.
+            if matches!(self.backend, AgentBackend::CodexExec) && configured == "claude" {
+                return "codex";
+            }
+            return &self.binary;
+        }
+        match self.backend {
+            AgentBackend::ClaudeCode => "claude",
+            AgentBackend::CodexExec => "codex",
+        }
+    }
+
+    fn validate_codex_with_env(&self, env: &dyn EnvResolver) -> Result<()> {
+        if self.brain.model.chars().any(|c| c.is_control()) {
+            return Err(GadgetronError::Config(
+                "agent.brain.model must not contain control characters".to_string(),
+            ));
+        }
+        if self.codex.profile.trim() != self.codex.profile {
+            return Err(GadgetronError::Config(
+                "agent.codex.profile must not have leading/trailing whitespace".to_string(),
+            ));
+        }
+        if self.codex.compatible_provider_id.trim().is_empty() {
+            return Err(GadgetronError::Config(
+                "agent.codex.compatible_provider_id must not be empty".to_string(),
+            ));
+        }
+        if self.codex.api_key_env.trim().is_empty() {
+            return Err(GadgetronError::Config(
+                "agent.codex.api_key_env must not be empty".to_string(),
+            ));
+        }
+        if self.codex.compatible_api_key_env.trim().is_empty() {
+            return Err(GadgetronError::Config(
+                "agent.codex.compatible_api_key_env must not be empty".to_string(),
+            ));
+        }
+        if self.codex.compatible_base_url_env.trim().is_empty() {
+            return Err(GadgetronError::Config(
+                "agent.codex.compatible_base_url_env must not be empty".to_string(),
+            ));
+        }
+
+        match self.codex.auth_mode {
+            CodexAuthMode::ChatGptLogin => {}
+            CodexAuthMode::OpenAiApiKeyEnv => {
+                let key = env.get(&self.codex.api_key_env).unwrap_or_default();
+                if key.trim().is_empty() {
+                    return Err(GadgetronError::Config(format!(
+                        "agent.codex.auth_mode=open_ai_api_key_env requires env var {}",
+                        self.codex.api_key_env
+                    )));
+                }
+            }
+            CodexAuthMode::OpenAiCompatibleProviderEnv => {
+                let key = env
+                    .get(&self.codex.compatible_api_key_env)
+                    .unwrap_or_default();
+                if key.trim().is_empty() {
+                    return Err(GadgetronError::Config(format!(
+                        "agent.codex.auth_mode=open_ai_compatible_provider_env requires env var {}",
+                        self.codex.compatible_api_key_env
+                    )));
+                }
+                let base_ref = self.codex.compatible_base_url_env.trim();
+                let base_url = if is_http_url(base_ref) {
+                    base_ref.to_string()
+                } else {
+                    env.get(base_ref).unwrap_or_default()
+                };
+                if base_url.trim().is_empty() {
+                    return Err(GadgetronError::Config(format!(
+                        "agent.codex.auth_mode=open_ai_compatible_provider_env requires env var {}",
+                        self.codex.compatible_base_url_env
+                    )));
+                }
+                if !is_http_url(base_url.trim()) {
+                    return Err(GadgetronError::Config(
+                        "agent.codex.compatible_base_url_env must resolve to http:// or https://"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -463,6 +743,13 @@ pub struct BrainConfig {
     /// Internal brain shim config (only used when mode == GadgetronLocal).
     #[serde(default)]
     pub shim: BrainShimConfig,
+
+    /// Reasoning effort level. Applied as `--effort` for the Claude Code
+    /// backend and `-c model_reasoning_effort="…"` for the Codex backend.
+    /// Default `max` — most thorough; lower levels trade depth
+    /// for speed.
+    #[serde(default)]
+    pub effort: AgentEffort,
 }
 
 fn default_external_anthropic_env() -> String {
@@ -480,6 +767,53 @@ impl Default for BrainConfig {
             custom_model_option: false,
             local_model: String::new(),
             shim: BrainShimConfig::default(),
+            effort: AgentEffort::default(),
+        }
+    }
+}
+
+/// Reasoning effort level surfaced to both subprocess agent backends.
+///
+/// Maps to:
+///   * Claude Code: `--effort low|medium|high|xhigh|max` (all 5 supported).
+///   * Codex      : `-c model_reasoning_effort="low|medium|high|xhigh"`.
+///     Codex has no `max` tier, so `Max` falls back to `xhigh` in the
+///     spawn helper. UI surfaces a warning on that path so the operator
+///     knows the request was downgraded.
+///
+/// Default is `Max` to mirror the user expectation that "Claude / Codex
+/// mode" with no further tuning runs at the most thorough setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEffort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    #[default]
+    Max,
+}
+
+impl AgentEffort {
+    /// Wire value for the Claude `--effort` CLI flag.
+    pub fn as_claude_cli_value(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Wire value for the Codex `model_reasoning_effort` config key.
+    /// Codex has no `max` tier, so it collapses into `xhigh`.
+    pub fn as_codex_config_value(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh | Self::Max => "xhigh",
         }
     }
 }
@@ -541,6 +875,31 @@ pub struct AgentBrainSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_by: Option<uuid::Uuid>,
     pub source: AgentBrainSettingsSource,
+
+    // High-level admin UI projection. Three axes the operator interacts
+    // with directly; the legacy fields above remain for back-compat
+    // (advanced section in the UI). The overlay below derives the
+    // raw `BrainMode` / `CodexConfig` settings from these.
+    /// Agent backend — Claude Code vs Codex.
+    #[serde(default, alias = "agent")]
+    pub backend: AgentBackend,
+    /// Whether the agent uses its built-in default model or a local
+    /// OpenAI-compatible LLM endpoint.
+    #[serde(default)]
+    pub model_source: ModelSource,
+    /// Base URL string for Local model source. Persisted directly
+    /// because admin doesn't have a process env to point at; the
+    /// gateway materializes a synthetic env var name when constructing
+    /// the codex/claude invocation.
+    #[serde(default)]
+    pub local_base_url: String,
+    /// Process env var name that holds the API key for the local
+    /// endpoint. The secret value itself is never stored.
+    #[serde(default)]
+    pub local_api_key_env: String,
+    /// Reasoning effort applied to both agent backends.
+    #[serde(default)]
+    pub effort: AgentEffort,
 }
 
 impl AgentBrainSettings {
@@ -559,6 +918,56 @@ impl AgentBrainSettings {
             updated_at,
             updated_by,
             source,
+            backend: AgentBackend::default(),
+            model_source: ModelSource::default(),
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+            effort: brain.effort,
+        }
+    }
+
+    /// Variant used by the workbench handler — projects the full
+    /// `AgentConfig` (backend + codex options) into the high-level
+    /// admin fields. `from_brain` only sees `BrainConfig` and falls
+    /// back to defaults.
+    pub fn from_agent(
+        agent: &AgentConfig,
+        source: AgentBrainSettingsSource,
+        updated_at: Option<chrono::DateTime<chrono::Utc>>,
+        updated_by: Option<uuid::Uuid>,
+    ) -> Self {
+        let (model_source, local_base_url, local_api_key_env) = match agent.backend {
+            AgentBackend::ClaudeCode => match agent.brain.mode {
+                BrainMode::ExternalProxy => (
+                    ModelSource::Local,
+                    agent.brain.external_base_url.clone(),
+                    agent.brain.external_auth_token_env.clone(),
+                ),
+                _ => (ModelSource::Default, String::new(), String::new()),
+            },
+            AgentBackend::CodexExec => match agent.codex.auth_mode {
+                CodexAuthMode::OpenAiCompatibleProviderEnv => (
+                    ModelSource::Local,
+                    agent.codex.compatible_base_url_env.clone(),
+                    agent.codex.compatible_api_key_env.clone(),
+                ),
+                _ => (ModelSource::Default, String::new(), String::new()),
+            },
+        };
+        Self {
+            mode: agent.brain.mode,
+            external_base_url: agent.brain.external_base_url.clone(),
+            model: agent.brain.model.clone(),
+            external_auth_token_env: agent.brain.external_auth_token_env.clone(),
+            custom_model_option: agent.brain.custom_model_option,
+            updated_at,
+            updated_by,
+            source,
+            backend: agent.backend,
+            model_source,
+            local_base_url,
+            local_api_key_env,
+            effort: agent.brain.effort,
         }
     }
 }
@@ -574,6 +983,21 @@ pub struct UpdateAgentBrainSettingsRequest {
     pub external_auth_token_env: String,
     #[serde(default)]
     pub custom_model_option: bool,
+
+    // High-level admin UI fields. When the client sends a request
+    // sourced from the new UI it populates these; legacy callers that
+    // only send the raw `mode` / `external_*` fields still work. The
+    // legacy JSON field name `agent` is accepted as an alias.
+    #[serde(default, alias = "agent")]
+    pub backend: AgentBackend,
+    #[serde(default)]
+    pub model_source: ModelSource,
+    #[serde(default)]
+    pub local_base_url: String,
+    #[serde(default)]
+    pub local_api_key_env: String,
+    #[serde(default)]
+    pub effort: AgentEffort,
 }
 
 impl UpdateAgentBrainSettingsRequest {
@@ -584,6 +1008,60 @@ impl UpdateAgentBrainSettingsRequest {
         next.model = self.model.clone();
         next.external_auth_token_env = self.external_auth_token_env.clone();
         next.custom_model_option = self.custom_model_option;
+        next.effort = self.effort;
+        next
+    }
+
+    /// Project the high-level admin UI inputs (`backend` + `model_source`
+    /// + `local_*` + `effort`) onto a full `AgentConfig`. Mutates
+    ///   `backend`, `brain.*`, and `codex.*` according to the matrix
+    ///   captured in the design notes:
+    ///
+    /// | Mode    | Model source | Result                                          |
+    /// |---------|--------------|--------------------------------------------------|
+    /// | Claude  | Default      | backend=claude_code, brain.mode=ClaudeMax        |
+    /// | Claude  | Local        | backend=claude_code, brain.mode=ExternalProxy +  |
+    /// |         |              | external_base_url + external_auth_token_env      |
+    /// | Codex   | Default      | backend=codex_exec, codex.auth_mode=ChatGptLogin |
+    /// | Codex   | Local        | backend=codex_exec, codex.auth_mode=             |
+    /// |         |              | OpenAiCompatibleProviderEnv + compatible_*_env   |
+    pub fn overlay_agent(&self, base: &AgentConfig) -> AgentConfig {
+        let mut next = base.clone();
+        // Reset the binary to the backend's default when the admin
+        // switches Backend. `resolved_binary()` then picks the right
+        // PATH lookup (`claude` for Claude Code, `codex` for Codex
+        // Exec) so the operator doesn't have to re-edit
+        // `gadgetron.toml` after a Mode swap. An operator with a
+        // pinned absolute path can still set it back in the toml
+        // and a process restart will preserve it.
+        if next.backend != self.backend {
+            next.binary.clear();
+        }
+        next.backend = self.backend;
+        next.brain.effort = self.effort;
+        next.brain.model = self.model.clone();
+        next.brain.custom_model_option = self.custom_model_option;
+
+        match (self.backend, self.model_source) {
+            (AgentBackend::ClaudeCode, ModelSource::Default) => {
+                next.brain.mode = BrainMode::ClaudeMax;
+                next.brain.external_base_url.clear();
+                next.brain.external_auth_token_env.clear();
+            }
+            (AgentBackend::ClaudeCode, ModelSource::Local) => {
+                next.brain.mode = BrainMode::ExternalProxy;
+                next.brain.external_base_url = self.local_base_url.clone();
+                next.brain.external_auth_token_env = self.local_api_key_env.clone();
+            }
+            (AgentBackend::CodexExec, ModelSource::Default) => {
+                next.codex.auth_mode = CodexAuthMode::ChatGptLogin;
+            }
+            (AgentBackend::CodexExec, ModelSource::Local) => {
+                next.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
+                next.codex.compatible_base_url_env = self.local_base_url.clone();
+                next.codex.compatible_api_key_env = self.local_api_key_env.clone();
+            }
+        }
         next
     }
 }
@@ -676,24 +1154,6 @@ impl BrainConfig {
                 "agent.brain.custom_model_option requires agent.brain.model".into(),
             ));
         }
-        if !self.external_auth_token_env.is_empty() {
-            if !is_valid_env_var_name(&self.external_auth_token_env) {
-                return Err(GadgetronError::Config(
-                    "agent.brain.external_auth_token_env must be an env var name matching [A-Z_][A-Z0-9_]*".into(),
-                ));
-            }
-            if env
-                .get(&self.external_auth_token_env)
-                .as_deref()
-                .unwrap_or("")
-                .is_empty()
-            {
-                return Err(GadgetronError::Config(format!(
-                    "agent.brain.external_auth_token_env {:?} is not set in the environment",
-                    self.external_auth_token_env
-                )));
-            }
-        }
         // V12 — recursion depth floor
         if self.shim.max_recursion_depth < 1 {
             return Err(GadgetronError::Config(
@@ -729,6 +1189,24 @@ impl BrainConfig {
                     return Err(GadgetronError::Config(
                         "agent.brain.external_base_url is required when brain.mode = 'external_proxy'".into(),
                     ));
+                }
+                if !self.external_auth_token_env.is_empty() {
+                    if !is_valid_env_var_name(&self.external_auth_token_env) {
+                        return Err(GadgetronError::Config(
+                            "agent.brain.external_auth_token_env must be an env var name matching [A-Z_][A-Z0-9_]*".into(),
+                        ));
+                    }
+                    if env
+                        .get(&self.external_auth_token_env)
+                        .as_deref()
+                        .unwrap_or("")
+                        .is_empty()
+                    {
+                        return Err(GadgetronError::Config(format!(
+                            "agent.brain.external_auth_token_env {:?} is not set in the environment",
+                            self.external_auth_token_env
+                        )));
+                    }
                 }
                 Ok(())
             }
@@ -785,6 +1263,10 @@ impl BrainConfig {
 
 fn contains_control_char(value: &str) -> bool {
     value.chars().any(|c| c.is_control())
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 fn is_valid_env_var_name(value: &str) -> bool {
@@ -1254,6 +1736,8 @@ mod config_tests {
     #[test]
     fn auth_token_env_name_must_be_uppercase_identifier() {
         let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ExternalProxy;
+        brain.external_base_url = "http://127.0.0.1:3456".into();
         brain.external_auth_token_env = "penny-token".into();
 
         let err = brain
@@ -1268,7 +1752,18 @@ mod config_tests {
     }
 
     #[test]
-    fn update_agent_brain_settings_overlays_only_runtime_fields() {
+    fn claude_max_ignores_stale_external_auth_token_env() {
+        let mut brain = BrainConfig::default();
+        brain.mode = BrainMode::ClaudeMax;
+        brain.external_auth_token_env = "penny-token".into();
+
+        assert!(brain
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_ok());
+    }
+
+    #[test]
+    fn update_agent_brain_settings_overlays_only_backend_fields() {
         let mut base = BrainConfig::default();
         base.external_anthropic_api_key_env = "ANTHROPIC_REAL_KEY".into();
         base.local_model = "vllm/llama".into();
@@ -1279,6 +1774,11 @@ mod config_tests {
             model: "openai/local-model".into(),
             external_auth_token_env: "PENNY_CCR_AUTH_TOKEN".into(),
             custom_model_option: true,
+            backend: AgentBackend::default(),
+            model_source: ModelSource::default(),
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+            effort: AgentEffort::default(),
         };
 
         let next = patch.overlay_brain(&base);
@@ -1291,6 +1791,39 @@ mod config_tests {
         assert_eq!(next.external_anthropic_api_key_env, "ANTHROPIC_REAL_KEY");
         assert_eq!(next.local_model, "vllm/llama");
         assert_eq!(next.shim.max_recursion_depth, 3);
+    }
+
+    #[test]
+    fn update_agent_brain_settings_overlay_agent_preserves_model_fields() {
+        let base = AgentConfig::default();
+        let patch = UpdateAgentBrainSettingsRequest {
+            mode: BrainMode::ClaudeMax,
+            external_base_url: String::new(),
+            model: "gpt-5.5".into(),
+            external_auth_token_env: String::new(),
+            custom_model_option: true,
+            backend: AgentBackend::CodexExec,
+            model_source: ModelSource::Local,
+            local_base_url: "http://127.0.0.1:8000/v1".into(),
+            local_api_key_env: "LOCAL_LLM_API_KEY".into(),
+            effort: AgentEffort::High,
+        };
+
+        let next = patch.overlay_agent(&base);
+
+        assert_eq!(next.backend, AgentBackend::CodexExec);
+        assert_eq!(next.brain.model, "gpt-5.5");
+        assert!(next.brain.custom_model_option);
+        assert_eq!(next.brain.effort, AgentEffort::High);
+        assert_eq!(
+            next.codex.auth_mode,
+            CodexAuthMode::OpenAiCompatibleProviderEnv
+        );
+        assert_eq!(
+            next.codex.compatible_base_url_env,
+            "http://127.0.0.1:8000/v1"
+        );
+        assert_eq!(next.codex.compatible_api_key_env, "LOCAL_LLM_API_KEY");
     }
 
     // ---- AgentConfig new fields (04 v2 §11.1 migration targets) ----
@@ -1503,5 +2036,81 @@ mod config_tests {
             cfg.validate().is_err(),
             "digest_summary_chars = 513 must be rejected"
         );
+    }
+
+    #[test]
+    fn codex_backend_resolves_default_binary_to_codex() {
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        assert_eq!(cfg.resolved_binary(), "codex");
+    }
+
+    #[test]
+    fn claude_backend_resolves_default_binary_to_claude() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.resolved_binary(), "claude");
+    }
+
+    #[test]
+    fn agent_config_accepts_backend_and_legacy_runtime_keys() {
+        let cfg: AgentConfig = toml::from_str(r#"backend = "codex_exec""#).unwrap();
+        assert_eq!(cfg.backend, AgentBackend::CodexExec);
+
+        let legacy: AgentConfig = toml::from_str(r#"runtime = "codex_exec""#).unwrap();
+        assert_eq!(legacy.backend, AgentBackend::CodexExec);
+    }
+
+    #[test]
+    fn codex_chatgpt_login_does_not_require_api_env() {
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::ChatGptLogin;
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_ok());
+    }
+
+    #[test]
+    fn codex_api_key_mode_requires_configured_env() {
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiApiKeyEnv;
+        cfg.codex.api_key_env = "OPENAI_API_KEY".to_string();
+
+        let err = cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .expect_err("missing API key env must fail");
+        assert!(err.to_string().contains("OPENAI_API_KEY"));
+
+        let env = FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
+        assert!(cfg.validate_with_env(&empty_providers(), &env).is_ok());
+    }
+
+    #[test]
+    fn codex_compatible_provider_mode_requires_key_and_base_url_env() {
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
+
+        let env = FakeEnv::new().with("OPENAI_API_KEY", "sk-test");
+        let err = cfg
+            .validate_with_env(&empty_providers(), &env)
+            .expect_err("missing base URL env must fail");
+        assert!(err.to_string().contains("OPENAI_BASE_URL"));
+
+        let env = env.with("OPENAI_BASE_URL", "https://llm.example.test/v1");
+        assert!(cfg.validate_with_env(&empty_providers(), &env).is_ok());
+    }
+
+    #[test]
+    fn codex_compatible_provider_accepts_literal_base_url_from_admin_overlay() {
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
+        cfg.codex.compatible_api_key_env = "LOCAL_LLM_API_KEY".into();
+        cfg.codex.compatible_base_url_env = "http://127.0.0.1:8000/v1".into();
+
+        let env = FakeEnv::new().with("LOCAL_LLM_API_KEY", "sk-local");
+        assert!(cfg.validate_with_env(&empty_providers(), &env).is_ok());
     }
 }
