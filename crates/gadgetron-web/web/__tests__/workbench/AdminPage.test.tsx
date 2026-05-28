@@ -29,7 +29,7 @@ describe("AdminPage", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows Admin sections as internal tabs with Penny Runtime first", async () => {
+  it("shows Admin sections as internal tabs with Agent Backend first", async () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -57,10 +57,10 @@ describe("AdminPage", () => {
 
     render(<AdminPage />);
 
-    expect(await screen.findByRole("tab", { name: "Penny Runtime" })).toBeTruthy();
+    expect(await screen.findByRole("tab", { name: "Agent Backend" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Users" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Access" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Penny Runtime" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Agent Backend" })).toBeTruthy();
     expect(screen.getByText("Applied configuration")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
 
@@ -304,7 +304,7 @@ describe("AdminPage", () => {
     });
   });
 
-  it("saves a Penny gateway token value without requiring an env var name", async () => {
+  it("saves local Penny settings without exposing raw brain mode controls", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
@@ -319,10 +319,15 @@ describe("AdminPage", () => {
         return jsonResponse({
           mode: "external_proxy",
           external_base_url: "http://10.100.1.5:8101",
-          model: "gemma4",
-          external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
+          model: "",
+          external_auth_token_env: "LOCAL_LLM_API_KEY",
           custom_model_option: false,
           source: "database",
+          backend: "claude_code",
+          model_source: "local",
+          local_base_url: "http://10.100.1.5:8101",
+          local_api_key_env: "LOCAL_LLM_API_KEY",
+          effort: "max",
         });
       }
 
@@ -334,6 +339,11 @@ describe("AdminPage", () => {
           external_auth_token_env: "",
           custom_model_option: false,
           source: "config_file",
+          backend: "claude_code",
+          model_source: "default",
+          local_base_url: "",
+          local_api_key_env: "",
+          effort: "max",
         });
       }
 
@@ -348,21 +358,19 @@ describe("AdminPage", () => {
     render(<AdminPage />);
 
     await userEvent.selectOptions(
-      await screen.findByDisplayValue("claude_max"),
-      "external_proxy",
+      await screen.findByTestId("penny-model-source-select"),
+      "local",
     );
     await userEvent.type(
-      screen.getByPlaceholderText("Leave empty to use the Claude Code default model"),
-      "gemma4",
-    );
-    await userEvent.type(
-      screen.getByPlaceholderText("http://127.0.0.1:8080"),
+      screen.getByTestId("penny-local-base-url"),
       "http://10.100.1.5:8101",
     );
     await userEvent.type(
-      screen.getByLabelText("Penny Auth Token"),
-      "test-secret-token",
+      screen.getByTestId("penny-local-api-key-env"),
+      "LOCAL_LLM_API_KEY",
     );
+    expect(screen.queryByText("Advanced (raw brain mode / model override)")).toBeNull();
+    expect(screen.queryByDisplayValue("claude_max")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -377,15 +385,18 @@ describe("AdminPage", () => {
       expect(body).toMatchObject({
         mode: "external_proxy",
         external_base_url: "http://10.100.1.5:8101",
-        model: "gemma4",
-        external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
-        external_auth_token_value: "test-secret-token",
+        model: "",
+        external_auth_token_env: "LOCAL_LLM_API_KEY",
+        backend: "claude_code",
+        model_source: "local",
+        local_base_url: "http://10.100.1.5:8101",
+        local_api_key_env: "LOCAL_LLM_API_KEY",
       });
+      expect(body).not.toHaveProperty("external_auth_token_value");
     });
-    expect((screen.getByLabelText("Penny Auth Token") as HTMLInputElement).value).toBe("");
   });
 
-  it("hides external gateway fields and clears stale external settings for Claude Max", async () => {
+  it("clears stale external settings for the default Claude entitlement", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
@@ -404,6 +415,11 @@ describe("AdminPage", () => {
           external_auth_token_env: "",
           custom_model_option: false,
           source: "database",
+          backend: "claude_code",
+          model_source: "default",
+          local_base_url: "",
+          local_api_key_env: "",
+          effort: "max",
         });
       }
 
@@ -411,10 +427,15 @@ describe("AdminPage", () => {
         return jsonResponse({
           mode: "claude_max",
           external_base_url: "http://127.0.0.1:8080",
-          model: "",
+          model: "stale-model",
           external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
           custom_model_option: true,
           source: "database",
+          backend: "claude_code",
+          model_source: "default",
+          local_base_url: "http://127.0.0.1:8080",
+          local_api_key_env: "PENNY_CCR_AUTH_TOKEN",
+          effort: "max",
         });
       }
 
@@ -428,7 +449,9 @@ describe("AdminPage", () => {
 
     render(<AdminPage />);
 
-    await screen.findByDisplayValue("claude_max");
+    await screen.findByTestId("penny-model-source-select");
+    expect(screen.queryByDisplayValue("claude_max")).toBeNull();
+    expect(screen.queryByText("Advanced (raw brain mode / model override)")).toBeNull();
     expect(screen.queryByText("Gateway URL")).toBeNull();
     expect(screen.queryByText("Auth Token")).toBeNull();
     expect(screen.queryByText("Advanced auth reference")).toBeNull();
@@ -451,6 +474,8 @@ describe("AdminPage", () => {
         model: "",
         external_auth_token_env: "",
         custom_model_option: false,
+        backend: "claude_code",
+        model_source: "default",
       });
       expect(body).not.toHaveProperty("external_auth_token_value");
     });

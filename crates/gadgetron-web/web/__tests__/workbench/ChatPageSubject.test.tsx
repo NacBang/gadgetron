@@ -136,7 +136,7 @@ describe("Chat page subject context", () => {
     render(<Home />);
 
     expect(screen.getByTestId("composer-input").getAttribute("placeholder")).toBe(
-      "Ask Penny or type /command",
+      "Ask Penny",
     );
   });
 
@@ -241,7 +241,7 @@ describe("Chat page subject context", () => {
     });
   });
 
-  it("shows the active Penny runtime next to the running indicator", async () => {
+  it("shows the active Penny backend next to the running indicator", async () => {
     threadHook.isRunning = true;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -254,6 +254,10 @@ describe("Chat page subject context", () => {
             model: "gemma4",
             external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
             custom_model_option: false,
+            backend: "claude_code",
+            model_source: "local",
+            local_base_url: "http://10.100.1.5:8101",
+            effort: "max",
             source: "database",
           }),
         } as Response;
@@ -272,7 +276,7 @@ describe("Chat page subject context", () => {
         "running",
       );
       expect(screen.getByTestId("active-task-indicator").textContent).toContain(
-        "gemma4 @ 10.100.1.5:8101",
+        "Claude · gemma4 @ 10.100.1.5:8101 · max",
       );
     });
   });

@@ -1,15 +1,15 @@
-//! `SessionStore` — per-conversation Claude Code native session tracking.
+//! `SessionStore` — per-conversation agent backend session tracking.
 //!
 //! The store maps gadgetron-side `conversation_id` → `SessionEntry`,
-//! which holds the UUID passed to Claude Code's `--session-id` /
-//! `--resume` flags, bookkeeping (last_used, turn_count), and a
+//! which holds Gadgetron's local session UUID, backend-native session ids,
+//! bookkeeping (last_used, turn_count), and a
 //! per-entry `tokio::sync::Mutex<()>` that serializes concurrent
 //! resumes of the same conversation.
 //!
 //! # Why `get_or_create` and NOT `get` + `insert_new`
 //!
 //! A naive two-step `get` → `insert_new` flow races two concurrent
-//! first-turn calls for the same id into two separate Claude Code
+//! first-turn calls for the same id into two separate backend
 //! sessions. `get_or_create` uses
 //! `DashMap::entry(...).or_insert_with(...)` so exactly one caller
 //! observes `first_turn == true` per `conversation_id`, even under
@@ -23,18 +23,20 @@
 //!   misconfigured `max_entries = 1_000_000` cannot pin a core on
 //!   hot paths.
 //! - **LRU eviction**: when `entries.len() > max_entries`, the entry
-//!   with the oldest `last_used` is removed. The Claude Code jsonl
-//!   file on disk is NOT deleted — that is Claude Code's own
+//!   with the oldest `last_used` is removed. Backend-native session
+//!   files on disk are NOT deleted — that is each backend's own
 //!   responsibility.
 //!
 //! The current build does not delete the on-disk jsonl. A future
 //! patch may add an explicit `tokio::fs::remove_file` for
 //! evicted/stale sessions.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use gadgetron_core::agent::AgentBackend;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -105,12 +107,14 @@ pub fn parse_conversation_id(raw: &str) -> (&str, &str) {
 /// Per-conversation bookkeeping. Cloning is `Arc`-cheap.
 #[derive(Debug)]
 pub struct SessionEntry {
-    /// UUID passed to Claude Code via `--session-id` (first turn) or
-    /// `--resume` (subsequent turns). Generated with `Uuid::new_v4()`
-    /// inside `SessionStore::get_or_create` — v4 (random) is chosen
-    /// because v1 leaks spawn time and v3/v5 require a stable
-    /// namespace we do not have.
+    /// Gadgetron-local UUID used by backends that accept a caller-supplied
+    /// native session id. Today that is Claude Code's `--session-id` /
+    /// `--resume` value, and it also feeds the legacy audit field name.
     pub claude_session_uuid: Uuid,
+    /// Backend-native session ids captured or restored for this conversation.
+    /// Claude stores its UUID string here; Codex stores the thread id returned
+    /// by `thread.started`; future backends should use the same map.
+    backend_session_ids: std::sync::Mutex<HashMap<AgentBackend, String>>,
     pub created_at: Instant,
     pub last_used: std::sync::Mutex<Instant>,
     pub turn_count: std::sync::atomic::AtomicU32,
@@ -122,19 +126,28 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
-    fn new() -> Self {
-        Self::with_uuid(Uuid::new_v4())
-    }
-
     fn with_uuid(uuid: Uuid) -> Self {
         let now = Instant::now();
         Self {
             claude_session_uuid: uuid,
+            backend_session_ids: std::sync::Mutex::new(HashMap::new()),
             created_at: now,
             last_used: std::sync::Mutex::new(now),
             turn_count: std::sync::atomic::AtomicU32::new(0),
             mutex: Arc::new(Mutex::new(())),
         }
+    }
+
+    fn with_backend_session(
+        uuid: Uuid,
+        backend: AgentBackend,
+        backend_session_id: Option<String>,
+    ) -> Self {
+        let entry = Self::with_uuid(uuid);
+        if let Some(session_id) = backend_session_id {
+            entry.set_backend_session_id(backend, session_id);
+        }
+        entry
     }
 
     /// Return the most recent `last_used` instant.
@@ -153,6 +166,27 @@ impl SessionEntry {
     /// Read the current turn_count (atomic, Relaxed).
     pub fn turn_count(&self) -> u32 {
         self.turn_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Return the backend-native session id captured for this conversation.
+    pub fn backend_session_id(&self, backend: AgentBackend) -> Option<String> {
+        self.backend_session_ids
+            .lock()
+            .unwrap()
+            .get(&backend)
+            .cloned()
+    }
+
+    pub fn set_backend_session_id(&self, backend: AgentBackend, session_id: String) {
+        self.backend_session_ids
+            .lock()
+            .unwrap()
+            .insert(backend, session_id);
+    }
+
+    /// Compatibility helper for older tests/callers.
+    pub fn codex_session_id(&self) -> Option<String> {
+        self.backend_session_id(AgentBackend::CodexExec)
     }
 }
 
@@ -204,6 +238,21 @@ impl SessionStore {
     /// - If `entries.len() > max_entries` AFTER insertion, evicts the
     ///   LRU entry (oldest `last_used`).
     pub fn get_or_create(&self, id: ConversationId) -> (Arc<SessionEntry>, bool) {
+        self.get_or_create_with_backend_session(id, AgentBackend::ClaudeCode, None)
+    }
+
+    /// Atomic get-or-insert with an optional persisted backend session id.
+    ///
+    /// `backend_session_id` is loaded from Gadgetron's DB transcript/session
+    /// tables before the in-memory entry is created. If present, the returned
+    /// `first_turn` flag is forced to `false` so the driver uses the backend's
+    /// native resume command instead of starting a new thread.
+    pub fn get_or_create_with_backend_session(
+        &self,
+        id: ConversationId,
+        backend: AgentBackend,
+        backend_session_id: Option<String>,
+    ) -> (Arc<SessionEntry>, bool) {
         self.sweep_expired();
 
         // If the `local_name` portion of the conversation id parses as
@@ -212,26 +261,38 @@ impl SessionStore {
         // from the DB's `conversation.id`, so the history endpoint can
         // locate past messages without a separate mapping table.
         let (_owner, local) = parse_conversation_id(&id);
-        let preferred_uuid = Uuid::parse_str(local).ok();
-
-        let mut first_turn = false;
+        let preferred_uuid = match backend {
+            AgentBackend::ClaudeCode => backend_session_id
+                .as_deref()
+                .and_then(|session_id| Uuid::parse_str(session_id).ok())
+                .or_else(|| Uuid::parse_str(local).ok()),
+            AgentBackend::CodexExec => Uuid::parse_str(local).ok(),
+        };
+        let mut inserted = false;
         let entry = self
             .entries
             .entry(id.clone())
             .or_insert_with(|| {
-                first_turn = true;
-                match preferred_uuid {
-                    Some(u) => Arc::new(SessionEntry::with_uuid(u)),
-                    None => Arc::new(SessionEntry::new()),
-                }
+                inserted = true;
+                let uuid = preferred_uuid.unwrap_or_else(Uuid::new_v4);
+                Arc::new(SessionEntry::with_backend_session(
+                    uuid,
+                    backend,
+                    backend_session_id.clone(),
+                ))
             })
             .value()
             .clone();
 
-        if first_turn && self.entries.len() > self.max_entries {
+        if let Some(session_id) = backend_session_id.clone() {
+            entry.set_backend_session_id(backend, session_id);
+        }
+
+        if inserted && self.entries.len() > self.max_entries {
             self.evict_lru_excluding(&id);
         }
 
+        let first_turn = inserted && backend_session_id.is_none();
         (entry, first_turn)
     }
 
@@ -241,6 +302,19 @@ impl SessionStore {
         if let Some(entry) = self.entries.get(id) {
             entry.value().bump();
         }
+    }
+
+    /// Persist a backend-native session id for an existing Gadgetron
+    /// conversation id.
+    pub fn set_backend_session_id(&self, id: &str, backend: AgentBackend, session_id: String) {
+        if let Some(entry) = self.entries.get(id) {
+            entry.value().set_backend_session_id(backend, session_id);
+        }
+    }
+
+    /// Compatibility helper for older Codex-specific call sites.
+    pub fn set_codex_session_id(&self, id: &str, session_id: String) {
+        self.set_backend_session_id(id, AgentBackend::CodexExec, session_id);
     }
 
     /// Remove up to `SWEEP_SCAN_HARD_CAP` entries older than `self.ttl`.
@@ -329,6 +403,33 @@ mod tests {
         assert!(!first_b);
         assert_eq!(entry_a.claude_session_uuid, entry_b.claude_session_uuid);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn get_or_create_with_persisted_codex_session_resumes() {
+        let store = SessionStore::new(60, 10);
+        let (entry, first) = store.get_or_create_with_backend_session(
+            "c1".to_string(),
+            AgentBackend::CodexExec,
+            Some("codex-thread-1".to_string()),
+        );
+
+        assert!(!first);
+        assert_eq!(entry.codex_session_id().as_deref(), Some("codex-thread-1"));
+    }
+
+    #[test]
+    fn get_or_create_with_persisted_claude_uuid_resumes() {
+        let store = SessionStore::new(60, 10);
+        let session_uuid = Uuid::new_v4();
+        let (entry, first) = store.get_or_create_with_backend_session(
+            "c1".to_string(),
+            AgentBackend::ClaudeCode,
+            Some(session_uuid.to_string()),
+        );
+
+        assert!(!first);
+        assert_eq!(entry.claude_session_uuid, session_uuid);
     }
 
     #[test]

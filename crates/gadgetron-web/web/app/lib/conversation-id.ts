@@ -63,6 +63,25 @@ export function setActiveConversationId(id: string): void {
   emitActiveConversationChange();
 }
 
+/// Return this tab's active conversation id, minting one when absent.
+///
+/// This is intentionally separate from `getActiveConversationId`:
+/// reads should not create state, but the chat shell must mount
+/// assistant-ui on the same id the transport will later send in
+/// `X-Gadgetron-Conversation-Id`. If the shell starts on a local
+/// assistant-ui thread and the transport mints a different backend id
+/// during the first send, clicking another history item can make the
+/// just-started conversation appear to disappear.
+export function ensureActiveConversationId(createId: () => string): string | null {
+  if (typeof window === "undefined") return null;
+  const existing = getActiveConversationId();
+  if (existing) return existing;
+  const next = createId().trim();
+  if (!next) return null;
+  setActiveConversationId(next);
+  return next;
+}
+
 /// Clear this tab's active conversation. Sibling tabs are unaffected.
 /// Also clears the cross-tab seed, so the next new tab starts blank.
 export function clearActiveConversationId(): void {

@@ -6,27 +6,33 @@
 //! chain: auth → tenant_context).
 
 use axum::{
+    body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use gadgetron_core::{
     context::TenantContext,
-    error::GadgetronError,
+    error::{GadgetronError, PennyErrorKind},
     knowledge::AuthenticatedContext,
     message::{Content, Message, Role},
-    provider::{ChatRequest, ModelInfo},
+    provider::{ChatChunk, ChatRequest, ModelInfo},
 };
 use gadgetron_xaas::audit::writer::{AuditEntry, AuditStatus};
+use sqlx::PgPool;
+use std::sync::Arc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::activity_capture::{
     capture_chat_completion, capture_chat_completion_error, error_class,
 };
+use crate::chat_jobs::{JobState, WaitResult};
 use crate::error::ApiError;
 use crate::penny::shared_context::render_penny_shared_context;
 use crate::server::AppState;
-use crate::sse::chat_chunk_to_sse;
 use crate::stream_end_guard::StreamEndGuard;
 
 // ---------------------------------------------------------------------------
@@ -74,6 +80,7 @@ pub async fn chat_completions_handler(
     // indexed write (~1-5ms); graceful-degrade is preserved by ignoring
     // the error with `let _ =` so a transient DB blip doesn't 5xx the
     // chat endpoint.
+    let mut conversation_persistence = None;
     if let (Some(pool), Some(user_id), Some(conv_raw)) = (
         state.pg_pool.as_ref(),
         ctx.actor_user_id,
@@ -83,6 +90,14 @@ pub async fn chat_completions_handler(
             let first_user_msg = req
                 .messages
                 .iter()
+                .find(|m| matches!(m.role, gadgetron_core::message::Role::User))
+                .and_then(|m| m.content.text())
+                .unwrap_or_default()
+                .to_string();
+            let last_user_msg = req
+                .messages
+                .iter()
+                .rev()
                 .find(|m| matches!(m.role, gadgetron_core::message::Role::User))
                 .and_then(|m| m.content.text())
                 .unwrap_or_default()
@@ -98,6 +113,30 @@ pub async fn chat_completions_handler(
             .await
             {
                 Ok((turn_count, summary_turn_at)) => {
+                    conversation_persistence = Some(ConversationPersistence {
+                        pool: pool.clone(),
+                        conversation_id: conv_uuid,
+                        tenant_id: ctx.tenant_id,
+                        user_id,
+                    });
+                    if let Err(e) = gadgetron_xaas::conversations::append_message(
+                        pool,
+                        conv_uuid,
+                        ctx.tenant_id,
+                        user_id,
+                        "user",
+                        &last_user_msg,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            target: "conversations",
+                            request_id = %ctx.request_id,
+                            conversation_id = %conv_uuid,
+                            error = %e,
+                            "append user conversation message failed"
+                        );
+                    }
                     // Rolling title summary via Penny. Re-summarize
                     // every 3 turns after the 3rd (3, 6, 9, …) so the
                     // sidebar label tracks what the conversation is
@@ -287,9 +326,56 @@ pub async fn chat_completions_handler(
     };
 
     if req.stream {
-        handle_streaming(state, ctx, req, router, quota_token).await
+        handle_streaming(
+            state,
+            ctx,
+            req,
+            router,
+            quota_token,
+            conversation_persistence,
+        )
+        .await
     } else {
-        handle_non_streaming(state, ctx, req, router, quota_token).await
+        handle_non_streaming(
+            state,
+            ctx,
+            req,
+            router,
+            quota_token,
+            conversation_persistence,
+        )
+        .await
+    }
+}
+
+#[derive(Clone)]
+struct ConversationPersistence {
+    pool: PgPool,
+    conversation_id: uuid::Uuid,
+    tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+}
+
+async fn append_assistant_message(persist: Option<&ConversationPersistence>, content: &str) {
+    let Some(persist) = persist else {
+        return;
+    };
+    if let Err(e) = gadgetron_xaas::conversations::append_message(
+        &persist.pool,
+        persist.conversation_id,
+        persist.tenant_id,
+        persist.user_id,
+        "assistant",
+        content,
+    )
+    .await
+    {
+        tracing::warn!(
+            target: "conversations",
+            conversation_id = %persist.conversation_id,
+            error = %e,
+            "append assistant conversation message failed"
+        );
     }
 }
 
@@ -300,9 +386,19 @@ async fn handle_non_streaming(
     req: ChatRequest,
     router: std::sync::Arc<gadgetron_router::Router>,
     quota_token: gadgetron_xaas::quota::enforcer::QuotaToken,
+    conversation_persistence: Option<ConversationPersistence>,
 ) -> Response {
     match router.chat(req.clone()).await {
         Ok(response) => {
+            let assistant_text = response
+                .choices
+                .iter()
+                .find(|choice| matches!(choice.message.role, Role::Assistant))
+                .and_then(|choice| choice.message.content.text())
+                .unwrap_or_default()
+                .to_string();
+            append_assistant_message(conversation_persistence.as_ref(), &assistant_text).await;
+
             let latency_ms = ctx.started_at.elapsed().as_millis() as i32;
             // Compute real cost from token counts +
             // the model's entry in the pricing table. Unknown models
@@ -451,12 +547,203 @@ async fn handle_non_streaming(
 /// Quota and audit are recorded at dispatch time (A4: time-to-first-byte
 /// semantics).  Phase 2 will add a Drop guard on the SSE stream to record
 /// total stream duration after the last byte.
+/// Serialize one `ChatChunk` into the SSE wire format
+/// (`data: {json}\n\n`). Stored in the job buffer so foreground and
+/// resume subscribers consume bytes-identical frames — no risk of a
+/// reconnecting client seeing a different serialisation than the
+/// original subscriber.
+fn chunk_to_sse_bytes(chunk: &ChatChunk) -> Bytes {
+    let json = serde_json::to_string(chunk)
+        .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}"));
+    Bytes::from(format!("data: {json}\n\n"))
+}
+
+/// Serialize a streaming error into an OpenAI-compatible `event: error`
+/// SSE frame. Mirrors what `chat_chunk_to_sse` used to emit so the
+/// wire contract is preserved across the refactor.
+fn error_to_sse_bytes(err: &GadgetronError) -> Bytes {
+    let payload = serde_json::json!({
+        "error": {
+            "message": err.error_message(),
+            "type":    err.error_type(),
+            "code":    err.error_code(),
+        }
+    })
+    .to_string();
+    Bytes::from(format!("event: error\ndata: {payload}\n\n"))
+}
+
+const PENNY_STDERR_LOG_PREVIEW_CHARS: usize = 8 * 1024;
+
+fn log_preview(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "<empty>".to_string();
+    }
+
+    let mut chars = trimmed.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push_str("...[truncated]");
+    }
+    out
+}
+
+fn log_chat_job_stream_error(job_id: uuid::Uuid, err: &GadgetronError) {
+    match err {
+        GadgetronError::Penny {
+            kind:
+                PennyErrorKind::AgentError {
+                    exit_code,
+                    stderr_redacted,
+                },
+            message,
+        } => {
+            tracing::error!(
+                error.code = err.error_code(),
+                error.type_ = err.error_type(),
+                job_id = %job_id,
+                penny.exit_code = *exit_code,
+                penny.stderr = %log_preview(stderr_redacted, PENNY_STDERR_LOG_PREVIEW_CHARS),
+                penny.message = %message,
+                "chat-job stream error: {err}",
+            );
+        }
+        GadgetronError::Penny {
+            kind: PennyErrorKind::SpawnFailed { reason },
+            message,
+        } => {
+            tracing::error!(
+                error.code = err.error_code(),
+                error.type_ = err.error_type(),
+                job_id = %job_id,
+                penny.spawn_reason = %log_preview(reason, PENNY_STDERR_LOG_PREVIEW_CHARS),
+                penny.message = %message,
+                "chat-job stream error: {err}",
+            );
+        }
+        GadgetronError::Penny { kind, message } => {
+            tracing::error!(
+                error.code = err.error_code(),
+                error.type_ = err.error_type(),
+                job_id = %job_id,
+                penny.kind = %kind,
+                penny.message = %message,
+                "chat-job stream error: {err}",
+            );
+        }
+        _ => {
+            tracing::error!(
+                error.code = err.error_code(),
+                error.type_ = err.error_type(),
+                job_id = %job_id,
+                "chat-job stream error: {err}",
+            );
+        }
+    }
+}
+
+/// Pull from the LLM stream and push SSE-formatted bytes into `job`,
+/// transitioning the job to Complete on `[DONE]` or Error on the
+/// first `Err`. The foreground SSE response and any resuming
+/// subscribers all read the same buffer.
+async fn run_chat_job<S>(
+    job: Arc<JobState>,
+    stream: S,
+    conversation_persistence: Option<ConversationPersistence>,
+) where
+    S: Stream<Item = Result<ChatChunk, GadgetronError>> + Send + 'static,
+{
+    let mut stream = std::pin::pin!(stream);
+    let mut assistant_text = String::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(chunk) => {
+                for choice in &chunk.choices {
+                    if let Some(content) = &choice.delta.content {
+                        assistant_text.push_str(content);
+                    }
+                }
+                let bytes = chunk_to_sse_bytes(&chunk);
+                job.push_chunk(bytes).await;
+            }
+            Err(err) => {
+                log_chat_job_stream_error(job.job_id, &err);
+                job.push_chunk(error_to_sse_bytes(&err)).await;
+                job.mark_error(err.error_message()).await;
+                return;
+            }
+        }
+    }
+    job.push_chunk(Bytes::from_static(b"data: [DONE]\n\n"))
+        .await;
+    append_assistant_message(conversation_persistence.as_ref(), &assistant_text).await;
+    job.mark_complete().await;
+}
+
+/// Build an SSE response body that drains the job's buffer from
+/// `since` (inclusive index) forward, blocks on the live tail when
+/// caught up, and terminates when the job reports `is_finished`.
+///
+/// The `job_id` is surfaced as the response header
+/// `X-Gadgetron-Job-Id` so the wire contract of the SSE body itself
+/// stays exactly what OpenAI clients expect (no custom frame in
+/// front of the first `chat.completion.chunk`). Resume clients
+/// already know the id from the URL and can ignore the header.
+pub(crate) fn build_job_response(job: Arc<JobState>, since: usize) -> Response {
+    let job_id = job.job_id;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(32);
+    tokio::spawn(async move {
+        // Replay everything the producer has buffered before we
+        // started subscribing. `wait_for_chunk_after` returns the
+        // full slice on the first call as a single batch.
+        let mut cursor = since;
+        loop {
+            match job.wait_for_chunk_after(cursor).await {
+                WaitResult::Chunks { chunks, finished } => {
+                    for c in &chunks {
+                        if tx.send(c.clone()).await.is_err() {
+                            return;
+                        }
+                    }
+                    cursor = cursor.saturating_add(chunks.len());
+                    if finished {
+                        return;
+                    }
+                }
+                WaitResult::Finished => return,
+            }
+        }
+    });
+
+    let byte_stream = ReceiverStream::new(rx).map(Ok::<Bytes, std::convert::Infallible>);
+    let mut response = Body::from_stream(byte_stream).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&job_id.to_string()) {
+        headers.insert(header::HeaderName::from_static("x-gadgetron-job-id"), v);
+    }
+    response
+}
+
 async fn handle_streaming(
     state: AppState,
     ctx: TenantContext,
     req: ChatRequest,
     router: std::sync::Arc<gadgetron_router::Router>,
     quota_token: gadgetron_xaas::quota::enforcer::QuotaToken,
+    conversation_persistence: Option<ConversationPersistence>,
 ) -> Response {
     // Measure dispatch latency BEFORE spawning the audit task (previous bug:
     // the value was captured inside tokio::spawn, always yielding 0ms).
@@ -543,7 +830,46 @@ async fn handle_streaming(
     );
     let guarded_stream = guard.wrap(raw_stream);
 
-    chat_chunk_to_sse(guarded_stream).into_response()
+    // Resumable-stream pipeline:
+    //
+    //   1. Register a JobState keyed by conversation_id. The job
+    //      owns the SSE chunk buffer and a Notify that wakes any
+    //      subscriber blocked on the live tail.
+    //   2. Spawn a background producer that pulls from the
+    //      `guarded_stream` (so audit / activity capture still fire
+    //      via the StreamEndGuard on Drop) and pushes SSE bytes into
+    //      the job. Completion / error transitions live on the job.
+    //   3. Return an SSE response that subscribes to the job's
+    //      buffer. The OpenAI-compat wire body is unchanged; the
+    //      `X-Gadgetron-Job-Id` response header carries the id so
+    //      the client can store it for resume.
+    //
+    // The producer is decoupled from the foreground response future,
+    // so a client that disconnects (closes the tab, navigates away)
+    // does NOT cancel the LLM call. The producer keeps pushing into
+    // the buffer, and a resume request via
+    // `GET /workbench/jobs/{job_id}/sync` replays from any index.
+    let conv_id_for_job = req
+        .conversation_id
+        .as_deref()
+        .and_then(extract_conversation_uuid)
+        .unwrap_or(uuid::Uuid::nil());
+    let job = state
+        .chat_jobs
+        .create(
+            conv_id_for_job,
+            ctx.actor_user_id,
+            ctx.tenant_id,
+            req.model.clone(),
+        )
+        .await;
+
+    let producer_job = std::sync::Arc::clone(&job);
+    tokio::spawn(async move {
+        run_chat_job(producer_job, guarded_stream, conversation_persistence).await;
+    });
+
+    build_job_response(job, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,6 +1334,13 @@ mod tests {
     use crate::test_helpers::{lazy_pool, TEST_AUDIT_CAPACITY, VALID_TOKEN};
     use gadgetron_core::agent::shared_context::PennyTurnContextAssembler;
 
+    #[test]
+    fn log_preview_trims_and_truncates() {
+        assert_eq!(log_preview("  \n  ", 8), "<empty>");
+        assert_eq!(log_preview("abcdef", 8), "abcdef");
+        assert_eq!(log_preview("abcdefghij", 5), "abcde...[truncated]");
+    }
+
     // -----------------------------------------------------------------------
     // Constants for FakeLlmProvider fixed responses
     // -----------------------------------------------------------------------
@@ -1251,6 +1584,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         }
     }
 
@@ -1669,6 +2003,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         }
     }
 

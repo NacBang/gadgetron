@@ -1196,8 +1196,9 @@ struct PennyRouterRegistration {
     registry: Arc<gadgetron_penny::GadgetRegistry>,
     audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink>,
     session_store: Arc<gadgetron_penny::SessionStore>,
+    backend_session_persistence: Option<Arc<dyn gadgetron_penny::AgentBackendSessionPersistence>>,
     config_path_for_mcp: PathBuf,
-    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
 }
 
 impl PennyRouterRegistration {
@@ -1210,7 +1211,69 @@ impl PennyRouterRegistration {
             providers,
             Some(self.config_path_for_mcp),
             self.brain_config,
+            self.backend_session_persistence,
         );
+    }
+}
+
+struct PgAgentBackendSessionPersistence {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl gadgetron_penny::AgentBackendSessionPersistence for PgAgentBackendSessionPersistence {
+    async fn load_backend_session_id(
+        &self,
+        conversation_id: &str,
+        backend: gadgetron_core::agent::AgentBackend,
+    ) -> Option<String> {
+        let (_owner, local_id) = gadgetron_penny::parse_conversation_id(conversation_id);
+        let Ok(id) = uuid::Uuid::parse_str(local_id) else {
+            return None;
+        };
+        match gadgetron_xaas::conversations::get_agent_backend_session_id(&self.pool, id, backend)
+            .await
+        {
+            Ok(session_id) => session_id,
+            Err(e) => {
+                tracing::warn!(
+                    target: "agent_backend_session",
+                    conversation_id,
+                    backend = %backend.as_str(),
+                    error = %e,
+                    "failed to load persisted agent backend session"
+                );
+                None
+            }
+        }
+    }
+
+    async fn save_backend_session_id(
+        &self,
+        conversation_id: &str,
+        backend: gadgetron_core::agent::AgentBackend,
+        backend_session_id: &str,
+    ) {
+        let (_owner, local_id) = gadgetron_penny::parse_conversation_id(conversation_id);
+        let Ok(id) = uuid::Uuid::parse_str(local_id) else {
+            return;
+        };
+        if let Err(e) = gadgetron_xaas::conversations::upsert_agent_backend_session_id(
+            &self.pool,
+            id,
+            backend,
+            backend_session_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                target: "agent_backend_session",
+                conversation_id,
+                backend = %backend.as_str(),
+                error = %e,
+                "failed to persist agent backend session"
+            );
+        }
     }
 }
 
@@ -1229,7 +1292,7 @@ fn prepare_penny_router_registration(
     config_path: &std::path::Path,
     app_config: &AppConfig,
     pg_pool: Option<sqlx::PgPool>,
-    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
@@ -1266,6 +1329,11 @@ fn prepare_penny_router_registration(
     // wired, the writer ALSO fans out to `capture_action` so every
     // Penny tool call lands in /workbench/activity with
     // `ActivityOrigin::Penny` attribution.
+    let backend_session_persistence = pg_pool.clone().map(|pool| {
+        Arc::new(PgAgentBackendSessionPersistence { pool })
+            as Arc<dyn gadgetron_penny::AgentBackendSessionPersistence>
+    });
+
     let audit_sink: Arc<dyn gadgetron_core::audit::GadgetAuditEventSink> = if let Some(pool) =
         pg_pool
     {
@@ -1298,6 +1366,7 @@ fn prepare_penny_router_registration(
         registry,
         audit_sink,
         session_store,
+        backend_session_persistence,
         config_path_for_mcp: canonicalize_config_path_for_mcp(config_path),
         brain_config,
     }))
@@ -1891,7 +1960,7 @@ fn build_provider_maps(
     config: &AppConfig,
     config_path: &std::path::Path,
     pg_pool: Option<sqlx::PgPool>,
-    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
@@ -1933,7 +2002,7 @@ fn build_provider_maps(
 
 struct PennyRegistrationRuntime {
     pg_pool: Option<sqlx::PgPool>,
-    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
     candidate_coordinator:
         Option<Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>>,
@@ -1994,7 +2063,7 @@ fn build_workbench(
     >,
     penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
     pg_pool: Option<sqlx::PgPool>,
-    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     catalog_path: Option<String>,
     bundles_dir: Option<String>,
     bundle_signing: gadgetron_core::config::BundleSigningConfig,
@@ -2244,6 +2313,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
             .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>),
         tool_audit_sink,
         billing_failures,
+        chat_jobs: Arc::new(gadgetron_gateway::chat_jobs::JobStore::new()),
     }
 }
 
@@ -2383,7 +2453,11 @@ async fn init_serve_runtime(
     let approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore> =
         Arc::new(gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new());
 
-    let mut startup_brain = config.agent.brain.clone();
+    // Build a startup AgentConfig overlay: gadgetron.toml as the
+    // base, then DB-persisted admin settings layered on top so the
+    // operator's last admin save (Mode / Model / Effort) survives
+    // a process restart.
+    let mut startup_agent = config.agent.clone();
     if let Some(pool) = pg_pool.as_ref() {
         match gadgetron_xaas::agent_brain::get_agent_brain_settings(
             pool,
@@ -2398,21 +2472,30 @@ async fn init_serve_runtime(
                     model: saved.model,
                     external_auth_token_env: saved.external_auth_token_env,
                     custom_model_option: saved.custom_model_option,
+                    backend: saved.backend,
+                    model_source: saved.model_source,
+                    local_base_url: saved.local_base_url,
+                    local_api_key_env: saved.local_api_key_env,
+                    effort: saved.effort,
                 };
-                let candidate = request.overlay_brain(&startup_brain);
+                let candidate = request.overlay_agent(&startup_agent);
                 match candidate
                     .validate_with_env(&config.providers, &gadgetron_core::agent::config::StdEnv)
                 {
                     Ok(()) => {
-                        startup_brain = candidate;
+                        startup_agent = candidate;
                         tracing::info!(
                             target: "agent_config",
-                            mode = %startup_brain.mode.as_str(),
-                            has_model = !startup_brain.model.is_empty(),
-                            has_base_url = !startup_brain.external_base_url.is_empty(),
-                            has_auth_token_env = !startup_brain.external_auth_token_env.is_empty(),
-                            custom_model_option = startup_brain.custom_model_option,
-                            "agent brain settings loaded from database"
+                            active_backend = ?startup_agent.backend,
+                            mode = %startup_agent.brain.mode.as_str(),
+                            saved_backend = ?request.backend,
+                            model_source = ?request.model_source,
+                            effort = ?startup_agent.brain.effort,
+                            has_model = !startup_agent.brain.model.is_empty(),
+                            has_base_url = !startup_agent.brain.external_base_url.is_empty(),
+                            has_auth_token_env = !startup_agent.brain.external_auth_token_env.is_empty(),
+                            custom_model_option = startup_agent.brain.custom_model_option,
+                            "agent settings loaded from database"
                         );
                     }
                     Err(e) => tracing::warn!(
@@ -2430,7 +2513,7 @@ async fn init_serve_runtime(
             ),
         }
     }
-    let agent_brain = Arc::new(arc_swap::ArcSwap::from_pointee(startup_brain));
+    let agent_brain = Arc::new(arc_swap::ArcSwap::from_pointee(startup_agent));
 
     let (providers_ss, providers_for_router, penny_registry) = build_provider_maps(
         config,
@@ -2530,6 +2613,13 @@ async fn init_serve_runtime(
     if let Some(wb) = state.workbench.as_ref() {
         gadgetron_gateway::web::workbench::spawn_sighup_reloader(wb.clone());
     }
+
+    // Reap completed chat-completion jobs that aged past the in-memory
+    // retention window. The task is detached on purpose: it runs for
+    // the lifetime of the process and has no recoverable failure mode
+    // (it's pure local-map mutation). We drop the JoinHandle explicitly
+    // so clippy doesn't flag the `let _ =` as let_underscore_future.
+    drop(state.chat_jobs.spawn_cleanup_task());
 
     let app = build_http_app(state, &config.web);
 

@@ -112,6 +112,7 @@ impl GatewayHarness {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(gadgetron_gateway::chat_jobs::JobStore::new()),
         };
 
         let router = build_router(state);

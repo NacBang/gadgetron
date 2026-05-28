@@ -185,6 +185,16 @@ pub struct AppState {
     /// (Management scope). Resets on restart — long-horizon
     /// reconciliation is future work.
     pub billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
+    /// In-memory chat-completion job registry. Streaming chat
+    /// requests register a job here and a background producer
+    /// pushes chunks into it; the foreground SSE response and any
+    /// resume client both read from the same `JobState`. Powers
+    /// `GET /workbench/conversations/{id}/active-job` and
+    /// `GET /workbench/jobs/{id}/sync` so a user who navigates away
+    /// mid-stream can re-attach to the in-flight generation when
+    /// they come back. The startup wiring spawns a cleanup task on
+    /// this store (see `chat_jobs::JobStore::spawn_cleanup_task`).
+    pub chat_jobs: Arc<crate::chat_jobs::JobStore>,
 }
 
 // chat_completions_handler and list_models_handler are the real implementations
@@ -547,6 +557,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         }
     }
 
@@ -575,6 +586,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         }
     }
 
@@ -920,6 +932,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         };
         assert!(
             state_with_tui.tui_tx.is_some(),
@@ -1005,6 +1018,7 @@ mod tests {
             billing_failures: std::sync::Arc::new(
                 gadgetron_xaas::billing::BillingFailureCounter::new(),
             ),
+            chat_jobs: std::sync::Arc::new(crate::chat_jobs::JobStore::new()),
         };
 
         let app = build_router(state);

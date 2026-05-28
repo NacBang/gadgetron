@@ -256,9 +256,9 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
               type="button"
               onClick={() => void handleLogout()}
               className="ml-1 rounded border border-zinc-800 px-1 py-0.5 text-[9px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
-              title="Log out"
+              title="Sign out"
             >
-              Log out
+              Sign out
             </button>
           )}
         </span>

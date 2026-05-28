@@ -8,7 +8,30 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Seoul
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      cargo-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Major and 0.x compatibility-breaking updates require planned
+      # migration PRs, not routine dependency bot PRs.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+      # toml 1.x changes parser behavior; handle as a planned migration.
+      - dependency-name: "toml"
+        update-types:
+          - "version-update:semver-major"
+      # nvml-wrapper minor releases can change compile-time API for the
+      # optional GPU monitor feature. Keep patch updates automated only.
+      - dependency-name: "nvml-wrapper"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
     commit-message:
       prefix: "chore(deps)"
       include: scope
@@ -24,7 +47,25 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Seoul
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      web-patch-minor:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@assistant-ui/*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Major updates require planned migration PRs, not routine dependency
+      # bot PRs.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+      # assistant-ui releases have peer/API coupling across packages; update
+      # them in a focused migration instead of dependency bot PRs.
+      - dependency-name: "@assistant-ui/*"
     commit-message:
       prefix: "chore(deps-web)"
       include: scope
@@ -40,7 +81,17 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Seoul
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "dtolnay/rust-toolchain"
+    ignore:
+      # The Rust compiler version is a project policy decision, not a
+      # routine GitHub Actions dependency bump.
+      - dependency-name: "dtolnay/rust-toolchain"
     commit-message:
       prefix: "chore(ci)"
       include: scope

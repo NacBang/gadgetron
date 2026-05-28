@@ -2,6 +2,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, act } from "@testing-library/react";
 import { StatusStrip } from "../../app/components/shell/status-strip";
 
+vi.mock("../../app/lib/auth-context", () => ({
+  useAuth: () => ({
+    identity: null,
+    viewMode: "user",
+    setViewMode: vi.fn(),
+    clearKey: vi.fn(),
+  }),
+}));
+
 // ---------------------------------------------------------------------------
 // fetch mock
 // ---------------------------------------------------------------------------
@@ -26,23 +35,22 @@ afterEach(() => {
 });
 
 describe("StatusStrip", () => {
-  it("shows 'Checking...' initially before first fetch resolves", () => {
+  it("renders the brand while the first health fetch is pending", () => {
     // Never resolves
     global.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
     render(<StatusStrip />);
-    const indicator = screen.getByTestId("health-indicator");
-    expect(indicator.textContent).toContain("Checking");
+    expect(screen.getByTestId("brand").textContent).toContain("Gadgetron");
+    expect(screen.queryByTestId("health-indicator")).toBeNull();
   });
 
-  it("shows healthy state on 200 with no degraded_reasons", async () => {
+  it("keeps healthy state visually quiet on 200 with no degraded_reasons", async () => {
     mockFetch(200, { degraded_reasons: [] });
     render(<StatusStrip />);
     // Wait for the async fetch to resolve and state to update
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50));
     });
-    const indicator = screen.getByTestId("health-indicator");
-    expect(indicator.textContent).toContain("Gateway healthy");
+    expect(screen.queryByTestId("health-indicator")).toBeNull();
   });
 
   it("shows degraded state on 200 with degraded_reasons present", async () => {
@@ -75,20 +83,16 @@ describe("StatusStrip", () => {
     expect(indicator.textContent).toContain("Gateway unreachable");
   });
 
-  it("shows active knowledge plugs (stub fixture)", async () => {
-    mockFetch(200, {});
+  it("does not render the removed legacy knowledge plugs", async () => {
+    global.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
     render(<StatusStrip />);
-    // Plugs are rendered statically — no async needed
-    const plugs = screen.getByTestId("knowledge-plugs");
-    expect(plugs.textContent).toContain("llm-wiki (canonical)");
-    expect(plugs.textContent).toContain("wiki-keyword");
-    expect(plugs.textContent).toContain("semantic-pgvector");
+    expect(screen.queryByTestId("knowledge-plugs")).toBeNull();
   });
 
-  it("shows session placeholder when no sessionId/actor provided", async () => {
-    mockFetch(200, {});
+  it("omits the removed session placeholder when no sessionId/actor provided", async () => {
+    global.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
     render(<StatusStrip />);
-    expect(screen.getByTestId("session-placeholder")).toBeTruthy();
+    expect(screen.queryByTestId("session-placeholder")).toBeNull();
   });
 
   it("shows sessionId when provided", async () => {

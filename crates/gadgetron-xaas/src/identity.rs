@@ -165,6 +165,60 @@ pub async fn update_user_profile(
     row.ok_or(IdentityError::NotFound)
 }
 
+/// Change a user's role. Same single-admin guard as `delete_user`:
+/// refuses to demote the last active admin in the tenant.
+pub async fn update_user_role(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    new_role: Role,
+) -> Result<UserRow, IdentityError> {
+    let mut tx = pool.begin().await?;
+
+    let current: UserRow = sqlx::query_as::<_, UserRow>(
+        r#"SELECT id, tenant_id, email, display_name, avatar_url, role, is_active,
+                  created_at, updated_at, last_login_at
+           FROM users WHERE id = $1 AND tenant_id = $2"#,
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(IdentityError::NotFound)?;
+
+    if current.role == "admin" && new_role != Role::Admin && current.is_active {
+        let active_admins: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM users
+               WHERE tenant_id = $1 AND role = 'admin' AND is_active = TRUE"#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active_admins <= 1 {
+            return Err(IdentityError::LastAdmin);
+        }
+    }
+
+    let row = sqlx::query_as::<_, UserRow>(
+        r#"
+        UPDATE users
+        SET role = $3,
+            updated_at = NOW()
+        WHERE id = $1 AND tenant_id = $2
+        RETURNING id, tenant_id, email, display_name, avatar_url, role, is_active,
+                  created_at, updated_at, last_login_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(new_role.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(row)
+}
+
 /// Delete a user. Applies the single-admin guard: refuses to delete
 /// the last active admin in the tenant (spec §7 Q-1).
 pub async fn delete_user(

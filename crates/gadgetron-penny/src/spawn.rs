@@ -30,8 +30,9 @@
 //! - `ANTHROPIC_API_KEY` — only for `external_anthropic` mode, read from
 //!   the operator-specified env var name (`brain.external_anthropic_api_key_env`)
 //!   via the injected `EnvResolver`
-//! - `ANTHROPIC_AUTH_TOKEN` — only when `brain.external_auth_token_env` names
-//!   an env var, read via the injected `EnvResolver`
+//! - `ANTHROPIC_AUTH_TOKEN` — only for `external_proxy` mode when
+//!   `brain.external_auth_token_env` names an env var, read via the injected
+//!   `EnvResolver`
 //! - `ANTHROPIC_MODEL` and `ANTHROPIC_CUSTOM_MODEL_OPTION` — only when
 //!   `brain.model` is configured
 //!
@@ -67,14 +68,16 @@
 
 use std::path::Path;
 
-use gadgetron_core::agent::config::{AgentConfig, BrainMode, EnvResolver, StdEnv};
+use gadgetron_core::agent::config::{
+    AgentConfig, BrainMode, CodexApprovalPolicy, CodexAuthMode, EnvResolver, StdEnv,
+};
 
 /// Penny agent persona — appended to Claude Code's default system prompt so
 /// the user-facing identity becomes "Penny" while internal tool scaffolding
 /// stays intact. Designed to be backend-agnostic: today the backend is an
 /// AI/GPU infrastructure (Gadgetron), tomorrow it may be something else.
 /// Penny's identity travels with the product, not the backend.
-const PENNY_PERSONA: &str = r#"You are Penny (full name: Penny Brown), an interactive agent that helps users with tasks. Use the instructions below and the tools available to you to assist the user.
+pub(crate) const PENNY_PERSONA: &str = r#"You are Penny (full name: Penny Brown), an interactive agent that helps users with tasks. Use the instructions below and the tools available to you to assist the user.
 
 # System
  - All text you output outside of tool use is displayed to the user.
@@ -401,6 +404,28 @@ pub fn format_allowed_tools(raw_names: &[String]) -> String {
     prefixed.join(",")
 }
 
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
+fn toml_string_array(values: &[String]) -> String {
+    toml::Value::Array(
+        values
+            .iter()
+            .map(|value| toml::Value::String(value.clone()))
+            .collect(),
+    )
+    .to_string()
+}
+
+fn add_codex_config_override(cmd: &mut Command, key: &str, value: impl Into<String>) {
+    cmd.arg("-c").arg(format!("{key}={}", value.into()));
+}
+
+fn add_codex_string_override(cmd: &mut Command, key: &str, value: &str) {
+    add_codex_config_override(cmd, key, toml_string(value));
+}
+
 /// Reasons a Command build can fail BEFORE we ever touch tokio.
 ///
 /// These are operator-facing config errors that `AgentConfig::validate`
@@ -412,6 +437,12 @@ pub enum SpawnError {
 
     #[error("agent.brain.external_auth_token_env {env_name:?} is not set")]
     MissingAuthToken { env_name: String },
+
+    #[error("agent.codex api key env var {env_name:?} is not set")]
+    MissingCodexApiKey { env_name: String },
+
+    #[error("agent.codex compatible provider base URL env var {env_name:?} is not set")]
+    MissingCodexBaseUrl { env_name: String },
 
     #[error(
         "agent.brain.mode = 'gadgetron_local' is not functional in this build \
@@ -435,6 +466,20 @@ pub enum ClaudeSessionMode {
     /// Insert `--resume <uuid>`. Claude Code continues the existing
     /// session keyed by the UUID.
     Resume { session_uuid: uuid::Uuid },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexExecMode {
+    Exec { persist_session: bool },
+    Resume { session_id: String },
+}
+
+fn codex_approval_config_value(policy: CodexApprovalPolicy) -> &'static str {
+    match policy {
+        CodexApprovalPolicy::Untrusted => "untrusted",
+        CodexApprovalPolicy::OnFailure | CodexApprovalPolicy::OnRequest => "on-request",
+        CodexApprovalPolicy::Never => "never",
+    }
 }
 
 /// Build the `claude -p` command with the pre-A5 stateless session
@@ -500,9 +545,39 @@ fn apply_base_env_allowlist(cmd: &mut Command, env: &dyn EnvResolver) {
         cmd.env("SHELL", shell);
     }
 
-    // Fixed PATH — NOT inherited. Prevents the operator from affecting
-    // which `git`, `gpg`, etc. Claude Code resolves.
-    cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    // PATH — start with the locked-down system dirs so `git`, `gpg`,
+    // etc. always resolve to the platform binary the operator can't
+    // override. Then append well-known node install locations because
+    // both `claude` and `codex` are `#!/usr/bin/env node` wrapper
+    // scripts and would otherwise fail with exit 127. The operator
+    // can extend further via `GADGETRON_AGENT_NODE_PATH`.
+    let mut path_segments: Vec<String> =
+        vec!["/usr/local/bin".into(), "/usr/bin".into(), "/bin".into()];
+    if let Some(extra) = env
+        .get("GADGETRON_AGENT_NODE_PATH")
+        .filter(|v| !v.trim().is_empty())
+    {
+        for seg in extra.split(':').filter(|s| !s.is_empty()) {
+            path_segments.push(seg.to_string());
+        }
+    }
+    if let Some(home) = env.get("HOME").filter(|v| !v.trim().is_empty()) {
+        path_segments.push(format!("{home}/.local/bin"));
+        path_segments.push(format!("{home}/.local/opt/node/bin"));
+        // Pick the newest installed NVM node, if any. Cheap dir read.
+        let nvm_dir = format!("{home}/.nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
+            let mut versions: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            versions.sort();
+            if let Some(latest) = versions.last() {
+                path_segments.push(format!("{nvm_dir}/{latest}/bin"));
+            }
+        }
+    }
+    cmd.env("PATH", path_segments.join(":"));
 
     // Locale — fall through to UTF-8 defaults when unset.
     cmd.env(
@@ -551,23 +626,22 @@ fn apply_brain_mode_env(
             if !config.brain.external_base_url.is_empty() {
                 cmd.env("ANTHROPIC_BASE_URL", &config.brain.external_base_url);
             }
+            if !config.brain.external_auth_token_env.is_empty() {
+                let token = env
+                    .get(&config.brain.external_auth_token_env)
+                    .unwrap_or_default();
+                if token.is_empty() {
+                    return Err(SpawnError::MissingAuthToken {
+                        env_name: config.brain.external_auth_token_env.clone(),
+                    });
+                }
+                cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+            }
         }
         BrainMode::GadgetronLocal => {
             // Path 1: rejected before reaching here, but belt-and-suspenders.
             return Err(SpawnError::GadgetronLocalNotFunctional);
         }
-    }
-
-    if !config.brain.external_auth_token_env.is_empty() {
-        let token = env
-            .get(&config.brain.external_auth_token_env)
-            .unwrap_or_default();
-        if token.is_empty() {
-            return Err(SpawnError::MissingAuthToken {
-                env_name: config.brain.external_auth_token_env.clone(),
-            });
-        }
-        cmd.env("ANTHROPIC_AUTH_TOKEN", token);
     }
 
     if !config.brain.model.is_empty() {
@@ -578,6 +652,88 @@ fn apply_brain_mode_env(
     }
 
     Ok(())
+}
+
+fn apply_codex_runtime_env(
+    cmd: &mut Command,
+    config: &AgentConfig,
+    env: &dyn EnvResolver,
+) -> Result<(), SpawnError> {
+    if let Some(home) = config.codex.home.as_ref() {
+        cmd.env("CODEX_HOME", home);
+    } else if let Some(home) = env.get("CODEX_HOME").filter(|v| !v.trim().is_empty()) {
+        cmd.env("CODEX_HOME", home);
+    }
+
+    match config.codex.auth_mode {
+        CodexAuthMode::ChatGptLogin => {}
+        CodexAuthMode::OpenAiApiKeyEnv => {
+            let key = env.get(&config.codex.api_key_env).unwrap_or_default();
+            if key.trim().is_empty() {
+                return Err(SpawnError::MissingCodexApiKey {
+                    env_name: config.codex.api_key_env.clone(),
+                });
+            }
+            cmd.env("CODEX_API_KEY", key);
+            if let Some(org_id) = env
+                .get(&config.codex.org_id_env)
+                .filter(|value| !value.trim().is_empty())
+            {
+                cmd.env("OPENAI_ORG_ID", org_id);
+            }
+        }
+        CodexAuthMode::OpenAiCompatibleProviderEnv => {
+            let key = env
+                .get(&config.codex.compatible_api_key_env)
+                .unwrap_or_default();
+            if key.trim().is_empty() {
+                return Err(SpawnError::MissingCodexApiKey {
+                    env_name: config.codex.compatible_api_key_env.clone(),
+                });
+            }
+            let base_url = resolve_codex_compatible_base_url(config, env);
+            if base_url.trim().is_empty() {
+                return Err(SpawnError::MissingCodexBaseUrl {
+                    env_name: config.codex.compatible_base_url_env.clone(),
+                });
+            }
+            cmd.env(&config.codex.compatible_api_key_env, key);
+            if !is_http_url(&config.codex.compatible_base_url_env) {
+                cmd.env(&config.codex.compatible_base_url_env, &base_url);
+            }
+            cmd.env("OPENAI_BASE_URL", base_url);
+            if let Some(org_id) = env
+                .get(&config.codex.org_id_env)
+                .filter(|value| !value.trim().is_empty())
+            {
+                cmd.env("OPENAI_ORG_ID", org_id);
+            }
+        }
+    }
+
+    if !config.brain.model.is_empty() {
+        cmd.env("OPENAI_MODEL", &config.brain.model);
+    }
+
+    // PATH extension for node-based wrappers was moved into
+    // `apply_base_env_allowlist` so both Claude Code and Codex spawn
+    // pick up `~/.local/bin` / NVM by default. Codex-specific env
+    // adjustments end here.
+
+    Ok(())
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn resolve_codex_compatible_base_url(config: &AgentConfig, env: &dyn EnvResolver) -> String {
+    let raw = config.codex.compatible_base_url_env.trim();
+    if is_http_url(raw) {
+        raw.to_string()
+    } else {
+        env.get(raw).unwrap_or_default()
+    }
 }
 
 fn apply_claude_args(
@@ -591,6 +747,10 @@ fn apply_claude_args(
     if !config.brain.model.is_empty() {
         cmd.arg("--model").arg(&config.brain.model);
     }
+    // Reasoning effort level — admin-configurable, defaults to `max`.
+    // Claude Code accepts low/medium/high/xhigh/max directly.
+    cmd.arg("--effort")
+        .arg(config.brain.effort.as_claude_cli_value());
     cmd.arg("--verbose");
     cmd.arg("--output-format").arg("stream-json");
     cmd.arg("--include-partial-messages");
@@ -636,6 +796,185 @@ fn apply_claude_args(
         .arg(PENNY_DISALLOWED_TOOLS.join(","));
 }
 
+fn apply_codex_args(
+    cmd: &mut Command,
+    config: &AgentConfig,
+    mode: &CodexExecMode,
+    config_path: Option<&Path>,
+    allowed_tools: &[String],
+    workdir: Option<&Path>,
+    env: &dyn EnvResolver,
+) {
+    cmd.arg("exec");
+    match mode {
+        CodexExecMode::Exec { .. } => {
+            cmd.arg("-");
+        }
+        CodexExecMode::Resume { session_id } => {
+            cmd.arg("resume").arg(session_id).arg("-");
+        }
+    }
+    if !config.brain.model.is_empty() {
+        cmd.arg("--model").arg(&config.brain.model);
+    }
+    if !config.codex.profile.is_empty() {
+        cmd.arg("--profile").arg(&config.codex.profile);
+    }
+    cmd.arg("--json");
+    if matches!(mode, CodexExecMode::Exec { .. }) {
+        cmd.arg("--sandbox")
+            .arg(config.codex.sandbox.as_cli_value());
+        // codex 0.130+ dropped the `--ask-for-approval` CLI flag in
+        // favor of a generic config override. Pass the policy via
+        // `-c approval_policy="<value>"` so the spawn keeps working
+        // across versions without the operator having to touch
+        // `~/.codex/config.toml`.
+        add_codex_string_override(
+            &mut *cmd,
+            "approval_policy",
+            config.codex.approval_policy.as_cli_value(),
+        );
+        if let Some(workdir) = workdir {
+            cmd.arg("--cd").arg(workdir);
+        }
+    }
+    if config.codex.skip_git_repo_check {
+        cmd.arg("--skip-git-repo-check");
+    }
+    if matches!(
+        mode,
+        CodexExecMode::Exec {
+            persist_session: false
+        }
+    ) && config.codex.ephemeral
+    {
+        cmd.arg("--ephemeral");
+    }
+    if config.codex.ignore_rules {
+        cmd.arg("--ignore-rules");
+    }
+    if config.codex.ignore_user_config {
+        cmd.arg("--ignore-user-config");
+    }
+
+    let forced_login_method = match config.codex.auth_mode {
+        CodexAuthMode::ChatGptLogin => "chatgpt",
+        CodexAuthMode::OpenAiApiKeyEnv | CodexAuthMode::OpenAiCompatibleProviderEnv => "api",
+    };
+    add_codex_string_override(cmd, "forced_login_method", forced_login_method);
+    // Reasoning effort surfaced via the admin UI. Codex has no `max`
+    // tier — `AgentEffort::as_codex_config_value` collapses `Max` to
+    // `xhigh` so the runtime accepts the override.
+    add_codex_string_override(
+        cmd,
+        "model_reasoning_effort",
+        config.brain.effort.as_codex_config_value(),
+    );
+    add_codex_string_override(cmd, "sandbox_mode", config.codex.sandbox.as_cli_value());
+    add_codex_string_override(
+        cmd,
+        "approval_policy",
+        codex_approval_config_value(config.codex.approval_policy),
+    );
+
+    if config.codex.disable_shell_tool {
+        add_codex_config_override(cmd, "features.shell_tool", "false");
+    }
+
+    if matches!(
+        config.codex.auth_mode,
+        CodexAuthMode::OpenAiCompatibleProviderEnv
+    ) {
+        let provider_id = &config.codex.compatible_provider_id;
+        let base_url = resolve_codex_compatible_base_url(config, env);
+        add_codex_string_override(cmd, "model_provider", provider_id);
+        add_codex_string_override(
+            cmd,
+            &format!("model_providers.{provider_id}.name"),
+            provider_id,
+        );
+        add_codex_string_override(
+            cmd,
+            &format!("model_providers.{provider_id}.base_url"),
+            &base_url,
+        );
+        add_codex_string_override(
+            cmd,
+            &format!("model_providers.{provider_id}.env_key"),
+            &config.codex.compatible_api_key_env,
+        );
+    }
+
+    apply_codex_mcp_overrides(cmd, config, config_path, allowed_tools, env);
+}
+
+fn apply_codex_mcp_overrides(
+    cmd: &mut Command,
+    config: &AgentConfig,
+    config_path: Option<&Path>,
+    allowed_tools: &[String],
+    env: &dyn EnvResolver,
+) {
+    let json = crate::gadget_config::build_config_json_for_agent_with_env(config_path, config, env);
+    let Some(server) = json
+        .get("mcpServers")
+        .and_then(|servers| servers.get(MCP_SERVER_NAME))
+    else {
+        return;
+    };
+    let Some(command) = server.get("command").and_then(|v| v.as_str()) else {
+        return;
+    };
+
+    let key_prefix = format!("mcp_servers.{MCP_SERVER_NAME}");
+    add_codex_string_override(cmd, &format!("{key_prefix}.command"), command);
+
+    let args: Vec<String> = server
+        .get("args")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+        .collect();
+    add_codex_config_override(cmd, &format!("{key_prefix}.args"), toml_string_array(&args));
+
+    if let Some(env_map) = server.get("env").and_then(|v| v.as_object()) {
+        for (name, value) in env_map {
+            if let Some(value) = value.as_str() {
+                add_codex_string_override(cmd, &format!("{key_prefix}.env.{name}"), value);
+            }
+        }
+    }
+
+    let mut enabled_tools = allowed_tools.to_vec();
+    enabled_tools.sort();
+    enabled_tools.dedup();
+    if !enabled_tools.is_empty() {
+        add_codex_config_override(
+            cmd,
+            &format!("{key_prefix}.enabled_tools"),
+            toml_string_array(&enabled_tools),
+        );
+    }
+
+    // Codex MCP calls default to an interactive approval prompt. Penny
+    // runs `codex exec` non-interactively, so a prompt-only MCP server
+    // returns "user cancelled MCP tool call" before Gadgetron ever sees
+    // the request. The server-side Gadgetron registry/policy already
+    // defines which tools are exposed and how write/destructive gadgets
+    // are gated, so the Codex-side server policy must approve configured
+    // MCP tools instead of asking the absent TTY user.
+    add_codex_string_override(
+        cmd,
+        &format!("{key_prefix}.default_tools_approval_mode"),
+        "approve",
+    );
+
+    if config.codex.mcp_required {
+        add_codex_config_override(cmd, &format!("{key_prefix}.required"), "true");
+    }
+}
+
 /// Env-injectable variant of `build_claude_command` for tests. Does
 /// NOT add `--session-id` / `--resume`; callers that need native
 /// session continuity go through `build_claude_command_with_session`.
@@ -645,7 +984,7 @@ pub fn build_claude_command_with_env(
     allowed_tools: &[String],
     env: &dyn EnvResolver,
 ) -> Result<Command, SpawnError> {
-    let mut cmd = Command::new(&config.binary);
+    let mut cmd = Command::new(config.resolved_binary());
 
     // Drop inherited environment.
     cmd.env_clear();
@@ -672,10 +1011,64 @@ pub fn build_claude_command_with_env(
     Ok(cmd)
 }
 
+/// Build a `codex exec` command for Penny. This is the Codex sibling of
+/// `build_claude_command_with_env`: it uses the same env-clear/allow-list
+/// discipline but maps runtime state to Codex CLI flags and `-c` config
+/// overrides instead of Claude Code's `--mcp-config` JSON flag.
+pub fn build_codex_exec_command_with_env(
+    config: &AgentConfig,
+    config_path: Option<&Path>,
+    allowed_tools: &[String],
+    workdir: Option<&Path>,
+    env: &dyn EnvResolver,
+) -> Result<Command, SpawnError> {
+    build_codex_exec_command_with_mode(
+        config,
+        config_path,
+        allowed_tools,
+        workdir,
+        CodexExecMode::Exec {
+            persist_session: false,
+        },
+        env,
+    )
+}
+
+pub fn build_codex_exec_command_with_mode(
+    config: &AgentConfig,
+    config_path: Option<&Path>,
+    allowed_tools: &[String],
+    workdir: Option<&Path>,
+    mode: CodexExecMode,
+    env: &dyn EnvResolver,
+) -> Result<Command, SpawnError> {
+    let mut cmd = Command::new(config.resolved_binary());
+
+    cmd.env_clear();
+    apply_base_env_allowlist(&mut cmd, env);
+    apply_codex_runtime_env(&mut cmd, config, env)?;
+    apply_codex_args(
+        &mut cmd,
+        config,
+        &mode,
+        config_path,
+        allowed_tools,
+        workdir,
+        env,
+    );
+
+    if let Some(session_root) = config.session_store_path.as_ref() {
+        cmd.current_dir(session_root);
+    }
+    cmd.kill_on_drop(true);
+
+    Ok(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gadgetron_core::agent::config::{BrainConfig, FakeEnv};
+    use gadgetron_core::agent::config::{AgentBackend, BrainConfig, CodexAuthMode, FakeEnv};
     use std::path::PathBuf;
 
     fn default_cfg() -> AgentConfig {
@@ -763,6 +1156,7 @@ mod tests {
         let tools = vec!["wiki.list".to_string(), "wiki.write".to_string()];
         let cmd =
             build_claude_command_with_env(&cfg, &mcp_path(), &tools, &FakeEnv::new()).unwrap();
+        assert_eq!(cmd.as_std().get_program().to_string_lossy(), "claude");
         let args = args_of(&cmd);
         assert!(args.contains(&"-p".to_string()));
         assert!(args.iter().any(|a| a == "--output-format"));
@@ -772,6 +1166,188 @@ mod tests {
         assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
         assert!(args.iter().any(|a| a == "--allowed-tools"));
         assert!(args.iter().any(|a| a == "--disallowed-tools"));
+    }
+
+    #[test]
+    fn build_claude_command_preserves_binary_override() {
+        let mut cfg = default_cfg();
+        cfg.binary = "/home/test/.local/bin/claude".to_string();
+
+        let cmd = build_claude_command_with_env(&cfg, &mcp_path(), &[], &FakeEnv::new()).unwrap();
+
+        assert_eq!(
+            cmd.as_std().get_program().to_string_lossy(),
+            "/home/test/.local/bin/claude"
+        );
+    }
+
+    #[test]
+    fn build_codex_exec_command_default_args_contain_required_flags() {
+        let mut cfg = default_cfg();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.brain.model = "gpt-5.1-codex".to_string();
+        let tools = vec!["wiki.write".to_string(), "wiki.list".to_string()];
+        let workdir = PathBuf::from("/tmp/gadgetron-penny-work");
+
+        let cmd = build_codex_exec_command_with_env(
+            &cfg,
+            None,
+            &tools,
+            Some(workdir.as_path()),
+            &FakeEnv::new().with("HOME", "/home/test"),
+        )
+        .unwrap();
+
+        let args = args_of(&cmd);
+        assert_eq!(cmd.as_std().get_program().to_string_lossy(), "codex");
+        assert!(args.windows(2).any(|w| w == ["exec", "-"]));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--model", "gpt-5.1-codex"]));
+        assert!(args.windows(2).any(|w| w == ["--sandbox", "read-only"]));
+        // codex 0.130+ dropped `--ask-for-approval`; the policy is now
+        // surfaced as `-c approval_policy="never"` (see `apply_codex_args`).
+        assert!(args.iter().any(|a| a == r#"approval_policy="never""#));
+        // Reasoning effort surfaces via the same config-override path.
+        // Default `Max` collapses to `xhigh` for codex.
+        assert!(args
+            .iter()
+            .any(|a| a == r#"model_reasoning_effort="xhigh""#));
+        assert!(args.contains(&"--ephemeral".to_string()));
+        assert!(args.contains(&"--ignore-rules".to_string()));
+        assert!(args.contains(&"--ignore-user-config".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--cd", "/tmp/gadgetron-penny-work"]));
+        assert!(args.iter().any(|a| a == r#"forced_login_method="chatgpt""#));
+        assert!(args.iter().any(|a| a == "features.shell_tool=false"));
+        assert!(args
+            .iter()
+            .any(|a| a == "mcp_servers.knowledge.required=true"));
+        assert!(args
+            .iter()
+            .any(|a| a == r#"mcp_servers.knowledge.default_tools_approval_mode="approve""#));
+        assert!(args
+            .iter()
+            .any(|a| a == r#"mcp_servers.knowledge.enabled_tools=["wiki.list", "wiki.write"]"#));
+        assert!(!args.contains(&"-p".to_string()));
+        assert!(!args.contains(&"--mcp-config".to_string()));
+        assert!(!args.contains(&"--allowed-tools".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn build_codex_resume_command_uses_resume_subcommand_and_config_overrides() {
+        let mut cfg = default_cfg();
+        cfg.backend = AgentBackend::CodexExec;
+        let workdir = PathBuf::from("/tmp/gadgetron-penny-work");
+
+        let cmd = build_codex_exec_command_with_mode(
+            &cfg,
+            None,
+            &[],
+            Some(workdir.as_path()),
+            CodexExecMode::Resume {
+                session_id: "codex-thread-1".to_string(),
+            },
+            &FakeEnv::new().with("HOME", "/home/test"),
+        )
+        .unwrap();
+
+        let args = args_of(&cmd);
+        assert!(args
+            .windows(4)
+            .any(|w| w == ["exec", "resume", "codex-thread-1", "-"]));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.iter().any(|a| a == r#"sandbox_mode="read-only""#));
+        assert!(args.iter().any(|a| a == r#"approval_policy="never""#));
+        assert!(!args.contains(&"--sandbox".to_string()));
+        assert!(!args.contains(&"--ask-for-approval".to_string()));
+        assert!(!args.contains(&"--cd".to_string()));
+        assert!(!args.contains(&"--ephemeral".to_string()));
+    }
+
+    #[test]
+    fn build_codex_exec_command_api_key_mode_maps_configured_env_to_codex_api_key() {
+        let mut cfg = default_cfg();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiApiKeyEnv;
+        cfg.codex.api_key_env = "OPENAI_API_KEY".to_string();
+        let env = FakeEnv::new()
+            .with("HOME", "/home/test")
+            .with("OPENAI_API_KEY", "sk-test");
+
+        let cmd = build_codex_exec_command_with_env(&cfg, None, &[], None, &env).unwrap();
+        let args = args_of(&cmd);
+        let envs = envs_of(&cmd);
+        assert!(args.iter().any(|a| a == r#"forced_login_method="api""#));
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "CODEX_API_KEY")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn build_codex_exec_command_compatible_provider_mode_adds_provider_config() {
+        let mut cfg = default_cfg();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
+        let env = FakeEnv::new()
+            .with("HOME", "/home/test")
+            .with("OPENAI_API_KEY", "sk-compatible")
+            .with("OPENAI_BASE_URL", "https://llm.example.test/v1");
+
+        let cmd = build_codex_exec_command_with_env(&cfg, None, &[], None, &env).unwrap();
+        let args = args_of(&cmd);
+        let envs = envs_of(&cmd);
+        assert!(args
+            .iter()
+            .any(|a| a == r#"model_provider="gadgetron_openai_compatible""#));
+        assert!(args
+            .iter()
+            .any(|a| a == r#"model_providers.gadgetron_openai_compatible.base_url="https://llm.example.test/v1""#));
+        assert!(args.iter().any(
+            |a| a == r#"model_providers.gadgetron_openai_compatible.env_key="OPENAI_API_KEY""#
+        ));
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "OPENAI_API_KEY")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("sk-compatible")
+        );
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "OPENAI_BASE_URL")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("https://llm.example.test/v1")
+        );
+    }
+
+    #[test]
+    fn build_codex_exec_command_compatible_provider_accepts_literal_base_url() {
+        let mut cfg = default_cfg();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
+        cfg.codex.compatible_api_key_env = "LOCAL_LLM_API_KEY".to_string();
+        cfg.codex.compatible_base_url_env = "http://127.0.0.1:8000/v1".to_string();
+        let env = FakeEnv::new()
+            .with("HOME", "/home/test")
+            .with("LOCAL_LLM_API_KEY", "sk-compatible");
+
+        let cmd = build_codex_exec_command_with_env(&cfg, None, &[], None, &env).unwrap();
+        let args = args_of(&cmd);
+        let envs = envs_of(&cmd);
+        assert!(args.iter().any(
+            |a| a == r#"model_providers.gadgetron_openai_compatible.base_url="http://127.0.0.1:8000/v1""#
+        ));
+        assert_eq!(
+            envs.iter()
+                .find(|(k, _)| k == "OPENAI_BASE_URL")
+                .and_then(|(_, v)| v.as_deref()),
+            Some("http://127.0.0.1:8000/v1")
+        );
     }
 
     #[test]
@@ -870,9 +1446,17 @@ mod tests {
             .find(|(k, _)| k == "PATH")
             .and_then(|(_, v)| v.clone())
             .expect("PATH must be set");
-        assert_eq!(
-            path, "/usr/local/bin:/usr/bin:/bin",
-            "PATH must be the fixed allowlist, not inherited"
+        assert!(
+            path.starts_with("/usr/local/bin:/usr/bin:/bin"),
+            "PATH must start with the fixed allowlist, got {path}"
+        );
+        assert!(
+            !path.contains("/opt/operator/evil"),
+            "PATH must not inherit arbitrary operator segments: {path}"
+        );
+        assert!(
+            path.contains("/home/test/.local/bin"),
+            "PATH should include common user-space Node wrapper dir: {path}"
         );
     }
 
@@ -1044,6 +1628,24 @@ mod tests {
         let envs = envs_of(&cmd);
         assert!(!envs.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY"));
         assert!(!envs.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
+        assert!(!envs.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn build_claude_command_claude_max_ignores_stale_auth_token_env_setting() {
+        let mut cfg = default_cfg(); // default is ClaudeMax
+        cfg.brain.external_auth_token_env = "PENNY_CCR_AUTH_TOKEN".into();
+        let env = FakeEnv::new()
+            .with("HOME", "/h")
+            .with("PENNY_CCR_AUTH_TOKEN", "stale-proxy-token");
+
+        let cmd = build_claude_command_with_env(&cfg, &mcp_path(), &[], &env).unwrap();
+        let envs = envs_of(&cmd);
+
+        assert!(
+            !envs.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN"),
+            "Claude OAuth mode must not receive proxy/API auth tokens"
+        );
     }
 
     #[test]
