@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full-stack lifecycle wrapper: Postgres container + gadgetron serve.
+# Local dev full-stack lifecycle wrapper: Postgres container + gadgetron serve.
 #
 # Usage:
 #   scripts/stack.sh up         # start postgres + gadgetron (background)
@@ -12,6 +12,11 @@
 # Postgres is run from the local image gadgetron-pgvector-timescale:pg16
 # (see images/pgvector-timescale/Dockerfile). The container uses a named
 # volume so DB state survives `down`/`up`.
+#
+# This wrapper is for the 18085 development service. Production/demo-like
+# deployments, including the separate 18080 service, should use their own
+# checkout/config/env. Override GADGETRON_POSTGRES_DB if you intentionally
+# want a different local database.
 
 set -euo pipefail
 
@@ -24,9 +29,10 @@ PG_VOLUME="gadgetron-pgdata"
 PG_PORT="127.0.0.1:5432:5432"
 PG_USER="gadgetron"
 PG_PASSWORD="secret"
-PG_DB="gadgetron_demo"
+PG_DB="${GADGETRON_POSTGRES_DB:-gadgetron_dev}"
 
 LAUNCH="${SCRIPT_DIR}/launch.sh"
+LOG="${GADGETRON_LOG_FILE:-${REPO}/.gadgetron/gadgetron-serve.log}"
 
 pg_running() {
     [[ "$(docker inspect -f '{{.State.Running}}' "${PG_CONTAINER}" 2>/dev/null)" == "true" ]]
@@ -43,13 +49,22 @@ pg_image_exists() {
 pg_wait_ready() {
     local i
     for i in $(seq 1 60); do
-        if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" -d "${PG_DB}" -q 2>/dev/null; then
+        if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" -d postgres -q 2>/dev/null; then
             return 0
         fi
         sleep 1
     done
     echo "error: postgres not ready after 60s" >&2
     return 1
+}
+
+pg_ensure_db() {
+    if docker exec "${PG_CONTAINER}" psql -U "${PG_USER}" -d postgres -tAc \
+        "select 1 from pg_database where datname = '${PG_DB}'" | grep -q 1; then
+        return
+    fi
+    echo "→ creating database ${PG_DB}"
+    docker exec "${PG_CONTAINER}" createdb -U "${PG_USER}" "${PG_DB}"
 }
 
 pg_up() {
@@ -79,6 +94,7 @@ pg_up() {
     echo -n "→ waiting for postgres to accept connections "
     pg_wait_ready
     echo "ready"
+    pg_ensure_db
 }
 
 pg_down() {
@@ -128,7 +144,7 @@ cmd_rebuild() {
 
 cmd_logs() {
     echo "=== gadgetron (last 40) ==="
-    tail -n 40 "${GADGETRON_LOG_FILE:-/tmp/gadgetron-serve.log}" 2>/dev/null || echo "(no gadgetron log)"
+    tail -n 40 "${LOG}" 2>/dev/null || echo "(no gadgetron log)"
     echo
     echo "=== postgres (last 40) ==="
     docker logs --tail 40 "${PG_CONTAINER}" 2>&1 || true

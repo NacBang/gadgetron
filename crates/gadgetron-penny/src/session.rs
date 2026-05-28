@@ -1,9 +1,8 @@
-//! `ClaudeCodeSession` — consuming subprocess lifecycle.
+//! Agent backend subprocess lifecycle.
 //!
-//! Owns one Claude Code invocation from `claude -p` spawn through
-//! stdout drain + wait + stderr collection. The session exposes a
-//! single consuming method `run(self)` that returns a boxed `Stream`
-//! of `ChatChunk` values.
+//! Owns one Penny backend invocation from subprocess spawn through stdout drain,
+//! wait, and stderr collection. The session exposes a single consuming method
+//! `run(self)` that returns a boxed `Stream` of `ChatChunk` values.
 //!
 //! # Implementation — mpsc channel
 //!
@@ -56,13 +55,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
-use gadgetron_core::agent::config::{AgentConfig, SessionMode, StdEnv};
-use gadgetron_core::audit::{
-    GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome, GadgetMetadata, GadgetTier,
-    NoopGadgetAuditEventSink,
-};
+use gadgetron_core::agent::config::{AgentBackend, AgentConfig, SessionMode, StdEnv};
+use gadgetron_core::audit::{GadgetAuditEventSink, GadgetMetadata, NoopGadgetAuditEventSink};
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
-use gadgetron_core::message::Role;
 use gadgetron_core::provider::{ChatChunk, ChatRequest};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -71,18 +66,36 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::agent_backend::{
+    BackendCommandMode, BackendLineResult, BackendSessionTurn, BackendStreamHandler,
+    BackendTurnPlan,
+};
+use crate::backend_session::AgentBackendSessionPersistence;
 use crate::gadget_config::write_config_file_for_agent;
 use crate::home::PennyHome;
+pub use crate::prompt::{build_stdin_payload, StdinMode};
 use crate::redact::redact_stderr;
 use crate::session_store::SessionStore;
-use crate::spawn::{build_claude_command_with_session, ClaudeSessionMode};
-use crate::stream::{event_to_chat_chunks_ex, parse_event, StreamJsonEvent};
+use crate::spawn::{
+    build_claude_command_with_session, build_codex_exec_command_with_mode, ClaudeSessionMode,
+    CodexExecMode,
+};
+
+#[cfg(test)]
+use crate::agent_backend::emit_tool_audit_if_needed;
+#[cfg(test)]
+use crate::stream::StreamJsonEvent;
+#[cfg(test)]
+use gadgetron_core::audit::{GadgetAuditEvent, GadgetCallOutcome, GadgetTier};
+#[cfg(test)]
+use gadgetron_core::message::Role;
 
 /// Bound on the in-flight chunk channel. Small values are fine —
 /// Claude Code emits chunks faster than HTTP can drain them anyway,
 /// and back-pressure is desired on slow clients.
 const CHUNK_CHANNEL_CAPACITY: usize = 32;
 const SILENT_AGENT_ERROR_RETRIES: usize = 1;
+const PROCESS_OUTPUT_TAIL_MAX_BYTES: usize = 8 * 1024;
 
 /// Internal session-driver state resolved from `AgentConfig.session_mode`,
 /// `ChatRequest.conversation_id`, and `SessionStore` lookup. Not public —
@@ -95,72 +108,48 @@ enum SpawnMode {
     Stateless,
     FirstTurn {
         conversation_id: String,
-        claude_session_uuid: Uuid,
+        gadgetron_session_uuid: Uuid,
         _guard: tokio::sync::OwnedMutexGuard<()>,
     },
     ResumeTurn {
         conversation_id: String,
-        claude_session_uuid: Uuid,
+        gadgetron_session_uuid: Uuid,
+        backend_session_id: Option<String>,
         _guard: tokio::sync::OwnedMutexGuard<()>,
     },
 }
 
-/// Driver-local execution context derived from `SpawnMode`.
-///
-/// Keeps the branching logic in one place so the hot path can work
-/// with concrete session/audit values instead of repeatedly matching
-/// on `SpawnMode`.
-#[derive(Debug)]
-struct DriverContext {
-    claude_session_mode: ClaudeSessionMode,
-    stdin_mode: StdinMode,
-    audit_conversation_id: Option<String>,
-    audit_session_uuid: Option<String>,
-}
-
-impl DriverContext {
-    fn from_spawn_mode(spawn_mode: &SpawnMode) -> Self {
-        match spawn_mode {
-            SpawnMode::Stateless => Self {
-                claude_session_mode: ClaudeSessionMode::Stateless,
-                stdin_mode: StdinMode::FlattenHistory,
-                audit_conversation_id: None,
-                audit_session_uuid: None,
-            },
-            SpawnMode::FirstTurn {
-                conversation_id,
-                claude_session_uuid,
-                ..
-            } => Self {
-                claude_session_mode: ClaudeSessionMode::First {
-                    session_uuid: *claude_session_uuid,
-                },
-                stdin_mode: StdinMode::NativeFirstTurn,
-                audit_conversation_id: Some(conversation_id.clone()),
-                audit_session_uuid: Some(claude_session_uuid.to_string()),
-            },
-            SpawnMode::ResumeTurn {
-                conversation_id,
-                claude_session_uuid,
-                ..
-            } => Self {
-                claude_session_mode: ClaudeSessionMode::Resume {
-                    session_uuid: *claude_session_uuid,
-                },
-                stdin_mode: StdinMode::NativeResumeTurn,
-                audit_conversation_id: Some(conversation_id.clone()),
-                audit_session_uuid: Some(claude_session_uuid.to_string()),
-            },
-        }
-    }
+fn plan_backend_turn(backend: AgentBackend, spawn_mode: &SpawnMode) -> Result<BackendTurnPlan> {
+    let turn = match spawn_mode {
+        SpawnMode::Stateless => BackendSessionTurn::Stateless,
+        SpawnMode::FirstTurn {
+            conversation_id,
+            gadgetron_session_uuid,
+            ..
+        } => BackendSessionTurn::First {
+            conversation_id,
+            gadgetron_session_uuid: *gadgetron_session_uuid,
+        },
+        SpawnMode::ResumeTurn {
+            conversation_id,
+            gadgetron_session_uuid,
+            backend_session_id,
+            ..
+        } => BackendSessionTurn::Resume {
+            conversation_id,
+            gadgetron_session_uuid: *gadgetron_session_uuid,
+            backend_session_id: backend_session_id.clone(),
+        },
+    };
+    BackendTurnPlan::from_turn(backend, turn)
 }
 
 /// Spawned subprocess handles retained for the full request lifecycle.
 ///
 /// The temporary MCP config file must live as long as the subprocess,
 /// so it is owned by this bundle rather than a loose local variable.
-struct SpawnedClaudeProcess {
-    _mcp_tmp: NamedTempFile,
+struct SpawnedAgentProcess {
+    _mcp_tmp: Option<NamedTempFile>,
     child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -174,14 +163,53 @@ enum StreamLoopOutcome {
     ReceiverDropped,
 }
 
-/// One Claude Code subprocess invocation.
-pub struct ClaudeCodeSession {
+#[derive(Debug, Clone)]
+struct ProcessOutputTail {
+    max_bytes: usize,
+    text: String,
+}
+
+impl ProcessOutputTail {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            text: String::new(),
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if self.max_bytes == 0 {
+            return;
+        }
+        self.text.push_str(&redact_stderr(line));
+        self.trim_to_max_bytes();
+    }
+
+    fn trimmed(&self) -> String {
+        self.text.trim().to_string()
+    }
+
+    fn trim_to_max_bytes(&mut self) {
+        if self.text.len() <= self.max_bytes {
+            return;
+        }
+        let mut start = self.text.len() - self.max_bytes;
+        while start < self.text.len() && !self.text.is_char_boundary(start) {
+            start += 1;
+        }
+        self.text.replace_range(..start, "");
+    }
+}
+
+/// One Penny backend subprocess invocation.
+pub struct AgentSession {
     config: Arc<AgentConfig>,
     allowed_tools: Vec<String>,
     request: ChatRequest,
     tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
     audit_sink: Arc<dyn GadgetAuditEventSink>,
     session_store: Option<Arc<SessionStore>>,
+    backend_session_persistence: Option<Arc<dyn AgentBackendSessionPersistence>>,
     /// Neutral cwd for Claude Code (see `crate::home`). When `None`,
     /// spawn inherits the caller's cwd — acceptable for tests but means
     /// Claude Code's per-project auto-memory keys to whatever directory
@@ -197,7 +225,7 @@ pub struct ClaudeCodeSession {
     config_path: Option<PathBuf>,
 }
 
-impl ClaudeCodeSession {
+impl AgentSession {
     /// Construct a session with an explicit audit sink + tool metadata
     /// snapshot. The metadata snapshot is taken from
     /// `GadgetRegistry::tool_metadata_snapshot()` by the caller (the
@@ -240,6 +268,7 @@ impl ClaudeCodeSession {
             tool_metadata,
             audit_sink,
             session_store,
+            None,
             penny_home,
             None,
         )
@@ -256,6 +285,7 @@ impl ClaudeCodeSession {
         tool_metadata: Arc<HashMap<String, GadgetMetadata>>,
         audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Option<Arc<SessionStore>>,
+        backend_session_persistence: Option<Arc<dyn AgentBackendSessionPersistence>>,
         penny_home: Option<Arc<PennyHome>>,
         config_path: Option<PathBuf>,
     ) -> Self {
@@ -266,6 +296,7 @@ impl ClaudeCodeSession {
             tool_metadata,
             audit_sink,
             session_store,
+            backend_session_persistence,
             penny_home,
             config_path,
         }
@@ -303,14 +334,19 @@ impl ClaudeCodeSession {
 
 /// The async task that owns the subprocess and pushes chunks / errors
 /// to the output channel.
-async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChunk>>) {
-    let ClaudeCodeSession {
+/// Backwards-compatible name retained for callers that still refer to the
+/// original Claude-only session type.
+pub type ClaudeCodeSession = AgentSession;
+
+async fn run_driver(session: AgentSession, tx: mpsc::Sender<Result<ChatChunk>>) {
+    let AgentSession {
         config,
         allowed_tools,
         request,
         tool_metadata,
         audit_sink,
         session_store,
+        backend_session_persistence,
         penny_home,
         config_path,
     } = session;
@@ -323,6 +359,7 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
         audit_sink.as_ref(),
         &tx,
         session_store.as_deref(),
+        backend_session_persistence.as_deref(),
         penny_home.as_deref(),
         config_path.as_deref(),
     )
@@ -337,101 +374,13 @@ async fn run_driver(session: ClaudeCodeSession, tx: mpsc::Sender<Result<ChatChun
     }
 }
 
-/// Emit a `GadgetCallCompleted` audit event for a single stream-json
-/// `ToolUse` boundary. Called BEFORE `event_to_chat_chunks` on the
-/// hot path so the audit write happens even if the caller fails to
-/// drain the chunk channel. Other event variants are ignored.
-///
-/// `elapsed_ms` is 0 — precise `id`-based correlation requires the
-/// `fake_claude` infrastructure.
-fn emit_tool_audit_if_needed(
-    event: &StreamJsonEvent,
-    tool_metadata: &HashMap<String, GadgetMetadata>,
-    audit_sink: &dyn GadgetAuditEventSink,
-    conversation_id: Option<&str>,
-    claude_session_uuid: Option<&str>,
-) -> bool {
-    // Tool use arrives in two shapes on the stream-json wire:
-    //   1. Legacy top-level `StreamJsonEvent::ToolUse` — kept for
-    //      forward compat / older Claude Code versions.
-    //   2. Claude Code ≥2.1: inside `Assistant.message.content[]` as a
-    //      `ContentBlock::ToolUse`. This is the current hot path; the
-    //      legacy arm alone silently drops audits against CC 2.1+.
-    let calls: Vec<(&str, &serde_json::Value)> = match event {
-        StreamJsonEvent::ToolUse { name, input, .. } => vec![(name.as_str(), input)],
-        StreamJsonEvent::Assistant { message } => message
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                crate::stream::ContentBlock::ToolUse { name, input, .. } => {
-                    Some((name.as_str(), input))
-                }
-                _ => None,
-            })
-            .collect(),
-        _ => return false,
-    };
-    let mut emitted = false;
-    for (name, input) in calls {
-        // Claude Code sanitizes dots in MCP tool identifiers to
-        // underscores (`wiki.list` → `wiki_list` on the wire). Undo
-        // the rewrite before registry lookup so tier/category resolve
-        // instead of falling back to the "unknown" default.
-        let without_prefix = name.strip_prefix("mcp__knowledge__").unwrap_or(name);
-        let canonical = without_prefix.replace('_', ".");
-        let (tier, category) = match tool_metadata.get(canonical.as_str()) {
-            Some(meta) => (meta.tier, meta.category.clone()),
-            None => match tool_metadata.get(without_prefix) {
-                Some(meta) => (meta.tier, meta.category.clone()),
-                None => (GadgetTier::Read, "unknown".to_string()),
-            },
-        };
-        let arguments_summary = summarize_tool_input(input);
-        audit_sink.send(GadgetAuditEvent::GadgetCallCompleted {
-            gadget_name: canonical.clone(),
-            tier,
-            category,
-            outcome: GadgetCallOutcome::Success,
-            elapsed_ms: 0,
-            conversation_id: conversation_id.map(|s| s.to_string()),
-            claude_session_uuid: claude_session_uuid.map(|s| s.to_string()),
-            owner_id: None,
-            tenant_id: None,
-            arguments_summary,
-        });
-        emitted = true;
-    }
-    emitted
-}
-
-/// Render a tool-call input JSON into a short one-line preview for
-/// the evidence pane. Caps at 200 chars so the bus payload stays
-/// bounded regardless of how verbose the model's arguments get.
-fn summarize_tool_input(input: &serde_json::Value) -> Option<String> {
-    if input.is_null() {
-        return None;
-    }
-    let rendered = match input {
-        serde_json::Value::Object(map) if map.is_empty() => return None,
-        _ => serde_json::to_string(input).ok()?,
-    };
-    const MAX: usize = 200;
-    if rendered.chars().count() <= MAX {
-        Some(rendered)
-    } else {
-        let mut out: String = rendered.chars().take(MAX).collect();
-        out.push('…');
-        Some(out)
-    }
-}
-
 fn spawn_claude_process(
     config: &AgentConfig,
     allowed_tools: &[String],
     claude_session_mode: ClaudeSessionMode,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
-) -> Result<SpawnedClaudeProcess> {
+) -> Result<SpawnedAgentProcess> {
     // 1. MCP config tempfile (mkstemp 0600 atomic). `config_path`
     // is forwarded so the MCP grandchild spawned by Claude Code can find
     // `[knowledge]` / `[agent]` even though its cwd is pinned to Penny's
@@ -470,6 +419,28 @@ fn spawn_claude_process(
         cmd.current_dir(home.workdir());
     }
 
+    tracing::info!(
+        target: "penny_subprocess",
+        backend = %config.backend.as_str(),
+        binary = %config.resolved_binary(),
+        brain_mode = %config.brain.mode.as_str(),
+        auth_source = match config.brain.mode {
+            gadgetron_core::agent::config::BrainMode::ClaudeMax => "claude_oauth",
+            gadgetron_core::agent::config::BrainMode::ExternalAnthropic => "anthropic_api_key",
+            gadgetron_core::agent::config::BrainMode::ExternalProxy => "external_proxy",
+            gadgetron_core::agent::config::BrainMode::GadgetronLocal => "gadgetron_local",
+        },
+        session_mode = ?claude_session_mode,
+        model_set = !config.brain.model.is_empty(),
+        anthropic_base_url_set = !config.brain.external_base_url.is_empty(),
+        anthropic_auth_token_env_set = matches!(
+            config.brain.mode,
+            gadgetron_core::agent::config::BrainMode::ExternalProxy
+        ) && !config.brain.external_auth_token_env.is_empty(),
+        allowed_tools = allowed_tools.len(),
+        "spawning penny subprocess"
+    );
+
     // 3. Spawn.
     let mut child: Child = cmd
         .stdin(std::process::Stdio::piped())
@@ -503,8 +474,8 @@ fn spawn_claude_process(
         buf
     });
 
-    Ok(SpawnedClaudeProcess {
-        _mcp_tmp: mcp_tmp,
+    Ok(SpawnedAgentProcess {
+        _mcp_tmp: Some(mcp_tmp),
         child,
         stdin,
         stdout,
@@ -512,9 +483,111 @@ fn spawn_claude_process(
     })
 }
 
+fn spawn_codex_process(
+    config: &AgentConfig,
+    allowed_tools: &[String],
+    mode: CodexExecMode,
+    penny_home: Option<&PennyHome>,
+    config_path: Option<&std::path::Path>,
+) -> Result<SpawnedAgentProcess> {
+    let workdir_buf = penny_home.map(PennyHome::workdir);
+    let mut cmd = build_codex_exec_command_with_mode(
+        config,
+        config_path,
+        allowed_tools,
+        workdir_buf.as_deref(),
+        mode.clone(),
+        &StdEnv,
+    )
+    .map_err(|e| GadgetronError::Penny {
+        kind: PennyErrorKind::SpawnFailed {
+            reason: e.to_string(),
+        },
+        message: format!("failed to build codex command: {e}"),
+    })?;
+
+    if let Some(home) = penny_home {
+        cmd.current_dir(home.workdir());
+    }
+
+    tracing::info!(
+        target: "penny_subprocess",
+        backend = %config.backend.as_str(),
+        binary = %config.resolved_binary(),
+        codex_auth_mode = ?config.codex.auth_mode,
+        auth_source = match config.codex.auth_mode {
+            gadgetron_core::agent::config::CodexAuthMode::ChatGptLogin => "chatgpt_oauth",
+            gadgetron_core::agent::config::CodexAuthMode::OpenAiApiKeyEnv => "openai_api_key",
+            gadgetron_core::agent::config::CodexAuthMode::OpenAiCompatibleProviderEnv => "openai_compatible_provider",
+        },
+        exec_mode = ?mode,
+        model_set = !config.brain.model.is_empty(),
+        codex_home_set = config.codex.home.is_some(),
+        compatible_base_url_ref_set = !config.codex.compatible_base_url_env.is_empty(),
+        allowed_tools = allowed_tools.len(),
+        "spawning penny subprocess"
+    );
+
+    let mut child: Child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            let kind = if e.kind() == std::io::ErrorKind::NotFound {
+                PennyErrorKind::NotInstalled
+            } else {
+                PennyErrorKind::SpawnFailed {
+                    reason: e.to_string(),
+                }
+            };
+            GadgetronError::Penny {
+                kind,
+                message: "failed to spawn codex subprocess".to_string(),
+            }
+        })?;
+
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+
+    let stderr_handle = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_end(&mut buf).await;
+        buf
+    });
+
+    Ok(SpawnedAgentProcess {
+        _mcp_tmp: None,
+        child,
+        stdin,
+        stdout,
+        stderr_handle,
+    })
+}
+
+fn spawn_agent_process(
+    config: &AgentConfig,
+    allowed_tools: &[String],
+    command_mode: BackendCommandMode,
+    penny_home: Option<&PennyHome>,
+    config_path: Option<&std::path::Path>,
+) -> Result<SpawnedAgentProcess> {
+    match command_mode {
+        BackendCommandMode::Claude(mode) => {
+            spawn_claude_process(config, allowed_tools, mode, penny_home, config_path)
+        }
+        BackendCommandMode::Codex(mode) => {
+            spawn_codex_process(config, allowed_tools, mode, penny_home, config_path)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stream_stdout_with_idle_timeout(
     stdout: ChildStdout,
+    handler: &mut BackendStreamHandler,
     request: &ChatRequest,
     tool_metadata: &HashMap<String, GadgetMetadata>,
     audit_sink: &dyn GadgetAuditEventSink,
@@ -523,14 +596,10 @@ async fn stream_stdout_with_idle_timeout(
     audit_conv_id: Option<&str>,
     audit_session_uuid_ref: Option<&str>,
     emitted_chunks: &mut bool,
+    stdout_tail: &mut ProcessOutputTail,
 ) -> Result<StreamLoopOutcome> {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    // Track whether we've received stream_event deltas
-    // (--include-partial-messages). When true, assistant event text
-    // blocks are duplicates of the already-streamed tokens and must
-    // be suppressed to avoid double-rendering on the client.
-    let mut has_streamed_deltas = false;
 
     loop {
         line.clear();
@@ -554,38 +623,29 @@ async fn stream_stdout_with_idle_timeout(
         if n == 0 {
             return Ok(StreamLoopOutcome::Eof);
         }
-        match parse_event(&line) {
-            Ok(Some(event)) => {
-                if matches!(&event, StreamJsonEvent::StreamEvent { .. }) {
-                    has_streamed_deltas = true;
-                }
-                if emit_tool_audit_if_needed(
-                    &event,
-                    tool_metadata,
-                    audit_sink,
-                    audit_conv_id,
-                    audit_session_uuid_ref,
-                ) {
-                    *emitted_chunks = true;
-                }
-                for chunk in event_to_chat_chunks_ex(event, request, has_streamed_deltas) {
-                    // Back-pressure: if the receiver is gone,
-                    // stop driving — the caller will cleanly
-                    // terminate the subprocess.
-                    if tx.send(Ok(chunk)).await.is_err() {
-                        return Ok(StreamLoopOutcome::ReceiverDropped);
-                    }
-                    *emitted_chunks = true;
-                }
+        stdout_tail.push_line(&line);
+        let Some(BackendLineResult {
+            chunks,
+            emitted_activity,
+        }) = handler.handle_line(
+            &line,
+            request,
+            tool_metadata,
+            audit_sink,
+            audit_conv_id,
+            audit_session_uuid_ref,
+        )?
+        else {
+            continue;
+        };
+        if emitted_activity {
+            *emitted_chunks = true;
+        }
+        for chunk in chunks {
+            if tx.send(Ok(chunk)).await.is_err() {
+                return Ok(StreamLoopOutcome::ReceiverDropped);
             }
-            Ok(None) => { /* empty line or unknown variant */ }
-            Err(e) => {
-                tracing::warn!(
-                    target: "penny_stream",
-                    error = %e,
-                    "stream-json line did not parse; skipping"
-                );
-            }
+            *emitted_chunks = true;
         }
     }
 }
@@ -606,25 +666,42 @@ async fn collect_stderr(stderr_handle: tokio::task::JoinHandle<Vec<u8>>) -> Stri
     redact_stderr(&stderr_raw)
 }
 
-fn ensure_successful_exit(status: std::process::ExitStatus, stderr_redacted: String) -> Result<()> {
+fn ensure_successful_exit(
+    status: std::process::ExitStatus,
+    stderr_redacted: String,
+    stdout_tail_redacted: String,
+) -> Result<()> {
     if status.success() {
         return Ok(());
     }
 
     let exit_code = status.code().unwrap_or(-1);
+    let diagnostic_output = agent_error_diagnostic_output(&stderr_redacted, &stdout_tail_redacted);
     tracing::warn!(
         target: "penny_subprocess",
         exit_code,
         stderr = %stderr_redacted,
+        stdout_tail = %stdout_tail_redacted,
         "penny subprocess exited with error"
     );
     Err(GadgetronError::Penny {
         kind: PennyErrorKind::AgentError {
             exit_code,
-            stderr_redacted,
+            stderr_redacted: diagnostic_output,
         },
         message: "penny subprocess exited with error".to_string(),
     })
+}
+
+fn agent_error_diagnostic_output(stderr_redacted: &str, stdout_tail_redacted: &str) -> String {
+    let stderr = stderr_redacted.trim();
+    let stdout_tail = stdout_tail_redacted.trim();
+    match (stderr.is_empty(), stdout_tail.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stderr.to_string(),
+        (true, false) => format!("stdout_tail={stdout_tail}"),
+        (false, false) => format!("stderr={stderr}\nstdout_tail={stdout_tail}"),
+    }
 }
 
 /// Resolve the spawn mode from config, request, and session store.
@@ -635,6 +712,7 @@ async fn resolve_spawn_mode(
     config: &AgentConfig,
     request: &ChatRequest,
     session_store: Option<&SessionStore>,
+    backend_session_persistence: Option<&dyn AgentBackendSessionPersistence>,
 ) -> Result<SpawnMode> {
     if config.session_mode == SessionMode::StatelessOnly {
         return Ok(SpawnMode::Stateless);
@@ -657,7 +735,20 @@ async fn resolve_spawn_mode(
         }
     };
 
-    let (entry, first_turn) = store.get_or_create(conversation_id.to_string());
+    let persisted_backend_session_id = match backend_session_persistence {
+        Some(persistence) => {
+            persistence
+                .load_backend_session_id(conversation_id, config.backend)
+                .await
+        }
+        None => None,
+    };
+
+    let (entry, first_turn) = store.get_or_create_with_backend_session(
+        conversation_id.to_string(),
+        config.backend,
+        persisted_backend_session_id,
+    );
 
     if first_turn && config.session_mode == SessionMode::NativeOnly {
         return Err(GadgetronError::Penny {
@@ -681,16 +772,28 @@ async fn resolve_spawn_mode(
             .to_string(),
     })?;
 
-    if first_turn {
+    let backend_session_id = entry.backend_session_id(config.backend);
+
+    if first_turn
+        || (matches!(config.backend, AgentBackend::CodexExec) && backend_session_id.is_none())
+    {
+        if !first_turn && matches!(config.backend, AgentBackend::CodexExec) {
+            tracing::warn!(
+                target: "penny_session",
+                conversation_id,
+                "conversation has no captured Codex session id — starting a new persistent Codex session with flattened history"
+            );
+        }
         Ok(SpawnMode::FirstTurn {
             conversation_id: conversation_id.to_string(),
-            claude_session_uuid: entry.claude_session_uuid,
+            gadgetron_session_uuid: entry.claude_session_uuid,
             _guard: guard,
         })
     } else {
         Ok(SpawnMode::ResumeTurn {
             conversation_id: conversation_id.to_string(),
-            claude_session_uuid: entry.claude_session_uuid,
+            gadgetron_session_uuid: entry.claude_session_uuid,
+            backend_session_id,
             _guard: guard,
         })
     }
@@ -714,12 +817,14 @@ async fn drive(
     audit_sink: &dyn GadgetAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
     session_store: Option<&SessionStore>,
+    backend_session_persistence: Option<&dyn AgentBackendSessionPersistence>,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
 ) -> Result<()> {
     // 0. Resolve spawn mode (native session branching).
-    let spawn_mode = resolve_spawn_mode(config, request, session_store).await?;
-    let driver_ctx = DriverContext::from_spawn_mode(&spawn_mode);
+    let spawn_mode =
+        resolve_spawn_mode(config, request, session_store, backend_session_persistence).await?;
+    let turn_plan = plan_backend_turn(config.backend, &spawn_mode)?;
     let mut attempt = 0;
 
     loop {
@@ -731,9 +836,11 @@ async fn drive(
             tool_metadata,
             audit_sink,
             tx,
+            session_store,
+            backend_session_persistence,
             penny_home,
             config_path,
-            &driver_ctx,
+            &turn_plan,
             &mut emitted_chunks,
         )
         .await
@@ -763,15 +870,18 @@ async fn drive(
 }
 
 fn should_retry_agent_error(err: &GadgetronError, attempt: usize, emitted_chunks: bool) -> bool {
-    attempt < SILENT_AGENT_ERROR_RETRIES
-        && !emitted_chunks
-        && matches!(
-            err,
-            GadgetronError::Penny {
-                kind: PennyErrorKind::AgentError { .. },
-                ..
-            }
-        )
+    if attempt >= SILENT_AGENT_ERROR_RETRIES || emitted_chunks {
+        return false;
+    }
+    match err {
+        GadgetronError::Penny {
+            kind: PennyErrorKind::AgentError {
+                stderr_redacted, ..
+            },
+            ..
+        } => stderr_redacted.trim().is_empty(),
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -782,15 +892,17 @@ async fn drive_attempt(
     tool_metadata: &HashMap<String, GadgetMetadata>,
     audit_sink: &dyn GadgetAuditEventSink,
     tx: &mpsc::Sender<Result<ChatChunk>>,
+    session_store: Option<&SessionStore>,
+    backend_session_persistence: Option<&dyn AgentBackendSessionPersistence>,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
-    driver_ctx: &DriverContext,
+    turn_plan: &BackendTurnPlan,
     emitted_chunks: &mut bool,
 ) -> Result<()> {
-    let mut process = spawn_claude_process(
+    let mut process = spawn_agent_process(
         config,
         allowed_tools,
-        driver_ctx.claude_session_mode,
+        turn_plan.command_mode.clone(),
         penny_home,
         config_path,
     )?;
@@ -801,18 +913,22 @@ async fn drive_attempt(
     let idle_timeout_secs = config.request_timeout_secs;
 
     // 6. Feed stdin with mode-appropriate payload and close.
-    feed_stdin_with_mode(process.stdin, request, driver_ctx.stdin_mode).await?;
+    feed_stdin_with_mode(process.stdin, request, turn_plan.stdin_mode).await?;
 
+    let mut stream_handler = BackendStreamHandler::new(turn_plan.backend);
+    let mut stdout_tail = ProcessOutputTail::new(PROCESS_OUTPUT_TAIL_MAX_BYTES);
     match stream_stdout_with_idle_timeout(
         process.stdout,
+        &mut stream_handler,
         request,
         tool_metadata,
         audit_sink,
         tx,
         idle_timeout_secs,
-        driver_ctx.audit_conversation_id.as_deref(),
-        driver_ctx.audit_session_uuid.as_deref(),
+        turn_plan.audit_conversation_id.as_deref(),
+        turn_plan.audit_claude_session_uuid.as_deref(),
         emitted_chunks,
+        &mut stdout_tail,
     )
     .await?
     {
@@ -852,105 +968,32 @@ async fn drive_attempt(
 
     // 8. Collect stderr from the sink task.
     let stderr_redacted = collect_stderr(process.stderr_handle).await;
-    ensure_successful_exit(status, stderr_redacted)?;
+    ensure_successful_exit(status, stderr_redacted, stdout_tail.trimmed())?;
 
-    Ok(())
-}
+    let backend_session_id = stream_handler
+        .captured_backend_session_id()
+        .or_else(|| turn_plan.persisted_backend_session_id());
 
-/// How `feed_stdin` should shape the stdin payload. Selected by the
-/// driver based on `SpawnMode` / `ChatRequest.conversation_id`.
-///
-/// Spec: `02-penny-agent.md §5.2.6`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StdinMode {
-    /// Flatten the full `req.messages` history into
-    /// `"{Role}: {content}\n\n"` blocks. Pre-A5 stateless fallback.
-    FlattenHistory,
-    /// First turn of a native session: write only the newest user
-    /// message (optionally prefixed with an earlier `System` message
-    /// that frames the conversation), with no role labels. Claude
-    /// Code stores this in a fresh jsonl keyed by `--session-id`.
-    NativeFirstTurn,
-    /// Resume turn of a native session: write ONLY the most recent
-    /// user message. The entire prior history is already in the
-    /// jsonl Claude Code loaded via `--resume`. Role labels are
-    /// omitted.
-    NativeResumeTurn,
-}
+    if let (Some(store), Some(conversation_id), Some(session_id)) = (
+        session_store,
+        turn_plan.audit_conversation_id.as_deref(),
+        backend_session_id,
+    ) {
+        store.set_backend_session_id(conversation_id, turn_plan.backend, session_id.to_string());
+    }
 
-/// Build the stdin payload bytes for a given mode. Separated from
-/// the async I/O so helpers + tests can verify the exact bytes.
-/// Returns `Err(PennyErrorKind::ToolInvalidArgs)` if a required
-/// message is missing (e.g. resume turn with no user message).
-pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String> {
-    match mode {
-        StdinMode::FlattenHistory => {
-            let mut buf = String::new();
-            for msg in &req.messages {
-                let role_label = match msg.role {
-                    Role::System => "System",
-                    Role::User => "User",
-                    Role::Assistant => "Assistant",
-                    Role::Tool => "Tool",
-                };
-                buf.push_str(role_label);
-                buf.push_str(": ");
-                buf.push_str(msg.content.text().unwrap_or(""));
-                buf.push_str("\n\n");
-            }
-            Ok(buf)
-        }
-        StdinMode::NativeFirstTurn => {
-            // Pick the last user message as the turn body. If the
-            // request also contains a System message, prepend it as a
-            // framing paragraph (two newlines separator). Assistant
-            // messages in the input — unexpected on a first turn —
-            // are ignored with a warning at the caller, NOT here.
-            let user_msg = req
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, Role::User))
-                .ok_or_else(|| GadgetronError::Penny {
-                    kind: PennyErrorKind::ToolInvalidArgs {
-                        reason: "first-turn request must contain at least one user message"
-                            .to_string(),
-                    },
-                    message: "native_first_turn: missing user message".to_string(),
-                })?;
-            let mut buf = String::new();
-            if let Some(sys) = req.messages.iter().find(|m| matches!(m.role, Role::System)) {
-                buf.push_str(sys.content.text().unwrap_or(""));
-                buf.push_str("\n\n");
-            }
-            buf.push_str(user_msg.content.text().unwrap_or(""));
-            Ok(buf)
-        }
-        StdinMode::NativeResumeTurn => {
-            // Resume turns MUST have the new user message as
-            // `messages.last()`. Anything else is a caller bug —
-            // the gateway is responsible for appending the new user
-            // turn to the client-supplied history.
-            let last = req.messages.last().ok_or_else(|| GadgetronError::Penny {
-                kind: PennyErrorKind::ToolInvalidArgs {
-                    reason: "resume-turn request must contain at least one message".to_string(),
-                },
-                message: "native_resume_turn: empty messages".to_string(),
-            })?;
-            if !matches!(last.role, Role::User) {
-                return Err(GadgetronError::Penny {
-                    kind: PennyErrorKind::ToolInvalidArgs {
-                        reason: format!(
-                            "resume-turn expected messages.last().role == User, got {:?}",
-                            last.role
-                        ),
-                    },
-                    message: "native_resume_turn: last message is not user".to_string(),
-                });
-            }
-            Ok(last.content.text().unwrap_or("").to_string())
+    if let (Some(persistence), Some(conversation_id)) = (
+        backend_session_persistence,
+        turn_plan.audit_conversation_id.as_deref(),
+    ) {
+        if let Some(session_id) = backend_session_id {
+            persistence
+                .save_backend_session_id(conversation_id, turn_plan.backend, session_id)
+                .await;
         }
     }
+
+    Ok(())
 }
 
 /// Write the payload produced by `build_stdin_payload` to the child's
@@ -985,7 +1028,7 @@ async fn feed_stdin(stdin: ChildStdin, req: &ChatRequest) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gadgetron_core::agent::config::AgentConfig;
+    use gadgetron_core::agent::config::{AgentBackend, AgentConfig};
     use gadgetron_core::message::Message;
     use gadgetron_core::provider::ChatRequest;
 
@@ -1044,6 +1087,20 @@ mod tests {
         assert!(expected.ends_with("User: what is 2+2\n\n"));
     }
 
+    #[test]
+    fn codex_stdin_payload_wraps_persona_and_conversation() {
+        let req = test_request();
+        let payload = build_stdin_payload(&req, StdinMode::CodexExec).unwrap();
+        assert!(payload.starts_with("<system>\n"));
+        assert!(payload.contains("Codex backend runtime notes"));
+        assert!(payload.contains("mcp__knowledge__"));
+        assert!(payload.contains("You are Penny"));
+        assert!(payload.contains("</system>\n\n<conversation>\n"));
+        assert!(payload.contains("System: be helpful\n\n"));
+        assert!(payload.contains("User: what is 2+2\n\n"));
+        assert!(payload.ends_with("</conversation>\n"));
+    }
+
     /// If the `claude` binary is missing, `drive` must surface
     /// `PennyErrorKind::NotInstalled` — not a generic spawn failure.
     #[tokio::test]
@@ -1068,8 +1125,140 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
-    // Full happy-path + stream roundtrip via a fake claude binary is
-    // future infrastructure work.
+    #[tokio::test]
+    async fn codex_runtime_streams_fake_exec_jsonl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("fake-codex");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"hello codex"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+        )
+        .expect("write fake codex");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake, perms).unwrap();
+        }
+
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.binary = fake.to_string_lossy().into_owned();
+        let session = ClaudeCodeSession::new_without_audit(Arc::new(cfg), vec![], test_request());
+
+        let mut stream = session.run();
+        use futures::StreamExt;
+        let first = stream.next().await.expect("text chunk").unwrap();
+        assert_eq!(
+            first.choices[0].delta.content.as_deref(),
+            Some("hello codex")
+        );
+        let second = stream.next().await.expect("stop chunk").unwrap();
+        assert_eq!(second.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_runtime_resumes_captured_thread_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("fake-codex");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/sh
+if [ "$1" = "exec" ] && [ "$2" = "resume" ]; then
+  if [ "$3" != "codex-thread-1" ]; then
+    echo "wrong session id: $3" >&2
+    exit 44
+  fi
+  input="$(cat)"
+  if [ "$input" != "second question" ]; then
+    echo "resume stdin should contain only the latest user turn: $input" >&2
+    exit 45
+  fi
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"second-ok"}}'
+  printf '%s\n' '{"type":"turn.completed"}'
+else
+  cat >/dev/null
+  printf '%s\n' '{"type":"thread.started","thread_id":"codex-thread-1"}'
+  printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"first-ok"}}'
+  printf '%s\n' '{"type":"turn.completed"}'
+fi
+"#,
+        )
+        .expect("write fake codex");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake, perms).unwrap();
+        }
+
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.binary = fake.to_string_lossy().into_owned();
+        let cfg = Arc::new(cfg);
+        let store = Arc::new(crate::session_store::SessionStore::new(60, 10));
+
+        let mut first_req = test_request();
+        first_req.conversation_id = Some("c1".to_string());
+        let first = ClaudeCodeSession::new(
+            cfg.clone(),
+            vec![],
+            first_req,
+            Arc::new(HashMap::new()),
+            Arc::new(NoopGadgetAuditEventSink),
+            Some(store.clone()),
+        );
+        let mut stream = first.run();
+        use futures::StreamExt;
+        let first_chunk = stream.next().await.expect("first chunk").unwrap();
+        assert_eq!(
+            first_chunk.choices[0].delta.content.as_deref(),
+            Some("first-ok")
+        );
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            store.get("c1").unwrap().codex_session_id().as_deref(),
+            Some("codex-thread-1")
+        );
+
+        let second_req = ChatRequest {
+            model: "penny".into(),
+            messages: vec![
+                Message::user("old question"),
+                Message::assistant("old answer"),
+                Message::user("second question"),
+            ],
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            tools: None,
+            stream: true,
+            stop: None,
+            conversation_id: Some("c1".to_string()),
+        };
+        let second = ClaudeCodeSession::new(
+            cfg,
+            vec![],
+            second_req,
+            Arc::new(HashMap::new()),
+            Arc::new(NoopGadgetAuditEventSink),
+            Some(store),
+        );
+        let mut stream = second.run();
+        let second_chunk = stream.next().await.expect("second chunk").unwrap();
+        assert_eq!(
+            second_chunk.choices[0].delta.content.as_deref(),
+            Some("second-ok")
+        );
+        while stream.next().await.is_some() {}
+    }
 
     // ---- ToolUse audit emission ----
     //
@@ -1505,6 +1694,22 @@ mod tests {
     }
 
     #[test]
+    fn retry_policy_does_not_retry_agent_error_with_diagnostics() {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::AgentError {
+                exit_code: 1,
+                stderr_redacted: "Failed to authenticate".to_string(),
+            },
+            message: "penny subprocess exited with error".to_string(),
+        };
+
+        assert!(
+            !should_retry_agent_error(&err, 0, false),
+            "diagnostic agent errors are not silent and should not be retried"
+        );
+    }
+
+    #[test]
     fn retry_policy_does_not_retry_timeout_or_spawn_failures() {
         let timeout = GadgetronError::Penny {
             kind: PennyErrorKind::Timeout { seconds: 120 },
@@ -1519,6 +1724,32 @@ mod tests {
 
         assert!(!should_retry_agent_error(&timeout, 0, false));
         assert!(!should_retry_agent_error(&spawn_failed, 0, false));
+    }
+
+    #[test]
+    fn process_output_tail_redacts_and_keeps_recent_stdout() {
+        let mut tail = ProcessOutputTail::new(128);
+        tail.push_line("older line that should eventually fall out\n");
+        tail.push_line("Failed to authenticate. token = ABCDEFGHIJKLMNOPQRSTUVWXYZ0123\n");
+
+        let output = tail.trimmed();
+
+        assert!(output.contains("Failed to authenticate"));
+        assert!(output.contains("[REDACTED:generic_secret]"));
+        assert!(!output.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
+        assert!(output.len() <= 128);
+    }
+
+    #[test]
+    fn agent_error_diagnostic_output_uses_stdout_tail_when_stderr_is_empty() {
+        assert_eq!(
+            agent_error_diagnostic_output("", "Failed to authenticate"),
+            "stdout_tail=Failed to authenticate"
+        );
+        assert_eq!(
+            agent_error_diagnostic_output("stderr msg", "stdout msg"),
+            "stderr=stderr msg\nstdout_tail=stdout msg"
+        );
     }
 
     // ---- §5.2.10 items 1-6: resolve_spawn_mode tests ----
@@ -1552,16 +1783,18 @@ mod tests {
         let store = SessionStore::new(60, 10);
         let req = request_with_conv_id(Some("c1"));
 
-        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store), None)
+            .await
+            .unwrap();
         match mode {
             SpawnMode::FirstTurn {
                 conversation_id,
-                claude_session_uuid,
+                gadgetron_session_uuid,
                 ..
             } => {
                 assert_eq!(conversation_id, "c1");
                 let entry = store.get("c1").unwrap();
-                assert_eq!(entry.claude_session_uuid, claude_session_uuid);
+                assert_eq!(entry.claude_session_uuid, gadgetron_session_uuid);
             }
             other => panic!(
                 "expected FirstTurn, got {:?}",
@@ -1581,15 +1814,17 @@ mod tests {
         let expected_uuid = entry.claude_session_uuid;
 
         let req = request_with_conv_id(Some("c1"));
-        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store), None)
+            .await
+            .unwrap();
         match mode {
             SpawnMode::ResumeTurn {
                 conversation_id,
-                claude_session_uuid,
+                gadgetron_session_uuid,
                 ..
             } => {
                 assert_eq!(conversation_id, "c1");
-                assert_eq!(claude_session_uuid, expected_uuid);
+                assert_eq!(gadgetron_session_uuid, expected_uuid);
             }
             other => panic!(
                 "expected ResumeTurn, got {:?}",
@@ -1605,7 +1840,9 @@ mod tests {
         let store = SessionStore::new(60, 10);
         let req = request_with_conv_id(None);
 
-        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store), None)
+            .await
+            .unwrap();
         assert!(matches!(mode, SpawnMode::Stateless));
     }
 
@@ -1615,7 +1852,9 @@ mod tests {
         let store = SessionStore::new(60, 10);
         let req = request_with_conv_id(Some("c1"));
 
-        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store), None)
+            .await
+            .unwrap();
         assert!(matches!(mode, SpawnMode::Stateless));
         assert!(store.is_empty(), "StatelessOnly must not touch the store");
     }
@@ -1625,7 +1864,7 @@ mod tests {
         let cfg = make_config(SessionMode::NativeWithFallback);
         let req = request_with_conv_id(Some("c1"));
 
-        let mode = resolve_spawn_mode(&cfg, &req, None).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, None, None).await.unwrap();
         assert!(matches!(mode, SpawnMode::Stateless));
     }
 
@@ -1637,7 +1876,9 @@ mod tests {
         let store = SessionStore::new(60, 10);
         let req = request_with_conv_id(Some("ghost"));
 
-        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store), None)
+            .await
+            .unwrap();
         match mode {
             SpawnMode::FirstTurn {
                 conversation_id, ..
@@ -1659,7 +1900,7 @@ mod tests {
         let store = SessionStore::new(60, 10);
         let req = request_with_conv_id(Some("ghost"));
 
-        let err = resolve_spawn_mode(&cfg, &req, Some(&store))
+        let err = resolve_spawn_mode(&cfg, &req, Some(&store), None)
             .await
             .expect_err("must return SessionNotFound");
         match err {
@@ -1681,7 +1922,9 @@ mod tests {
         store.get_or_create("c1".to_string());
 
         let req = request_with_conv_id(Some("c1"));
-        let mode = resolve_spawn_mode(&cfg, &req, Some(&store)).await.unwrap();
+        let mode = resolve_spawn_mode(&cfg, &req, Some(&store), None)
+            .await
+            .unwrap();
         assert!(matches!(mode, SpawnMode::ResumeTurn { .. }));
     }
 

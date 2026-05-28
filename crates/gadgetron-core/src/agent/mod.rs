@@ -13,9 +13,10 @@ pub mod shared_context;
 pub mod tools;
 
 pub use config::{
-    AgentBrainSettings, AgentBrainSettingsSource, AgentConfig, BrainConfig, BrainMode,
-    BrainShimConfig, DestructiveGadgetsConfig, ExtraConfirmation, GadgetMode, GadgetsConfig,
-    UpdateAgentBrainSettingsRequest, WriteGadgetsConfig,
+    AgentBackend, AgentBrainSettings, AgentBrainSettingsSource, AgentConfig, AgentEffort,
+    BrainConfig, BrainMode, BrainShimConfig, CodexApprovalPolicy, CodexAuthMode, CodexConfig,
+    CodexSandboxMode, DestructiveGadgetsConfig, ExtraConfirmation, GadgetMode, GadgetsConfig,
+    ModelSource, UpdateAgentBrainSettingsRequest, WriteGadgetsConfig,
 };
 pub use tools::{
     GadgetDispatcher, GadgetError, GadgetModeReconfigurer, GadgetProvider, GadgetResult,

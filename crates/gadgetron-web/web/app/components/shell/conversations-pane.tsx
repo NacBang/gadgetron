@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useThread } from "@assistant-ui/react";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useAuth } from "../../lib/auth-context";
+import { useActiveJob, isJobRunning } from "../../lib/chat-resume";
 import {
+  ACTIVE_CONVERSATION_EVENT,
   clearActiveConversationId,
   getActiveConversationId,
   setActiveConversationId,
@@ -151,16 +153,52 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
     return () => window.clearTimeout(t);
   }, [isRunning, refresh]);
 
+  // Refresh whenever the active conversation id changes — covers the
+  // "first message in a brand-new chat" path where the transport mints
+  // a fresh uuid in `buildHeaders` and fires this event. The mint
+  // happens before the HTTP request reaches the backend, so we also
+  // schedule a delayed refresh (1.5s) to give the backend's
+  // `conversations` INSERT time to commit. Without these, a user who
+  // skips the "새 대화" button and just types into the composer would
+  // sometimes find their first turn missing from the sidebar until the
+  // 5s polling tick caught up — or longer if the polling fell between
+  // the INSERT and the next tick.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onActive = () => {
+      void refresh();
+      const t = window.setTimeout(() => void refresh(), 1_500);
+      return () => window.clearTimeout(t);
+    };
+    window.addEventListener(ACTIVE_CONVERSATION_EVENT, onActive);
+    return () => {
+      window.removeEventListener(ACTIVE_CONVERSATION_EVENT, onActive);
+    };
+  }, [refresh]);
+
   const goTo = useCallback((id: string | null) => {
     writeActiveConvId(id);
     setActive(id);
     if (typeof window === "undefined") return;
-    // `location.assign("/web/")` from within `/web/` would be a no-op
-    // in some browsers; force a reload so the assistant-ui runtime
-    // boots fresh for the chosen conversation.
-    if (window.location.pathname === "/web" || window.location.pathname === "/web/") {
-      window.location.reload();
-    } else {
+    // `writeActiveConvId` already fired `ACTIVE_CONVERSATION_EVENT`,
+    // which the (shell) layout listens to: it re-fetches the chosen
+    // conversation's history from the backend and re-keys the
+    // AssistantRuntimeProvider so the chat thread re-hydrates in
+    // place. No page reload needed — the user stays on whichever
+    // surface they were on (chat, copilot, admin, …), only the chat
+    // pane swaps to the new conversation.
+    //
+    // One case still navigates: if the user is on a non-chat surface
+    // (admin/dashboard/etc.) AND explicitly clicks a conversation,
+    // we route them to the chat surface so they actually see the
+    // re-hydrated thread.
+    const p = window.location.pathname;
+    const onChatSurface =
+      p === "/web" ||
+      p === "/web/" ||
+      p === "/web/copilot" ||
+      p === "/web/copilot/";
+    if (!onChatSurface) {
       window.location.assign("/web/");
     }
   }, []);
@@ -241,36 +279,72 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
           </div>
         )}
         {rows.map((r) => (
-          <div
+          <ConversationRow
             key={r.id}
-            className={cn(
-              "group flex items-center gap-1 rounded px-1.5 py-1 text-[11px]",
-              active === r.id
-                ? "bg-zinc-800 text-zinc-100"
-                : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
-            )}
-          >
-            <button
-              type="button"
-              onClick={() => switchTo(r.id)}
-              className="flex-1 truncate text-left"
-              title={r.title}
-              data-testid={`conv-${r.id}`}
-            >
-              {r.title}
-            </button>
-            <button
-              type="button"
-              onClick={() => void remove(r.id)}
-              className="flex size-5 shrink-0 items-center justify-center rounded text-zinc-600 opacity-0 transition group-hover:opacity-100 hover:bg-zinc-800 hover:text-red-400"
-              title="삭제"
-              data-testid={`conv-delete-${r.id}`}
-            >
-              <Trash2 className="size-3" aria-hidden />
-            </button>
-          </div>
+            row={r}
+            isActive={active === r.id}
+            onSelect={() => switchTo(r.id)}
+            onDelete={() => void remove(r.id)}
+          />
         ))}
       </div>
+    </div>
+  );
+}
+
+/// One row in the sidebar conversation list. Extracted into its
+/// own component so each row can call `useActiveJob(r.id)` —
+/// hook calls inside `.map` are a React rules violation, so the
+/// per-row poll lives here.
+function ConversationRow({
+  row,
+  isActive,
+  onSelect,
+  onDelete,
+}: {
+  row: ConvRow;
+  isActive: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
+  const job = useActiveJob(row.id);
+  const running = isJobRunning(job);
+  return (
+    <div
+      className={cn(
+        "group flex items-center gap-1 rounded px-1.5 py-1 text-[11px]",
+        isActive
+          ? "bg-zinc-800 text-zinc-100"
+          : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
+      )}
+    >
+      {running && (
+        // Pulsing blue dot — same affordance ChatGPT uses for
+        // "this thread is still generating in the background."
+        <span
+          className="size-1.5 shrink-0 animate-pulse rounded-full bg-blue-400"
+          aria-label="응답 생성 중"
+          data-testid={`conv-running-${row.id}`}
+        />
+      )}
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex-1 truncate text-left"
+        title={row.title}
+        data-testid={`conv-${row.id}`}
+      >
+        {row.title}
+      </button>
+      <button
+        type="button"
+        onClick={onDelete}
+        className="flex size-5 shrink-0 items-center justify-center rounded text-zinc-600 opacity-0 transition group-hover:opacity-100 hover:bg-zinc-800 hover:text-red-400"
+        title="삭제"
+        data-testid={`conv-delete-${row.id}`}
+      >
+        <Trash2 className="size-3" aria-hidden />
+      </button>
     </div>
   );
 }

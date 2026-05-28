@@ -121,10 +121,10 @@ describe("ServersPage", () => {
     // text button — they share visual treatment with the copilot
     // route's HostCard header so both surfaces have the same affordance.
     expect(
-      actions.querySelector(`[data-testid="host-detail-host-1"]`),
+      actions.querySelector(`[data-testid="host-detail-10.100.1.110"]`),
     ).not.toBeNull();
     expect(
-      actions.querySelector(`[data-testid="host-expand-host-1"]`),
+      actions.querySelector(`[data-testid="host-expand-10.100.1.110"]`),
     ).not.toBeNull();
     expect(actions.compareDocumentPosition(titleRow)).toBe(
       Node.DOCUMENT_POSITION_PRECEDING,
@@ -288,7 +288,7 @@ describe("ServersPage", () => {
       }
       if (url.includes("/workbench/servers/host-1/metrics")) {
         return jsonResponse({
-          metric: "cooling.coolant_temp",
+          metric: "cooling.coolant_inlet1_temp",
           unit: "celsius",
           resolution: "auto",
           points: [],
@@ -305,7 +305,7 @@ describe("ServersPage", () => {
     await waitFor(() => {
       expect(
         (global.fetch as ReturnType<typeof vi.fn>).mock.calls.some(([url]) =>
-          String(url).includes("metric=cooling.coolant_temp"),
+          String(url).includes("metric=cooling.coolant_inlet1_temp"),
         ),
       ).toBe(true);
     });
@@ -407,7 +407,9 @@ describe("ServersPage", () => {
 
     render(<ServersPage />);
 
-    expect(await screen.findByText("9.5 MiB/s")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText(/9\.5 MiB\/s/)).toBeTruthy();
+    });
     await waitFor(() => {
       const calls = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.map(
         ([url]) => String(url),

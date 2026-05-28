@@ -1,5 +1,5 @@
 //! `PennyProvider` — the `LlmProvider` impl that routes
-//! `/v1/chat/completions?model=penny` to `ClaudeCodeSession`.
+//! `/v1/chat/completions?model=penny` to the configured Penny agent backend.
 //!
 //! # What this module does
 //!
@@ -14,7 +14,7 @@
 //! - `models` returns a single `ModelInfo { id: "penny", .. }` so
 //!   clients can discover the model via `/v1/models`.
 //! - `health` is a best-effort readiness check — currently just
-//!   verifies the configured `claude` binary is reachable via
+//!   verifies the configured agent binary is reachable via
 //!   `which::which` semantics (re-implemented as a `std::fs` stat to
 //!   avoid adding another workspace dep for a one-liner).
 //!
@@ -39,6 +39,7 @@ use gadgetron_core::provider::{
     ChatChunk, ChatRequest, ChatResponse, Choice, LlmProvider, ModelInfo, Usage,
 };
 
+use crate::backend_session::AgentBackendSessionPersistence;
 use crate::gadget_registry::GadgetRegistry;
 use crate::session::ClaudeCodeSession;
 use crate::session_store::SessionStore;
@@ -54,6 +55,7 @@ pub struct PennyProvider {
     registry: Arc<GadgetRegistry>,
     audit_sink: Arc<dyn GadgetAuditEventSink>,
     session_store: Arc<SessionStore>,
+    backend_session_persistence: Option<Arc<dyn AgentBackendSessionPersistence>>,
     /// Penny workspace (see `crate::home`). When `None`, sessions spawn
     /// with the caller's current working directory — which means Claude
     /// Code's per-project auto-memory will key to that cwd. Production
@@ -69,7 +71,7 @@ pub struct PennyProvider {
     /// Optional live brain settings snapshot shared with the gateway Admin
     /// settings endpoint. When present, every request overlays this snapshot
     /// onto the frozen startup config before spawning Claude Code.
-    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
 }
 
 impl PennyProvider {
@@ -101,6 +103,7 @@ impl PennyProvider {
             registry,
             audit_sink,
             session_store,
+            None,
             penny_home,
             None,
         )
@@ -114,6 +117,7 @@ impl PennyProvider {
         registry: Arc<GadgetRegistry>,
         audit_sink: Arc<dyn GadgetAuditEventSink>,
         session_store: Arc<SessionStore>,
+        backend_session_persistence: Option<Arc<dyn AgentBackendSessionPersistence>>,
         penny_home: Option<Arc<crate::home::PennyHome>>,
         config_path: Option<std::path::PathBuf>,
     ) -> Self {
@@ -122,15 +126,24 @@ impl PennyProvider {
             registry,
             audit_sink,
             session_store,
+            backend_session_persistence,
             penny_home,
             config_path,
             brain_config: None,
         }
     }
 
+    pub fn with_backend_session_persistence(
+        mut self,
+        backend_session_persistence: Arc<dyn AgentBackendSessionPersistence>,
+    ) -> Self {
+        self.backend_session_persistence = Some(backend_session_persistence);
+        self
+    }
+
     pub fn with_brain_config(
         mut self,
-        brain_config: Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>,
+        brain_config: Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>,
     ) -> Self {
         self.brain_config = Some(brain_config);
         self
@@ -151,10 +164,15 @@ impl PennyProvider {
     pub const MODEL_ID: &'static str = "penny";
 
     fn live_config_snapshot(&self) -> AgentConfig {
-        let mut live_config = (*self.config).clone();
-        if let Some(brain) = self.brain_config.as_ref() {
-            live_config.brain = (*brain.load_full()).clone();
-        }
+        // When the workbench has swapped a full AgentConfig in (admin
+        // changed Backend/Model/Effort), use it wholesale so backend +
+        // codex options follow. Otherwise fall back to the frozen
+        // startup config. Gadgets always come from the registry so
+        // the side-panel reconfigurer stays authoritative.
+        let mut live_config = match self.brain_config.as_ref() {
+            Some(handle) => (*handle.load_full()).clone(),
+            None => (*self.config).clone(),
+        };
         live_config.gadgets = self.registry.current_gadgets_config();
         live_config
     }
@@ -226,6 +244,7 @@ impl LlmProvider for PennyProvider {
             tool_metadata,
             self.audit_sink.clone(),
             Some(self.session_store.clone()),
+            self.backend_session_persistence.clone(),
             self.penny_home.clone(),
             self.config_path.clone(),
         );
@@ -247,7 +266,7 @@ impl LlmProvider for PennyProvider {
         Self::MODEL_ID
     }
 
-    /// Readiness check: verify the configured `claude` binary is
+    /// Readiness check: verify the configured backend binary is
     /// present on disk. Returns `Err(PennyErrorKind::NotInstalled)`
     /// if it's missing. Does NOT actually invoke the binary — that
     /// would add startup latency and could fail spuriously under
@@ -259,11 +278,12 @@ impl LlmProvider for PennyProvider {
         // `std::fs::metadata` for absolute paths; for relative/bare
         // commands, assume ok and let the first real spawn surface
         // the error.
-        let path = std::path::Path::new(&self.config.binary);
+        let binary = self.config.resolved_binary();
+        let path = std::path::Path::new(binary);
         if path.is_absolute() && !path.exists() {
             return Err(GadgetronError::Penny {
                 kind: PennyErrorKind::NotInstalled,
-                message: format!("configured claude binary not found: {}", self.config.binary),
+                message: format!("configured agent binary not found: {binary}"),
             });
         }
         Ok(())
@@ -297,9 +317,11 @@ pub fn register_with_router(
         providers,
         config_path,
         None,
+        None,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn register_with_router_and_brain_config(
     config: Arc<AgentConfig>,
     registry: Arc<GadgetRegistry>,
@@ -307,7 +329,8 @@ pub fn register_with_router_and_brain_config(
     session_store: Arc<SessionStore>,
     providers: &mut std::collections::HashMap<String, Arc<dyn LlmProvider>>,
     config_path: Option<std::path::PathBuf>,
-    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::BrainConfig>>>,
+    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
+    backend_session_persistence: Option<Arc<dyn AgentBackendSessionPersistence>>,
 ) {
     let penny_home = match std::env::var("HOME") {
         Ok(real_home) => {
@@ -337,6 +360,7 @@ pub fn register_with_router_and_brain_config(
         registry,
         audit_sink,
         session_store,
+        backend_session_persistence,
         penny_home,
         config_path,
     );
@@ -403,11 +427,11 @@ mod tests {
     fn live_config_snapshot_overlays_brain_snapshot() {
         let mut cfg = AgentConfig::default();
         cfg.brain.model = "claude-default".into();
-        let mut live_brain = cfg.brain.clone();
-        live_brain.mode = gadgetron_core::agent::BrainMode::ExternalProxy;
-        live_brain.external_base_url = "http://127.0.0.1:3456".into();
-        live_brain.model = "openai/local-model".into();
-        let brain_handle = Arc::new(arc_swap::ArcSwap::from_pointee(live_brain));
+        let mut live_agent = cfg.clone();
+        live_agent.brain.mode = gadgetron_core::agent::BrainMode::ExternalProxy;
+        live_agent.brain.external_base_url = "http://127.0.0.1:3456".into();
+        live_agent.brain.model = "openai/local-model".into();
+        let brain_handle = Arc::new(arc_swap::ArcSwap::from_pointee(live_agent));
         let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry())
             .with_brain_config(brain_handle);
 

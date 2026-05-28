@@ -54,7 +54,24 @@ interface ListResponse {
   returned: number;
 }
 
+interface GroupRow {
+  id: string;
+  tenant_id: string;
+  display_name: string;
+  description: string | null;
+  created_at: string;
+  created_by: string | null;
+}
+
+interface ListGroupsResponse {
+  groups: GroupRow[];
+  returned: number;
+}
+
 type BrainMode = "claude_max" | "external_anthropic" | "external_proxy" | "gadgetron_local";
+type AgentBackend = "claude_code" | "codex_exec";
+type ModelSource = "default" | "local";
+type AgentEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 interface AgentBrainSettings {
   mode: BrainMode;
@@ -65,6 +82,14 @@ interface AgentBrainSettings {
   updated_at?: string;
   updated_by?: string;
   source: "config_file" | "database";
+  // High-level admin UI fields. Older backend responses may
+  // omit these; default-fallback in the consumer.
+  backend?: AgentBackend;
+  agent?: AgentBackend;
+  model_source?: ModelSource;
+  local_base_url?: string;
+  local_api_key_env?: string;
+  effort?: AgentEffort;
 }
 
 interface UpdateAgentBrainSettingsRequest {
@@ -74,6 +99,11 @@ interface UpdateAgentBrainSettingsRequest {
   external_auth_token_env: string;
   external_auth_token_value?: string;
   custom_model_option: boolean;
+  backend: AgentBackend;
+  model_source: ModelSource;
+  local_base_url: string;
+  local_api_key_env: string;
+  effort: AgentEffort;
 }
 
 interface LlmEndpointRow {
@@ -108,10 +138,9 @@ interface ManagedHostRow {
   alias?: string | null;
 }
 
-type AdminTab = "penny-runtime" | "users" | "access";
+type AdminTab = "agent-backend" | "users" | "access";
 
 const MAX_AVATAR_FILE_BYTES = 2 * 1024 * 1024;
-const DEFAULT_PENNY_AUTH_TOKEN_ENV = "PENNY_CCR_AUTH_TOKEN";
 
 function authHeaders(apiKey: string | null): Record<string, string> {
   return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
@@ -161,6 +190,8 @@ async function updateUserProfile(
   body: {
     display_name: string;
     avatar_url?: string | null;
+    group_ids?: string[];
+    role?: "member" | "admin" | "service";
   },
 ): Promise<UserRow> {
   const res = await fetch(`${getApiBase()}/workbench/admin/users/${userId}`, {
@@ -177,6 +208,104 @@ async function updateUserProfile(
     throw new Error(`update user profile: HTTP ${res.status} ${text}`);
   }
   return (await res.json()) as UserRow;
+}
+
+async function listGroups(apiKey: string | null): Promise<GroupRow[]> {
+  const res = await fetch(`${getApiBase()}/workbench/admin/groups`, {
+    credentials: "include",
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) {
+    throw new Error(`list groups: HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as ListGroupsResponse;
+  return body.groups;
+}
+
+async function listUserGroups(
+  apiKey: string | null,
+  userId: string,
+): Promise<GroupRow[]> {
+  const res = await fetch(
+    `${getApiBase()}/workbench/admin/users/${userId}/groups`,
+    {
+      credentials: "include",
+      headers: authHeaders(apiKey),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`list user groups: HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as ListGroupsResponse;
+  return body.groups;
+}
+
+async function createGroup(
+  apiKey: string | null,
+  body: { id: string; display_name: string; description?: string },
+): Promise<GroupRow> {
+  const res = await fetch(`${getApiBase()}/workbench/admin/groups`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      ...authHeaders(apiKey),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`create group: HTTP ${res.status} ${text}`);
+  }
+  return (await res.json()) as GroupRow;
+}
+
+async function deleteGroup(
+  apiKey: string | null,
+  groupId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${getApiBase()}/workbench/admin/groups/${encodeURIComponent(groupId)}`,
+    {
+      method: "DELETE",
+      credentials: "include",
+      headers: authHeaders(apiKey),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`delete group: HTTP ${res.status} ${text}`);
+  }
+}
+
+interface GroupMemberRow {
+  group_id: string;
+  user_id: string;
+  added_at: string;
+  added_by: string | null;
+}
+
+interface ListGroupMembersResponse {
+  members: GroupMemberRow[];
+  returned: number;
+}
+
+async function listGroupMembers(
+  apiKey: string | null,
+  groupId: string,
+): Promise<GroupMemberRow[]> {
+  const res = await fetch(
+    `${getApiBase()}/workbench/admin/groups/${encodeURIComponent(groupId)}/members`,
+    {
+      credentials: "include",
+      headers: authHeaders(apiKey),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`list group members: HTTP ${res.status}`);
+  }
+  const body = (await res.json()) as ListGroupMembersResponse;
+  return body.members;
 }
 
 async function getAgentBrainSettings(apiKey: string | null): Promise<AgentBrainSettings> {
@@ -644,24 +773,41 @@ function PennyBrainSettings({
   canCall: boolean;
 }) {
   const [settings, setSettings] = useState<AgentBrainSettings | null>(null);
-  const [mode, setMode] = useState<BrainMode>("claude_max");
-  const [baseUrl, setBaseUrl] = useState("");
+  // High-level UI axes (new). These are the only controls the user
+  // sees by default; the legacy fields below live behind the
+  // Advanced toggle and are derived from these on save.
+  const [backend, setBackend] = useState<AgentBackend>("claude_code");
+  const [modelSource, setModelSource] = useState<ModelSource>("default");
+  const [localBaseUrl, setLocalBaseUrl] = useState("");
+  const [localApiKeyEnv, setLocalApiKeyEnv] = useState("");
+  const [effort, setEffort] = useState<AgentEffort>("max");
+  // Server still stores legacy BrainConfig fields; the UI derives them from
+  // Backend + Model instead of exposing raw mode names.
   const [model, setModel] = useState("");
-  const [authEnv, setAuthEnv] = useState("");
-  const [authTokenValue, setAuthTokenValue] = useState("");
   const [customModel, setCustomModel] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const applySettings = useCallback((next: AgentBrainSettings) => {
+    const nextModelSource =
+      next.model_source ?? (next.mode === "claude_max" ? "default" : "local");
     setSettings(next);
-    setMode(next.mode);
-    setBaseUrl(next.external_base_url);
-    setModel(next.model);
-    setAuthEnv(next.external_auth_token_env);
-    setAuthTokenValue("");
-    setCustomModel(next.custom_model_option);
+    setModel(nextModelSource === "local" ? next.model : "");
+    setCustomModel(nextModelSource === "local" ? next.custom_model_option : false);
+    setBackend(next.backend ?? next.agent ?? "claude_code");
+    setModelSource(nextModelSource);
+    setLocalBaseUrl(
+      nextModelSource === "local"
+        ? next.local_base_url ?? next.external_base_url
+        : "",
+    );
+    setLocalApiKeyEnv(
+      nextModelSource === "local"
+        ? next.local_api_key_env ?? next.external_auth_token_env
+        : "",
+    );
+    setEffort(next.effort ?? "max");
   }, []);
 
   const refresh = useCallback(async () => {
@@ -684,39 +830,58 @@ function PennyBrainSettings({
   const save = useCallback(async () => {
     setSaving(true);
     setErr(null);
+    // codex has no `max` tier; warn that the request is clamped.
+    if (backend === "codex_exec" && effort === "max") {
+      toast.info("Codex: 'max' is clamped to 'xhigh' at spawn time.");
+    }
     try {
-      const usesExternalRuntime = mode !== "claude_max";
-      const tokenValue = usesExternalRuntime ? authTokenValue.trim() : "";
-      const tokenEnv = usesExternalRuntime
-        ? authEnv.trim() || (tokenValue ? DEFAULT_PENNY_AUTH_TOKEN_ENV : "")
-        : "";
+      // Derive the legacy raw fields from the high-level axes so old
+      // server overlay paths (used by validate_with_env) still see a
+      // coherent BrainConfig.
+      const isClaude = backend === "claude_code";
+      const isLocal = modelSource === "local";
+      const derivedMode: BrainMode = isClaude
+        ? isLocal
+          ? "external_proxy"
+          : "claude_max"
+        : // codex uses claude_max as a noop here — the codex.* fields
+          // overlaid on the backend carry the auth info instead.
+          "claude_max";
+      const usesExternal = derivedMode !== "claude_max";
+      const modelOverride = isLocal ? model.trim() : "";
+      const tokenEnv = usesExternal ? localApiKeyEnv.trim() : "";
       const next = await updateAgentBrainSettings(apiKey, {
-        mode,
-        external_base_url: usesExternalRuntime ? baseUrl.trim() : "",
-        model: model.trim(),
+        mode: derivedMode,
+        external_base_url: usesExternal ? localBaseUrl.trim() : "",
+        model: modelOverride,
         external_auth_token_env: tokenEnv,
-        ...(tokenValue ? { external_auth_token_value: tokenValue } : {}),
-        custom_model_option: usesExternalRuntime ? customModel : false,
+        custom_model_option: usesExternal ? customModel : false,
+        backend,
+        model_source: modelSource,
+        local_base_url: isLocal ? localBaseUrl.trim() : "",
+        local_api_key_env: isLocal ? localApiKeyEnv.trim() : "",
+        effort,
       });
       applySettings(next);
-      toast.success("Penny LLM settings saved");
+      toast.success("Penny agent settings saved");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setSaving(false);
     }
   }, [
+    backend,
     apiKey,
     applySettings,
-    authEnv,
-    authTokenValue,
-    baseUrl,
     customModel,
-    mode,
+    effort,
+    localApiKeyEnv,
+    localBaseUrl,
     model,
+    modelSource,
   ]);
 
-  const usesExternalRuntime = mode !== "claude_max";
+  const isLocal = modelSource === "local";
 
   return (
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
@@ -751,93 +916,102 @@ function PennyBrainSettings({
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        {/* Agent backend — Claude Code / Codex */}
         <div>
-          <label className="mb-1 block text-[11px] text-zinc-500">Mode</label>
+          <label className="mb-1 block text-[11px] text-zinc-500">
+            Agent Backend
+          </label>
           <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value as BrainMode)}
+            value={backend}
+            onChange={(e) => setBackend(e.target.value as AgentBackend)}
+            data-testid="penny-backend-select"
             className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
           >
-            <option value="claude_max">claude_max</option>
-            <option value="external_anthropic">external_anthropic</option>
-            <option value="external_proxy">external_proxy</option>
+            <option value="claude_code">Claude Code</option>
+            <option value="codex_exec">Codex</option>
           </select>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            Agent backend that powers Penny.
+          </p>
         </div>
+        {/* Model source — Default / Local */}
         <div>
           <label className="mb-1 block text-[11px] text-zinc-500">Model</label>
-          <Input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="Leave empty to use the Claude Code default model"
-            autoComplete="off"
-          />
+          <select
+            value={modelSource}
+            onChange={(e) => setModelSource(e.target.value as ModelSource)}
+            data-testid="penny-model-source-select"
+            className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
+          >
+            <option value="default">Default (CLI built-in)</option>
+            <option value="local">Local LLM endpoint</option>
+          </select>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            {backend === "claude_code"
+              ? "Default = Claude entitlement. Local = OpenAI-compatible endpoint via external_proxy."
+              : "Default = ChatGPT login. Local = OpenAI-compatible endpoint via env vars."}
+          </p>
         </div>
-        {usesExternalRuntime && (
+        {/* Effort */}
+        <div>
+          <label className="mb-1 block text-[11px] text-zinc-500">Effort</label>
+          <select
+            value={effort}
+            onChange={(e) => setEffort(e.target.value as AgentEffort)}
+            data-testid="penny-effort-select"
+            className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
+          >
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+          <p className="mt-1 text-[10px] text-zinc-600">
+            {backend === "codex_exec" && effort === "max"
+              ? "Codex has no 'max' — clamped to 'xhigh' at spawn."
+              : "Reasoning effort applied at every turn."}
+          </p>
+        </div>
+        {/* Local LLM endpoint extra fields */}
+        {isLocal && (
           <>
-            <div>
-              <label className="mb-1 block text-[11px] text-zinc-500">Gateway URL</label>
+            <div className="md:col-span-2">
+              <label className="mb-1 block text-[11px] text-zinc-500">
+                Local Base URL
+              </label>
               <Input
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="http://127.0.0.1:8080"
+                value={localBaseUrl}
+                onChange={(e) => setLocalBaseUrl(e.target.value)}
+                placeholder="http://127.0.0.1:8000/v1"
                 autoComplete="off"
+                data-testid="penny-local-base-url"
               />
+              <p className="mt-1 text-[10px] text-zinc-600">
+                OpenAI-compatible endpoint URL (vLLM, SGLang, llama.cpp server …)
+              </p>
             </div>
             <div>
-              <label className="mb-1 block text-[11px] text-zinc-500">Auth Token</label>
+              <label className="mb-1 block text-[11px] text-zinc-500">
+                API Key Env Var
+              </label>
               <Input
-                type="password"
-                value={authTokenValue}
-                onChange={(e) => setAuthTokenValue(e.target.value)}
-                placeholder="Paste gateway token value"
-                autoComplete="new-password"
-                aria-label="Penny Auth Token"
+                value={localApiKeyEnv}
+                onChange={(e) => setLocalApiKeyEnv(e.target.value)}
+                placeholder="LOCAL_LLM_API_KEY"
+                autoComplete="off"
+                data-testid="penny-local-api-key-env"
               />
+              <p className="mt-1 text-[10px] text-zinc-600">
+                Process env var name holding the key (not the value itself)
+              </p>
             </div>
-            <details className="md:col-span-2 rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2">
-              <summary className="cursor-pointer text-[11px] text-zinc-400">
-                Advanced auth reference
-              </summary>
-              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] md:items-end">
-                <div>
-                  <label className="mb-1 block text-[11px] text-zinc-500">
-                    Token reference
-                  </label>
-                  <Input
-                    value={authEnv}
-                    onChange={(e) => setAuthEnv(e.target.value)}
-                    placeholder={DEFAULT_PENNY_AUTH_TOKEN_ENV}
-                    autoComplete="off"
-                    aria-label="Penny Auth Token Env"
-                  />
-                </div>
-                <p className="text-[11px] leading-5 text-zinc-500">
-                  The token value is applied to the running server and is not returned
-                  by this screen. Gadgetron stores only the reference name.
-                </p>
-              </div>
-            </details>
           </>
         )}
       </div>
 
-      <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        {usesExternalRuntime ? (
-          <label className="inline-flex items-center gap-2 text-[11px] text-zinc-400">
-            <input
-              type="checkbox"
-              checked={customModel}
-              onChange={(e) => setCustomModel(e.target.checked)}
-              className="h-4 w-4 rounded border-zinc-700 bg-zinc-950"
-            />
-            Use ANTHROPIC_CUSTOM_MODEL_OPTION
-          </label>
-        ) : (
-          <p className="text-[11px] text-zinc-500">
-            Claude Max uses the local Claude Code login. Gateway settings are cleared on save.
-          </p>
-        )}
+      <div className="mt-3 flex justify-end">
         <Button onClick={() => void save()} disabled={saving || !canCall}>
           {saving ? "Saving…" : "Save"}
         </Button>
@@ -1143,7 +1317,7 @@ function LlmEndpointSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Penny Runtime</h2>
+          <h2 className="text-sm font-medium text-zinc-200">Agent Backend</h2>
           <p className="text-[11px] text-zinc-500">
             IP/port detection · automatic model discovery · CCR/Anthropic endpoints connect to Penny
           </p>
@@ -1559,7 +1733,7 @@ function LlmEndpointSettings({
                       className="h-6 px-2 text-[11px]"
                       title={
                         endpoint.protocol === "anthropic_messages"
-                          ? "Apply to Penny runtime"
+                          ? "Apply to Agent Backend"
                           : "Create a CCR bridge in front of the OpenAI-compatible endpoint"
                       }
                     >
@@ -1714,12 +1888,43 @@ function UsersTable({
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editAvatarUrl, setEditAvatarUrl] = useState("");
+  const [editRole, setEditRole] = useState<"member" | "admin" | "service">("member");
   const [saving, setSaving] = useState<string | null>(null);
+  const [allGroups, setAllGroups] = useState<GroupRow[]>([]);
+  const [editGroupIds, setEditGroupIds] = useState<Set<string>>(new Set());
+  const [groupsLoading, setGroupsLoading] = useState(false);
 
-  const startEdit = useCallback((u: UserRow) => {
-    setEditing(u.id);
-    setEditName(u.display_name);
-    setEditAvatarUrl(u.avatar_url || "");
+  const startEdit = useCallback(
+    async (u: UserRow) => {
+      setEditing(u.id);
+      setEditName(u.display_name);
+      setEditAvatarUrl(u.avatar_url || "");
+      setEditRole(u.role);
+      setEditGroupIds(new Set());
+      setGroupsLoading(true);
+      try {
+        const [groups, userGroups] = await Promise.all([
+          listGroups(apiKey),
+          listUserGroups(apiKey, u.id),
+        ]);
+        setAllGroups(groups);
+        setEditGroupIds(new Set(userGroups.map((g) => g.id)));
+      } catch (e) {
+        toast.error((e as Error).message);
+      } finally {
+        setGroupsLoading(false);
+      }
+    },
+    [apiKey],
+  );
+
+  const toggleGroup = useCallback((id: string) => {
+    setEditGroupIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
   const saveEdit = useCallback(
@@ -1733,6 +1938,8 @@ function UsersTable({
         await updateUserProfile(apiKey, u.id, {
           display_name: editName.trim(),
           avatar_url: editAvatarUrl.trim() || null,
+          group_ids: Array.from(editGroupIds).sort(),
+          role: editRole !== u.role ? editRole : undefined,
         });
         toast.success(`Profile saved: ${u.email}`);
         setEditing(null);
@@ -1743,7 +1950,7 @@ function UsersTable({
         setSaving(null);
       }
     },
-    [apiKey, editAvatarUrl, editName, onChanged],
+    [apiKey, editAvatarUrl, editGroupIds, editName, editRole, onChanged],
   );
 
   const remove = useCallback(
@@ -1776,7 +1983,7 @@ function UsersTable({
             <th className="w-12 px-4 py-2 text-left font-normal">Photo</th>
             <th className="px-4 py-2 text-left font-normal">Email</th>
             <th className="px-4 py-2 text-left font-normal">Name</th>
-            <th className="px-4 py-2 text-left font-normal">Group</th>
+            <th className="px-4 py-2 text-left font-normal">Role</th>
             <th className="w-36 px-4 py-2 text-right font-normal"></th>
           </tr>
         </thead>
@@ -1819,7 +2026,7 @@ function UsersTable({
                       size="sm"
                       variant="ghost"
                       className="h-6 px-2 text-[11px]"
-                      onClick={() => startEdit(u)}
+                      onClick={() => void startEdit(u)}
                     >
                       Edit
                     </Button>
@@ -1860,6 +2067,78 @@ function UsersTable({
                           urlTestId="edit-user-avatar-url"
                         />
                       </div>
+                    </div>
+                    <div className="mt-3">
+                      <label className="mb-1 block text-[11px] text-zinc-500">
+                        Role (settings privilege)
+                      </label>
+                      <select
+                        value={editRole}
+                        onChange={(e) =>
+                          setEditRole(
+                            e.target.value as "member" | "admin" | "service",
+                          )
+                        }
+                        data-testid="edit-user-role"
+                        className="h-7 rounded border border-zinc-800 bg-zinc-950 px-2 text-[11px] text-zinc-200"
+                      >
+                        <option value="member">member</option>
+                        <option value="admin">admin</option>
+                        <option value="service">service</option>
+                      </select>
+                      <p className="mt-1 text-[10px] text-zinc-600">
+                        Admin manages settings. Member/service use the
+                        platform. Demoting the last admin is rejected.
+                      </p>
+                    </div>
+                    <div className="mt-3">
+                      <label className="mb-1 block text-[11px] text-zinc-500">
+                        Groups (access permission)
+                      </label>
+                      {groupsLoading ? (
+                        <p className="text-[11px] text-zinc-600">Loading…</p>
+                      ) : allGroups.length === 0 ? (
+                        <p
+                          className="text-[11px] text-zinc-600"
+                          data-testid="edit-user-groups-empty"
+                        >
+                          No groups defined yet. Create one in the Access tab.
+                        </p>
+                      ) : (
+                        <div
+                          className="flex flex-wrap gap-2"
+                          data-testid="edit-user-groups"
+                        >
+                          {allGroups.map((g) => {
+                            const checked = editGroupIds.has(g.id);
+                            return (
+                              <label
+                                key={g.id}
+                                className={
+                                  "flex cursor-pointer items-center gap-1.5 rounded border px-2 py-1 text-[11px] " +
+                                  (checked
+                                    ? "border-blue-700 bg-blue-950/40 text-blue-200"
+                                    : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700")
+                                }
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleGroup(g.id)}
+                                  className="size-3"
+                                  data-testid={`edit-user-group-${g.id}`}
+                                />
+                                <span className="font-mono">{g.id}</span>
+                                {g.display_name !== g.id && (
+                                  <span className="text-zinc-500">
+                                    — {g.display_name}
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                     <div className="mt-3 flex justify-end gap-2">
                       <Button
@@ -1907,6 +2186,253 @@ function UsersTable({
 // Page
 // ---------------------------------------------------------------------------
 
+function GroupsPanel({
+  apiKey,
+  users,
+  canCall,
+}: {
+  apiKey: string | null;
+  users: UserRow[];
+  canCall: boolean;
+}) {
+  const [groups, setGroups] = useState<GroupRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [newId, setNewId] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [members, setMembers] = useState<GroupMemberRow[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!canCall) return;
+    setLoading(true);
+    setErr(null);
+    try {
+      setGroups(await listGroups(apiKey));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiKey, canCall]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const onCreate = useCallback(async () => {
+    const id = newId.trim();
+    const displayName = newName.trim();
+    if (!id || !displayName) {
+      toast.error("ID and display name are required");
+      return;
+    }
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
+      toast.error("ID must be kebab-case (lowercase letters, digits, hyphen)");
+      return;
+    }
+    setCreating(true);
+    try {
+      await createGroup(apiKey, {
+        id,
+        display_name: displayName,
+        description: newDesc.trim() || undefined,
+      });
+      setNewId("");
+      setNewName("");
+      setNewDesc("");
+      toast.success(`Group created: ${id}`);
+      await refresh();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setCreating(false);
+    }
+  }, [apiKey, newDesc, newId, newName, refresh]);
+
+  const onDelete = useCallback(
+    async (g: GroupRow) => {
+      if (!window.confirm(`Delete group "${g.id}"? This removes all memberships.`)) {
+        return;
+      }
+      setDeleting(g.id);
+      try {
+        await deleteGroup(apiKey, g.id);
+        toast.success(`Group deleted: ${g.id}`);
+        if (expandedId === g.id) setExpandedId(null);
+        await refresh();
+      } catch (e) {
+        toast.error((e as Error).message);
+      } finally {
+        setDeleting(null);
+      }
+    },
+    [apiKey, expandedId, refresh],
+  );
+
+  const toggleExpand = useCallback(
+    async (g: GroupRow) => {
+      if (expandedId === g.id) {
+        setExpandedId(null);
+        return;
+      }
+      setExpandedId(g.id);
+      setMembersLoading(true);
+      try {
+        setMembers(await listGroupMembers(apiKey, g.id));
+      } catch (e) {
+        toast.error((e as Error).message);
+        setMembers([]);
+      } finally {
+        setMembersLoading(false);
+      }
+    },
+    [apiKey, expandedId],
+  );
+
+  const usersById = new Map(users.map((u) => [u.id, u]));
+
+  return (
+    <OperationalPanel
+      title="Groups"
+      description="Access groups orthogonal to Role. Each group is a kebab-case identifier. Members are managed from the Users tab (Edit → Groups)."
+    >
+      {err && (
+        <InlineNotice tone="error" title="Groups request failed" details={err}>
+          Retry after resolving the issue.
+        </InlineNotice>
+      )}
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+        <Input
+          value={newId}
+          onChange={(e) => setNewId(e.target.value)}
+          placeholder="kebab-case-id"
+          autoComplete="off"
+          data-testid="new-group-id"
+        />
+        <Input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="Display name"
+          autoComplete="off"
+          data-testid="new-group-display-name"
+        />
+        <Input
+          value={newDesc}
+          onChange={(e) => setNewDesc(e.target.value)}
+          placeholder="Description (optional)"
+          autoComplete="off"
+          data-testid="new-group-description"
+        />
+        <Button
+          size="sm"
+          onClick={() => void onCreate()}
+          disabled={creating || !canCall}
+          data-testid="new-group-submit"
+        >
+          {creating ? "Creating…" : "Create group"}
+        </Button>
+      </div>
+      <div className="mt-4">
+        {loading ? (
+          <p className="text-[11px] text-zinc-500">Loading…</p>
+        ) : groups.length === 0 ? (
+          <p
+            className="text-[11px] text-zinc-500"
+            data-testid="groups-empty"
+          >
+            No groups yet. Create one above.
+          </p>
+        ) : (
+          <table className="w-full text-left text-[12px]" data-testid="groups-table">
+            <thead>
+              <tr className="text-[11px] uppercase text-zinc-500">
+                <th className="px-2 py-1 font-medium">ID</th>
+                <th className="px-2 py-1 font-medium">Display name</th>
+                <th className="px-2 py-1 font-medium">Description</th>
+                <th className="px-2 py-1 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => (
+                <Fragment key={g.id}>
+                  <tr className="border-t border-zinc-800">
+                    <td className="px-2 py-1 font-mono text-zinc-300">{g.id}</td>
+                    <td className="px-2 py-1 text-zinc-300">{g.display_name}</td>
+                    <td className="px-2 py-1 text-zinc-500">{g.description || "—"}</td>
+                    <td className="px-2 py-1 text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void toggleExpand(g)}
+                        className="mr-1 h-6 px-2 text-[11px]"
+                        data-testid={`group-toggle-${g.id}`}
+                      >
+                        {expandedId === g.id ? "Hide" : "Members"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2 text-[11px] text-red-400 hover:text-red-300"
+                        disabled={deleting === g.id}
+                        onClick={() => void onDelete(g)}
+                        data-testid={`group-delete-${g.id}`}
+                      >
+                        {deleting === g.id ? "…" : "Delete"}
+                      </Button>
+                    </td>
+                  </tr>
+                  {expandedId === g.id && (
+                    <tr className="border-t border-zinc-800 bg-zinc-950/60">
+                      <td colSpan={4} className="px-4 py-2">
+                        {membersLoading ? (
+                          <p className="text-[11px] text-zinc-500">Loading members…</p>
+                        ) : members.length === 0 ? (
+                          <p
+                            className="text-[11px] text-zinc-500"
+                            data-testid={`group-members-empty-${g.id}`}
+                          >
+                            No members. Add via Users tab → Edit → Groups.
+                          </p>
+                        ) : (
+                          <ul
+                            className="space-y-1 text-[11px]"
+                            data-testid={`group-members-${g.id}`}
+                          >
+                            {members.map((m) => {
+                              const u = usersById.get(m.user_id);
+                              return (
+                                <li key={m.user_id} className="text-zinc-400">
+                                  {u ? (
+                                    <>
+                                      <span className="text-zinc-200">{u.display_name}</span>
+                                      <span className="ml-2 text-zinc-500">{u.email}</span>
+                                    </>
+                                  ) : (
+                                    <span className="font-mono text-zinc-500">{m.user_id}</span>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </OperationalPanel>
+  );
+}
+
 function ApiKeyOverride({
   onSet,
 }: {
@@ -1946,7 +2472,7 @@ export default function AdminPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<AdminTab>("penny-runtime");
+  const [activeTab, setActiveTab] = useState<AdminTab>("agent-backend");
   // Either an API key OR a logged-in session grants access; the
   // backend middleware accepts the session cookie when Bearer is absent.
   const canCall = !!apiKey || !!identity;
@@ -1971,7 +2497,7 @@ export default function AdminPage() {
   }, [refresh]);
 
   const tabs: Array<{ id: AdminTab; label: string }> = [
-    { id: "penny-runtime", label: "Penny Runtime" },
+    { id: "agent-backend", label: "Agent Backend" },
     { id: "users", label: "Users" },
     { id: "access", label: "Access" },
   ];
@@ -1980,7 +2506,7 @@ export default function AdminPage() {
     <div className="flex h-full min-h-0 flex-col">
       <WorkbenchPage
         title="Admin"
-        subtitle="Configure Penny runtime, users, and access controls."
+        subtitle="Configure Penny agent backend, users, and access controls."
         actions={
           <Button
             variant="ghost"
@@ -2032,7 +2558,7 @@ export default function AdminPage() {
             </InlineNotice>
           )}
 
-          {activeTab === "penny-runtime" && (
+          {activeTab === "agent-backend" && (
             <div role="tabpanel" className="space-y-4">
               <PennyBrainSettings apiKey={requestApiKey} canCall={canCall} />
               <LlmEndpointSettings apiKey={requestApiKey} canCall={canCall} />
@@ -2047,9 +2573,10 @@ export default function AdminPage() {
           )}
 
           {activeTab === "access" && (
-            <div role="tabpanel">
+            <div role="tabpanel" className="space-y-4">
+              <GroupsPanel apiKey={requestApiKey} users={users} canCall={canCall} />
               <OperationalPanel
-                title="Access"
+                title="API key override"
                 description="Override the management API key for this browser session."
               >
                 <ApiKeyOverride onSet={(k) => saveKey(k)} />

@@ -71,6 +71,15 @@ pub fn build_config_json_for_agent(
     build_config_json_with_env_and_gadgets(config_path, &StdEnv, Some(&config.gadgets))
 }
 
+/// Test/invocation injectable variant used by Codex command generation.
+pub fn build_config_json_for_agent_with_env(
+    config_path: Option<&Path>,
+    config: &AgentConfig,
+    env: &dyn EnvResolver,
+) -> serde_json::Value {
+    build_config_json_with_env_and_gadgets(config_path, env, Some(&config.gadgets))
+}
+
 fn build_config_json_with_env(
     config_path: Option<&Path>,
     env: &dyn EnvResolver,

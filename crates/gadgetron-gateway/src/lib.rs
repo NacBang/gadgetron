@@ -5,6 +5,7 @@
 pub mod activity_capture;
 pub mod auth_google;
 pub mod auth_session;
+pub mod chat_jobs;
 pub mod error;
 pub mod handlers;
 pub mod middleware;

@@ -14,9 +14,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   SendHorizonal,
-  Settings2,
   User,
-  CommandIcon,
   Square,
   Copy as CopyIcon,
   Check as CheckIcon,
@@ -31,14 +29,6 @@ import { SlashAutocomplete } from "../components/slash-autocomplete";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from "../components/ui/dialog";
 import { authHeaders, useAuth } from "../lib/auth-context";
 import {
   ACTIVE_CONVERSATION_EVENT,
@@ -76,6 +66,13 @@ interface PennyBrainSettings {
   mode?: string;
   external_base_url?: string;
   model?: string;
+  // High-level admin axes. Older API responses may
+  // omit these — the summary fn falls back to the raw fields above.
+  backend?: "claude_code" | "codex_exec";
+  agent?: "claude_code" | "codex_exec";
+  model_source?: "default" | "local";
+  local_base_url?: string;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 function getApiBase(): string {
@@ -97,13 +94,43 @@ function endpointHost(baseUrl: string | undefined): string {
   }
 }
 
-function pennyRuntimeSummary(settings: PennyBrainSettings): string {
-  const model = settings.model?.trim() || settings.mode?.trim() || "Penny";
-  const host = endpointHost(settings.external_base_url);
-  return host ? `${model} @ ${host}` : model;
+function pennyBackendSummary(settings: PennyBrainSettings): string {
+  // Prefer the new high-level axes (admin "Agent Backend" + "Model"). Falls
+  // back to the raw `mode`/`model` projection so old backends keep
+  // working.
+  const backend = settings.backend ?? settings.agent;
+  const agentLabel =
+    backend === "codex_exec"
+      ? "Codex"
+      : backend === "claude_code"
+        ? "Claude"
+        : settings.mode?.trim() || "Penny";
+  const effort = settings.effort ?? "";
+  const isLocal = settings.model_source === "local";
+  const explicitModel = settings.model?.trim() ?? "";
+  const localHost =
+    endpointHost(settings.local_base_url) || endpointHost(settings.external_base_url);
+
+  // model segment: explicit override > local host > "default"
+  const modelLabel = explicitModel
+    ? isLocal && localHost
+      ? `${explicitModel} @ ${localHost}`
+      : explicitModel
+    : isLocal
+      ? localHost
+        ? `local @ ${localHost}`
+        : "local"
+      : backend
+        ? "default"
+        : "";
+
+  const parts = [agentLabel];
+  if (modelLabel) parts.push(modelLabel);
+  if (effort) parts.push(effort);
+  return parts.join(" · ");
 }
 
-function usePennyRuntimeSummary(enabled: boolean): string | null {
+function usePennyBackendSummary(enabled: boolean): string | null {
   const { apiKey, identity } = useAuth();
   const [summary, setSummary] = useState<string | null>(null);
 
@@ -119,7 +146,7 @@ function usePennyRuntimeSummary(enabled: boolean): string | null {
         });
         if (!res.ok || cancelled) return;
         const body = (await res.json()) as PennyBrainSettings;
-        if (!cancelled) setSummary(pennyRuntimeSummary(body));
+        if (!cancelled) setSummary(pennyBackendSummary(body));
       } catch {
         // Runtime details are supplemental; keep the running badge visible.
       }
@@ -207,6 +234,7 @@ function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
 function useActiveHistory(): ActiveHistoryState {
   const [past, setPast] = useState<HistoryMsg[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const { apiKey } = useAuth();
   useEffect(() => {
     let cancelled = false;
     let seq = 0;
@@ -227,7 +255,7 @@ function useActiveHistory(): ActiveHistoryState {
         setErr(null);
         const res = await fetch(
           `${root}/api/v1/web/workbench/conversations/${id}/messages`,
-          { credentials: "include" },
+          { credentials: "include", headers: authHeaders(apiKey) },
         );
         if (!res.ok) return;
         const body = (await res.json()) as { messages: HistoryMsg[] };
@@ -250,7 +278,7 @@ function useActiveHistory(): ActiveHistoryState {
       window.removeEventListener(ACTIVE_CONVERSATION_EVENT, refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, []);
+  }, [apiKey]);
   return { past, err };
 }
 
@@ -448,18 +476,20 @@ function ActiveConversationBanner() {
     setTurnCount(thread);
   }, [thread]);
   useEffect(() => {
-    const id = getActiveConversationId();
-    if (!id) {
-      setTitle(null);
-      return;
-    }
-    const base =
-      document
-        .querySelector<HTMLMetaElement>('meta[name="gadgetron-api-base"]')
-        ?.content ?? "/v1";
-    const root = base.replace(/\/v\d+$/, "");
     let cancelled = false;
-    (async () => {
+    let seq = 0;
+    const load = async () => {
+      const requestSeq = ++seq;
+      const id = getActiveConversationId();
+      if (!id) {
+        setTitle(null);
+        return;
+      }
+      const base =
+        document
+          .querySelector<HTMLMetaElement>('meta[name="gadgetron-api-base"]')
+          ?.content ?? "/v1";
+      const root = base.replace(/\/v\d+$/, "");
       try {
         const res = await fetch(
           `${root}/api/v1/web/workbench/conversations`,
@@ -470,13 +500,19 @@ function ActiveConversationBanner() {
           conversations: Array<{ id: string; title: string }>;
         };
         const hit = body.conversations.find((c) => c.id === id);
-        if (!cancelled) setTitle(hit?.title ?? null);
+        if (!cancelled && requestSeq === seq) setTitle(hit?.title ?? null);
       } catch {
         // ignore
       }
-    })();
+    };
+    const refresh = () => {
+      void load();
+    };
+    void load();
+    window.addEventListener(ACTIVE_CONVERSATION_EVENT, refresh);
     return () => {
       cancelled = true;
+      window.removeEventListener(ACTIVE_CONVERSATION_EVENT, refresh);
     };
   }, []);
   if (!title || title === "New chat") return null;
@@ -523,21 +559,13 @@ function ActiveSubjectBanner() {
 }
 
 export default function Home() {
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [slashHelpOpen, setSlashHelpOpen] = useState(false);
-  const { clearKey } = useAuth();
   const history = useActiveHistory();
 
   return (
     <>
       <SlashHelpDialog open={slashHelpOpen} onOpenChange={setSlashHelpOpen} />
-      <ChatHeader
-        onOpenSettings={() => setSettingsOpen(true)}
-        settingsOpen={settingsOpen}
-        setSettingsOpen={setSettingsOpen}
-        onClearKey={clearKey}
-        onOpenHelp={() => setSlashHelpOpen(true)}
-      />
+      <ChatHeader />
 
       <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
         <ActiveConversationBanner />
@@ -571,12 +599,6 @@ export default function Home() {
         <div className="border-t border-zinc-800 bg-zinc-950/80 backdrop-blur">
           <div className="chat-thread-column mx-auto w-full max-w-[min(1400px,92vw)] p-4">
             <Composer onOpenHelp={() => setSlashHelpOpen(true)} />
-            <p className="mt-2 text-center text-[11px] text-zinc-600">
-              <kbd className="rounded border border-zinc-800 bg-zinc-900/50 px-1 py-0.5 font-mono text-[10px]">
-                /help
-              </kbd>{" "}
-              to list slash commands. Enter to send, Shift+Enter for newline.
-            </p>
           </div>
         </div>
       </ThreadPrimitive.Root>
@@ -588,38 +610,26 @@ export default function Home() {
 
 function ActiveTaskIndicator() {
   const isRunning = useThread((s) => s.isRunning);
-  const runtimeSummary = usePennyRuntimeSummary(isRunning);
+  const backendSummary = usePennyBackendSummary(isRunning);
   if (!isRunning) return null;
   return (
     <span
       className="flex min-w-0 items-center gap-1 rounded border border-blue-900/50 bg-blue-900/20 px-1.5 py-0.5 font-mono text-[10px] text-blue-400 motion-safe:animate-in motion-safe:fade-in duration-200"
       data-testid="active-task-indicator"
-      title={runtimeSummary ? `Penny runtime: ${runtimeSummary}` : undefined}
+      title={backendSummary ? `Penny backend: ${backendSummary}` : undefined}
     >
       <span className="size-1.5 rounded-full bg-blue-400 motion-safe:animate-pulse" />
       <span className="shrink-0">running</span>
-      {runtimeSummary && (
+      {backendSummary && (
         <span className="min-w-0 max-w-[min(36vw,22rem)] truncate text-blue-300/80">
-          · {runtimeSummary}
+          · {backendSummary}
         </span>
       )}
     </span>
   );
 }
 
-function ChatHeader({
-  onOpenSettings,
-  settingsOpen,
-  setSettingsOpen,
-  onClearKey,
-  onOpenHelp,
-}: {
-  onOpenSettings: () => void;
-  settingsOpen: boolean;
-  setSettingsOpen: (v: boolean) => void;
-  onClearKey: () => void;
-  onOpenHelp: () => void;
-}) {
+function ChatHeader() {
   return (
     <header
       className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
@@ -627,48 +637,9 @@ function ChatHeader({
     >
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium text-zinc-300">Penny</span>
-        <span className="hidden text-[11px] text-zinc-600 md:inline">
-          Gadgetron Knowledge Agent
-        </span>
       </div>
       <div className="flex items-center gap-1.5">
         <ActiveTaskIndicator />
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onOpenHelp}
-          className="h-6 gap-1 px-2 text-[11px] text-zinc-500 hover:text-zinc-300"
-        >
-          <CommandIcon className="size-3" />
-          Commands
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onOpenSettings}
-          className="h-6 gap-1 px-2 text-[11px] text-zinc-500 hover:text-zinc-300"
-        >
-          <Settings2 className="size-3" />
-          Settings
-        </Button>
-        <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Settings</DialogTitle>
-              <DialogDescription>
-                API key is stored in browser localStorage only.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex flex-col gap-2 py-4">
-              <p className="text-sm text-zinc-400">Current session: signed in</p>
-            </div>
-            <DialogFooter>
-              <Button variant="destructive" onClick={onClearKey}>
-                Clear API key (sign out)
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       </div>
     </header>
   );
@@ -764,25 +735,15 @@ function EmptyState() {
     >
       <div className="flex flex-col gap-1.5">
         <h1 className="text-sm font-medium text-zinc-300">Ready</h1>
-        <p className="text-xs text-zinc-500">
-          Send a message to Penny, or import a wiki page via{" "}
-          <code className="rounded bg-zinc-900 px-1 py-0.5 font-mono text-[11px] text-zinc-400">
-            wiki.import
-          </code>{" "}
-          gadget.
-        </p>
       </div>
       <div className="flex w-full flex-col gap-1.5">
         {suggestions.map((s) => (
           <button
             key={s}
             onClick={() => pick(s)}
-            className="group flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/50 px-3 py-2.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-300"
+            className="rounded border border-zinc-800 bg-zinc-900/50 px-3 py-2.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-300"
           >
-            <span className="flex-1">{s}</span>
-            <span className="text-[11px] text-zinc-600 opacity-0 transition-opacity group-hover:opacity-100">
-              Enter ↵
-            </span>
+            {s}
           </button>
         ))}
       </div>
@@ -1088,7 +1049,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
     >
       <SlashAutocomplete onLocalExecute={executeLocalCommand} />
       <ComposerPrimitive.Input
-        placeholder="Ask Penny or type /command"
+        placeholder="Ask Penny"
         rows={1}
         autoFocus
         className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-600"

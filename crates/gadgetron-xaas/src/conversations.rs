@@ -2,11 +2,13 @@
 //!
 //! Supports the left-rail chat sidebar: list, rename, soft-delete.
 //! Rows here are the authoritative source for "which chats does user X
-//! own?"; Claude Code's jsonl files at `~/.gadgetron/penny/work/` are
-//! the actual message history and are referenced by
-//! `claude_session_uuid`.
+//! own?". `conversation_messages` is the runtime-neutral transcript;
+//! `conversation_agent_sessions` maps the same Gadgetron conversation to
+//! backend-native resume ids for Claude Code, Codex, and future compatible
+//! agent backends.
 
 use chrono::{DateTime, Utc};
+use gadgetron_core::agent::AgentBackend;
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -20,6 +22,13 @@ pub struct ConversationRow {
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ConversationMessageRow {
+    pub role: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +116,115 @@ pub async fn upsert_turn(
     .fetch_optional(pool)
     .await?;
     row.ok_or(ConversationError::OwnershipMismatch)
+}
+
+/// Append one user-visible chat message to the runtime-neutral transcript.
+///
+/// The caller must already have passed the `conversations` ownership gate.
+/// This insert still carries `(tenant_id, user_id)` so reads can enforce the
+/// same boundary without trusting only `conversation_id`.
+pub async fn append_message(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+    content: &str,
+) -> Result<(), ConversationError> {
+    let clean = content.trim();
+    if clean.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO conversation_messages \
+             (conversation_id, tenant_id, user_id, role, content) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(conversation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(role)
+    .bind(clean)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Load the DB-backed transcript for a conversation owned by the caller.
+pub async fn list_messages(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<ConversationMessageRow>, ConversationError> {
+    let rows = sqlx::query_as::<_, ConversationMessageRow>(
+        "SELECT role, content, created_at \
+         FROM conversation_messages \
+         WHERE conversation_id = $1 AND tenant_id = $2 AND user_id = $3 \
+         ORDER BY id ASC",
+    )
+    .bind(conversation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Load the durable backend-native session id for a Gadgetron conversation.
+pub async fn get_agent_backend_session_id(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    backend: AgentBackend,
+) -> Result<Option<String>, ConversationError> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT backend_session_id \
+         FROM conversation_agent_sessions \
+         WHERE conversation_id = $1 AND backend = $2",
+    )
+    .bind(conversation_id)
+    .bind(backend.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(session_id,)| session_id))
+}
+
+/// Persist the backend-native resume id after a successful Penny turn.
+///
+/// Ownership columns are copied from `conversations`; this keeps the mapping
+/// consistent with the sidebar owner and avoids trusting the agent subprocess
+/// path with tenant/user identity.
+pub async fn upsert_agent_backend_session_id(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    backend: AgentBackend,
+    backend_session_id: &str,
+) -> Result<(), ConversationError> {
+    let clean = backend_session_id.trim();
+    if clean.is_empty() {
+        return Ok(());
+    }
+    let result = sqlx::query(
+        "INSERT INTO conversation_agent_sessions \
+             (conversation_id, tenant_id, user_id, backend, backend_session_id) \
+         SELECT id, tenant_id, user_id, $2, $3 \
+         FROM conversations \
+         WHERE id = $1 \
+         ON CONFLICT (conversation_id, backend) DO UPDATE SET \
+            backend_session_id = EXCLUDED.backend_session_id, \
+            tenant_id = EXCLUDED.tenant_id, \
+            user_id = EXCLUDED.user_id, \
+            updated_at = now()",
+    )
+    .bind(conversation_id)
+    .bind(backend.as_str())
+    .bind(clean)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ConversationError::NotFound);
+    }
+    Ok(())
 }
 
 /// Apply a Penny-generated summary as the conversation's new title.

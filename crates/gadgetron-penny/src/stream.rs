@@ -30,6 +30,7 @@
 
 use gadgetron_core::provider::{ChatChunk, ChatRequest, ChunkChoice, ChunkDelta};
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -203,6 +204,353 @@ pub fn parse_event(line: &str) -> Result<Option<StreamJsonEvent>, serde_json::Er
         Err(e) if e.is_data() => Ok(None), // unknown variant — forward-compat
         Err(e) => Err(e),
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodexExecEvent {
+    ThreadStarted(String),
+    TextDelta(String),
+    FinalMessage(String),
+    McpToolCall {
+        call_id: Option<String>,
+        name: String,
+        input: Value,
+        result: Option<CodexToolCallResult>,
+    },
+    Finished,
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexToolCallResult {
+    pub is_error: bool,
+    pub output: String,
+}
+
+pub fn parse_codex_exec_event(line: &str) -> Result<Option<CodexExecEvent>, serde_json::Error> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(trimmed)?;
+    Ok(codex_event_from_value(&value))
+}
+
+fn codex_event_from_value(value: &Value) -> Option<CodexExecEvent> {
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if event_type == "error" || event_type == "turn.failed" {
+        return Some(CodexExecEvent::Error(error_message(value)));
+    }
+
+    if event_type == "thread.started" || event_type == "session.started" {
+        if let Some(id) = value
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/thread/id").and_then(Value::as_str))
+            .or_else(|| value.get("session_id").and_then(Value::as_str))
+            .or_else(|| value.get("id").and_then(Value::as_str))
+            .filter(|id| !id.is_empty())
+        {
+            return Some(CodexExecEvent::ThreadStarted(id.to_string()));
+        }
+    }
+
+    if event_type == "turn.completed"
+        || event_type == "turn.finished"
+        || event_type == "response.completed"
+        || event_type == "done"
+    {
+        return Some(CodexExecEvent::Finished);
+    }
+
+    if let Some(text) = value
+        .get("delta")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/delta/text").and_then(Value::as_str))
+        .or_else(|| value.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+    {
+        if event_type.contains("delta") || value.get("delta").is_some() {
+            return Some(CodexExecEvent::TextDelta(text.to_string()));
+        }
+    }
+
+    if let Some(item) = value.get("item") {
+        if let Some(event) = codex_item_event(item) {
+            return Some(event);
+        }
+    }
+
+    if let Some(payload) = value.get("payload") {
+        if let Some(event) = codex_item_event(payload).or_else(|| codex_event_from_value(payload)) {
+            return Some(event);
+        }
+    }
+
+    codex_item_event(value)
+}
+
+fn codex_item_event(item: &Value) -> Option<CodexExecEvent> {
+    let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if item_type == "agent_message"
+        || item_type == "assistant_message"
+        || item_type == "message"
+        || item_type == "output_message"
+    {
+        let text = extract_text(item);
+        if !text.is_empty() {
+            return Some(CodexExecEvent::FinalMessage(text));
+        }
+    }
+
+    if item_type == "function_call" {
+        let namespace = item.get("namespace").and_then(Value::as_str).unwrap_or("");
+        if namespace.starts_with("mcp__") {
+            let raw_name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let name = format!("{namespace}{raw_name}");
+            let input = codex_arguments_value(item).unwrap_or(Value::Null);
+            return Some(CodexExecEvent::McpToolCall {
+                call_id: codex_call_id(item),
+                name,
+                input,
+                result: None,
+            });
+        }
+    }
+
+    if item_type == "mcp_tool_call"
+        || item_type == "tool_call"
+        || item_type == "mcp_tool_call_begin"
+        || item_type == "mcp_tool_call_end"
+    {
+        let name = codex_tool_name(item);
+        let input = codex_arguments_value(item)
+            .or_else(|| {
+                item.pointer("/invocation/arguments")
+                    .cloned()
+                    .or_else(|| item.pointer("/invocation/input").cloned())
+            })
+            .unwrap_or(Value::Null);
+        return Some(CodexExecEvent::McpToolCall {
+            call_id: codex_call_id(item),
+            name,
+            input,
+            result: codex_tool_result(item),
+        });
+    }
+
+    None
+}
+
+fn codex_call_id(item: &Value) -> Option<String> {
+    item.get("call_id")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("id").and_then(Value::as_str))
+        .or_else(|| item.pointer("/invocation/call_id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn codex_tool_name(item: &Value) -> String {
+    if let Some(tool) = item.pointer("/invocation/tool").and_then(Value::as_str) {
+        if let Some(server) = item.pointer("/invocation/server").and_then(Value::as_str) {
+            if !server.is_empty() {
+                return format!("{server}.{tool}");
+            }
+        }
+        return tool.to_string();
+    }
+
+    if let Some(name) = item
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("tool_name").and_then(Value::as_str))
+        .or_else(|| item.get("tool").and_then(Value::as_str))
+    {
+        return name.to_string();
+    }
+
+    "unknown".to_string()
+}
+
+fn codex_arguments_value(item: &Value) -> Option<Value> {
+    let value = item.get("arguments").or_else(|| item.get("input"))?;
+    match value {
+        Value::String(raw) => serde_json::from_str(raw)
+            .ok()
+            .or_else(|| Some(value.clone())),
+        _ => Some(value.clone()),
+    }
+}
+
+fn codex_tool_result(item: &Value) -> Option<CodexToolCallResult> {
+    let result = item.get("result")?;
+    if let Some(err) = result.get("Err") {
+        return Some(CodexToolCallResult {
+            is_error: true,
+            output: codex_result_to_text(err),
+        });
+    }
+    if let Some(ok) = result.get("Ok") {
+        return Some(CodexToolCallResult {
+            is_error: false,
+            output: codex_result_to_text(ok),
+        });
+    }
+    if result.is_null() {
+        return None;
+    }
+    Some(CodexToolCallResult {
+        is_error: false,
+        output: codex_result_to_text(result),
+    })
+}
+
+fn codex_result_to_text(value: &Value) -> String {
+    match value {
+        Value::Null => return String::new(),
+        Value::Object(map) if map.is_empty() => return String::new(),
+        Value::String(s) => return s.clone(),
+        Value::Array(items) => return codex_text_array_to_text(items),
+        _ => {}
+    }
+
+    if let Some(text) = value
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("content").and_then(Value::as_str))
+    {
+        return text.to_string();
+    }
+
+    if let Some(content) = value.get("content").and_then(Value::as_array) {
+        let text = codex_text_array_to_text(content);
+        if !text.is_empty() {
+            return text;
+        }
+    }
+
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn codex_text_array_to_text(items: &[Value]) -> String {
+    items
+        .iter()
+        .filter_map(|part| {
+            part.as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| {
+                    part.get("content")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_text(value: &Value) -> String {
+    if let Some(text) = value
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("content").and_then(Value::as_str))
+    {
+        return text.to_string();
+    }
+
+    if let Some(content) = value.get("content").and_then(Value::as_array) {
+        return content
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.get("content").and_then(Value::as_str))
+            })
+            .collect::<Vec<_>>()
+            .join("");
+    }
+
+    if let Some(message) = value.get("message") {
+        return extract_text(message);
+    }
+
+    String::new()
+}
+
+fn error_message(value: &Value) -> String {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/error/message").and_then(Value::as_str))
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .unwrap_or("codex exec reported an error")
+        .to_string()
+}
+
+pub fn codex_event_to_chat_chunks_ex(
+    event: CodexExecEvent,
+    req: &ChatRequest,
+    skip_final_text: bool,
+) -> Vec<ChatChunk> {
+    match event {
+        CodexExecEvent::TextDelta(text) if !text.is_empty() => {
+            vec![build_chunk(req, Some(text), None)]
+        }
+        CodexExecEvent::FinalMessage(text) if !text.is_empty() && !skip_final_text => {
+            vec![build_chunk(req, Some(text), None)]
+        }
+        CodexExecEvent::Finished => stop_chunk(req),
+        CodexExecEvent::ThreadStarted(_) => Vec::new(),
+        CodexExecEvent::McpToolCall {
+            name,
+            input,
+            result,
+            ..
+        } => codex_tool_call_to_chat_chunks(&name, &input, result.as_ref(), req, result.is_none()),
+        CodexExecEvent::Error(_)
+        | CodexExecEvent::TextDelta(_)
+        | CodexExecEvent::FinalMessage(_) => Vec::new(),
+    }
+}
+
+pub(crate) fn codex_tool_call_to_chat_chunks(
+    name: &str,
+    input: &Value,
+    result: Option<&CodexToolCallResult>,
+    req: &ChatRequest,
+    include_start: bool,
+) -> Vec<ChatChunk> {
+    let mut chunks = Vec::new();
+    if include_start {
+        tracing::info!(target: "penny_audit", tool_name = %name, "penny_tool_called");
+        let preview = truncate_chars(&input.to_string(), 120);
+        let formatted = format!("\n\n🔧 **{}** `{}`\n\n", name, preview);
+        chunks.push(build_chunk(req, Some(formatted), None));
+    }
+
+    if let Some(result) = result {
+        let icon = if result.is_error { "❌" } else { "✓" };
+        let output = if result.output.trim().is_empty() {
+            "completed"
+        } else {
+            result.output.trim()
+        };
+        let preview = truncate_chars(output, 300);
+        let formatted = format!("{} _{}_ \n\n", icon, preview.replace('\n', " "));
+        chunks.push(build_chunk(req, Some(formatted), None));
+    }
+
+    chunks
 }
 
 /// Translate one stream-json event into zero or more `ChatChunk`s.
@@ -640,6 +988,147 @@ mod tests {
     fn parse_event_malformed_json_returns_err() {
         let line = "{not valid json";
         assert!(parse_event(line).is_err());
+    }
+
+    #[test]
+    fn parse_codex_exec_item_completed_agent_message() {
+        let line = r#"{"type":"item.completed","item":{"type":"agent_message","text":"hello from codex"}}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::FinalMessage("hello from codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_thread_started() {
+        let line = r#"{"type":"thread.started","thread_id":"codex-thread-1"}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::ThreadStarted("codex-thread-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_delta_text() {
+        let line = r#"{"type":"item.updated","delta":{"text":"hel"}}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::TextDelta("hel".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_mcp_tool_call() {
+        let line = r#"{"type":"item.completed","item":{"type":"mcp_tool_call","name":"wiki.search","arguments":{"query":"gadgetron"}}}"#;
+        match parse_codex_exec_event(line).unwrap() {
+            Some(CodexExecEvent::McpToolCall {
+                name,
+                input,
+                result,
+                ..
+            }) => {
+                assert_eq!(name, "wiki.search");
+                assert_eq!(input["query"], "gadgetron");
+                assert_eq!(result, None);
+            }
+            other => panic!("unexpected codex event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_codex_exec_response_item_function_call_mcp_namespace() {
+        let line = r#"{"type":"response_item","payload":{"type":"function_call","name":"wiki_search","namespace":"mcp__knowledge__","arguments":"{\"query\":\"gadgetron\"}","call_id":"call_1"}}"#;
+        match parse_codex_exec_event(line).unwrap() {
+            Some(CodexExecEvent::McpToolCall {
+                call_id,
+                name,
+                input,
+                result,
+            }) => {
+                assert_eq!(call_id.as_deref(), Some("call_1"));
+                assert_eq!(name, "mcp__knowledge__wiki_search");
+                assert_eq!(input["query"], "gadgetron");
+                assert_eq!(result, None);
+            }
+            other => panic!("unexpected codex event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_codex_exec_event_msg_mcp_tool_call_end() {
+        let line = r#"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"call_1","invocation":{"server":"knowledge","tool":"wiki.search","arguments":{"query":"gadgetron"}},"result":{"Ok":{}}}}"#;
+        match parse_codex_exec_event(line).unwrap() {
+            Some(CodexExecEvent::McpToolCall {
+                call_id,
+                name,
+                input,
+                result,
+            }) => {
+                assert_eq!(call_id.as_deref(), Some("call_1"));
+                assert_eq!(name, "knowledge.wiki.search");
+                assert_eq!(input["query"], "gadgetron");
+                assert_eq!(
+                    result,
+                    Some(CodexToolCallResult {
+                        is_error: false,
+                        output: String::new()
+                    })
+                );
+            }
+            other => panic!("unexpected codex event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_final_message_to_chat_chunk() {
+        let chunks = codex_event_to_chat_chunks_ex(
+            CodexExecEvent::FinalMessage("done".to_string()),
+            &req(),
+            false,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn codex_mcp_tool_start_to_chat_chunk() {
+        let chunks = codex_event_to_chat_chunks_ex(
+            CodexExecEvent::McpToolCall {
+                call_id: Some("call_1".to_string()),
+                name: "server.list".to_string(),
+                input: json!({"scope":"all"}),
+                result: None,
+            },
+            &req(),
+            false,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].choices[0].delta.content.as_deref(),
+            Some("\n\n🔧 **server.list** `{\"scope\":\"all\"}`\n\n")
+        );
+    }
+
+    #[test]
+    fn codex_mcp_tool_result_to_chat_chunk() {
+        let chunks = codex_event_to_chat_chunks_ex(
+            CodexExecEvent::McpToolCall {
+                call_id: Some("call_1".to_string()),
+                name: "server.list".to_string(),
+                input: json!({"scope":"all"}),
+                result: Some(CodexToolCallResult {
+                    is_error: false,
+                    output: "2 servers".to_string(),
+                }),
+            },
+            &req(),
+            false,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].choices[0].delta.content.as_deref(),
+            Some("✓ _2 servers_ \n\n")
+        );
     }
 
     // ---- event_to_chat_chunks ----
