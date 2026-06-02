@@ -27,6 +27,30 @@ import {
   type UIMessageChunk,
 } from "ai";
 
+function getWorkbenchBase(): string {
+  if (typeof document === "undefined") return "/api/v1/web";
+  const meta = document.querySelector<HTMLMetaElement>(
+    'meta[name="gadgetron-api-base"]',
+  );
+  const chatBase = meta?.content || "/v1";
+  return chatBase.replace(/\/v1$/, "/api/v1/web");
+}
+
+function reconnectHeaders(extra?: HeadersInit): Record<string, string> {
+  const headers = new Headers(extra);
+  if (typeof localStorage !== "undefined" && !headers.has("Authorization")) {
+    const key = localStorage.getItem("gadgetron_api_key");
+    if (key) headers.set("Authorization", `Bearer ${key}`);
+  }
+  return Object.fromEntries(headers.entries());
+}
+
+interface ActiveJobSnapshot {
+  job_id: string;
+  status: "streaming" | "complete" | "error";
+  is_finished: boolean;
+}
+
 export interface OpenAIChatTransportInit<
   UI_MESSAGE extends UIMessage = UIMessage,
 > extends Omit<
@@ -84,6 +108,51 @@ export class OpenAIChatTransport<
     });
     this.model = opts.model;
     this.extraBody = opts.extraBody ?? {};
+  }
+
+  async reconnectToStream(
+    options: Parameters<
+      HttpChatTransport<UI_MESSAGE>["reconnectToStream"]
+    >[0],
+  ): Promise<ReadableStream<UIMessageChunk> | null> {
+    const conversationId = options.chatId?.trim();
+    if (!conversationId) return null;
+
+    const fetchImpl = this.fetch ?? globalThis.fetch;
+    const headers = reconnectHeaders(options.headers);
+    const activeUrl = `${getWorkbenchBase()}/workbench/conversations/${encodeURIComponent(
+      conversationId,
+    )}/active-job`;
+
+    const activeRes = await fetchImpl(activeUrl, {
+      method: "GET",
+      headers,
+      credentials: "include",
+    });
+    if (!activeRes.ok) return null;
+
+    const active = (await activeRes.json()) as ActiveJobSnapshot;
+    if (
+      !active.job_id ||
+      active.is_finished ||
+      active.status !== "streaming"
+    ) {
+      return null;
+    }
+
+    const syncUrl = `${getWorkbenchBase()}/workbench/jobs/${encodeURIComponent(
+      active.job_id,
+    )}/sync?since=0`;
+    const syncRes = await fetchImpl(syncUrl, {
+      method: "GET",
+      headers,
+      credentials: "include",
+    });
+    if (!syncRes.ok) {
+      throw new Error((await syncRes.text()) || "Failed to resume chat stream.");
+    }
+    if (!syncRes.body) return null;
+    return this.processResponseStream(syncRes.body);
   }
 
   protected processResponseStream(
