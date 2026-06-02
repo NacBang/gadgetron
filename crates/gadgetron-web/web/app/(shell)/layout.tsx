@@ -195,7 +195,13 @@ function AuthedShell({ children }: { children: ReactNode }) {
   // the instance — switching threads no longer unmounts the prior
   // runtime, so in-progress streaming continues in the background
   // and the "생성 중" state is preserved when the user comes back.
-  const runtimeHook = () => useChatRuntime({ transport });
+  const runtimeHook = () =>
+    useChatRuntime({
+      transport,
+      // AI SDK's useChat supports this runtime flag even though the
+      // assistant-ui wrapper type has not surfaced it yet.
+      resume: true,
+    } as Parameters<typeof useChatRuntime>[0] & { resume: boolean });
 
   const runtime = useRemoteThreadListRuntime({
     runtimeHook,
