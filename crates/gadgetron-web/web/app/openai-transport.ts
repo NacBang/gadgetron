@@ -371,7 +371,7 @@ export class OpenAIChatTransport<
             const msg =
               errObj?.message ??
               (typeof errObj === "string" ? errObj : "unknown server error");
-            const pretty = `\n\n❌ **오류**: ${msg}`;
+            const pretty = `\n\n❌ **Error**: ${msg}`;
             contentBuffer += pretty;
             flushContentBuffer(controller, true);
             if (activeTextStreaming) {

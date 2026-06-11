@@ -211,7 +211,7 @@ export default function DashboardPage() {
                 >
                   <Tile
                     testId="tile-servers"
-                    title="서버"
+                    title="Servers"
                     primary={`${summary.servers.online}/${summary.servers.total}`}
                     primaryLabel="online"
                     sub={[
@@ -221,7 +221,7 @@ export default function DashboardPage() {
                   />
                   <Tile
                     testId="tile-gpus"
-                    title="GPU"
+                    title="GPUs"
                     primary={`${summary.gpus.count}`}
                     primaryLabel="gpus"
                     sub={[
@@ -247,7 +247,7 @@ export default function DashboardPage() {
                   />
                   <Tile
                     testId="tile-resources"
-                    title="자원"
+                    title="Resources"
                     primary={
                       summary.cpu.avg_util_pct != null
                         ? `${summary.cpu.avg_util_pct.toFixed(0)}%`
@@ -272,14 +272,14 @@ export default function DashboardPage() {
                   <a
                     href="/web/findings"
                     className="block"
-                    title="로그 분석 findings 열기"
+                    title="Open log-analysis findings"
                   >
                     <Tile
                       testId="tile-warnings"
-                      title="경고"
+                      title="Warnings"
                       primary={`${summary.warnings}`}
                       primaryLabel="warnings"
-                      sub={[["findings", "열기 →"]]}
+                      sub={[["findings", "Open →"]]}
                     />
                   </a>
                 </div>

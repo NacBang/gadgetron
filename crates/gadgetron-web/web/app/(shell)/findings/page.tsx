@@ -116,7 +116,7 @@ function buildFindingSubject(f: Finding, hostLabel: string): WorkbenchSubject {
     href: `/web/findings?host=${encodeURIComponent(f.host_id)}`,
     summary: f.summary,
     prompt:
-      "Review this log finding with me. Explain the operational risk, likely cause, and the safest next step before taking action.",
+      "이 로그 finding을 함께 검토해줘. 운영상 위험, 추정 원인, 그리고 조치 전에 가장 안전한 다음 단계를 설명해줘.",
     facts: {
       hostId: f.host_id,
       source: f.source,

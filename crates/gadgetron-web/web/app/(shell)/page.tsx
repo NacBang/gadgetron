@@ -48,7 +48,10 @@ import {
   ACTIVE_CONVERSATION_EVENT,
   getActiveConversationId,
 } from "../lib/conversation-id";
-import { useWorkbenchSubject } from "../lib/workbench-subject-context";
+import {
+  useWorkbenchSubject,
+  withSubjectContext,
+} from "../lib/workbench-subject-context";
 import { getApiBase } from "../lib/workbench-client";
 
 // ---------------------------------------------------------------------------
@@ -360,7 +363,7 @@ function PastMessages({ history }: { history: ActiveHistoryState }) {
   return (
     <div className="mb-2 space-y-3" data-testid="past-messages">
       <div className="text-center text-[10px] uppercase tracking-wider text-zinc-700">
-        과거 대화
+        Past conversation
       </div>
       {err && (
         <div className="rounded border border-red-900/40 bg-red-950/20 px-3 py-1 text-[11px] text-red-400">
@@ -529,7 +532,7 @@ function ActiveConversationBanner() {
       data-testid="active-conversation-banner"
     >
       <div className="mx-auto flex w-full max-w-[min(1400px,92vw)] items-center gap-2 text-[11px]">
-        <span className="text-zinc-500">대화:</span>
+        <span className="text-zinc-500">Conversation:</span>
         <span className="truncate text-zinc-200" title={title}>
           {title}
         </span>
@@ -539,7 +542,7 @@ function ActiveConversationBanner() {
 }
 
 function ActiveSubjectBanner() {
-  const { subject } = useWorkbenchSubject();
+  const { subject, clearActiveSubject } = useWorkbenchSubject();
   if (!subject) return null;
   return (
     <div
@@ -550,6 +553,9 @@ function ActiveSubjectBanner() {
         <span className="shrink-0 text-blue-300">Talking about</span>
         <span className="min-w-0 flex-1 truncate text-zinc-100" title={subject.title}>
           {subject.title}
+          {subject.subtitle && (
+            <span className="ml-1.5 text-zinc-500">· {subject.subtitle}</span>
+          )}
         </span>
         {subject.href && (
           <a
@@ -559,6 +565,20 @@ function ActiveSubjectBanner() {
             View source
           </a>
         )}
+        {/* Dismiss = forget the pinned subject for this conversation.
+          * The transcript keeps the already-sent context message — this
+          * only clears the banner/anchor (ISSUE 52; previously there
+          * was no way to close it from the UI). */}
+        <button
+          type="button"
+          onClick={clearActiveSubject}
+          data-testid="active-subject-clear"
+          title="Dismiss subject — the conversation transcript is kept"
+          aria-label="Dismiss subject"
+          className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+        >
+          ✕
+        </button>
       </div>
     </div>
   );
@@ -721,8 +741,8 @@ function ChatHeader({
           onClick={onToggleMonitoring}
           title={
             monitoringOpen
-              ? "모니터링 패널 닫기"
-              : "모니터링 패널 열기 — 채팅 옆에 호스트 상태 그리드"
+              ? "Close the monitoring panel"
+              : "Open the monitoring panel — live host grid beside the chat"
           }
           className={`rounded border px-2 py-0.5 text-[11px] transition-colors ${
             monitoringOpen
@@ -730,7 +750,7 @@ function ChatHeader({
               : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
           }`}
         >
-          모니터링
+          Monitoring
         </button>
       </div>
     </header>
@@ -808,13 +828,25 @@ function useRotatingSuggestions(): string[] {
   return slice;
 }
 
+// Shown instead of the generic rotation when the conversation is
+// pinned to a subject ("Talking about …", ISSUE 53). Each pick goes out
+// through withSubjectContext, so the structured context rides along
+// even when the seeded auto-send lost its race.
+const SUBJECT_SUGGESTIONS = [
+  "이 주제의 원인을 분석해줘",
+  "영향 범위와 위험도를 평가해줘",
+  "해결 절차를 단계별로 정리해줘",
+];
+
 function EmptyState() {
   const composer = useComposerRuntime();
-  const suggestions = useRotatingSuggestions();
+  const { subject } = useWorkbenchSubject();
+  const rotating = useRotatingSuggestions();
+  const suggestions = subject ? SUBJECT_SUGGESTIONS : rotating;
 
   const pick = useCallback(
     (text: string) => {
-      composer.setText(text);
+      composer.setText(withSubjectContext(text));
       setTimeout(() => composer.send(), 0);
     },
     [composer],
@@ -826,7 +858,12 @@ function EmptyState() {
       data-testid="chat-empty-state"
     >
       <div className="flex flex-col gap-1.5">
-        <h1 className="text-sm font-medium text-zinc-300">Ready</h1>
+        <h1
+          className="max-w-md truncate text-sm font-medium text-zinc-300"
+          title={subject?.title}
+        >
+          {subject ? `Ask about "${subject.title}"` : "Ready"}
+        </h1>
       </div>
       <div className="flex w-full flex-col gap-1.5">
         {suggestions.map((s) => (
@@ -856,11 +893,11 @@ function JumpToLatest() {
     <ThreadPrimitive.ScrollToBottom asChild>
       <button
         type="button"
-        aria-label="최신 메시지로 이동"
+        aria-label="Jump to latest message"
         className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/60 bg-background/85 px-3 py-1.5 text-xs font-medium text-foreground/90 shadow-lg backdrop-blur transition-all hover:bg-background hover:text-foreground motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 duration-200"
       >
         <ChevronDown className="size-3.5" />
-        최신으로
+        Latest
       </button>
     </ThreadPrimitive.ScrollToBottom>
   );
@@ -923,7 +960,7 @@ function CopyMessageButton() {
   return (
     <button
       type="button"
-      aria-label="메시지 복사"
+      aria-label="Copy message"
       onClick={onCopy}
       className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-md border border-border/40 bg-background/80 text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground group-hover:opacity-100"
     >
@@ -1055,6 +1092,8 @@ function AssistantStatusBadge() {
 function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   const composer = useComposerRuntime();
   const isRunning = useThread((s) => s.isRunning);
+  // First-message detector for guaranteed subject delivery (ISSUE 53).
+  const messageCount = useThread((s) => s.messages.length);
   const { refreshSubject } = useWorkbenchSubject();
 
   // Preserve the in-progress draft across chat switches / reloads.
@@ -1123,6 +1162,16 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
       composer.setText("");
       if (typeof location !== "undefined") location.reload();
       return;
+    }
+    // Guaranteed subject delivery (ISSUE 53): on the FIRST message of a
+    // conversation pinned to a subject, prepend the structured context.
+    // The seeded auto-send can silently lose its race with the runtime
+    // spinning up after a full-page navigation — without this, "이
+    // 버그에 대해서 알려줘" reaches Penny with no idea what "이 버그" is.
+    // Visible on purpose: the transcript should show what Penny saw.
+    if (messageCount === 0) {
+      const next = withSubjectContext(text);
+      if (next !== text) composer.setText(next);
     }
   };
 

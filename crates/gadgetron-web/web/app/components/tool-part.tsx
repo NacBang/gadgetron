@@ -137,7 +137,7 @@ export function ToolPart(props: {
           {isRunning && (
             <span className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-400/70">
               <span className="size-1 rounded-full bg-blue-400 animate-pulse" />
-              호출 중
+              Running
             </span>
           )}
           {success && (
@@ -153,7 +153,7 @@ export function ToolPart(props: {
           {argsStr && (
             <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-2">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                입력
+                Input
               </div>
               <pre className="text-xs text-foreground/80 whitespace-pre-wrap break-all font-mono">
                 {argsStr}
@@ -163,7 +163,7 @@ export function ToolPart(props: {
           {resultStr && (
             <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-2">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                결과
+                Result
               </div>
               <pre className="text-xs text-foreground/80 whitespace-pre-wrap break-all font-mono">
                 {resultStr}

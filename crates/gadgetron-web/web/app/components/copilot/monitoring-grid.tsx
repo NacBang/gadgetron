@@ -5,6 +5,13 @@ import { useAuth } from "../../lib/auth-context";
 import { Sparkline, type SparkPoint } from "../sparkline";
 import { HostDetailDrawer } from "../host-detail-drawer";
 import { getApiBase, invokeAction, unwrapPayload, type ActionResponse } from "../../lib/workbench-client";
+import {
+  ChevronDown,
+  ChevronRight,
+  Maximize2,
+} from "lucide-react";
+import { fmtBps, fmtBytes, fmtUptime, shortenCpu, shortenGpuName } from "../../lib/format";
+import type { ServerStats } from "../../lib/server-types";
 
 // Background polls must stay silent on failure — wrap the shared
 // client's throwing invokeAction back into the null contract this
@@ -88,25 +95,6 @@ interface TempStat {
   celsius: number;
 }
 
-interface ServerStats {
-  cpu: {
-    util_pct: number;
-    cores: number;
-    load_1m: number;
-    load_5m: number;
-  } | null;
-  mem: {
-    total_bytes: number;
-    used_bytes: number;
-  } | null;
-  gpus: GpuStat[];
-  power: { psu_watts: number | null } | null;
-  network?: NetworkStat[];
-  temps?: TempStat[];
-  gadgetini?: CoolingStat | null;
-  uptime_secs: number | null;
-}
-
 const POLL_HOSTS_MS = 5_000;
 /// Per-host stats poll cadence. Server-monitor polls 1 Hz internally
 /// → copilot pulling every 5 s is plenty fresh and keeps the
@@ -119,14 +107,6 @@ const HISTORY_WINDOW_MS = 5 * 60 * 1000;
 const HISTORY_REFRESH_MS = 5_000;
 const CRITICAL_AGE_MS = 5 * 60 * 1000;
 const WARNING_AGE_MS = 90 * 1000;
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KiB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MiB`;
-  if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(1)} GiB`;
-  return `${(n / 1024 ** 4).toFixed(1)} TiB`;
-}
 
 function ageMs(iso?: string | null, now: number = Date.now()): number {
   if (!iso) return Number.POSITIVE_INFINITY;
@@ -230,25 +210,6 @@ function ProgressBar({
   );
 }
 
-function shortenCpu(model: string): string {
-  return model
-    .replace(/Intel\(R\)|AMD|Xeon\(R\)|Core\(TM\)|EPYC|Processor/gi, "")
-    .replace(/\s+/g, " ")
-    .replace(/@.*$/, "")
-    .replace(/\s+CPU/i, "")
-    .trim()
-    .slice(0, 36);
-}
-
-function shortenGpuName(name: string): string {
-  return name
-    .replace(/NVIDIA\s+/i, "")
-    .replace(/GeForce\s+/i, "")
-    .replace(/PCIe/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 async function fetchHosts(apiKey: string | null): Promise<HostRow[]> {
   const resp = await invokeActionOrNull(apiKey, "server-list", {});
   const parsed = unwrapNullable(resp) as { hosts?: HostRow[] } | null;
@@ -330,14 +291,6 @@ function useHostMetricHistory(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey, hostId, metricsKey]);
   return series;
-}
-
-function fmtBps(bps: number | undefined): string {
-  if (bps == null || !Number.isFinite(bps)) return "—";
-  if (bps < 1024) return `${bps.toFixed(0)}B/s`;
-  if (bps < 1024 ** 2) return `${(bps / 1024).toFixed(1)}KB/s`;
-  if (bps < 1024 ** 3) return `${(bps / 1024 ** 2).toFixed(1)}MB/s`;
-  return `${(bps / 1024 ** 3).toFixed(1)}GB/s`;
 }
 
 /// Sum N timeseries by timestamp. Aligns input arrays by exact ts
@@ -545,7 +498,11 @@ function HostCard({
             className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
             data-testid="copilot-host-expand"
           >
-            {expanded ? "▾" : "▸"}
+            {expanded ? (
+              <ChevronDown className="size-3.5" aria-hidden />
+            ) : (
+              <ChevronRight className="size-3.5" aria-hidden />
+            )}
           </button>
           {/* Drawer — opens the full host-detail-drawer with charts,
             * time-range selector, per-series toggles. Same drawer
@@ -559,7 +516,7 @@ function HostCard({
             className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
             data-testid="copilot-host-open-drawer"
           >
-            ⇱
+            <Maximize2 className="size-3" aria-hidden />
           </button>
         </div>
       </header>
@@ -814,16 +771,6 @@ function HostCard({
       </footer>
     </article>
   );
-}
-
-function fmtUptime(secs: number | null): string {
-  if (secs == null || !Number.isFinite(secs)) return "—";
-  const days = Math.floor(secs / 86400);
-  const hours = Math.floor((secs % 86400) / 3600);
-  const mins = Math.floor((secs % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
 }
 
 export function MonitoringGrid() {

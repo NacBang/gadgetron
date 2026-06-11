@@ -12,34 +12,34 @@ import { Badge } from "./ui/badge";
 const COMMANDS: Array<{ cmd: string; desc: string; example?: string }> = [
   {
     cmd: "/help",
-    desc: "사용 가능한 명령 보기 (이 창)",
+    desc: "Show available commands (this dialog)",
   },
   {
     cmd: "/clear",
-    desc: "현재 대화 지우기 (새로 시작)",
+    desc: "Clear the current conversation (start fresh)",
   },
   {
     cmd: "/wiki list",
-    desc: "위키 페이지 목록 요청",
-    example: "Penny가 wiki.list 도구를 호출합니다.",
+    desc: "List wiki pages",
+    example: "Penny calls the wiki.list tool.",
   },
   {
-    cmd: "/wiki search <쿼리>",
-    desc: "위키 검색",
+    cmd: "/wiki search <query>",
+    desc: "Search the wiki",
     example: "/wiki search GPU 장애",
   },
   {
-    cmd: "/wiki get <페이지>",
-    desc: "특정 페이지 읽기",
+    cmd: "/wiki get <page>",
+    desc: "Read a specific page",
     example: "/wiki get penny/usage",
   },
   {
-    cmd: "/wiki delete <페이지>",
-    desc: "페이지 삭제 (soft delete → _archived/)",
+    cmd: "/wiki delete <page>",
+    desc: "Delete a page (soft delete → _archived/)",
   },
   {
     cmd: "/wiki rename <from> <to>",
-    desc: "페이지 이름 변경",
+    desc: "Rename a page",
   },
 ];
 
@@ -54,10 +54,10 @@ export function SlashHelpDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>슬래시 명령</DialogTitle>
+          <DialogTitle>Slash commands</DialogTitle>
           <DialogDescription>
-            메시지 첫 글자가 <code>/</code>로 시작하면 명령으로 해석됩니다. 일반
-            대화는 그대로 쓰시면 됩니다.
+            Messages starting with <code>/</code> are interpreted as commands.
+            Everything else is a normal message.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-2 py-2">

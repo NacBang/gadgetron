@@ -77,7 +77,7 @@ export function MarkdownText({
     return (
       <div
         className="flex items-center gap-1.5 py-1.5"
-        aria-label="응답 생성 중"
+        aria-label="Generating response"
       >
         <span className="size-1.5 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:-0.3s]" />
         <span className="size-1.5 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:-0.15s]" />
@@ -142,7 +142,7 @@ export function MarkdownText({
               return (
                 <Link
                   href={`/wiki?page=${encodeURIComponent(page)}`}
-                  title={`위키 문서 열기: ${page}`}
+                  title={`Open wiki page: ${page}`}
                   className="no-underline"
                 >
                   <code
@@ -166,7 +166,7 @@ export function MarkdownText({
       </ReactMarkdown>
       {isRevealing && (
         <span
-          aria-label="Penny가 작성 중"
+          aria-label="Penny is writing"
           className="ml-1.5 inline-block size-2 rounded-full bg-blue-400 align-middle motion-safe:animate-pulse shadow-[0_0_6px_rgba(96,165,250,0.55)]"
         />
       )}
