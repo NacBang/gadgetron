@@ -13,6 +13,7 @@ import {
 import { useEvidence, type EvidenceItem } from "../../lib/evidence-context";
 import { useAuth } from "../../lib/auth-context";
 import { ContextTab } from "./side-panel-context";
+import { getApiBase } from "../../lib/workbench-client";
 
 // ---------------------------------------------------------------------------
 // Side panel (ex-Evidence)
@@ -39,15 +40,6 @@ interface EvidencePaneProps {
 }
 
 type TabId = "context" | "actions" | "sources" | "activity" | "settings";
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 function formatRelative(at: number, now: number): string {
   const s = Math.max(0, Math.floor((now - at) / 1000));

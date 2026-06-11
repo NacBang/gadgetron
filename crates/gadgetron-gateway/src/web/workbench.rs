@@ -247,6 +247,10 @@ pub enum WorkbenchHttpError {
     DirectActionsDisabled,
     /// The requested approval id does not exist.
     ApprovalNotFound,
+    /// No chat job matches the requested conversation / job id, OR the
+    /// matching job belongs to another tenant / user. One variant for
+    /// both so the response never leaks whether a foreign job exists.
+    JobNotFound,
     /// The approval has already been resolved (approved or denied).
     ApprovalAlreadyResolved { state: String },
     /// The actor's tenant differs from the approval's tenant.
@@ -366,6 +370,18 @@ impl IntoResponse for WorkbenchHttpError {
                                     a fresh approval id.",
                         "type": "invalid_request_error",
                         "code": "workbench_approval_not_found",
+                    }
+                });
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
+            WorkbenchHttpError::JobNotFound => {
+                let body = json!({
+                    "error": {
+                        "message": "No chat job found. The job may have \
+                                    finished and been reaped, or never \
+                                    existed in this process.",
+                        "type": "invalid_request_error",
+                        "code": "workbench_job_not_found",
                     }
                 });
                 (StatusCode::NOT_FOUND, Json(body)).into_response()
@@ -2136,21 +2152,10 @@ pub async fn get_conversation_active_job_handler(
     axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<crate::chat_jobs::JobSnapshot>, WorkbenchHttpError> {
     let Some(job) = state.chat_jobs.active_for_conversation(id).await else {
-        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "no active job for this conversation".to_string(),
-        )));
+        return Err(WorkbenchHttpError::JobNotFound);
     };
-    if job.tenant_id != ctx.tenant_id {
-        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "no active job for this conversation".to_string(),
-        )));
-    }
-    if let (Some(actor), Some(owner)) = (ctx.actor_user_id, job.user_id) {
-        if actor != owner {
-            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-                "no active job for this conversation".to_string(),
-            )));
-        }
+    if !job_visible_to(&job, &ctx) {
+        return Err(WorkbenchHttpError::JobNotFound);
     }
     Ok(Json(job.snapshot().await))
 }
@@ -2180,20 +2185,93 @@ pub async fn get_job_sync_handler(
     axum::extract::Query(query): axum::extract::Query<JobSyncQuery>,
 ) -> axum::response::Response {
     let Some(job) = state.chat_jobs.get(job_id).await else {
-        return WorkbenchHttpError::Core(GadgetronError::Config("no such job".to_string()))
-            .into_response();
+        return WorkbenchHttpError::JobNotFound.into_response();
     };
+    if !job_visible_to(&job, &ctx) {
+        return WorkbenchHttpError::JobNotFound.into_response();
+    }
+    crate::handlers::build_job_response(job, query.since)
+}
+
+/// Shared tenant + user visibility rule for the resumable-stream
+/// endpoints. The job's stored `tenant_id` must match the caller's;
+/// when both sides carry a user id, those must match too (legacy
+/// Bearer keys without `user_id` skip the user check).
+fn job_visible_to(
+    job: &crate::chat_jobs::JobState,
+    ctx: &gadgetron_core::context::TenantContext,
+) -> bool {
     if job.tenant_id != ctx.tenant_id {
-        return WorkbenchHttpError::Core(GadgetronError::Config("no such job".to_string()))
-            .into_response();
+        return false;
     }
     if let (Some(actor), Some(owner)) = (ctx.actor_user_id, job.user_id) {
         if actor != owner {
-            return WorkbenchHttpError::Core(GadgetronError::Config("no such job".to_string()))
-                .into_response();
+            return false;
         }
     }
-    crate::handlers::build_job_response(job, query.since)
+    true
+}
+
+/// `POST /api/v1/web/workbench/jobs/{job_id}/cancel` — ask the
+/// producer to stop an in-flight generation. The producer abandons
+/// the upstream stream at the next chunk boundary (killing the Penny
+/// subprocess via the usual drop chain), persists the partial
+/// assistant text, appends the `[DONE]` terminator for attached
+/// subscribers, and flips the job to `cancelled`.
+///
+/// Returns the job snapshot at request time — the status transition
+/// is asynchronous, so an immediately-following `active-job` poll may
+/// still briefly read `streaming`. Idempotent: cancelling a finished
+/// (or already-cancelled) job is a no-op that returns the snapshot.
+///
+/// Tenant + user boundary: same `job_visible_to` rule as the other
+/// resumable-stream endpoints; invisible jobs 404.
+pub async fn cancel_job_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(job_id): axum::extract::Path<uuid::Uuid>,
+) -> Result<Json<crate::chat_jobs::JobSnapshot>, WorkbenchHttpError> {
+    let Some(job) = state.chat_jobs.get(job_id).await else {
+        return Err(WorkbenchHttpError::JobNotFound);
+    };
+    if !job_visible_to(&job, &ctx) {
+        return Err(WorkbenchHttpError::JobNotFound);
+    }
+    job.request_cancel();
+    Ok(Json(job.snapshot().await))
+}
+
+/// Response body for `GET /api/v1/web/workbench/jobs/active`.
+#[derive(Debug, serde::Serialize)]
+pub struct ActiveJobsResponse {
+    pub jobs: Vec<crate::chat_jobs::JobSnapshot>,
+}
+
+/// `GET /api/v1/web/workbench/jobs/active` — every still-streaming
+/// chat job visible to the caller, in one response. The sidebar polls
+/// THIS endpoint once per interval to drive its per-conversation
+/// "생성 중" indicators, instead of polling
+/// `/conversations/{id}/active-job` once per row.
+///
+/// Visibility: same tenant + user rule as the per-job endpoints
+/// (`job_visible_to`). Finished jobs are omitted — the indicator only
+/// cares about live generations.
+pub async fn list_active_jobs_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Json<ActiveJobsResponse> {
+    let mut jobs = Vec::new();
+    for job in state.chat_jobs.all_jobs().await {
+        if !job_visible_to(&job, &ctx) {
+            continue;
+        }
+        let snapshot = job.snapshot().await;
+        if snapshot.is_finished {
+            continue;
+        }
+        jobs.push(snapshot);
+    }
+    Json(ActiveJobsResponse { jobs })
 }
 
 /// `GET /api/v1/web/workbench/conversations/{id}/messages` — read
@@ -3425,7 +3503,12 @@ pub fn workbench_routes() -> Router<AppState> {
             "/conversations/{id}/active-job",
             get(get_conversation_active_job_handler),
         )
+        .route("/jobs/active", get(list_active_jobs_handler))
         .route("/jobs/{job_id}/sync", get(get_job_sync_handler))
+        .route(
+            "/jobs/{job_id}/cancel",
+            axum::routing::post(cancel_job_handler),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -4486,6 +4569,128 @@ mod tests {
         .expect("ccr bridge request");
 
         assert!(validate_ccr_bridge_request(&body).is_err());
+    }
+
+    #[tokio::test]
+    async fn active_jobs_lists_only_visible_streaming_jobs() {
+        let projection = Arc::new(InProcessWorkbenchProjection {
+            knowledge: None,
+            gateway_version: "0.0.0-test",
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b().into_snapshot(),
+            )),
+        });
+        let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
+
+        let tenant = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let other_user = Uuid::new_v4();
+
+        // Visible: same tenant + same user, still streaming.
+        let visible = state
+            .chat_jobs
+            .create(Uuid::new_v4(), Some(user), tenant, "penny".into())
+            .await;
+        // Omitted: finished.
+        let finished = state
+            .chat_jobs
+            .create(Uuid::new_v4(), Some(user), tenant, "penny".into())
+            .await;
+        finished.mark_complete().await;
+        // Omitted: cross-tenant.
+        state
+            .chat_jobs
+            .create(Uuid::new_v4(), Some(user), other_tenant, "penny".into())
+            .await;
+        // Omitted: same tenant, different user.
+        state
+            .chat_jobs
+            .create(Uuid::new_v4(), Some(other_user), tenant, "penny".into())
+            .await;
+
+        let ctx = gadgetron_core::context::TenantContext {
+            tenant_id: tenant,
+            api_key_id: Uuid::new_v4(),
+            scopes: vec![Scope::OpenAiCompat],
+            quota_snapshot: Arc::new(gadgetron_core::context::QuotaSnapshot {
+                daily_limit_cents: 0,
+                daily_used_cents: 0,
+                monthly_limit_cents: 0,
+                monthly_used_cents: 0,
+            }),
+            request_id: Uuid::new_v4(),
+            started_at: std::time::Instant::now(),
+            actor_user_id: Some(user),
+            actor_api_key_id: None,
+        };
+
+        let Json(resp) =
+            list_active_jobs_handler(axum::extract::State(state), axum::Extension(ctx)).await;
+        assert_eq!(resp.jobs.len(), 1, "only the visible streaming job");
+        assert_eq!(resp.jobs[0].job_id, visible.job_id);
+        assert!(matches!(
+            resp.jobs[0].status,
+            crate::chat_jobs::JobStatus::Streaming
+        ));
+    }
+
+    fn test_ctx(tenant: Uuid, user: Option<Uuid>) -> gadgetron_core::context::TenantContext {
+        gadgetron_core::context::TenantContext {
+            tenant_id: tenant,
+            api_key_id: Uuid::new_v4(),
+            scopes: vec![Scope::OpenAiCompat],
+            quota_snapshot: Arc::new(gadgetron_core::context::QuotaSnapshot {
+                daily_limit_cents: 0,
+                daily_used_cents: 0,
+                monthly_limit_cents: 0,
+                monthly_used_cents: 0,
+            }),
+            request_id: Uuid::new_v4(),
+            started_at: std::time::Instant::now(),
+            actor_user_id: user,
+            actor_api_key_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_job_sets_flag_and_enforces_visibility() {
+        let projection = Arc::new(InProcessWorkbenchProjection {
+            knowledge: None,
+            gateway_version: "0.0.0-test",
+            descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b().into_snapshot(),
+            )),
+        });
+        let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
+
+        let tenant = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let job = state
+            .chat_jobs
+            .create(Uuid::new_v4(), Some(user), tenant, "penny".into())
+            .await;
+
+        // Cross-user cancel must 404 and must NOT set the flag.
+        let foreign = cancel_job_handler(
+            axum::extract::State(state.clone()),
+            axum::Extension(test_ctx(tenant, Some(Uuid::new_v4()))),
+            axum::extract::Path(job.job_id),
+        )
+        .await;
+        assert!(matches!(foreign, Err(WorkbenchHttpError::JobNotFound)));
+        assert!(!job.is_cancel_requested());
+
+        // Owner cancel sets the flag and returns the snapshot.
+        let owned = cancel_job_handler(
+            axum::extract::State(state),
+            axum::Extension(test_ctx(tenant, Some(user))),
+            axum::extract::Path(job.job_id),
+        )
+        .await
+        .expect("owner cancel succeeds");
+        assert!(job.is_cancel_requested());
+        assert_eq!(owned.0.job_id, job.job_id);
     }
 
     #[tokio::test]

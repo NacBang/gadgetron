@@ -171,6 +171,30 @@ function AuthedShell({ children }: { children: ReactNode }) {
       // authoritative session pin.
       fetch: async (input, init) => {
         const res = await fetch(input, init);
+        // Stop button → server-side cancel. The AI SDK aborts this
+        // fetch when the user presses stop, but with resumable jobs
+        // the backend keeps generating after a client disconnect —
+        // an abort alone would leave the job running (and the
+        // sidebar dot pulsing). Hook the abort signal to
+        // POST /jobs/{id}/cancel; `keepalive` lets the request
+        // survive even when the abort happens during teardown.
+        const jobId = res.headers.get("x-gadgetron-job-id");
+        const signal = init?.signal;
+        if (res.ok && jobId && signal) {
+          const cancelJob = () => {
+            void fetch(
+              `${getApiBase().replace(/\/v1$/, "/api/v1/web")}/workbench/jobs/${encodeURIComponent(jobId)}/cancel`,
+              {
+                method: "POST",
+                headers: buildHeaders(),
+                credentials: "include",
+                keepalive: true,
+              },
+            ).catch(() => {});
+          };
+          if (signal.aborted) cancelJob();
+          else signal.addEventListener("abort", cancelJob, { once: true });
+        }
         if (res.status !== 403) return res;
         type ErrorBody = { error?: { code?: string } };
         let parsed: ErrorBody | null = null;

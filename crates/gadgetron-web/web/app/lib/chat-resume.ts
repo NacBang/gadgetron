@@ -25,7 +25,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const POLL_INTERVAL_MS = 1500;
 
-export type JobStatus = "streaming" | "complete" | "error";
+export type JobStatus = "streaming" | "complete" | "error" | "cancelled";
 
 export interface JobSnapshot {
   job_id: string;
@@ -111,6 +111,76 @@ export function useActiveJob(convId: string | null): JobSnapshot | null {
  */
 export function isJobRunning(snap: JobSnapshot | null): boolean {
   return snap !== null && snap.status === "streaming" && !snap.is_finished;
+}
+
+/**
+ * Polls `GET /workbench/jobs/active` — every still-streaming job
+ * visible to the caller — and returns the set of conversation ids
+ * with a live generation. ONE request per interval for the whole
+ * sidebar, instead of one `useActiveJob` poll per conversation row.
+ *
+ * The returned Set keeps referential identity across ticks when its
+ * contents are unchanged, so consumers don't re-render every poll.
+ */
+export function useRunningConversations(): ReadonlySet<string> {
+  const [running, setRunning] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const apply = (ids: Set<string>) => {
+      setRunning((prev) => {
+        if (prev.size === ids.size) {
+          let same = true;
+          for (const id of ids) {
+            if (!prev.has(id)) {
+              same = false;
+              break;
+            }
+          }
+          if (same) return prev;
+        }
+        return ids;
+      });
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      const url = `${getWorkbenchBase()}/workbench/jobs/active`;
+      try {
+        const res = await fetch(url, {
+          headers: authHeaders(),
+          credentials: "include",
+        });
+        if (cancelled) return;
+        if (!res.ok) {
+          apply(new Set());
+          return;
+        }
+        const data = (await res.json()) as { jobs: JobSnapshot[] };
+        const ids = new Set<string>();
+        for (const job of data.jobs ?? []) {
+          if (job.status === "streaming" && !job.is_finished) {
+            ids.add(job.conversation_id);
+          }
+        }
+        apply(ids);
+      } catch {
+        if (!cancelled) apply(new Set());
+      }
+    };
+
+    void tick();
+    const id = window.setInterval(() => void tick(), POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  return running;
 }
 
 export interface JobSyncCallbacks {

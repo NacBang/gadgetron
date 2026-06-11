@@ -18,11 +18,17 @@ export interface WorkbenchPrefs {
   leftRailWidth: number;
   showReasoning: boolean;
   showToolDetails: boolean;
-  /// Chat / monitoring grid split ratio on `/web/copilot`. 0.5 = 50/50,
-  /// 0.4 = chat narrower, 0.6 = chat wider. Clamped to
+  /// Chat / monitoring grid split ratio. 0.5 = 50/50, 0.4 = chat
+  /// narrower, 0.6 = chat wider. Clamped to
   /// [COPILOT_CHAT_RATIO_MIN, COPILOT_CHAT_RATIO_MAX] at write time
-  /// so neither pane shrinks below the legibility floor.
+  /// so neither pane shrinks below the legibility floor. (Named after
+  /// the former /web/copilot route; the split now lives on /web.)
   copilotChatRatio: number;
+  /// Whether the monitoring grid pane is open on the chat route —
+  /// the merged successor of the separate /web/copilot route
+  /// (ISSUE 47). Persisted so the operator's chosen layout survives
+  /// reloads, like the ratio.
+  chatMonitoringOpen: boolean;
 }
 
 export const COPILOT_CHAT_RATIO_DEFAULT = 0.5;
@@ -59,6 +65,14 @@ export function clampEvidencePaneWidth(v: number): number {
 }
 
 const STORAGE_KEY = "gadgetron.workbench.prefs";
+/// Same-tab change broadcast. Several components hold their own
+/// `useWorkbenchPrefs()` instance simultaneously (WorkbenchShell +
+/// the chat Home split since ISSUE 47); without this, instance A's
+/// write was based on A's mount-time snapshot and silently rolled
+/// back whatever instance B had written in the meantime (e.g. toggle
+/// monitoring → left-rail collapse reverts). `storage` events only
+/// fire cross-tab, hence the custom event.
+const PREFS_EVENT = "gadgetron:workbench-prefs";
 
 const DEFAULT_PREFS: WorkbenchPrefs = {
   density: "comfortable",
@@ -74,6 +88,7 @@ const DEFAULT_PREFS: WorkbenchPrefs = {
   showReasoning: false,
   showToolDetails: false,
   copilotChatRatio: COPILOT_CHAT_RATIO_DEFAULT,
+  chatMonitoringOpen: false,
 };
 
 const VALID_DENSITIES: WorkbenchDensity[] = ["compact", "comfortable"];
@@ -125,6 +140,10 @@ function readPrefs(): WorkbenchPrefs {
       ...DEFAULT_PREFS,
       ...(parsed as WorkbenchPrefs),
       copilotChatRatio: ratio,
+      chatMonitoringOpen:
+        typeof parsed.chatMonitoringOpen === "boolean"
+          ? parsed.chatMonitoringOpen
+          : false,
       leftRailWidth: clampLeftRailWidth(
         (parsed as WorkbenchPrefs).leftRailWidth,
       ),
@@ -160,16 +179,28 @@ export function useWorkbenchPrefs(): [
   useEffect(() => {
     setPrefs(readPrefs());
     setMounted(true);
+    // Stay in sync with writes from OTHER hook instances (same tab via
+    // the custom event, other tabs via `storage`).
+    const refresh = () => setPrefs(readPrefs());
+    window.addEventListener(PREFS_EVENT, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(PREFS_EVENT, refresh);
+      window.removeEventListener("storage", refresh);
+    };
   }, []);
 
   const update = useCallback(
     (patch: Partial<WorkbenchPrefs>) => {
       if (!mounted) return;
-      setPrefs((prev) => {
-        const next = { ...prev, ...patch };
-        writePrefs(next);
-        return next;
-      });
+      // Base the merge on what is CURRENTLY stored, not this instance's
+      // state — another instance may have written since our last read.
+      const next = { ...readPrefs(), ...patch };
+      writePrefs(next);
+      setPrefs(next);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event(PREFS_EVENT));
+      }
     },
     [mounted],
   );

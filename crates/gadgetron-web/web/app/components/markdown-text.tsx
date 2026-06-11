@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+import { useWikiPages, wikiPageFromCode } from "../lib/wiki-link";
 
 /**
  * Assistant-ui TextMessagePart component — receives `{ text, isRunning }`
@@ -37,6 +40,22 @@ import remarkGfm from "remark-gfm";
 // Accept any status shape assistant-ui hands us — the library union is
 // `MessagePartStatus | ToolCallMessagePartStatus` (running / complete /
 // incomplete / requires-action). We only care whether `type === "running"`.
+/**
+ * Footnote refs (`[^1]` superscripts and the `↩` backrefs) carry
+ * fragment hrefs. remark-gfm emits the SAME element ids in every
+ * message, so a native anchor jump lands on the FIRST message's
+ * footnote — and the old blanket `target="_blank"` opened a dead new
+ * tab instead. Resolve the target inside this message's own subtree.
+ */
+function scrollToFragment(e: MouseEvent<HTMLAnchorElement>, href: string) {
+  e.preventDefault();
+  const scope = e.currentTarget.closest("[data-md-scope]") ?? document;
+  const id = decodeURIComponent(href.slice(1));
+  scope
+    .querySelector(`[id="${CSS.escape(id)}"]`)
+    ?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 export function MarkdownText({
   text,
   status,
@@ -45,6 +64,7 @@ export function MarkdownText({
   status?: { readonly type: string };
 }) {
   const isRunning = status?.type === "running";
+  const wikiPages = useWikiPages();
   // Hooks first (React rules-of-hooks — no conditional hook calls).
   const displayed = useTypewriterText(text, isRunning);
   const isRevealing = isRunning || displayed.length < text.length;
@@ -67,20 +87,79 @@ export function MarkdownText({
   }
 
   return (
-    <div className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-p:leading-relaxed prose-pre:my-3 prose-pre:rounded-lg prose-pre:border prose-pre:border-border/60 prose-pre:bg-neutral-950/60 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-li:leading-relaxed prose-code:text-[13px] prose-code:bg-neutral-800/80 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2 prose-headings:font-semibold prose-headings:text-neutral-100 prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-strong:text-neutral-50 prose-blockquote:border-l-blue-400/40 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-blockquote:my-2 prose-table:my-2 prose-th:border-border prose-td:border-border/60 prose-hr:border-border/50">
+    <div
+      data-md-scope
+      className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-p:leading-relaxed prose-pre:my-3 prose-pre:rounded-lg prose-pre:border prose-pre:border-border/60 prose-pre:bg-neutral-950/60 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-li:leading-relaxed prose-code:text-[13px] prose-code:bg-neutral-800/80 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2 prose-headings:font-semibold prose-headings:text-neutral-100 prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-strong:text-neutral-50 prose-blockquote:border-l-blue-400/40 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-blockquote:my-2 prose-table:my-2 prose-th:border-border prose-td:border-border/60 prose-hr:border-border/50"
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ href, children, ...rest }) => (
-            <a
-              {...rest}
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children, node: _node, ...rest }) => {
+            if (href?.startsWith("#")) {
+              return (
+                <a
+                  {...rest}
+                  href={href}
+                  onClick={(e) => scrollToFragment(e, href)}
+                >
+                  {children}
+                </a>
+              );
+            }
+            if (href?.startsWith("/web/")) {
+              // In-app links (the evidence pane's `/web/wiki?page=…`
+              // shape) navigate in the same tab; Link prepends the
+              // `/web` basePath itself.
+              return (
+                <Link {...rest} href={href.slice("/web".length) || "/"}>
+                  {children}
+                </Link>
+              );
+            }
+            return (
+              <a {...rest} href={href} target="_blank" rel="noopener noreferrer">
+                {children}
+              </a>
+            );
+          },
+          code: ({ children, className, node: _node, ...rest }) => {
+            // Wiki citations: Penny's footnote definitions name the
+            // cited page as inline code (`ops/runbook-h100-ecc`).
+            // When that text exactly matches an existing wiki page,
+            // make it open the document (ISSUE 44).
+            const text =
+              typeof children === "string"
+                ? children
+                : Array.isArray(children) &&
+                    children.every((c) => typeof c === "string")
+                  ? children.join("")
+                  : null;
+            const page =
+              text != null
+                ? wikiPageFromCode(text, className, wikiPages)
+                : null;
+            if (page) {
+              return (
+                <Link
+                  href={`/wiki?page=${encodeURIComponent(page)}`}
+                  title={`위키 문서 열기: ${page}`}
+                  className="no-underline"
+                >
+                  <code
+                    {...rest}
+                    className={`${className ?? ""} cursor-pointer text-blue-300 underline decoration-dotted decoration-blue-400/50 underline-offset-2`}
+                  >
+                    {children}
+                  </code>
+                </Link>
+              );
+            }
+            return (
+              <code {...rest} className={className}>
+                {children}
+              </code>
+            );
+          },
         }}
       >
         {safeForMarkdown}

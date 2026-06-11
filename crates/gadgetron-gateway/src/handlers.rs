@@ -644,9 +644,10 @@ fn log_chat_job_stream_error(job_id: uuid::Uuid, err: &GadgetronError) {
 }
 
 /// Pull from the LLM stream and push SSE-formatted bytes into `job`,
-/// transitioning the job to Complete on `[DONE]` or Error on the
-/// first `Err`. The foreground SSE response and any resuming
-/// subscribers all read the same buffer.
+/// transitioning the job to Complete on `[DONE]`, Error on the first
+/// `Err`, or Cancelled when `request_cancel` fires. The foreground
+/// SSE response and any resuming subscribers all read the same
+/// buffer.
 async fn run_chat_job<S>(
     job: Arc<JobState>,
     stream: S,
@@ -654,31 +655,55 @@ async fn run_chat_job<S>(
 ) where
     S: Stream<Item = Result<ChatChunk, GadgetronError>> + Send + 'static,
 {
-    let mut stream = std::pin::pin!(stream);
     let mut assistant_text = String::new();
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(chunk) => {
-                for choice in &chunk.choices {
-                    if let Some(content) = &choice.delta.content {
-                        assistant_text.push_str(content);
+    let cancelled = {
+        let mut stream = std::pin::pin!(stream);
+        loop {
+            let item = tokio::select! {
+                item = stream.next() => item,
+                // Stop pulling mid-generation. Breaking out of the
+                // scope drops `stream` → the StreamEndGuard fires its
+                // audit amendment → the Penny driver's channel closes
+                // → the subprocess is killed. Buffered chunks stay
+                // replayable until the TTL reaps the job.
+                _ = job.cancelled_signal() => break true,
+            };
+            match item {
+                None => break false,
+                Some(Ok(chunk)) => {
+                    for choice in &chunk.choices {
+                        if let Some(content) = &choice.delta.content {
+                            assistant_text.push_str(content);
+                        }
                     }
+                    let bytes = chunk_to_sse_bytes(&chunk);
+                    job.push_chunk(bytes).await;
                 }
-                let bytes = chunk_to_sse_bytes(&chunk);
-                job.push_chunk(bytes).await;
-            }
-            Err(err) => {
-                log_chat_job_stream_error(job.job_id, &err);
-                job.push_chunk(error_to_sse_bytes(&err)).await;
-                job.mark_error(err.error_message()).await;
-                return;
+                Some(Err(err)) => {
+                    log_chat_job_stream_error(job.job_id, &err);
+                    job.push_chunk(error_to_sse_bytes(&err)).await;
+                    job.mark_error(err.error_message()).await;
+                    return;
+                }
             }
         }
-    }
+    };
+
     job.push_chunk(Bytes::from_static(b"data: [DONE]\n\n"))
         .await;
-    append_assistant_message(conversation_persistence.as_ref(), &assistant_text).await;
-    job.mark_complete().await;
+    // Persist whatever the model produced — for a cancelled turn the
+    // partial answer still lands in the transcript (same contract as
+    // pressing stop in ChatGPT). Skip empty partials so a cancel
+    // before the first token doesn't append a blank assistant row.
+    if !cancelled || !assistant_text.trim().is_empty() {
+        append_assistant_message(conversation_persistence.as_ref(), &assistant_text).await;
+    }
+    if cancelled {
+        tracing::info!(job_id = %job.job_id, "chat job cancelled by operator");
+        job.mark_cancelled().await;
+    } else {
+        job.mark_complete().await;
+    }
 }
 
 /// Build an SSE response body that drains the job's buffer from
@@ -1333,6 +1358,46 @@ mod tests {
     };
     use crate::test_helpers::{lazy_pool, TEST_AUDIT_CAPACITY, VALID_TOKEN};
     use gadgetron_core::agent::shared_context::PennyTurnContextAssembler;
+
+    #[tokio::test]
+    async fn run_chat_job_cancel_terminates_and_marks_cancelled() {
+        let store = Arc::new(crate::chat_jobs::JobStore::new());
+        let job = store
+            .create(Uuid::new_v4(), None, Uuid::nil(), "penny".into())
+            .await;
+
+        // A stream that never yields — models an in-flight generation
+        // waiting on the provider. Without the cancel branch the
+        // producer would park on next() forever.
+        let producer = tokio::spawn(run_chat_job(
+            Arc::clone(&job),
+            stream::pending::<Result<ChatChunk, GadgetronError>>(),
+            None,
+        ));
+
+        // Give the producer a beat to enter the select.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        job.request_cancel();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), producer)
+            .await
+            .expect("producer must terminate after cancel")
+            .expect("producer joined");
+
+        let snap = job.snapshot().await;
+        assert!(matches!(
+            snap.status,
+            crate::chat_jobs::JobStatus::Cancelled
+        ));
+        assert!(snap.is_finished);
+        // Subscribers see a clean [DONE] terminator.
+        let (chunks, finished) = job.replay_from(0).await;
+        assert!(finished);
+        assert_eq!(
+            chunks.last().map(|b| b.as_ref()),
+            Some(&b"data: [DONE]\n\n"[..])
+        );
+    }
 
     #[test]
     fn log_preview_trims_and_truncates() {

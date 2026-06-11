@@ -2,9 +2,28 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
-import { safeRandomUUID } from "../../lib/uuid";
 import { Sparkline, type SparkPoint } from "../sparkline";
 import { HostDetailDrawer } from "../host-detail-drawer";
+import { getApiBase, invokeAction, unwrapPayload, type ActionResponse } from "../../lib/workbench-client";
+
+// Background polls must stay silent on failure — wrap the shared
+// client's throwing invokeAction back into the null contract this
+// grid's call sites rely on.
+async function invokeActionOrNull(
+  apiKey: string | null,
+  actionId: string,
+  args: Record<string, unknown>,
+): Promise<ActionResponse | null> {
+  try {
+    return await invokeAction(apiKey, actionId, args);
+  } catch {
+    return null;
+  }
+}
+
+function unwrapNullable(resp: ActionResponse | null): unknown {
+  return resp ? unwrapPayload(resp) : null;
+}
 
 // Live host grid for the `/web/copilot` split route. Polls
 // `server-list` every 5 s for inventory + `server-stats` every 5 s
@@ -100,50 +119,6 @@ const HISTORY_WINDOW_MS = 5 * 60 * 1000;
 const HISTORY_REFRESH_MS = 5_000;
 const CRITICAL_AGE_MS = 5 * 60 * 1000;
 const WARNING_AGE_MS = 90 * 1000;
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
-
-async function invokeAction(
-  apiKey: string | null,
-  actionId: string,
-  args: Record<string, unknown>,
-): Promise<Record<string, unknown> | null> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body: JSON.stringify({ args, client_invocation_id: safeRandomUUID() }),
-  });
-  if (!res.ok) return null;
-  return (await res.json()) as Record<string, unknown>;
-}
-
-function unwrapPayload(resp: Record<string, unknown> | null): unknown {
-  if (!resp) return null;
-  const payload = (resp as { result?: { payload?: unknown } }).result?.payload;
-  if (Array.isArray(payload)) {
-    const first = payload[0] as { text?: string } | undefined;
-    if (first?.text) {
-      try {
-        return JSON.parse(first.text);
-      } catch {
-        return first.text;
-      }
-    }
-  }
-  return payload;
-}
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -275,8 +250,8 @@ function shortenGpuName(name: string): string {
 }
 
 async function fetchHosts(apiKey: string | null): Promise<HostRow[]> {
-  const resp = await invokeAction(apiKey, "server-list", {});
-  const parsed = unwrapPayload(resp) as { hosts?: HostRow[] } | null;
+  const resp = await invokeActionOrNull(apiKey, "server-list", {});
+  const parsed = unwrapNullable(resp) as { hosts?: HostRow[] } | null;
   return Array.isArray(parsed?.hosts) ? parsed.hosts : [];
 }
 
@@ -394,8 +369,8 @@ async function fetchStats(
   hostId: string,
 ): Promise<ServerStats | null> {
   try {
-    const resp = await invokeAction(apiKey, "server-stats", { id: hostId });
-    return unwrapPayload(resp) as ServerStats | null;
+    const resp = await invokeActionOrNull(apiKey, "server-stats", { id: hostId });
+    return unwrapNullable(resp) as ServerStats | null;
   } catch {
     return null;
   }

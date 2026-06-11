@@ -190,7 +190,7 @@ search:
   formats: [html, json]
   safe_search: 0
 general:
-  instance_name: gadgetron-dev
+  instance_name: gadgetron
 YAML
 }
 

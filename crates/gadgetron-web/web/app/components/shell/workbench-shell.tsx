@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { StatusStrip, useGatewayHealth } from "./status-strip";
 import { LeftRail } from "./left-rail";
@@ -107,13 +106,6 @@ export function WorkbenchShell({
   const health = useGatewayHealth();
   const [, setRetryCount] = useState(0);
   const narrowDesktop = useNarrowDesktop();
-  const pathname = usePathname();
-  // Copilot route owns its own right pane (the live MonitoringGrid in
-  // `(shell)/copilot/page.tsx`). The default EvidencePane is dropped
-  // there per the B-α design: monitoring-only on the right, no
-  // sources/actions tabs competing for the operator's eyes while
-  // they watch host status.
-  const isCopilotRoute = pathname?.startsWith("/web/copilot") ?? false;
   const effectiveLeftRailCollapsed =
     preAuth || narrowDesktop || prefs.leftRailCollapsed;
 
@@ -125,12 +117,14 @@ export function WorkbenchShell({
   };
 
   // Default right rail: the shared EvidencePane. `rightRail === null`
-  // means the caller explicitly opted out (pre-auth, or copilot route
-  // — see comment above). `rightRail` passed as a node means "use my
-  // custom right rail". Undefined = fall back to the default
-  // EvidencePane.
+  // means the caller explicitly opted out (pre-auth). `rightRail`
+  // passed as a node means "use my custom right rail". Undefined =
+  // fall back to the default EvidencePane. (The former copilot-route
+  // special case is gone — the monitoring split lives on the chat
+  // page itself since ISSUE 47, and the EvidencePane defaults to its
+  // collapsed column there.)
   const resolvedRightRail =
-    preAuth || rightRail === null || isCopilotRoute
+    preAuth || rightRail === null
       ? null
       : rightRail !== undefined
         ? rightRail
@@ -187,7 +181,7 @@ export function WorkbenchShell({
           {children}
         </main>
 
-        {!preAuth && resolvedRightRail && prefs.evidencePaneOpen && !isCopilotRoute && (
+        {!preAuth && resolvedRightRail && prefs.evidencePaneOpen && (
           <ResizeHandle
             orientation="vertical"
             ariaLabel="Resize evidence pane"

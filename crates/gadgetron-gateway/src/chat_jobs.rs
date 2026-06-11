@@ -47,6 +47,10 @@ pub enum JobStatus {
     Streaming,
     Complete,
     Error,
+    /// Operator pressed stop: `POST /jobs/{id}/cancel` asked the
+    /// producer to abandon the upstream stream. Whatever was buffered
+    /// stays replayable until the TTL reaps the job.
+    Cancelled,
 }
 
 #[derive(Debug)]
@@ -84,6 +88,13 @@ pub struct JobState {
     completed_at: Mutex<Option<Instant>>,
     inner: Mutex<JobInner>,
     watchers: Notify,
+    /// Cancellation signal. The cancel handler flips the flag and
+    /// notifies; the producer's select loop observes it between
+    /// chunks (`cancelled_signal`). Separate from `watchers`, which
+    /// wakes buffer SUBSCRIBERS — mixing the two would wake every
+    /// sync client on each cancel request.
+    cancel_requested: std::sync::atomic::AtomicBool,
+    cancel_notify: Notify,
 }
 
 impl JobState {
@@ -109,6 +120,8 @@ impl JobState {
                 is_finished: false,
             }),
             watchers: Notify::new(),
+            cancel_requested: std::sync::atomic::AtomicBool::new(false),
+            cancel_notify: Notify::new(),
         }
     }
 
@@ -145,6 +158,47 @@ impl JobState {
         self.watchers.notify_waiters();
     }
 
+    /// Mark the job as cancelled by the operator. Terminal like
+    /// `mark_complete` — subscribers drain the buffer and stop.
+    pub async fn mark_cancelled(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.status = JobStatus::Cancelled;
+        inner.is_finished = true;
+        drop(inner);
+        *self.completed_at.lock().await = Some(Instant::now());
+        self.watchers.notify_waiters();
+    }
+
+    /// Ask the producer to stop pulling from the upstream stream. The
+    /// actual transition to `Cancelled` happens in the producer once
+    /// it observes the flag — callers read the snapshot for the
+    /// eventual state. Idempotent; a no-op on finished jobs.
+    pub fn request_cancel(&self) {
+        self.cancel_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel_notify.notify_waiters();
+    }
+
+    pub fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Resolves once `request_cancel` has been called. Same
+    /// enable-before-check pattern as `wait_for_chunk_after` so a
+    /// notify between the flag check and the park is not lost.
+    pub async fn cancelled_signal(&self) {
+        loop {
+            let notified = self.cancel_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancel_requested() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Snapshot for the `/active-job` endpoint.
     pub async fn snapshot(&self) -> JobSnapshot {
         let inner = self.inner.lock().await;
@@ -179,6 +233,14 @@ impl JobState {
         loop {
             let notified = self.watchers.notified();
             tokio::pin!(notified);
+            // Register with the Notify BEFORE checking the buffer.
+            // `notify_waiters` stores no permit, so a producer push that
+            // lands between the condition check and the first poll of
+            // `notified` would otherwise be lost — fatal when it was the
+            // job's final wake (mark_complete), leaving this subscriber
+            // parked forever. With `enable()` first, a push after the
+            // check wakes us; a push before it is seen by the check.
+            notified.as_mut().enable();
             {
                 let inner = self.inner.lock().await;
                 if inner.chunks.len() > current {
@@ -193,8 +255,6 @@ impl JobState {
                     return WaitResult::Finished;
                 }
             }
-            // Lock dropped before parking — producer can grab it
-            // and call notify_waiters while we sleep.
             notified.await;
         }
     }
@@ -279,6 +339,14 @@ impl JobStore {
     pub async fn active_for_conversation(&self, conv_id: Uuid) -> Option<Arc<JobState>> {
         let job_id = *self.by_conv.read().await.get(&conv_id)?;
         self.get(job_id).await
+    }
+
+    /// Every registered job (streaming + recently completed). The
+    /// batched `/jobs/active` endpoint filters this for caller
+    /// visibility and liveness — one sidebar poll per interval instead
+    /// of one per conversation row.
+    pub async fn all_jobs(&self) -> Vec<Arc<JobState>> {
+        self.by_id.read().await.values().cloned().collect()
     }
 
     /// Drop jobs that finished long enough ago to be reaped.
@@ -416,6 +484,61 @@ mod tests {
         let snap = job.snapshot().await;
         assert!(matches!(snap.status, JobStatus::Error));
         assert_eq!(snap.error_message.as_deref(), Some("upstream 500"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_signal_resolves_after_request_cancel() {
+        let store = fresh_store();
+        let job = store
+            .create(Uuid::new_v4(), None, Uuid::nil(), "penny".into())
+            .await;
+
+        let waiter = {
+            let job = Arc::clone(&job);
+            tokio::spawn(async move { job.cancelled_signal().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished(), "must wait until cancel requested");
+
+        job.request_cancel();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("cancelled_signal must resolve")
+            .expect("waiter joined");
+        assert!(job.is_cancel_requested());
+
+        // Signal is level-triggered: a second await resolves instantly.
+        tokio::time::timeout(Duration::from_secs(1), job.cancelled_signal())
+            .await
+            .expect("already-cancelled signal resolves immediately");
+    }
+
+    #[tokio::test]
+    async fn mark_cancelled_is_terminal_for_subscribers() {
+        let store = fresh_store();
+        let job = store
+            .create(Uuid::new_v4(), None, Uuid::nil(), "penny".into())
+            .await;
+        job.push_chunk(Bytes::from_static(b"partial")).await;
+        job.mark_cancelled().await;
+
+        let snap = job.snapshot().await;
+        assert!(matches!(snap.status, JobStatus::Cancelled));
+        assert!(snap.is_finished);
+        // Buffer stays replayable; the tail terminates.
+        let (chunks, finished) = job.replay_from(0).await;
+        assert_eq!(chunks.len(), 1);
+        assert!(finished);
+        match job.wait_for_chunk_after(1).await {
+            WaitResult::Finished => {}
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancelled_status_serializes_snake_case() {
+        let s = serde_json::to_string(&JobStatus::Cancelled).expect("serialize");
+        assert_eq!(s, "\"cancelled\"");
     }
 
     #[tokio::test]

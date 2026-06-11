@@ -404,6 +404,12 @@ fn workbench_err_to_gadgetron(err: WorkbenchHttpError) -> GadgetronError {
             GadgetronError::Config(format!("approval already resolved (state={state})"))
         }
         WorkbenchHttpError::ApprovalForbidden => GadgetronError::Forbidden,
+        WorkbenchHttpError::JobNotFound => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: "chat-job".into(),
+            },
+            message: "Chat job not found.".into(),
+        },
     }
 }
 

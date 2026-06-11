@@ -10,21 +10,13 @@ import {
   WorkbenchPage,
 } from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
+import { getApiBase, invokeAction, unwrapPayload } from "../../lib/workbench-client";
 
 // ---------------------------------------------------------------------------
 // /web/dashboard — operator observability surface. Runs inside
 // `(shell)/layout.tsx`; supplies only the dashboard header + tiles +
 // live-feed right column. Auth gate / outer chrome live in the shell.
 // ---------------------------------------------------------------------------
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 function wsUrlFromHttp(httpBase: string, actorKey: string | null): string {
   if (typeof location === "undefined") return "";
@@ -37,25 +29,47 @@ function wsUrlFromHttp(httpBase: string, actorKey: string | null): string {
   return actorKey ? `${base}?token=${encodeURIComponent(actorKey)}` : base;
 }
 
-type UsageSummary = {
-  window_hours: number;
-  chat: {
-    requests: number;
-    errors: number;
-    total_input_tokens: number;
-    total_output_tokens: number;
-    total_cost_cents: number;
-    avg_latency_ms: number;
+// Fleet summary — the `server-fleet` action payload (ISSUE 46). The
+// dashboard leads with the REGISTERED SERVERS' health, not gadgetron's
+// own usage counters (user direction 2026-06-11); usage numbers remain
+// available via /workbench/usage/summary for the admin surface.
+type FleetSummary = {
+  generated_at: string;
+  /** False in legacy no-DB mode — online/offline counts are then
+   * meaningless and the UI renders "unknown" instead (ISSUE 50). */
+  snapshots_available?: boolean;
+  servers: { total: number; online: number; offline: number };
+  gpus: {
+    count: number;
+    avg_util_pct: number | null;
+    max_temp_c: number | null;
+    total_power_w: number | null;
   };
-  actions: {
-    total: number;
-    success: number;
-    error: number;
-    pending_approval: number;
-    avg_elapsed_ms: number;
-  };
-  tools: { total: number; errors: number };
+  cpu: { avg_util_pct: number | null };
+  mem: { used_bytes: number; total_bytes: number };
+  warnings: number;
+  hosts: Array<{
+    id: string;
+    host: string;
+    alias: string | null;
+    online: boolean;
+    cpu_util_pct: number | null;
+    gpu_count: number;
+    gpu_avg_util_pct: number | null;
+    gpu_max_temp_c: number | null;
+    warnings: number;
+  }>;
 };
+
+async function fetchFleet(apiKey: string | null): Promise<FleetSummary> {
+  return unwrapPayload(
+    await invokeAction(apiKey, "server-fleet", {}),
+  ) as FleetSummary;
+}
+
+function fmtGiB(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(0)} GiB`;
+}
 
 type LiveEvent = {
   type: string;
@@ -64,7 +78,7 @@ type LiveEvent = {
 
 export default function DashboardPage() {
   const { apiKey } = useAuth();
-  const [summary, setSummary] = useState<UsageSummary | null>(null);
+  const [summary, setSummary] = useState<FleetSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [wsStatus, setWsStatus] = useState<
@@ -75,22 +89,18 @@ export default function DashboardPage() {
   const refreshSummary = useCallback(async () => {
     setSummaryError(null);
     try {
-      const res = await fetch(`${getApiBase()}/workbench/usage/summary`, {
-        credentials: "include", headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`${res.status} ${text.slice(0, 200)}`);
-      }
-      const json = (await res.json()) as UsageSummary;
-      setSummary(json);
+      setSummary(await fetchFleet(apiKey));
     } catch (e) {
       setSummaryError((e as Error).message);
     }
   }, [apiKey]);
 
+  // Snapshot rows refresh at poller cadence; 10 s keeps the tiles live
+  // without hammering the action endpoint.
   useEffect(() => {
     void refreshSummary();
+    const t = window.setInterval(() => void refreshSummary(), 10_000);
+    return () => window.clearInterval(t);
   }, [apiKey, refreshSummary]);
 
   // Live WebSocket subscription. Reconnects on close; drops on unmount.
@@ -133,7 +143,7 @@ export default function DashboardPage() {
   return (
     <WorkbenchPage
       title="Dashboard"
-      subtitle="Cross-system activity, usage, and live operational events."
+      subtitle="Registered-fleet health at a glance, plus live operational events."
       headerTestId="dashboard-header"
       actions={
         <Button
@@ -152,13 +162,15 @@ export default function DashboardPage() {
           }
         >
           <span className="text-xs text-zinc-500">
-            Live feed and usage summary
+            Fleet status and live feed
           </span>
           <span
             className="text-[11px] text-zinc-600"
             data-testid="dashboard-window-label"
           >
-            last {summary?.window_hours ?? 24}h
+            {summary
+              ? `${summary.servers.online}/${summary.servers.total} online`
+              : "—"}
           </span>
           <span
             data-testid="dashboard-ws-status"
@@ -178,10 +190,10 @@ export default function DashboardPage() {
         {summaryError && (
           <InlineNotice
             tone="error"
-            title="Usage summary request failed"
+            title="Fleet summary request failed"
             details={summaryError}
           >
-            Gadgetron could not load the current usage summary.
+            Gadgetron could not load the registered-server summary.
           </InlineNotice>
         )}
         <div className="flex min-h-[520px] overflow-hidden rounded border border-zinc-800">
@@ -192,53 +204,127 @@ export default function DashboardPage() {
               </div>
             )}
             {summary && (
-              <div
-                className="grid grid-cols-1 gap-3 md:grid-cols-3"
-                data-testid="dashboard-tiles"
-              >
-                <Tile
-                  testId="tile-chat"
-                  title="Chat"
-                  primary={`${summary.chat.requests}`}
-                  primaryLabel="requests"
-                  sub={[
-                    [
-                      "tokens",
-                      `${summary.chat.total_input_tokens + summary.chat.total_output_tokens}`,
-                    ],
-                    [
-                      "cost",
-                      `$${(summary.chat.total_cost_cents / 100).toFixed(2)}`,
-                    ],
-                    [
-                      "avg latency",
-                      `${summary.chat.avg_latency_ms.toFixed(0)}ms`,
-                    ],
-                    ["errors", `${summary.chat.errors}`],
-                  ]}
-                />
-                <Tile
-                  testId="tile-actions"
-                  title="Actions"
-                  primary={`${summary.actions.total}`}
-                  primaryLabel="invocations"
-                  sub={[
-                    ["success", `${summary.actions.success}`],
-                    ["error", `${summary.actions.error}`],
-                    ["pending", `${summary.actions.pending_approval}`],
-                    [
-                      "avg elapsed",
-                      `${summary.actions.avg_elapsed_ms.toFixed(0)}ms`,
-                    ],
-                  ]}
-                />
-                <Tile
-                  testId="tile-tools"
-                  title="Tools"
-                  primary={`${summary.tools.total}`}
-                  primaryLabel="calls"
-                  sub={[["errors", `${summary.tools.errors}`]]}
-                />
+              <div className="flex flex-col gap-3">
+                <div
+                  className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4"
+                  data-testid="dashboard-tiles"
+                >
+                  <Tile
+                    testId="tile-servers"
+                    title="서버"
+                    primary={`${summary.servers.online}/${summary.servers.total}`}
+                    primaryLabel="online"
+                    sub={[
+                      ["online", `${summary.servers.online}`],
+                      ["offline", `${summary.servers.offline}`],
+                    ]}
+                  />
+                  <Tile
+                    testId="tile-gpus"
+                    title="GPU"
+                    primary={`${summary.gpus.count}`}
+                    primaryLabel="gpus"
+                    sub={[
+                      [
+                        "avg util",
+                        summary.gpus.avg_util_pct != null
+                          ? `${summary.gpus.avg_util_pct.toFixed(0)}%`
+                          : "—",
+                      ],
+                      [
+                        "max temp",
+                        summary.gpus.max_temp_c != null
+                          ? `${summary.gpus.max_temp_c.toFixed(0)}°C`
+                          : "—",
+                      ],
+                      [
+                        "power",
+                        summary.gpus.total_power_w != null
+                          ? `${summary.gpus.total_power_w.toFixed(0)}W`
+                          : "—",
+                      ],
+                    ]}
+                  />
+                  <Tile
+                    testId="tile-resources"
+                    title="자원"
+                    primary={
+                      summary.cpu.avg_util_pct != null
+                        ? `${summary.cpu.avg_util_pct.toFixed(0)}%`
+                        : "—"
+                    }
+                    primaryLabel="avg cpu"
+                    sub={[
+                      [
+                        "mem",
+                        summary.mem.total_bytes > 0
+                          ? `${fmtGiB(summary.mem.used_bytes)} / ${fmtGiB(summary.mem.total_bytes)}`
+                          : "—",
+                      ],
+                      [
+                        "mem %",
+                        summary.mem.total_bytes > 0
+                          ? `${((summary.mem.used_bytes / summary.mem.total_bytes) * 100).toFixed(0)}%`
+                          : "—",
+                      ],
+                    ]}
+                  />
+                  <a
+                    href="/web/findings"
+                    className="block"
+                    title="로그 분석 findings 열기"
+                  >
+                    <Tile
+                      testId="tile-warnings"
+                      title="경고"
+                      primary={`${summary.warnings}`}
+                      primaryLabel="warnings"
+                      sub={[["findings", "열기 →"]]}
+                    />
+                  </a>
+                </div>
+                {/* Per-host status strip — one dot per server (green =
+                  * online, red = offline, amber ring = warnings). Scales
+                  * to hundreds of hosts; click → /web/servers. */}
+                {summary.hosts.length > 0 && (
+                  <div
+                    className="rounded border border-zinc-800 bg-zinc-900/40 p-3"
+                    data-testid="dashboard-host-strip"
+                  >
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                      Hosts ({summary.hosts.length})
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {summary.hosts.map((h) => (
+                        <a
+                          key={h.id}
+                          href="/web/servers"
+                          data-testid="dashboard-host-dot"
+                          title={`${h.alias ?? h.host}${h.online ? "" : " · offline"}${
+                            h.cpu_util_pct != null
+                              ? ` · CPU ${h.cpu_util_pct.toFixed(0)}%`
+                              : ""
+                          }${
+                            h.gpu_count > 0
+                              ? ` · GPU×${h.gpu_count}${
+                                  h.gpu_avg_util_pct != null
+                                    ? ` ${h.gpu_avg_util_pct.toFixed(0)}%`
+                                    : ""
+                                }`
+                              : ""
+                          }${h.warnings > 0 ? ` · ⚠${h.warnings}` : ""}`}
+                          className={`size-3 rounded-sm ${
+                            summary.snapshots_available === false
+                              ? "bg-zinc-500"
+                              : h.online
+                                ? "bg-emerald-500"
+                                : "bg-red-600"
+                          } ${h.warnings > 0 ? "ring-1 ring-amber-400" : ""}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </main>

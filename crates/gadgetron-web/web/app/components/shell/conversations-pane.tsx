@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useThread } from "@assistant-ui/react";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useAuth } from "../../lib/auth-context";
-import { useActiveJob, isJobRunning } from "../../lib/chat-resume";
+import { useRunningConversations } from "../../lib/chat-resume";
 import {
   ACTIVE_CONVERSATION_EVENT,
   clearActiveConversationId,
@@ -106,6 +106,9 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [active, setActive] = useState<string | null>(null);
+  // ONE batched poll for every row's "생성 중" indicator — per-row
+  // useActiveJob polling scaled as O(rows) requests per interval.
+  const runningConvs = useRunningConversations();
 
   // Hydrate the active id once on mount.
   useEffect(() => {
@@ -283,6 +286,7 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
             key={r.id}
             row={r}
             isActive={active === r.id}
+            running={runningConvs.has(r.id)}
             onSelect={() => switchTo(r.id)}
             onDelete={() => void remove(r.id)}
           />
@@ -292,23 +296,22 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-/// One row in the sidebar conversation list. Extracted into its
-/// own component so each row can call `useActiveJob(r.id)` —
-/// hook calls inside `.map` are a React rules violation, so the
-/// per-row poll lives here.
+/// One row in the sidebar conversation list. The running flag comes
+/// from the pane-level `useRunningConversations()` batch poll — rows
+/// render the indicator only, no per-row network traffic.
 function ConversationRow({
   row,
   isActive,
+  running,
   onSelect,
   onDelete,
 }: {
   row: ConvRow;
   isActive: boolean;
+  running: boolean;
   onSelect: () => void;
   onDelete: () => void;
 }) {
-  const job = useActiveJob(row.id);
-  const running = isJobRunning(job);
   return (
     <div
       className={cn(

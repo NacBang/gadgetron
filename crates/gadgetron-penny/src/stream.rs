@@ -210,6 +210,14 @@ pub fn parse_event(line: &str) -> Result<Option<StreamJsonEvent>, serde_json::Er
 pub enum CodexExecEvent {
     ThreadStarted(String),
     TextDelta(String),
+    /// Streamed reasoning fragment (`agent_reasoning_delta` family).
+    /// Surfaced as a thinking block, NOT as answer text — and it must
+    /// not count as an answer delta, or a reasoning-only stream would
+    /// suppress the final `agent_message`.
+    ReasoningDelta(String),
+    /// Complete reasoning block (`agent_reasoning` / `item.type =
+    /// "reasoning"`). Skipped when reasoning deltas already streamed.
+    Reasoning(String),
     FinalMessage(String),
     McpToolCall {
         call_id: Option<String>,
@@ -217,7 +225,10 @@ pub enum CodexExecEvent {
         input: Value,
         result: Option<CodexToolCallResult>,
     },
-    Finished,
+    Finished {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
     Error(String),
 }
 
@@ -261,7 +272,37 @@ fn codex_event_from_value(value: &Value) -> Option<CodexExecEvent> {
         || event_type == "response.completed"
         || event_type == "done"
     {
-        return Some(CodexExecEvent::Finished);
+        let usage = value.get("usage");
+        return Some(CodexExecEvent::Finished {
+            input_tokens: usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(Value::as_u64),
+            output_tokens: usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(Value::as_u64),
+        });
+    }
+
+    // Reasoning events MUST be claimed before the generic delta
+    // extraction below — an `agent_reasoning_delta` payload carries a
+    // top-level `delta` string and would otherwise be misread as an
+    // answer TextDelta (leaking raw reasoning into the answer AND
+    // setting the has-streamed-deltas flag that suppresses the final
+    // agent_message).
+    if event_type.contains("reasoning") {
+        if let Some(delta) = value
+            .get("delta")
+            .and_then(Value::as_str)
+            .or_else(|| value.pointer("/delta/text").and_then(Value::as_str))
+            .filter(|delta| !delta.is_empty())
+        {
+            return Some(CodexExecEvent::ReasoningDelta(delta.to_string()));
+        }
+        let text = codex_reasoning_text(value);
+        if !text.is_empty() {
+            return Some(CodexExecEvent::Reasoning(text));
+        }
+        return None;
     }
 
     if let Some(text) = value
@@ -302,6 +343,13 @@ fn codex_item_event(item: &Value) -> Option<CodexExecEvent> {
         let text = extract_text(item);
         if !text.is_empty() {
             return Some(CodexExecEvent::FinalMessage(text));
+        }
+    }
+
+    if item_type == "reasoning" || item_type == "agent_reasoning" {
+        let text = codex_reasoning_text(item);
+        if !text.is_empty() {
+            return Some(CodexExecEvent::Reasoning(text));
         }
     }
 
@@ -459,6 +507,21 @@ fn codex_text_array_to_text(items: &[Value]) -> String {
         .join(" ")
 }
 
+/// Best-effort text extraction for codex reasoning shapes. Reasoning
+/// items carry `text`, a `content` array, or (older builds) a `summary`
+/// array of plain strings — try each in turn.
+fn codex_reasoning_text(value: &Value) -> String {
+    let text = extract_text(value);
+    if !text.is_empty() {
+        return text;
+    }
+    value
+        .get("summary")
+        .and_then(Value::as_array)
+        .map(|items| codex_text_array_to_text(items))
+        .unwrap_or_default()
+}
+
 fn extract_text(value: &Value) -> String {
     if let Some(text) = value
         .get("text")
@@ -501,15 +564,37 @@ pub fn codex_event_to_chat_chunks_ex(
     event: CodexExecEvent,
     req: &ChatRequest,
     skip_final_text: bool,
+    skip_full_reasoning: bool,
 ) -> Vec<ChatChunk> {
     match event {
         CodexExecEvent::TextDelta(text) if !text.is_empty() => {
             vec![build_chunk(req, Some(text), None)]
         }
+        CodexExecEvent::ReasoningDelta(text) if !text.is_empty() => {
+            vec![build_chunk(req, Some(format_thinking_block(&text)), None)]
+        }
+        CodexExecEvent::Reasoning(text) if !text.is_empty() && !skip_full_reasoning => {
+            vec![build_chunk(req, Some(format_thinking_block(&text)), None)]
+        }
         CodexExecEvent::FinalMessage(text) if !text.is_empty() && !skip_final_text => {
             vec![build_chunk(req, Some(text), None)]
         }
-        CodexExecEvent::Finished => stop_chunk(req),
+        CodexExecEvent::Finished {
+            input_tokens,
+            output_tokens,
+        } => {
+            // Mirror the Claude path's message_usage telemetry: audit-
+            // only tracing, never a client-visible chunk.
+            if input_tokens.is_some() || output_tokens.is_some() {
+                tracing::info!(
+                    target: "penny_audit",
+                    input_tokens = input_tokens.unwrap_or(0),
+                    output_tokens = output_tokens.unwrap_or(0),
+                    "penny_usage"
+                );
+            }
+            stop_chunk(req)
+        }
         CodexExecEvent::ThreadStarted(_) => Vec::new(),
         CodexExecEvent::McpToolCall {
             name,
@@ -519,6 +604,8 @@ pub fn codex_event_to_chat_chunks_ex(
         } => codex_tool_call_to_chat_chunks(&name, &input, result.as_ref(), req, result.is_none()),
         CodexExecEvent::Error(_)
         | CodexExecEvent::TextDelta(_)
+        | CodexExecEvent::ReasoningDelta(_)
+        | CodexExecEvent::Reasoning(_)
         | CodexExecEvent::FinalMessage(_) => Vec::new(),
     }
 }
@@ -1017,6 +1104,92 @@ mod tests {
         );
     }
 
+    /// Regression lock: `agent_reasoning_delta` carries a top-level
+    /// `delta` string and was previously misread by the generic delta
+    /// branch as an answer `TextDelta` — leaking raw reasoning into the
+    /// answer and (via has_streamed_deltas) suppressing the final
+    /// `agent_message`.
+    #[test]
+    fn parse_codex_exec_reasoning_delta_is_not_text_delta() {
+        let line = r#"{"type":"event_msg","payload":{"type":"agent_reasoning_delta","delta":"thinking hard"}}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::ReasoningDelta("thinking hard".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_full_reasoning_block() {
+        let line = r#"{"type":"event_msg","payload":{"type":"agent_reasoning","text":"plan: search the wiki"}}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::Reasoning(
+                "plan: search the wiki".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_reasoning_item_with_summary() {
+        let line = r#"{"type":"item.completed","item":{"type":"reasoning","summary":["weigh options","pick wiki.search"]}}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::Reasoning(
+                "weigh options pick wiki.search".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_turn_completed_extracts_usage() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":40,"output_tokens":55}}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::Finished {
+                input_tokens: Some(120),
+                output_tokens: Some(55),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_codex_exec_turn_completed_without_usage() {
+        let line = r#"{"type":"turn.completed"}"#;
+        assert_eq!(
+            parse_codex_exec_event(line).unwrap(),
+            Some(CodexExecEvent::Finished {
+                input_tokens: None,
+                output_tokens: None,
+            })
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_delta_renders_thinking_block() {
+        let chunks = codex_event_to_chat_chunks_ex(
+            CodexExecEvent::ReasoningDelta("checking the wiki".to_string()),
+            &req(),
+            false,
+            false,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].choices[0].delta.content.as_deref(),
+            Some("> 💭 _checking the wiki_\n\n")
+        );
+    }
+
+    #[test]
+    fn codex_full_reasoning_skipped_after_reasoning_deltas() {
+        let chunks = codex_event_to_chat_chunks_ex(
+            CodexExecEvent::Reasoning("full block".to_string()),
+            &req(),
+            false,
+            true, // reasoning deltas already streamed
+        );
+        assert!(chunks.is_empty());
+    }
+
     #[test]
     fn parse_codex_exec_mcp_tool_call() {
         let line = r#"{"type":"item.completed","item":{"type":"mcp_tool_call","name":"wiki.search","arguments":{"query":"gadgetron"}}}"#;
@@ -1085,6 +1258,7 @@ mod tests {
             CodexExecEvent::FinalMessage("done".to_string()),
             &req(),
             false,
+            false,
         );
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("done"));
@@ -1100,6 +1274,7 @@ mod tests {
                 result: None,
             },
             &req(),
+            false,
             false,
         );
         assert_eq!(chunks.len(), 1);
@@ -1122,6 +1297,7 @@ mod tests {
                 }),
             },
             &req(),
+            false,
             false,
         );
         assert_eq!(chunks.len(), 1);

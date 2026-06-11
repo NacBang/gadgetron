@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { useAuth } from "./auth-context";
+import { getApiBase } from "./workbench-client";
 
 // Live evidence feed: subscribes to /workbench/events/ws once per session,
 // keeps the most recent 50 read-tier tool calls + knowledge-category
@@ -68,15 +69,6 @@ interface EvidenceContextValue {
 }
 
 const EvidenceContext = createContext<EvidenceContextValue | null>(null);
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 function wsUrl(actorKey: string | null): string {
   if (typeof location === "undefined") return "";

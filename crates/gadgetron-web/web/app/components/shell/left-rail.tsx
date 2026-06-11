@@ -10,7 +10,6 @@ import {
   Server,
   Shield,
   AlertTriangle,
-  LayoutPanelLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../../lib/auth-context";
@@ -28,7 +27,6 @@ import { ConversationsPane } from "./conversations-pane";
 
 export type LeftRailTab =
   | "chat"
-  | "copilot"
   | "wiki"
   | "dashboard"
   | "servers"
@@ -54,17 +52,9 @@ const NAV_ITEMS: NavItem[] = [
     icon: <MessageSquare className="size-4" aria-hidden />,
     href: "/",
   },
-  {
-    // Copilot = same chat thread as `/web` rendered side-by-side
-    // with a live monitoring grid. Different layout, same Penny
-    // runtime + conversation_id (sessionStorage shared, runtime
-    // hoisted in (shell)/layout.tsx). Operators flip between the
-    // two views without losing in-flight responses.
-    id: "copilot",
-    label: "Copilot",
-    icon: <LayoutPanelLeft className="size-4" aria-hidden />,
-    href: "/copilot",
-  },
+  // The former "Copilot" tab (chat + monitoring split) merged into
+  // Chat (ISSUE 47): the chat header's 모니터링 toggle opens the same
+  // split; /copilot redirects here.
   {
     id: "wiki",
     label: "Knowledge",
@@ -105,10 +95,6 @@ function tabFromPathname(pathname: string | null): LeftRailTab {
   const normalized = pathname.startsWith("/web")
     ? pathname.slice("/web".length) || "/"
     : pathname;
-  // `/copilot` matched BEFORE `/` because both start at root after
-  // the `/web` strip. Order-sensitive — moving copilot below the
-  // bare-/ check would silently route copilot back to chat.
-  if (normalized.startsWith("/copilot")) return "copilot";
   if (normalized.startsWith("/wiki")) return "wiki";
   if (normalized.startsWith("/dashboard")) return "dashboard";
   if (normalized.startsWith("/servers")) return "servers";

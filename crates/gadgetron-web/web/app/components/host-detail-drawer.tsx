@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { counterToRollingRate } from "../lib/metric-series";
 import { Button } from "./ui/button";
+import { getApiBase } from "../lib/workbench-client";
 
 // Drawer (full-height right panel) opened when an operator clicks a
 // host card on /web/servers. Lets them pick a time range, browse a
@@ -51,15 +52,6 @@ const RANGES: RangeOption[] = [
   { label: "24h", ms: 24 * 60 * 60 * 1000 },
   { label: "7d", ms: 7 * 24 * 60 * 60 * 1000 },
 ];
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 /** A single series drawn as one line on the chart. */
 interface SeriesSpec {

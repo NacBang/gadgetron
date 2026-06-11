@@ -7,6 +7,20 @@ import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { Sparkline, type SparkPoint } from "../../components/sparkline";
 import { HostDetailDrawer } from "../../components/host-detail-drawer";
+import { TopologyGraphView } from "../../components/topology-graph";
+import { ServerTileGrid } from "../../components/server-tile-grid";
+import {
+  topologySignature,
+  type HostStatus,
+  type TopologyGraph,
+} from "../../lib/topology-elements";
+import {
+  filterSortHosts,
+  type FleetHostRow,
+  type ServerSortKey,
+  type ServerStatusFilter,
+  type TileColorBy,
+} from "../../lib/server-fleet-view";
 import {
   EmptyState,
   InlineNotice,
@@ -16,7 +30,7 @@ import {
 } from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
 import { counterToRollingRate } from "../../lib/metric-series";
-import { safeRandomUUID } from "../../lib/uuid";
+import { getApiBase, invokeAction, unwrapPayload } from "../../lib/workbench-client";
 
 // ---------------------------------------------------------------------------
 // /web/servers — server-monitor bundle UI.
@@ -26,15 +40,6 @@ import { safeRandomUUID } from "../../lib/uuid";
 // 5 seconds; clicking the card opens a detail sheet with per-GPU, per-disk,
 // and per-chip temperature breakdowns.
 // ---------------------------------------------------------------------------
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 interface Host {
   id: string;
@@ -136,43 +141,6 @@ type StatsMap = Record<
     lastFetchedAt?: number;
   }
 >;
-
-async function invokeAction(
-  apiKey: string | null,
-  actionId: string,
-  args: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ args, client_invocation_id: safeRandomUUID() }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${actionId}: ${res.status} ${text.slice(0, 300)}`);
-  }
-  return await res.json();
-}
-
-function unwrapPayload(resp: Record<string, unknown>): unknown {
-  const payload = (resp as { result?: { payload?: unknown } }).result?.payload;
-  if (Array.isArray(payload)) {
-    // Gadget path: content returns `[{type:"text", text:"<json>"}]`.
-    const first = payload[0] as { text?: string } | undefined;
-    if (first?.text) {
-      try {
-        return JSON.parse(first.text);
-      } catch {
-        return first.text;
-      }
-    }
-  }
-  return payload;
-}
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -1441,7 +1409,7 @@ function HostCard({
   return (
     <div
       data-testid={`host-card-${host.host}`}
-      className="group/card flex h-[500px] flex-col gap-2 overflow-hidden rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
+      className="group/card flex h-[480px] flex-col gap-2 overflow-hidden rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
     >
       <div className="flex min-w-0 flex-col gap-2">
         <div className="min-w-0" data-testid="host-card-title-row">
@@ -1504,11 +1472,8 @@ function HostCard({
               </button>
             </div>
           )}
-          {host.alias && !editing && (
-            <div className="truncate font-mono text-[11px] text-zinc-500">
-              {host.host}
-            </div>
-          )}
+          {/* One connection line — the alias case used to add a second
+            * line repeating the bare host, which read as clutter. */}
           <div className="truncate font-mono text-[11px] text-zinc-500">
             {host.ssh_user}@{host.host}:{host.ssh_port}
           </div>
@@ -1571,11 +1536,11 @@ function HostCard({
               </a>
             );
           })()}
-          {/* Inline expand — toggles per-GPU detail block. Mirrors
-            * the copilot card's ▸/▾ button so both surfaces share
-            * the same expand affordance instead of /web/servers
-            * burying the toggle on the GPU row header (low
-            * discoverability). */}
+          {/* Uniform icon-only action row. The old mix of emoji+text
+            * buttons ("🔧 shell", "+ gadgetini", "remove") wrapped to
+            * two lines on narrow cards; same-size icon buttons with
+            * tooltips keep the row to one tidy line. Testids and
+            * behavior unchanged. */}
           <button
             type="button"
             data-testid={`host-expand-${host.host}`}
@@ -1583,18 +1548,15 @@ function HostCard({
             aria-expanded={gpuExpanded}
             aria-label={gpuExpanded ? "Collapse host detail" : "Expand host detail"}
             title={gpuExpanded ? "Collapse" : "Expand inline"}
-            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
+            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
           >
             {gpuExpanded ? "▾" : "▸"}
           </button>
-          {/* Drawer — full charts + range selector. Same component
-            * the copilot card's ⇱ button opens. Renamed from the
-            * old "detail" text button to match copilot's icon. */}
           <button
             type="button"
             data-testid={`host-detail-${host.host}`}
             onClick={onOpenDetail}
-            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
+            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
             title="Open detail drawer"
             aria-label="Open detail drawer"
           >
@@ -1604,16 +1566,17 @@ function HostCard({
             type="button"
             data-testid={`host-shell-${host.host}`}
             onClick={() => setShellOpen(true)}
-            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
+            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 font-mono text-[10px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
             title="Run remote bash (approval required per call)"
+            aria-label="Run remote bash"
           >
-            🔧 shell
+            {">_"}
           </button>
           <button
             type="button"
             data-testid={`host-gadgetini-${host.host}`}
             onClick={() => setGadgetiniOpen(true)}
-            className={`rounded border px-1.5 py-0.5 text-[11px] hover:border-blue-700 hover:text-blue-300 ${
+            className={`inline-flex size-6 items-center justify-center rounded border text-[11px] hover:border-blue-700 hover:text-blue-300 ${
               host.gadgetini
                 ? "border-blue-900/70 text-blue-300"
                 : "border-zinc-800 text-zinc-400"
@@ -1623,17 +1586,19 @@ function HostCard({
                 ? "Edit gadgetini connection"
                 : "Attach a gadgetini child board"
             }
+            aria-label="Gadgetini settings"
           >
-            {host.gadgetini ? "📡 gadgetini" : "+ gadgetini"}
+            📡
           </button>
           <button
             type="button"
             data-testid={`host-remove-${host.host}`}
             onClick={onRemove}
-            className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:border-red-800 hover:text-red-400"
+            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 text-[11px] text-zinc-400 hover:border-red-800 hover:text-red-400"
             title="Remove host"
+            aria-label="Remove host"
           >
-            remove
+            ✕
           </button>
         </div>
       </div>
@@ -1664,9 +1629,11 @@ function HostCard({
         </InlineNotice>
       )}
       {stats?.cpu && (
+        // Model name lives in the header line already — repeating it in
+        // the bar label just truncated the percentage column.
         <ProgressBar
           pct={stats.cpu.util_pct}
-          label={`CPU${host.cpu_model ? ` ${shortenCpu(host.cpu_model)}` : ""} · ${stats.cpu.cores}c`}
+          label={`CPU · ${stats.cpu.cores}c`}
         />
       )}
       {stats?.mem && (
@@ -1789,15 +1756,44 @@ function HostCard({
           </div>
         );
       })()}
-      {stats?.power?.psu_watts != null && (
-        <StatRow label="PSU" value={`${stats.power.psu_watts.toFixed(0)}W`} />
-      )}
-      {stats?.temps && stats.temps.length > 0 && (
-        <StatRow
-          label="max temp"
-          value={`${Math.max(...stats.temps.map((t) => t.celsius)).toFixed(0)}°C`}
-        />
-      )}
+      {/* Single vitals line — PSU, hottest sensor, and uptime used to
+        * be three separate label/value rows; one row reads cleaner and
+        * frees vertical space for the sparklines. */}
+      {stats &&
+        (stats.power?.psu_watts != null ||
+          (stats.temps?.length ?? 0) > 0 ||
+          stats.uptime_secs != null) && (
+          <div
+            className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500"
+            data-testid="host-vitals-row"
+          >
+            {stats.power?.psu_watts != null && (
+              <span>
+                PSU{" "}
+                <span className="font-mono text-zinc-300">
+                  {stats.power.psu_watts.toFixed(0)}W
+                </span>
+              </span>
+            )}
+            {stats.temps && stats.temps.length > 0 && (
+              <span>
+                max temp{" "}
+                <span className="font-mono text-zinc-300">
+                  {Math.max(...stats.temps.map((t) => t.celsius)).toFixed(0)}
+                  °C
+                </span>
+              </span>
+            )}
+            {stats.uptime_secs != null && (
+              <span>
+                up{" "}
+                <span className="font-mono text-zinc-300">
+                  {fmtUptime(stats.uptime_secs)}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
       {cooling && (
         <div
           className="flex flex-col gap-0.5"
@@ -1875,9 +1871,6 @@ function HostCard({
             </div>
           )}
         </div>
-      )}
-      {stats?.uptime_secs != null && (
-        <StatRow label="uptime" value={fmtUptime(stats.uptime_secs)} />
       )}
       {sparkMetrics.length > 0 && (
         <div
@@ -2132,6 +2125,66 @@ export default function ServersPage() {
   // a successful registration (handled inside AddHostForm).
   const [addFormCollapsed, setAddFormCollapsed] = useState(false);
   const [detailHost, setDetailHost] = useState<Host | null>(null);
+  // Cards vs topology graph (ISSUE 41). The graph fetches once on
+  // entry + every 60 s — topology changes on cabling work, not
+  // per-second, and the action is an inventory read (no SSH).
+  const [view, setView] = useState<"cards" | "tiles" | "graph">("cards");
+  const [topology, setTopology] = useState<TopologyGraph | null>(null);
+  const [topologyError, setTopologyError] = useState<string | null>(null);
+  // Shared filter / sort bar (ISSUE 48) — applies to cards AND tiles.
+  // Status + metric values come from the single-call `server-fleet`
+  // action; without it (legacy no-DB mode) filters degrade to no-ops.
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<ServerStatusFilter>("all");
+  const [sortKey, setSortKey] = useState<ServerSortKey>("name");
+  const [tileColorBy, setTileColorBy] = useState<TileColorBy>("status");
+  const [fleet, setFleet] = useState<ReadonlyMap<string, FleetHostRow>>(
+    new Map(),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const resp = await invokeAction(apiKey, "server-fleet", {});
+        const payload = unwrapPayload(resp) as
+          | { snapshots_available?: boolean; hosts?: FleetHostRow[] }
+          | undefined;
+        if (!cancelled) {
+          // Without a snapshot store (legacy no-DB mode) every host
+          // reads "offline", which is a lie — degrade to the no-data
+          // mode instead: filters no-op, tiles gray (ISSUE 50).
+          setFleet(
+            payload?.snapshots_available === false
+              ? new Map()
+              : new Map((payload?.hosts ?? []).map((r) => [r.id, r])),
+          );
+        }
+      } catch {
+        // Fleet summary is an enhancement — filter/sort degrade
+        // gracefully without it.
+      }
+    };
+    void tick();
+    const t = window.setInterval(() => void tick(), 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [apiKey]);
+
+  // Graph border colors (ISSUE 49) — same fleet data, narrowed to the
+  // status fields the topology view needs.
+  const fleetStatus = useMemo(
+    () =>
+      new Map<string, HostStatus>(
+        [...fleet].map(([id, r]) => [
+          id,
+          { online: r.online, warnings: r.warnings },
+        ]),
+      ),
+    [fleet],
+  );
   // `nowMs` ticks once per second so the "updated Xs ago" label on
   // each host card stays live without per-card timers. We intentionally
   // decouple this from `POLL_INTERVAL_MS` — the label should keep
@@ -2143,6 +2196,36 @@ export default function ServersPage() {
     }, 1000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (view !== "graph") return;
+    let cancelled = false;
+    const fetchTopology = async () => {
+      try {
+        const resp = await invokeAction(apiKey, "server-topology", {});
+        if (!cancelled) {
+          const next = unwrapPayload(resp) as TopologyGraph;
+          // Same-content refetches keep the previous object — a new
+          // identity would re-run cytoscape layout and reset the
+          // operator's pan/zoom every 60 s.
+          setTopology((prev) =>
+            prev && topologySignature(prev) === topologySignature(next)
+              ? prev
+              : next,
+          );
+          setTopologyError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setTopologyError((e as Error).message);
+      }
+    };
+    void fetchTopology();
+    const t = setInterval(() => void fetchTopology(), 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [view, apiKey]);
 
   const refreshList = useCallback(async () => {
     try {
@@ -2289,7 +2372,10 @@ export default function ServersPage() {
     return () => clearInterval(t);
   }, [apiKey, hosts, refreshStats]);
 
-  const hostList = useMemo(() => hosts, [hosts]);
+  const hostList = useMemo(
+    () => filterSortHosts(hosts, fleet, query, statusFilter, sortKey),
+    [hosts, fleet, query, statusFilter, sortKey],
+  );
   const hasHostErrors = Object.values(statsMap).some((entry) => entry.error);
 
   return (
@@ -2352,13 +2438,141 @@ export default function ServersPage() {
           </InlineNotice>
         )}
 
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1" data-testid="servers-view-toggle">
+            {(["cards", "tiles", "graph"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                className={`rounded-md border px-2.5 py-1 text-xs font-mono transition-colors ${
+                  view === v
+                    ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                    : "border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {v === "cards" ? "카드" : v === "tiles" ? "타일" : "그래프"}
+              </button>
+            ))}
+          </div>
+          {view !== "graph" && (
+            <div
+              className="flex flex-wrap items-center gap-2"
+              data-testid="servers-filter-bar"
+            >
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="검색 — alias · host · GPU 모델"
+                className="h-7 w-60 font-mono text-xs"
+                data-testid="servers-filter-query"
+              />
+              <div className="flex items-center gap-1">
+                {(
+                  [
+                    ["all", "전체"],
+                    ["online", "온라인"],
+                    ["offline", "오프라인"],
+                    ["warn", "경고"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setStatusFilter(key)}
+                    aria-pressed={statusFilter === key}
+                    className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+                      statusFilter === key
+                        ? "border-blue-700 bg-blue-950/40 text-blue-300"
+                        : "border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-1 text-[11px] text-zinc-500">
+                정렬
+                <select
+                  value={sortKey}
+                  onChange={(e) => setSortKey(e.target.value as ServerSortKey)}
+                  data-testid="servers-sort-select"
+                  className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-300"
+                >
+                  <option value="name">이름</option>
+                  <option value="cpu">CPU 사용률</option>
+                  <option value="gpu">GPU 사용률</option>
+                  <option value="temp">GPU 온도</option>
+                </select>
+              </label>
+              {(query.trim() !== "" || statusFilter !== "all") && (
+                <span
+                  className="text-[11px] text-zinc-600"
+                  data-testid="servers-filter-count"
+                >
+                  {hostList.length}/{hosts.length} 표시
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {view === "graph" ? (
+          <section data-testid="topology-section">
+            {topologyError && (
+              <InlineNotice
+                tone="error"
+                title="Topology request failed"
+                details={topologyError}
+              >
+                Gadgetron could not load the cluster topology graph.
+              </InlineNotice>
+            )}
+            {topology ? (
+              <TopologyGraphView
+                graph={topology}
+                status={fleetStatus}
+                onSelectHost={(id) => {
+                  const h = hosts.find((x) => x.id === id);
+                  if (h) setDetailHost(h);
+                }}
+              />
+            ) : (
+              !topologyError && (
+                <div className="text-xs text-zinc-500" data-testid="topology-loading">
+                  loading topology…
+                </div>
+              )
+            )}
+          </section>
+        ) : view === "tiles" ? (
+          <section data-testid="tiles-section">
+            <ServerTileGrid
+              hosts={hostList}
+              fleet={fleet}
+              colorBy={tileColorBy}
+              onColorByChange={setTileColorBy}
+              onSelect={(id) => {
+                const h = hosts.find((x) => x.id === id);
+                if (h) setDetailHost(h);
+              }}
+            />
+          </section>
+        ) : (
         <section>
           {hostList.length === 0 ? (
             <div data-testid="servers-empty">
-              <EmptyState
-                title="No hosts registered yet"
-                description="Use the registration form to add a managed server."
-              />
+              {hosts.length === 0 ? (
+                <EmptyState
+                  title="No hosts registered yet"
+                  description="Use the registration form to add a managed server."
+                />
+              ) : (
+                <EmptyState
+                  title="조건에 맞는 서버가 없습니다"
+                  description="검색어 또는 상태 필터를 조정해 보세요."
+                />
+              )}
             </div>
           ) : (
             <div
@@ -2388,6 +2602,7 @@ export default function ServersPage() {
             </div>
           )}
         </section>
+        )}
       </div>
       </WorkbenchPage>
       {detailHost && (

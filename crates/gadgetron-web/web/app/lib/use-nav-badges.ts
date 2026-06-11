@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "./auth-context";
+import { invokeAction, unwrapPayload } from "./workbench-client";
 
 // Polls the workbench actions for "how many servers / log findings does
 // this operator have" and condenses the result into a (count, tone)
@@ -46,56 +47,16 @@ const INITIAL_BADGES: NavBadges = { servers: NEUTRAL, logs: NEUTRAL };
 const SERVER_CRITICAL_AGE_MS = 5 * 60 * 1000;
 const SERVER_WARNING_AGE_MS = 90 * 1000;
 
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
-async function invokeAction(
+// Path is `/workbench/actions/{id}` — NO `/invoke` suffix (an older
+// draft used `/invoke`, silently 404ing every nav badge). Returns the
+// UNWRAPPED payload — badge code only ever needs the inner value.
+async function invokePayload(
   apiKey: string | null,
   actionId: string,
   args: Record<string, unknown> = {},
 ): Promise<unknown> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  // Path is `/workbench/actions/{id}` — NO `/invoke` suffix. Earlier
-  // versions of this hook used `/invoke` (mirroring an older draft of
-  // the workbench routes), which silently 404'd and left every nav
-  // badge at neutral. `credentials: "include"` so the cookie session
-  // reaches the gateway when no Bearer key is present.
-  const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body: JSON.stringify({ args }),
-  });
-  if (!res.ok) {
-    throw new Error(`${actionId} HTTP ${res.status}`);
-  }
-  const body = (await res.json()) as Record<string, unknown>;
-  // Workbench wraps gadget output as either a raw JSON value or an
-  // MCP content array `[{type:"text", text:"<json>"}]`. Accept both —
-  // matches `(shell)/servers/page.tsx::unwrapPayload` and the
-  // copilot MonitoringGrid.
-  const payload = (body as { result?: { payload?: unknown } }).result?.payload;
-  if (Array.isArray(payload)) {
-    const first = payload[0] as { text?: string } | undefined;
-    if (first?.text) {
-      try {
-        return JSON.parse(first.text);
-      } catch {
-        return first.text;
-      }
-    }
-    return payload;
-  }
-  return payload;
+  return unwrapPayload(await invokeAction(apiKey, actionId, args));
 }
 
 interface ServerListPayload {
@@ -170,8 +131,8 @@ export function useNavBadges(): NavBadges {
     const tick = async () => {
       try {
         const [serverPayload, logsPayload] = await Promise.all([
-          invokeAction(apiKey, "server-list").catch(() => null),
-          invokeAction(apiKey, "loganalysis-list").catch(() => null),
+          invokePayload(apiKey, "server-list").catch(() => null),
+          invokePayload(apiKey, "loganalysis-list").catch(() => null),
         ]);
         if (cancelled) return;
         const findingsArray =

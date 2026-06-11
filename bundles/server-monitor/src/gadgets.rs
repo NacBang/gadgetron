@@ -5,6 +5,7 @@
 //! shapes its return value as `GadgetResult.content` (a JSON value
 //! wrapped in MCP-style `[{ "type": "text", "text": "<json>" }]`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,13 +19,14 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::bootstrap::{run_bootstrap, verify_key_only};
-use crate::collectors::{collect_info, collect_machine_identity, collect_stats};
+use crate::collectors::{collect_info, collect_machine_identity, collect_stats, ServerStats};
 use crate::gadgetini::{
     collect_gadgetini_stats, disable_child_wlan0, install_child_key_with_password, GadgetiniMode,
     GadgetiniRecord, DEFAULT_USB_IPV6, DEFAULT_USB_PARENT_IFACE, FACTORY_PASSWORD_ENV,
 };
 use crate::inventory::{HostRecord, InventoryStore};
 use crate::metrics::{stats_to_samples, try_ship, IngestionCounters, MetricSample};
+use crate::snapshot::{load_fresh_snapshot, upsert_snapshot};
 use crate::ssh::{
     generate_keypair, install_pasted_key, pubkey_path_for, read_pubkey, OneShotSecret, SshError,
     SshTarget,
@@ -46,6 +48,14 @@ pub struct ServerMonitorProvider {
     /// so a removed host doesn't leave orphan rows that surface in the
     /// UI as bare-UUID "phantom hosts".
     pg_pool: Option<sqlx::PgPool>,
+    /// Per-host single-flight lock for the snapshot-stale fallback in
+    /// `server.stats`: the first caller SSHes and re-primes
+    /// `host_stats_latest`; concurrent callers (N tabs polling while the
+    /// poller is wedged or cold) wait here and read the re-primed row
+    /// instead of stampeding sshd. Only consulted when a pg pool is
+    /// wired — without one there is no shared row to reuse, so
+    /// serializing would only add latency.
+    collect_locks: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl ServerMonitorProvider {
@@ -55,6 +65,7 @@ impl ServerMonitorProvider {
             metrics_sender: None,
             metrics_counters: IngestionCounters::default(),
             pg_pool: None,
+            collect_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -119,6 +130,8 @@ impl GadgetProvider for ServerMonitorProvider {
             schema_server_remove(),
             schema_server_info(),
             schema_server_stats(),
+            schema_server_topology(),
+            schema_server_fleet(),
             schema_server_systemctl(),
             schema_server_journal(),
             schema_server_logread(),
@@ -134,6 +147,8 @@ impl GadgetProvider for ServerMonitorProvider {
             "server.remove" => self.call_remove(args).await,
             "server.info" => self.call_info(args).await,
             "server.stats" => self.call_stats(args).await,
+            "server.topology" => self.call_topology().await,
+            "server.fleet" => self.call_fleet().await,
             "server.systemctl" => self.call_systemctl(args).await,
             "server.journal" => self.call_journal(args).await,
             "server.logread" => self.call_logread(args).await,
@@ -411,6 +426,12 @@ impl ServerMonitorProvider {
                     gpu_models.clone()
                 },
                 gadgetini: prior.gadgetini.clone(),
+                // Keep the prior scan for UI continuity but clear the
+                // stamp — connection details changed, so the poller
+                // rescans on its next tick.
+                network_interfaces: prior.network_interfaces.clone(),
+                network_scanned_at: None,
+                lldp_raw: prior.lldp_raw.clone(),
             };
             self.inventory
                 .upsert(updated.clone())
@@ -447,6 +468,9 @@ impl ServerMonitorProvider {
             cpu_cores,
             gpus: gpu_models.clone(),
             gadgetini: None,
+            network_interfaces: Vec::new(),
+            network_scanned_at: None,
+            lldp_raw: None,
         };
         self.inventory
             .upsert(record.clone())
@@ -571,25 +595,32 @@ impl ServerMonitorProvider {
         // and persist whatever we get. Saves the operator a re-register.
         if info.machine_id.is_none() || info.dmi_uuid.is_none() || info.dmi_serial.is_none() {
             let probed = collect_machine_identity(&target).await;
-            let mut updated = rec.clone();
-            if updated.machine_id.is_none() && probed.machine_id.is_some() {
-                updated.machine_id = probed.machine_id.clone();
-                info.machine_id = probed.machine_id;
+            if info.machine_id.is_none() {
+                info.machine_id = probed.machine_id.clone();
             }
-            if updated.dmi_uuid.is_none() && probed.dmi_uuid.is_some() {
-                updated.dmi_uuid = probed.dmi_uuid.clone();
-                info.dmi_uuid = probed.dmi_uuid;
+            if info.dmi_uuid.is_none() {
+                info.dmi_uuid = probed.dmi_uuid.clone();
             }
-            if updated.dmi_serial.is_none() && probed.dmi_serial.is_some() {
-                updated.dmi_serial = probed.dmi_serial.clone();
-                info.dmi_serial = probed.dmi_serial;
+            if info.dmi_serial.is_none() {
+                info.dmi_serial = probed.dmi_serial.clone();
             }
-            if updated.machine_id != rec.machine_id
-                || updated.dmi_uuid != rec.dmi_uuid
-                || updated.dmi_serial != rec.dmi_serial
-            {
-                let _ = self.inventory.upsert(updated).await;
-            }
+            // `modify` fills only the still-missing fields under the
+            // store lock — upserting the pre-probe `rec` snapshot could
+            // roll back fields a concurrent writer just set.
+            let _ = self
+                .inventory
+                .modify(id, move |h| {
+                    if h.machine_id.is_none() {
+                        h.machine_id = probed.machine_id;
+                    }
+                    if h.dmi_uuid.is_none() {
+                        h.dmi_uuid = probed.dmi_uuid;
+                    }
+                    if h.dmi_serial.is_none() {
+                        h.dmi_serial = probed.dmi_serial;
+                    }
+                })
+                .await;
         }
         // Static hardware descriptors backfill: if the cached record
         // doesn't have cpu/gpu names yet (pre-0.5.21 registration),
@@ -599,22 +630,23 @@ impl ServerMonitorProvider {
         let needs_hw_backfill =
             rec.cpu_model.is_none() || rec.cpu_cores.is_none() || rec.gpus.is_empty();
         if needs_hw_backfill {
-            let mut updated = rec.clone();
-            if updated.cpu_model.is_none() && !info.cpu_model.is_empty() {
-                updated.cpu_model = Some(info.cpu_model.clone());
-            }
-            if updated.cpu_cores.is_none() && info.cpu_cores > 0 {
-                updated.cpu_cores = Some(info.cpu_cores);
-            }
-            if updated.gpus.is_empty() && !info.gpu_models.is_empty() {
-                updated.gpus = info.gpu_models.clone();
-            }
-            if updated.cpu_model != rec.cpu_model
-                || updated.cpu_cores != rec.cpu_cores
-                || updated.gpus != rec.gpus
-            {
-                let _ = self.inventory.upsert(updated).await;
-            }
+            let cpu_model = info.cpu_model.clone();
+            let cpu_cores = info.cpu_cores;
+            let gpu_models = info.gpu_models.clone();
+            let _ = self
+                .inventory
+                .modify(id, move |h| {
+                    if h.cpu_model.is_none() && !cpu_model.is_empty() {
+                        h.cpu_model = Some(cpu_model);
+                    }
+                    if h.cpu_cores.is_none() && cpu_cores > 0 {
+                        h.cpu_cores = Some(cpu_cores);
+                    }
+                    if h.gpus.is_empty() && !gpu_models.is_empty() {
+                        h.gpus = gpu_models;
+                    }
+                })
+                .await;
         }
         let _ = self.inventory.mark_ok(id, Utc::now()).await;
         ok_result(serde_json::to_value(info).unwrap_or(json!({})))
@@ -631,40 +663,61 @@ impl ServerMonitorProvider {
             .map_err(|e| GadgetError::Execution(format!("inventory get: {e}")))?
             .ok_or_else(|| GadgetError::InvalidArgs(format!("no host with id {id}")))?;
         let inv_ms = t_inv.elapsed().as_millis();
-        let target = to_target(&rec, self.known_hosts_path());
-        let t_ssh = std::time::Instant::now();
-        let mut stats = collect_stats(&target)
-            .await
-            .map_err(|e| GadgetError::Execution(format!("stats collect: {e}")))?;
-        let ssh_ms = t_ssh.elapsed().as_millis();
-        let t_mark = std::time::Instant::now();
-        let now = Utc::now();
-        let mut updated_rec: Option<HostRecord> = None;
-        if let Some(gadgetini) = rec.gadgetini.as_ref().filter(|g| g.enabled) {
-            match collect_gadgetini_stats(&target, gadgetini).await {
-                Ok(parsed) => {
-                    stats.warnings.extend(parsed.warnings);
-                    stats.gadgetini = Some(parsed.stats);
-                    let mut next = rec.clone();
-                    next.last_ok_at = Some(now);
-                    if let Some(g) = next.gadgetini.as_mut() {
-                        g.last_ok_at = Some(now);
-                    }
-                    updated_rec = Some(next);
-                }
-                Err(e) => {
-                    stats
-                        .warnings
-                        .push(format!("gadgetini collect failed: {e}"));
-                }
+
+        // Snapshot fast path (ISSUE 38): the background poller refreshes
+        // `host_stats_latest` at 1 Hz, so N concurrent viewers share ONE
+        // collector per host instead of opening N SSH sessions each.
+        if let Some(pool) = self.pg_pool.as_ref() {
+            if let Some(stats) = load_fresh_snapshot(pool, rec.tenant_id, rec.id).await {
+                tracing::info!(
+                    target: "server_monitor_timing",
+                    host_id = %id,
+                    host = %rec.host,
+                    inv_ms,
+                    total_ms = t_total.elapsed().as_millis(),
+                    source = "snapshot",
+                    "call_stats served from snapshot"
+                );
+                return ok_result(stats);
             }
         }
-        if let Some(next) = updated_rec {
-            let _ = self.inventory.upsert(next).await;
-        } else {
-            let _ = self.inventory.mark_ok(id, now).await;
+
+        // Snapshot stale/missing → single-flight the re-prime (ISSUE 43).
+        // The first caller proceeds to the SSH collect below holding the
+        // per-host lock; concurrent callers block here and then find the
+        // row the winner just re-primed, instead of stampeding sshd.
+        let mut _collect_guard: Option<tokio::sync::OwnedMutexGuard<()>> = None;
+        if let Some(pool) = self.pg_pool.as_ref() {
+            let host_lock = {
+                let mut locks = self.collect_locks.lock().await;
+                Arc::clone(locks.entry(rec.id).or_default())
+            };
+            _collect_guard = Some(host_lock.lock_owned().await);
+            if let Some(stats) = load_fresh_snapshot(pool, rec.tenant_id, rec.id).await {
+                tracing::info!(
+                    target: "server_monitor_timing",
+                    host_id = %id,
+                    host = %rec.host,
+                    inv_ms,
+                    total_ms = t_total.elapsed().as_millis(),
+                    source = "snapshot",
+                    "call_stats served from snapshot re-primed by a concurrent caller"
+                );
+                return ok_result(stats);
+            }
         }
-        let mark_ms = t_mark.elapsed().as_millis();
+
+        // Fallback: direct SSH collect — poller absent (no pool), not yet
+        // warmed up, or wedged. Same behavior as pre-ISSUE-38 builds, and
+        // it re-primes the snapshot row for the next reader. The
+        // single-flight guard (when present) is held to the end of the
+        // function.
+        let target = to_target(&rec, self.known_hosts_path());
+        let t_ssh = std::time::Instant::now();
+        let stats = collect_full_stats(&self.inventory, &rec, &target)
+            .await
+            .map_err(GadgetError::Execution)?;
+        let ssh_ms = t_ssh.elapsed().as_millis();
 
         let t_ship = std::time::Instant::now();
         let samples = stats_to_samples(rec.tenant_id, rec.id, &stats);
@@ -673,6 +726,9 @@ impl ServerMonitorProvider {
             &self.metrics_counters,
             samples,
         );
+        if let Some(pool) = self.pg_pool.as_ref() {
+            upsert_snapshot(pool, rec.tenant_id, rec.id, &stats).await;
+        }
         let ship_ms = t_ship.elapsed().as_millis();
 
         let t_ser = std::time::Instant::now();
@@ -685,14 +741,67 @@ impl ServerMonitorProvider {
             host = %rec.host,
             inv_ms,
             ssh_ms,
-            mark_ok_ms = mark_ms,
             ship_ms,
             serialize_ms = ser_ms,
             total_ms,
+            source = "ssh",
             "call_stats timings"
         );
 
         ok_result(payload)
+    }
+
+    /// Cluster network graph from inventory only — no SSH, no DB, so
+    /// cost is independent of viewer count (design doc 20 §5).
+    async fn call_topology(&self) -> Result<GadgetResult, GadgetError> {
+        let hosts = self
+            .inventory
+            .load()
+            .await
+            .map_err(|e| GadgetError::Execution(format!("inventory load: {e}")))?;
+        let graph = crate::topology::build_topology_graph(&hosts, Utc::now());
+        ok_result(serde_json::to_value(&graph).unwrap_or(json!({})))
+    }
+
+    /// Fleet-wide summary for the dashboard (ISSUE 46): one inventory
+    /// read + ONE `host_stats_latest` query — cost independent of fleet
+    /// size and viewer count. No SSH ever. Without a pg pool (legacy
+    /// pull-only mode) it degrades to inventory-only counts.
+    async fn call_fleet(&self) -> Result<GadgetResult, GadgetError> {
+        let hosts = self
+            .inventory
+            .load()
+            .await
+            .map_err(|e| GadgetError::Execution(format!("inventory load: {e}")))?;
+        let mut rows: HashMap<Uuid, (Value, chrono::DateTime<Utc>)> = HashMap::new();
+        if let Some(pool) = self.pg_pool.as_ref() {
+            if !hosts.is_empty() {
+                let ids: Vec<Uuid> = hosts.iter().map(|h| h.id).collect();
+                match sqlx::query_as::<_, (Uuid, Value, chrono::DateTime<Utc>)>(
+                    "SELECT host_id, stats, fetched_at FROM host_stats_latest \
+                     WHERE host_id = ANY($1)",
+                )
+                .bind(&ids)
+                .fetch_all(pool)
+                .await
+                {
+                    Ok(r) => {
+                        rows = r.into_iter().map(|(id, s, t)| (id, (s, t))).collect();
+                    }
+                    Err(e) => tracing::warn!(
+                        target: "server_monitor_snapshot",
+                        error = %e,
+                        "fleet snapshot query failed — serving inventory-only summary"
+                    ),
+                }
+            }
+        }
+        ok_result(fleet_summary(
+            &hosts,
+            &rows,
+            self.pg_pool.is_some(),
+            Utc::now(),
+        ))
     }
 
     async fn call_systemctl(&self, args: Value) -> Result<GadgetResult, GadgetError> {
@@ -1147,10 +1256,24 @@ impl ServerMonitorProvider {
         }
 
         if !changed.is_empty() {
-            self.inventory
-                .upsert(rec.clone())
+            // Write only the fields server.update owns, under the store
+            // lock — `upsert(rec)` would also write back this handler's
+            // pre-SSH snapshot of poller-owned fields (last_ok_at,
+            // network_*), rolling back anything written concurrently.
+            let host_id = rec.id;
+            let desired = rec.clone();
+            rec = self
+                .inventory
+                .modify(host_id, move |h| {
+                    h.alias = desired.alias;
+                    h.host = desired.host;
+                    h.ssh_user = desired.ssh_user;
+                    h.ssh_port = desired.ssh_port;
+                    h.gadgetini = desired.gadgetini;
+                })
                 .await
-                .map_err(|e| GadgetError::Execution(format!("inventory save: {e}")))?;
+                .map_err(|e| GadgetError::Execution(format!("inventory save: {e}")))?
+                .ok_or_else(|| GadgetError::InvalidArgs(format!("no host with id {host_id}")))?;
         }
 
         ok_result(json!({
@@ -1475,6 +1598,204 @@ fn is_safe_priority(s: &str) -> bool {
     )
 }
 
+/// `last_ok_at` is bookkeeping, not telemetry: at the poller's 1 Hz
+/// cadence an unconditional write would re-serialize + fsync the whole
+/// inventory.json once per host per second. Refresh the stamp at most
+/// this often — it sets the "last seen" precision, nothing else.
+const LAST_OK_REFRESH_SECS: i64 = 10;
+
+/// Full per-host collect: base stats + (when enabled) gadgetini, plus the
+/// inventory `last_ok_at` bookkeeping both callers need. Shared by the
+/// `server.stats` fallback path and the background poller so the snapshot
+/// row always carries exactly the shape the gadget returns.
+pub(crate) async fn collect_full_stats(
+    inventory: &Arc<InventoryStore>,
+    rec: &HostRecord,
+    target: &SshTarget,
+) -> Result<ServerStats, String> {
+    let mut stats = collect_stats(target)
+        .await
+        .map_err(|e| format!("stats collect: {e}"))?;
+    let now = Utc::now();
+    let stamp_fresh = |at: Option<chrono::DateTime<Utc>>| {
+        at.is_some_and(|at| now.signed_duration_since(at).num_seconds() < LAST_OK_REFRESH_SECS)
+    };
+    let host_stamp_fresh = stamp_fresh(rec.last_ok_at);
+    let mut stamp_gadgetini = false;
+    if let Some(gadgetini) = rec.gadgetini.as_ref().filter(|g| g.enabled) {
+        match collect_gadgetini_stats(target, gadgetini).await {
+            Ok(parsed) => {
+                stats.warnings.extend(parsed.warnings);
+                stats.gadgetini = Some(parsed.stats);
+                stamp_gadgetini = !host_stamp_fresh || !stamp_fresh(gadgetini.last_ok_at);
+            }
+            Err(e) => {
+                stats
+                    .warnings
+                    .push(format!("gadgetini collect failed: {e}"));
+            }
+        }
+    }
+    // Stamps go through `modify` so only the last_ok_at fields are
+    // touched — upserting a clone of the caller's pre-collect `rec`
+    // snapshot rolled back concurrent writers' fields on a race.
+    if stamp_gadgetini {
+        let _ = inventory
+            .modify(rec.id, |h| {
+                h.last_ok_at = Some(now);
+                if let Some(g) = h.gadgetini.as_mut() {
+                    g.last_ok_at = Some(now);
+                }
+            })
+            .await;
+    } else if !host_stamp_fresh {
+        let _ = inventory.mark_ok(rec.id, now).await;
+    }
+    Ok(stats)
+}
+
+/// A host is "online" when its snapshot row is at most this old. The
+/// poller refreshes every ~1 s per host; 15 s tolerates a few missed
+/// ticks (slow SSH, brief poller restart) without flapping the badge.
+const FLEET_ONLINE_WINDOW_SECS: i64 = 15;
+
+/// Pure aggregation: inventory + latest snapshot rows → the dashboard
+/// fleet summary. Split from `call_fleet` so it unit-tests without a
+/// database. Per-host CPU/GPU figures come from the snapshot JSON;
+/// offline hosts fall back to the inventory's cached GPU list so the
+/// fleet GPU count stays stable when a box goes down.
+fn fleet_summary(
+    hosts: &[HostRecord],
+    rows: &HashMap<Uuid, (Value, chrono::DateTime<Utc>)>,
+    // Whether a snapshot store exists at all. Without one (legacy
+    // pull-only mode) every host would read as "offline", which is a
+    // lie — the flag lets clients render "unknown" instead (ISSUE 50).
+    snapshots_available: bool,
+    now: chrono::DateTime<Utc>,
+) -> Value {
+    let f64_at = |v: &Value, path: &[&str]| -> Option<f64> {
+        let mut cur = v;
+        for p in path {
+            cur = cur.get(p)?;
+        }
+        cur.as_f64()
+    };
+
+    let mut online = 0usize;
+    let mut cpu_utils: Vec<f64> = Vec::new();
+    let mut mem_used = 0.0f64;
+    let mut mem_total = 0.0f64;
+    let mut gpu_count = 0usize;
+    let mut gpu_utils: Vec<f64> = Vec::new();
+    let mut gpu_max_temp: Option<f64> = None;
+    let mut gpu_power_w = 0.0f64;
+    let mut warning_count = 0usize;
+    let mut host_rows: Vec<Value> = Vec::new();
+
+    for rec in hosts {
+        let snap = rows.get(&rec.id);
+        let is_online = snap.is_some_and(|(_, fetched_at)| {
+            now.signed_duration_since(*fetched_at).num_seconds() < FLEET_ONLINE_WINDOW_SECS
+        });
+        let stats = snap.map(|(s, _)| s);
+
+        let cpu_util = stats.and_then(|s| f64_at(s, &["cpu", "util_pct"]));
+        let host_gpus: Vec<&Value> = stats
+            .and_then(|s| s.get("gpus"))
+            .and_then(|g| g.as_array())
+            .map(|a| a.iter().collect())
+            .unwrap_or_default();
+        let host_gpu_count = if is_online {
+            host_gpus.len()
+        } else {
+            rec.gpus.len()
+        };
+        let host_warnings = stats
+            .and_then(|s| s.get("warnings"))
+            .and_then(|w| w.as_array())
+            .map(|w| w.len())
+            .unwrap_or(0);
+
+        let mut host_gpu_utils: Vec<f64> = Vec::new();
+        let mut host_gpu_temp: Option<f64> = None;
+        if is_online {
+            online += 1;
+            if let Some(u) = cpu_util {
+                cpu_utils.push(u);
+            }
+            if let (Some(u), Some(t)) = (
+                stats.and_then(|s| f64_at(s, &["mem", "used_bytes"])),
+                stats.and_then(|s| f64_at(s, &["mem", "total_bytes"])),
+            ) {
+                mem_used += u;
+                mem_total += t;
+            }
+            for g in &host_gpus {
+                if let Some(u) = f64_at(g, &["util_pct"]) {
+                    gpu_utils.push(u);
+                    host_gpu_utils.push(u);
+                }
+                if let Some(t) = f64_at(g, &["temp_c"]) {
+                    gpu_max_temp = Some(gpu_max_temp.map_or(t, |m: f64| m.max(t)));
+                    host_gpu_temp = Some(host_gpu_temp.map_or(t, |m: f64| m.max(t)));
+                }
+                if let Some(p) = f64_at(g, &["power_w"]) {
+                    gpu_power_w += p;
+                }
+            }
+            warning_count += host_warnings;
+        }
+        gpu_count += host_gpu_count;
+
+        let host_gpu_avg = if host_gpu_utils.is_empty() {
+            None
+        } else {
+            Some(host_gpu_utils.iter().sum::<f64>() / host_gpu_utils.len() as f64)
+        };
+        host_rows.push(json!({
+            "id": rec.id,
+            "host": rec.host,
+            "alias": rec.alias,
+            "online": is_online,
+            "cpu_util_pct": if is_online { cpu_util } else { None },
+            "gpu_count": host_gpu_count,
+            "gpu_avg_util_pct": host_gpu_avg,
+            "gpu_max_temp_c": host_gpu_temp,
+            "warnings": host_warnings,
+        }));
+    }
+
+    let avg = |v: &[f64]| -> Option<f64> {
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.iter().sum::<f64>() / v.len() as f64)
+        }
+    };
+    json!({
+        "generated_at": now,
+        "snapshots_available": snapshots_available,
+        "servers": {
+            "total": hosts.len(),
+            "online": online,
+            "offline": hosts.len() - online,
+        },
+        "gpus": {
+            "count": gpu_count,
+            "avg_util_pct": avg(&gpu_utils),
+            "max_temp_c": gpu_max_temp,
+            "total_power_w": if gpu_power_w > 0.0 { Some(gpu_power_w) } else { None },
+        },
+        "cpu": { "avg_util_pct": avg(&cpu_utils) },
+        "mem": {
+            "used_bytes": mem_used,
+            "total_bytes": mem_total,
+        },
+        "warnings": warning_count,
+        "hosts": host_rows,
+    })
+}
+
 fn to_target(rec: &HostRecord, known_hosts: PathBuf) -> SshTarget {
     SshTarget {
         host: rec.host.clone(),
@@ -1614,6 +1935,45 @@ fn schema_server_stats() -> GadgetSchema {
             "type": "object",
             "properties": { "id": { "type": "string", "format": "uuid" } },
             "required": ["id"],
+            "additionalProperties": false
+        }),
+        idempotent: Some(true),
+    }
+}
+
+fn schema_server_topology() -> GadgetSchema {
+    GadgetSchema {
+        name: "server.topology".into(),
+        tier: GadgetTier::Read,
+        description: "Return the cluster network graph built from the per-host NIC \
+            inventory: hosts, inferred networks (grouped by VLAN id + IPv4 subnet, \
+            with L2 verification from neighbor tables), and host-to-network links \
+            with link speeds. Inventory-read only — never opens SSH. Use this to \
+            answer questions like \"which servers sit on VLAN110\"."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        idempotent: Some(true),
+    }
+}
+
+fn schema_server_fleet() -> GadgetSchema {
+    GadgetSchema {
+        name: "server.fleet".into(),
+        tier: GadgetTier::Read,
+        description: "Fleet-wide summary of every registered server from the latest \
+            snapshots: total/online/offline counts, GPU count + average utilization + \
+            hottest GPU + total GPU power, average CPU utilization, memory used/total, \
+            warning count, and a compact per-host status list. One inventory read + one \
+            database query — never opens SSH. Use this to answer \"how is the cluster \
+            doing right now\"."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
             "additionalProperties": false
         }),
         idempotent: Some(true),
@@ -1794,6 +2154,9 @@ mod tests {
             cpu_cores: None,
             gpus: Vec::new(),
             gadgetini: None,
+            network_interfaces: Vec::new(),
+            network_scanned_at: None,
+            lldp_raw: None,
         }
     }
 
@@ -1813,9 +2176,81 @@ mod tests {
             "server.remove",
             "server.info",
             "server.stats",
+            "server.topology",
+            "server.fleet",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn fleet_summary_aggregates_online_and_offline() {
+        let now = Utc::now();
+        let mut a = test_host_record(Uuid::new_v4());
+        a.alias = Some("a".into());
+        let mut b = test_host_record(Uuid::new_v4());
+        b.gpus = vec!["NVIDIA RTX 4090".into(), "NVIDIA RTX 4090".into()];
+        let stats = json!({
+            "cpu": {"util_pct": 40.0},
+            "mem": {"used_bytes": 1000.0, "total_bytes": 4000.0},
+            "gpus": [
+                {"util_pct": 90.0, "temp_c": 70.0, "power_w": 300.0},
+                {"util_pct": 10.0, "temp_c": 60.0, "power_w": 100.0}
+            ],
+            "warnings": ["dcgm fallback"]
+        });
+        let mut rows = HashMap::new();
+        rows.insert(a.id, (stats, now - chrono::Duration::seconds(2)));
+        // b has no snapshot row → offline; GPU count falls back to the
+        // inventory's cached list so the fleet total stays stable.
+        let v = fleet_summary(&[a, b], &rows, true, now);
+        assert_eq!(v["servers"]["total"], 2);
+        assert_eq!(v["servers"]["online"], 1);
+        assert_eq!(v["servers"]["offline"], 1);
+        assert_eq!(v["gpus"]["count"], 4);
+        assert_eq!(v["gpus"]["avg_util_pct"], 50.0);
+        assert_eq!(v["gpus"]["max_temp_c"], 70.0);
+        assert_eq!(v["gpus"]["total_power_w"], 400.0);
+        assert_eq!(v["cpu"]["avg_util_pct"], 40.0);
+        assert_eq!(v["warnings"], 1);
+        let hosts = v["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0]["online"], true);
+        assert_eq!(hosts[0]["gpu_avg_util_pct"], 50.0);
+        assert_eq!(hosts[1]["online"], false);
+        assert_eq!(hosts[1]["gpu_count"], 2);
+    }
+
+    #[test]
+    fn fleet_summary_without_snapshot_store_sets_flag_false() {
+        let v = fleet_summary(
+            &[test_host_record(Uuid::new_v4())],
+            &HashMap::new(),
+            false,
+            Utc::now(),
+        );
+        assert_eq!(v["snapshots_available"], false);
+        // Clients use the flag to render "unknown" instead of trusting
+        // the all-offline counts below.
+        assert_eq!(v["servers"]["offline"], 1);
+    }
+
+    #[test]
+    fn fleet_summary_stale_row_counts_as_offline() {
+        let now = Utc::now();
+        let a = test_host_record(Uuid::new_v4());
+        let mut rows = HashMap::new();
+        rows.insert(
+            a.id,
+            (
+                json!({"cpu": {"util_pct": 5.0}}),
+                now - chrono::Duration::seconds(60),
+            ),
+        );
+        let v = fleet_summary(&[a], &rows, true, now);
+        assert_eq!(v["servers"]["online"], 0);
+        assert!(v["cpu"]["avg_util_pct"].is_null());
+        assert!(v["hosts"][0]["cpu_util_pct"].is_null());
     }
 
     #[test]

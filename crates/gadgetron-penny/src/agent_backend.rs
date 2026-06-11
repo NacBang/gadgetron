@@ -169,6 +169,12 @@ pub(crate) enum BackendStreamHandler {
     },
     Codex {
         has_streamed_deltas: bool,
+        /// True once a reasoning delta streamed — full reasoning blocks
+        /// are then skipped (they duplicate the streamed fragments).
+        /// Kept separate from `has_streamed_deltas`, which tracks only
+        /// ANSWER deltas: a reasoning-only stream must not suppress the
+        /// final `agent_message`.
+        has_streamed_reasoning: bool,
         captured_session_id: Option<String>,
         started_tool_calls: HashSet<String>,
     },
@@ -182,6 +188,7 @@ impl BackendStreamHandler {
             },
             AgentBackend::CodexExec => Self::Codex {
                 has_streamed_deltas: false,
+                has_streamed_reasoning: false,
                 captured_session_id: None,
                 started_tool_calls: HashSet::new(),
             },
@@ -212,6 +219,7 @@ impl BackendStreamHandler {
             ),
             Self::Codex {
                 has_streamed_deltas,
+                has_streamed_reasoning,
                 captured_session_id,
                 started_tool_calls,
             } => handle_codex_line(
@@ -221,6 +229,7 @@ impl BackendStreamHandler {
                 audit_sink,
                 conversation_id,
                 has_streamed_deltas,
+                has_streamed_reasoning,
                 captured_session_id,
                 started_tool_calls,
             ),
@@ -314,6 +323,7 @@ fn handle_codex_line(
     audit_sink: &dyn GadgetAuditEventSink,
     conversation_id: Option<&str>,
     has_streamed_deltas: &mut bool,
+    has_streamed_reasoning: &mut bool,
     captured_session_id: &mut Option<String>,
     started_tool_calls: &mut HashSet<String>,
 ) -> Result<Option<BackendLineResult>> {
@@ -334,6 +344,9 @@ fn handle_codex_line(
     }
     if matches!(&event, CodexExecEvent::TextDelta(_)) {
         *has_streamed_deltas = true;
+    }
+    if matches!(&event, CodexExecEvent::ReasoningDelta(_)) {
+        *has_streamed_reasoning = true;
     }
     let mut chunks_override = None;
     let emitted_activity = if let CodexExecEvent::McpToolCall {
@@ -374,8 +387,14 @@ fn handle_codex_line(
             message,
         });
     }
-    let chunks = chunks_override
-        .unwrap_or_else(|| codex_event_to_chat_chunks_ex(event, request, *has_streamed_deltas));
+    let chunks = chunks_override.unwrap_or_else(|| {
+        codex_event_to_chat_chunks_ex(
+            event,
+            request,
+            *has_streamed_deltas,
+            *has_streamed_reasoning,
+        )
+    });
     Ok(Some(BackendLineResult {
         emitted_activity,
         chunks,
@@ -455,15 +474,23 @@ fn emit_codex_tool_audit_if_needed(
     audit_sink: &dyn GadgetAuditEventSink,
     conversation_id: Option<&str>,
 ) {
-    let canonical = name
+    // Codex surfaces the same gadget under two shapes depending on the
+    // event family: `knowledge.wiki.search` (event_msg invocation
+    // server+tool) and `mcp__knowledge__wiki_search` (function_call
+    // namespace). Strip whichever prefix is present — chaining
+    // `unwrap_or(name)` between the two strips would silently restore
+    // the unstripped original whenever the second prefix doesn't match.
+    let without_prefix = name
         .strip_prefix("knowledge.")
-        .unwrap_or(name)
-        .strip_prefix("mcp__knowledge__")
-        .unwrap_or(name)
-        .replace('_', ".");
+        .or_else(|| name.strip_prefix("mcp__knowledge__"))
+        .unwrap_or(name);
+    let canonical = without_prefix.replace('_', ".");
     let (tier, category) = match tool_metadata.get(canonical.as_str()) {
         Some(meta) => (meta.tier, meta.category.clone()),
-        None => (GadgetTier::Read, "unknown".to_string()),
+        None => match tool_metadata.get(without_prefix) {
+            Some(meta) => (meta.tier, meta.category.clone()),
+            None => (GadgetTier::Read, "unknown".to_string()),
+        },
     };
     audit_sink.send(GadgetAuditEvent::GadgetCallCompleted {
         gadget_name: canonical,
@@ -503,6 +530,29 @@ mod tests {
     use gadgetron_core::audit::NoopGadgetAuditEventSink;
     use gadgetron_core::message::Message;
 
+    #[derive(Debug, Default)]
+    struct CaptureSink {
+        events: std::sync::Mutex<Vec<GadgetAuditEvent>>,
+    }
+
+    impl GadgetAuditEventSink for CaptureSink {
+        fn send(&self, event: GadgetAuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn metadata_with_wiki_write() -> HashMap<String, GadgetMetadata> {
+        let mut m = HashMap::new();
+        m.insert(
+            "wiki.write".to_string(),
+            GadgetMetadata {
+                tier: GadgetTier::Write,
+                category: "knowledge".to_string(),
+            },
+        );
+        m
+    }
+
     fn req() -> ChatRequest {
         ChatRequest {
             model: "penny".to_string(),
@@ -514,6 +564,102 @@ mod tests {
             stream: true,
             stop: None,
             conversation_id: None,
+        }
+    }
+
+    /// Reasoning deltas must surface as 💭 thinking blocks AND must not
+    /// trip the answer-delta flag — a reasoning-only stream still needs
+    /// its final `agent_message` delivered.
+    #[test]
+    fn codex_reasoning_delta_does_not_suppress_final_message() {
+        let mut handler = BackendStreamHandler::new(AgentBackend::CodexExec);
+        let sink = NoopGadgetAuditEventSink;
+
+        let reasoning = r#"{"type":"event_msg","payload":{"type":"agent_reasoning_delta","delta":"let me check"}}"#;
+        let result = handler
+            .handle_line(reasoning, &req(), &HashMap::new(), &sink, None, None)
+            .expect("handled")
+            .expect("recognized");
+        assert_eq!(result.chunks.len(), 1);
+        assert_eq!(
+            result.chunks[0].choices[0].delta.content.as_deref(),
+            Some("> 💭 _let me check_\n\n")
+        );
+
+        let final_msg =
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"the answer"}}"#;
+        let result = handler
+            .handle_line(final_msg, &req(), &HashMap::new(), &sink, None, None)
+            .expect("handled")
+            .expect("recognized");
+        assert_eq!(
+            result.chunks.len(),
+            1,
+            "final message must not be suppressed by reasoning deltas"
+        );
+        assert_eq!(
+            result.chunks[0].choices[0].delta.content.as_deref(),
+            Some("the answer")
+        );
+    }
+
+    /// Regression lock: the `event_msg/mcp_tool_call_end` shape names the
+    /// gadget `knowledge.wiki.write` (invocation server + tool). The old
+    /// strip chain restored the unstripped name whenever the second
+    /// `mcp__knowledge__` prefix didn't match, so the metadata lookup
+    /// missed and every such audit row landed as tier=Read /
+    /// category=unknown — including write gadgets.
+    #[test]
+    fn codex_tool_audit_canonicalizes_server_dot_tool_names() {
+        let mut handler = BackendStreamHandler::new(AgentBackend::CodexExec);
+        let sink = CaptureSink::default();
+        let line = r#"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"call_1","invocation":{"server":"knowledge","tool":"wiki.write","arguments":{"name":"home"}},"result":{"Ok":{}}}}"#;
+
+        handler
+            .handle_line(line, &req(), &metadata_with_wiki_write(), &sink, None, None)
+            .expect("line handled")
+            .expect("event recognized");
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one audit event expected");
+        match &events[0] {
+            GadgetAuditEvent::GadgetCallCompleted {
+                gadget_name,
+                tier,
+                category,
+                ..
+            } => {
+                assert_eq!(gadget_name, "wiki.write");
+                assert_eq!(*tier, GadgetTier::Write);
+                assert_eq!(category, "knowledge");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    /// The `function_call` namespace shape (`mcp__knowledge__wiki_write`)
+    /// must canonicalize to the same gadget name + tier.
+    #[test]
+    fn codex_tool_audit_canonicalizes_mcp_namespace_names() {
+        let mut handler = BackendStreamHandler::new(AgentBackend::CodexExec);
+        let sink = CaptureSink::default();
+        let line = r#"{"type":"response_item","payload":{"type":"function_call","name":"wiki_write","namespace":"mcp__knowledge__","arguments":"{\"name\":\"home\"}","call_id":"call_2"}}"#;
+
+        handler
+            .handle_line(line, &req(), &metadata_with_wiki_write(), &sink, None, None)
+            .expect("line handled")
+            .expect("event recognized");
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one audit event expected");
+        match &events[0] {
+            GadgetAuditEvent::GadgetCallCompleted {
+                gadget_name, tier, ..
+            } => {
+                assert_eq!(gadget_name, "wiki.write");
+                assert_eq!(*tier, GadgetTier::Write);
+            }
+            other => panic!("wrong event: {other:?}"),
         }
     }
 

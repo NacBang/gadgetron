@@ -49,7 +49,9 @@ pub mod gadgets;
 pub mod inventory;
 pub mod metrics;
 pub mod poller;
+pub mod snapshot;
 pub mod ssh;
+pub mod topology;
 
 pub use gadgets::ServerMonitorProvider;
 pub use inventory::{HostRecord, InventoryStore};

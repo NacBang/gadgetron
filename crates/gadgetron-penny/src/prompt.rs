@@ -4,16 +4,6 @@ use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::Role;
 use gadgetron_core::provider::ChatRequest;
 
-use crate::spawn::PENNY_PERSONA;
-
-const CODEX_PENNY_PREAMBLE: &str = r#"Codex backend runtime notes:
-- Treat this block as binding instructions for this Penny invocation.
-- Your user-facing identity and behavior are Penny, Gadgetron's collaboration agent. Do not answer as a coding agent.
-- Use the configured MCP server named `knowledge` for Gadgetron actions. Codex may expose these tools under the namespace `mcp__knowledge__` with function names such as `wiki_search`; that is the same tool as product-facing `wiki.search`.
-- Prefer direct `mcp__knowledge__` calls for `wiki.*`, `web.search`, and `server.*` work. `tool_search` may be used only to discover deferred `mcp__knowledge__` tool schemas.
-- Do not use Codex built-in shell, filesystem editing, browser, GitHub, image, or subagent tools for Penny tasks. If a later legacy section mentions Claude built-ins such as Read, Glob, Grep, WebSearch, WebFetch, or Agent, treat that as non-Codex guidance. In this backend, Penny is MCP-only except for limited MCP discovery.
-- Do not ask the user to approve configured MCP calls. The Gadgetron MCP server and Gadgetron policy layer are the tool boundary."#;
-
 /// How a backend invocation should shape the stdin payload.
 ///
 /// The session driver selects this from the backend turn plan; prompt
@@ -29,9 +19,10 @@ pub enum StdinMode {
     /// Resume turn of a native session: write only the newest user
     /// message. The backend native session already owns prior context.
     NativeResumeTurn,
-    /// Codex exec turn before a native session id exists. Persona and
-    /// conversation travel together because Codex has no Claude-style
-    /// `--system-prompt` flag.
+    /// Codex exec turn before a native session id exists: flatten the
+    /// full history. The persona does NOT ride stdin — it replaces
+    /// codex's base instructions via `-c instructions=...` on every
+    /// spawn (D-20260611-01 backend parity).
     CodexExec,
     /// Codex native resume turn. The prior context is loaded by
     /// `codex exec resume`; stdin carries only the newest user message.
@@ -84,17 +75,7 @@ pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String>
             }
             Ok(last.content.text().unwrap_or("").to_string())
         }
-        StdinMode::CodexExec => {
-            let mut buf = String::new();
-            buf.push_str("<system>\n");
-            buf.push_str(CODEX_PENNY_PREAMBLE);
-            buf.push_str("\n\n");
-            buf.push_str(PENNY_PERSONA);
-            buf.push_str("\n</system>\n\n<conversation>\n");
-            buf.push_str(&flatten_conversation(req));
-            buf.push_str("</conversation>\n");
-            Ok(buf)
-        }
+        StdinMode::CodexExec => Ok(flatten_conversation(req)),
     }
 }
 

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useEvidence, type ServerContextItem } from "../../lib/evidence-context";
 import { useAuth } from "../../lib/auth-context";
+import { getApiBase } from "../../lib/workbench-client";
 
 // Server-context card stack — a collapsed-by-default list of hosts the
 // active chat has touched (via `server.*` tool calls), surfaced inside
@@ -29,15 +30,6 @@ interface ServerSnapshot {
   cpuModel?: string | null;
   gpus: string[];
   lastOkAt?: string | null;
-}
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
 
 function relativeAge(now: number, then: number): string {

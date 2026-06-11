@@ -474,7 +474,14 @@ mod tests {
     /// the `capture_subscriber` + `with_default` scope so the global
     /// cache settles between tests. Zero runtime cost outside these
     /// two tests.
-    static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ///
+    /// The lock is the CRATE-WIDE `TRACING_TEST_LOCK`: `config.rs`
+    /// tests install a process-global subscriber + rebuild the
+    /// interest cache, and a rebuild landing mid-`with_default` scope
+    /// here makes these assertions miss their events (observed as a
+    /// 2026-06-10 workspace-run flake). Module-local locks cannot
+    /// serialize across modules.
+    use crate::TRACING_TEST_LOCK as CAPTURE_LOCK;
 
     #[test]
     fn register_log_contains_only_bundle_plug_axis_outcome() {
@@ -490,6 +497,10 @@ mod tests {
 
         let (buf, sub) = capture_subscriber();
         tracing::subscriber::with_default(sub, || {
+            // Heal any Interest cached as never() before this
+            // thread-local subscriber existed (e.g. a prior test hit
+            // the register() callsite under the no-op dispatcher).
+            tracing::callsite::rebuild_interest_cache();
             let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             let id = PlugId::new("bar").unwrap();
             let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider {
@@ -564,6 +575,8 @@ mod tests {
 
         let (buf, sub) = capture_subscriber();
         tracing::subscriber::with_default(sub, || {
+            // Same stale-Interest healing as the whitelist test above.
+            tracing::callsite::rebuild_interest_cache();
             let mut ctx = BundleContext::new(&preds, &mut inner, &mut extractor_inner);
             let id = PlugId::new("bar").unwrap();
             let plug: Arc<dyn LlmProvider> = Arc::new(FakeLlmProvider { name: "bar".into() });
