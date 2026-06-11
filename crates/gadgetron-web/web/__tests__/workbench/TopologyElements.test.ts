@@ -5,6 +5,7 @@ import {
   hostStatusColor,
   networkColor,
   toCytoscapeElements,
+  topologyLayout,
   topologySignature,
   STATUS_BORDER_COLORS,
   type TopologyGraph,
@@ -94,6 +95,25 @@ describe("edgeWidth", () => {
     expect(edgeWidth(1000)).toBe(1);
     expect(edgeWidth(10000)).toBe(2);
     expect(edgeWidth(100000)).toBe(3);
+  });
+});
+
+describe("topologyLayout", () => {
+  it("small fleets get concentric with hubs on the inner ring", () => {
+    const opts = topologyLayout(5);
+    expect(opts.name).toBe("concentric");
+    const concentric = opts.concentric as (n: {
+      hasClass: (c: string) => boolean;
+    }) => number;
+    // Network hubs rank closer to the center than hosts, so every
+    // host-to-hub spoke points inward — never over a neighboring host.
+    expect(concentric({ hasClass: (c) => c === "network" })).toBe(2);
+    expect(concentric({ hasClass: () => false })).toBe(1);
+  });
+
+  it("large fleets keep fcose", () => {
+    expect(topologyLayout(30).name).toBe("fcose");
+    expect(topologyLayout(200).name).toBe("fcose");
   });
 });
 

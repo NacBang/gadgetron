@@ -49,6 +49,33 @@ export interface ElementDef {
   classes?: string;
 }
 
+/**
+ * Layout options by fleet size (ISSUE 51). Small fleets use
+ * `concentric` — network hubs on the inner ring, hosts on the outer
+ * ring — so every host-to-hub spoke points inward and never passes
+ * over a neighboring host. The previous `grid` layout put hosts in
+ * rows, and a host's edge to the central hub visually crossed the
+ * host sitting next to it ("서버3이 서버4를 통해 연결된 것처럼" 보이던
+ * 버그). Larger fleets keep fcose (force-directed), which spreads
+ * hubs apart on its own.
+ */
+export function topologyLayout(hostCount: number): Record<string, unknown> {
+  if (hostCount < 30) {
+    return {
+      name: "concentric",
+      animate: false,
+      padding: 24,
+      // Higher value = closer to the center.
+      concentric: (node: { hasClass: (cls: string) => boolean }) =>
+        node.hasClass("network") ? 2 : 1,
+      // Each concentric value gets its own ring.
+      levelWidth: () => 1,
+      minNodeSpacing: 32,
+    };
+  }
+  return { name: "fcose", animate: false, padding: 24 };
+}
+
 /** Per-host status fed from the `server-fleet` action (ISSUE 49). */
 export interface HostStatus {
   online: boolean;
