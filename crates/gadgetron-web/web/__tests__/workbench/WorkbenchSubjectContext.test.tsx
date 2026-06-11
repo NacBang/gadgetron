@@ -9,6 +9,7 @@ import {
   readConversationSubject,
   startPennyDiscussion,
   useWorkbenchSubject,
+  withSubjectContext,
   WorkbenchSubjectProvider,
   writeConversationSubject,
   type WorkbenchSubject,
@@ -188,5 +189,35 @@ describe("workbench subject context", () => {
     expect(screen.getByTestId("subject-title").textContent).toBe(
       "Second finding",
     );
+  });
+});
+
+describe("withSubjectContext (ISSUE 53)", () => {
+  beforeEach(() => {
+    localStorageMock.clear();
+    sessionStorageMock.clear();
+  });
+
+  it("prepends the subject draft to a first message", () => {
+    setActiveConversationId("conv-ctx");
+    writeConversationSubject("conv-ctx", subject);
+
+    const out = withSubjectContext("이 버그에 대해서 알려줘");
+
+    expect(out).toContain("Subject: SMART pending sectors");
+    expect(out).toContain('"severity": "critical"');
+    expect(out).toContain("질문: 이 버그에 대해서 알려줘");
+  });
+
+  it("leaves no-subject, slash-command, and already-drafted text alone", () => {
+    setActiveConversationId("conv-empty");
+    expect(withSubjectContext("hello")).toBe("hello");
+
+    setActiveConversationId("conv-ctx2");
+    writeConversationSubject("conv-ctx2", subject);
+    expect(withSubjectContext("/help")).toBe("/help");
+
+    const draft = buildSubjectDraft(subject);
+    expect(withSubjectContext(draft)).toBe(draft);
   });
 });

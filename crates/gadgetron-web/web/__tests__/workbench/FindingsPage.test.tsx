@@ -130,7 +130,7 @@ describe("FindingsPage", () => {
     expect(screen.getByText(/raw journal scanner failed/i)).toBeTruthy();
   });
 
-  it("seeds an English-first Penny draft with structured finding subject context", async () => {
+  it("seeds a Korean Penny draft with structured finding subject context", async () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/workbench/actions/loganalysis-list")) {
@@ -198,7 +198,7 @@ describe("FindingsPage", () => {
     const convId = getActiveConversationId();
     expect(convId).toBeTruthy();
     expect(localStorage.getItem(`gadgetron_draft_${convId}`)).toContain(
-      "Review this log finding with me",
+      "이 로그 finding을 함께 검토해줘",
     );
     expect(localStorage.getItem(`gadgetron_subject_${convId}`)).toContain(
       '"kind":"log_finding"',

@@ -258,9 +258,9 @@ function approvalHostLine(
 function relativeAge(iso: string): string {
   const d = new Date(iso);
   const diff = Math.max(0, (Date.now() - d.getTime()) / 1000);
-  if (diff < 60) return `${Math.floor(diff)}s 전`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m 전`;
-  return `${Math.floor(diff / 3600)}h 전`;
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
 }
 
 function ApprovalCard({
@@ -314,24 +314,24 @@ function ApprovalCard({
           onClick={() => setExpanded((v) => !v)}
           className="rounded border border-purple-800 bg-purple-950/30 px-1.5 py-0.5 font-mono text-[10px] text-purple-300 hover:border-purple-500 hover:text-purple-100"
         >
-          {expanded ? "▴ 접기" : "▾ 전체 인자"}
+          {expanded ? "▴ Collapse" : "▾ Full arguments"}
         </button>
         <span className="ml-auto" />
         <button
           type="button"
           onClick={() => void decide(a.id, true)}
           className="shrink-0 rounded border border-emerald-700 bg-emerald-950/40 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-emerald-200 hover:border-emerald-500 hover:bg-emerald-900/60"
-          title="승인"
+          title="Approve"
         >
-          ⚡ 승인
+          ⚡ Approve
         </button>
         <button
           type="button"
           onClick={() => void decide(a.id, false)}
           className="shrink-0 rounded border border-red-800 bg-red-950/30 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-red-200 hover:border-red-500 hover:bg-red-900/40"
-          title="거부"
+          title="Deny"
         >
-          ✕ 거부
+          ✕ Deny
         </button>
       </div>
     </li>
@@ -404,8 +404,8 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
       if (
         !window.confirm(
           approve
-            ? "이 대기 중인 조치를 승인하시겠습니까?"
-            : "이 대기 중인 조치를 거부하시겠습니까?",
+            ? "Approve this pending action?"
+            : "Deny this pending action?",
         )
       )
         return;
@@ -426,10 +426,10 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
         );
         if (!res.ok) {
           const body = await res.text();
-          alert(`${verb} 실패: ${res.status} ${body.slice(0, 200)}`);
+          alert(`${verb} failed: ${res.status} ${body.slice(0, 200)}`);
         }
       } catch (e) {
-        alert(`${verb} 실패: ${(e as Error).message}`);
+        alert(`${verb} failed: ${(e as Error).message}`);
       }
     },
     [apiKey],
@@ -439,7 +439,7 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
       const label =
         a.remediation.label ??
         `${a.remediation.tool} ${JSON.stringify(a.remediation.args)}`;
-      if (!window.confirm(`실행할까요?\n\n${label}`)) return;
+      if (!window.confirm(`Run this action?\n\n${label}`)) return;
       try {
         const actionId = a.remediation.tool.replace(".", "-");
         const args = { ...a.remediation.args, id: a.hostId };
@@ -466,7 +466,7 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
           },
         );
       } catch (e) {
-        alert(`실행 실패: ${(e as Error).message}`);
+        alert(`Run failed: ${(e as Error).message}`);
       }
     },
     [apiKey],
@@ -479,11 +479,11 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
         data-testid="actions-empty"
       >
         <Zap className="size-4 text-zinc-700" aria-hidden />
-        <p className="text-xs font-medium text-zinc-400">대기 중 조치 없음</p>
+        <p className="text-xs font-medium text-zinc-400">No pending actions</p>
         <p className="text-[11px] leading-relaxed text-zinc-600">
-          Penny가 실행 가능한 조치를 제안하면 여기 쌓입니다.
+          Actionable suggestions from Penny queue up here.
           <br />
-          Logs 탭에서 finding의 ⚡ 버튼을 누르면 같은 경로로 실행돼요.
+          The ⚡ button on a Logs finding runs through the same path.
         </p>
       </div>
     );
@@ -524,7 +524,7 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
               onClick={() => void run(a)}
               className="ml-auto shrink-0 rounded border border-blue-700 bg-blue-950/40 px-2 py-0.5 font-mono text-[10px] font-semibold text-blue-200 hover:border-blue-500 hover:bg-blue-900/60"
             >
-              ⚡ {a.remediation.label ?? "실행"}
+              ⚡ {a.remediation.label ?? "Run"}
             </button>
           </div>
         </li>
@@ -564,13 +564,13 @@ interface GadgetsConfig {
 }
 
 const WRITE_BUCKETS: Array<{ key: keyof WriteGadgetsConfig; label: string; hint: string }> = [
-  { key: "default_mode", label: "기본 (default_mode)", hint: "버킷에 매칭되지 않는 Write 툴 공통" },
-  { key: "wiki_write", label: "위키 (wiki_write)", hint: "wiki.write / wiki.create / wiki.delete" },
-  { key: "server_admin", label: "서버 운영 (server_admin)", hint: "server.bash / server.systemctl / server.add / server.remove" },
-  { key: "loganalysis_admin", label: "로그 분석 (loganalysis_admin)", hint: "loganalysis.dismiss / set_interval / comment_* (DB only)" },
-  { key: "infra_write", label: "인프라 (infra_write)", hint: "infra.*" },
-  { key: "scheduler_write", label: "스케줄러 (scheduler_write)", hint: "scheduler.*" },
-  { key: "provider_mutate", label: "프로바이더 (provider_mutate)", hint: "infra.rotate_api_key / infra.add_provider" },
+  { key: "default_mode", label: "Default (default_mode)", hint: "Write tools not matched by a bucket" },
+  { key: "wiki_write", label: "Wiki (wiki_write)", hint: "wiki.write / wiki.create / wiki.delete" },
+  { key: "server_admin", label: "Server admin (server_admin)", hint: "server.bash / server.systemctl / server.add / server.remove" },
+  { key: "loganalysis_admin", label: "Log analysis (loganalysis_admin)", hint: "loganalysis.dismiss / set_interval / comment_* (DB only)" },
+  { key: "infra_write", label: "Infra (infra_write)", hint: "infra.*" },
+  { key: "scheduler_write", label: "Scheduler (scheduler_write)", hint: "scheduler.*" },
+  { key: "provider_mutate", label: "Provider (provider_mutate)", hint: "infra.rotate_api_key / infra.add_provider" },
 ];
 
 function SettingsTab({ apiKey }: { apiKey: string | null }) {
@@ -637,7 +637,7 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
         data-testid="settings-loading"
       >
         <SettingsIcon className="size-4 text-zinc-700" aria-hidden />
-        <p className="text-xs font-medium text-zinc-400">설정 로드 중…</p>
+        <p className="text-xs font-medium text-zinc-400">Loading settings…</p>
       </div>
     );
   }
@@ -648,7 +648,7 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
         data-testid="settings-error"
       >
         <SettingsIcon className="size-4 text-red-700" aria-hidden />
-        <p className="text-xs font-medium text-red-400">설정 API 오류</p>
+        <p className="text-xs font-medium text-red-400">Settings API error</p>
         <p className="break-all text-[10px] leading-relaxed text-zinc-500">{err}</p>
       </div>
     );
@@ -658,9 +658,9 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
   return (
     <div className="flex-1 overflow-y-auto" data-testid="settings-panel">
       <div className="border-b border-zinc-900 px-3 py-2 text-[11px] text-zinc-300">
-        <div className="font-semibold text-zinc-200">Write 툴 버킷별 승인 모드</div>
+        <div className="font-semibold text-zinc-200">Approval mode per write-tool bucket</div>
         <p className="mt-0.5 text-[10px] leading-relaxed text-zinc-500">
-          <strong>Auto</strong>: 즉시 실행 · <strong>Ask</strong>: 승인 대기 카드 · <strong>Never</strong>: 차단
+          <strong>Auto</strong>: run immediately · <strong>Ask</strong>: approval card · <strong>Never</strong>: blocked
         </p>
       </div>
       <ul className="px-2 py-2">
@@ -680,7 +680,7 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
                 </div>
               </div>
               <select
-                aria-label={`${label} 모드`}
+                aria-label={`${label} mode`}
                 data-testid={`settings-bucket-${key}`}
                 disabled={saving !== null}
                 value={value}
@@ -705,10 +705,10 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
         <li className="flex items-start justify-between gap-2 border-b border-zinc-900/60 py-2 pl-1">
           <div className="flex-1 min-w-0">
             <div className="truncate text-[11px] font-medium text-zinc-200">
-              파괴적 툴 (destructive)
+              Destructive tools
             </div>
             <div className="mt-0.5 truncate text-[10px] text-zinc-500">
-              T3 허용 여부 — Ask 강제, 이 토글은 ON/OFF만
+              T3 allowance — Ask is enforced; this toggle is only ON/OFF
             </div>
           </div>
           <label className="flex shrink-0 items-center gap-1 text-[11px] text-zinc-300">
@@ -731,11 +731,11 @@ function SettingsTab({ apiKey }: { apiKey: string | null }) {
         </li>
       </ul>
       <div className="px-3 py-2 text-[10px] leading-relaxed text-zinc-500">
-        변경은 다음 Penny 디스패치부터 적용됩니다. 이미 실행 중인 서브프로세스는
-        시작 시 고정된 <code>--allowed-tools</code> 목록을 유지해요.
+        Changes apply from the next Penny dispatch. Already-running subprocesses
+        keep the <code>--allowed-tools</code> list fixed at spawn.
         {err && (
           <div className="mt-1 break-all text-red-400" data-testid="settings-save-error">
-            저장 실패: {err}
+            Save failed: {err}
           </div>
         )}
       </div>
@@ -759,9 +759,9 @@ function SourcesTab({ items }: { items: EvidenceItem[] }) {
         data-testid="sources-empty"
       >
         <BookOpen className="size-4 text-zinc-700" aria-hidden />
-        <p className="text-xs font-medium text-zinc-400">인용 없음</p>
+        <p className="text-xs font-medium text-zinc-400">No citations</p>
         <p className="text-[11px] leading-relaxed text-zinc-600">
-          Penny가 wiki 페이지나 웹을 조회하면 출처가 여기에 나타납니다.
+          Sources appear here when Penny consults wiki pages or the web.
         </p>
       </div>
     );
@@ -791,9 +791,9 @@ function ActivityTab({ items }: { items: EvidenceItem[] }) {
         data-testid="activity-empty"
       >
         <Activity className="size-4 text-zinc-700" aria-hidden />
-        <p className="text-xs font-medium text-zinc-400">아직 활동 없음</p>
+        <p className="text-xs font-medium text-zinc-400">No activity yet</p>
         <p className="text-[11px] leading-relaxed text-zinc-600">
-          Penny의 read-tier 호출 + workbench action이 실시간으로 기록됩니다.
+          Penny's read-tier calls and workbench actions stream here live.
         </p>
       </div>
     );
@@ -966,7 +966,7 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
           <span
             data-testid="evidence-pane-badge"
             className="rounded bg-blue-900/50 px-1 font-mono text-[9px] text-blue-300"
-            title={`${pendingCount} 대기 조치`}
+            title={`${pendingCount} pending actions`}
           >
             ⚡{pendingCount}
           </span>
@@ -975,7 +975,7 @@ export function EvidencePane({ open, onToggle, width = 320 }: EvidencePaneProps)
           <span
             data-testid="evidence-pane-badge-sources"
             className="rounded bg-zinc-800 px-1 font-mono text-[9px] text-zinc-400"
-            title={`${sourcesBadge} 인용`}
+            title={`${sourcesBadge} citations`}
           >
             {sourcesBadge}
           </span>

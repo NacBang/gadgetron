@@ -216,7 +216,7 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
 
   const remove = useCallback(
     async (id: string) => {
-      if (!window.confirm("이 대화를 삭제할까요? (되돌릴 수 없습니다)")) return;
+      if (!window.confirm("Delete this conversation? This cannot be undone.")) return;
       try {
         await deleteConversation(apiKey, id);
         if (active === id) {
@@ -238,7 +238,7 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
           type="button"
           onClick={startNewChat}
           className="flex size-8 items-center justify-center rounded text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
-          title="새 대화"
+          title="New chat"
         >
           <MessageSquarePlus className="size-4" aria-hidden />
         </button>
@@ -257,10 +257,10 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
           onClick={startNewChat}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
           data-testid="new-chat-btn"
-          title="새 대화"
+          title="New chat"
         >
           <MessageSquarePlus className="size-3" aria-hidden />
-          새 대화
+          New chat
         </button>
       </div>
 
@@ -278,7 +278,7 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
         )}
         {!loading && rows.length === 0 && !err && (
           <div className="px-2 py-1 text-[11px] text-zinc-600">
-            아직 대화가 없습니다.
+            No conversations yet.
           </div>
         )}
         {rows.map((r) => (
@@ -326,7 +326,7 @@ function ConversationRow({
         // "this thread is still generating in the background."
         <span
           className="size-1.5 shrink-0 animate-pulse rounded-full bg-blue-400"
-          aria-label="응답 생성 중"
+          aria-label="Generating response"
           data-testid={`conv-running-${row.id}`}
         />
       )}
@@ -343,7 +343,7 @@ function ConversationRow({
         type="button"
         onClick={onDelete}
         className="flex size-5 shrink-0 items-center justify-center rounded text-zinc-600 opacity-0 transition group-hover:opacity-100 hover:bg-zinc-800 hover:text-red-400"
-        title="삭제"
+        title="Delete"
         data-testid={`conv-delete-${row.id}`}
       >
         <Trash2 className="size-3" aria-hidden />

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FormEvent, ReactNode } from "react";
 import { setActiveConversationId } from "../../app/lib/conversation-id";
@@ -84,6 +84,9 @@ vi.mock("../../app/lib/auth-context", () => ({
 
 vi.mock("../../app/lib/workbench-subject-context", () => ({
   useWorkbenchSubject: () => subjectHook.value,
+  // Passthrough — injection behavior itself is covered in
+  // WorkbenchSubjectContext.test.tsx against the real module.
+  withSubjectContext: (text: string) => text,
 }));
 
 const createStorageMock = () => {
@@ -164,6 +167,47 @@ describe("Chat page subject context", () => {
     expect(screen.getByText("View source").getAttribute("href")).toBe(
       "/web/findings?host=host-1",
     );
+  });
+
+  it("pins subject-scoped suggestions on the empty state (ISSUE 53)", () => {
+    subjectHook.value = {
+      ...subjectHook.value,
+      activeConversationId: "conv-1",
+      subject: {
+        id: "finding-1",
+        kind: "log_finding",
+        bundle: "logs",
+        title: "SSH login failure (possible brute-force)",
+      },
+    };
+
+    render(<Home />);
+
+    expect(
+      screen.getByText('Ask about "SSH login failure (possible brute-force)"'),
+    ).toBeTruthy();
+    expect(screen.getByText("이 주제의 원인을 분석해줘")).toBeTruthy();
+    expect(screen.getByText("해결 절차를 단계별로 정리해줘")).toBeTruthy();
+  });
+
+  it("dismisses the subject banner via the clear button (ISSUE 52)", () => {
+    const clearActiveSubject = vi.fn();
+    subjectHook.value = {
+      ...subjectHook.value,
+      activeConversationId: "conv-1",
+      clearActiveSubject,
+      subject: {
+        id: "finding-1",
+        kind: "log_finding",
+        bundle: "logs",
+        title: "SMART pending sectors",
+      },
+    };
+
+    render(<Home />);
+
+    fireEvent.click(screen.getByTestId("active-subject-clear"));
+    expect(clearActiveSubject).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes subject context when the composer hydrates a seeded draft", async () => {

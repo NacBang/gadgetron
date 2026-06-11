@@ -177,7 +177,7 @@ export function TopologyGraphView({
                   ? "border-zinc-800 text-zinc-600"
                   : "border-zinc-700 text-zinc-300"
               }`}
-              title={`${n.subnet} · ${n.member_count} hosts${n.verified ? " · L2 확인됨" : " · 추정"}`}
+              title={`${n.subnet} · ${n.member_count} hosts${n.verified ? " · L2 verified" : " · inferred"}`}
             >
               <span
                 className="h-2 w-2 rounded-full"
@@ -198,21 +198,21 @@ export function TopologyGraphView({
               className="size-2 rounded-full"
               style={{ backgroundColor: STATUS_BORDER_COLORS.online }}
             />
-            온라인
+            Online
           </span>
           <span className="flex items-center gap-1">
             <span
               className="size-2 rounded-full"
               style={{ backgroundColor: STATUS_BORDER_COLORS.warn }}
             />
-            경고
+            Warnings
           </span>
           <span className="flex items-center gap-1">
             <span
               className="size-2 rounded-full"
               style={{ backgroundColor: STATUS_BORDER_COLORS.offline }}
             />
-            오프라인
+            Offline
           </span>
         </div>
       )}
@@ -227,8 +227,9 @@ export function TopologyGraphView({
             className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 text-center text-xs text-zinc-500"
             data-testid="topology-empty"
           >
-            등록된 호스트가 없거나 아직 토폴로지 스캔 전입니다. 스캔은 등록 후
-            수 초 안에, 이후 5분 간격으로 갱신됩니다.
+            No hosts registered, or the first topology scan hasn't run
+            yet. Scans land a few seconds after registration and refresh
+            every 5 minutes.
           </div>
         )}
       </div>

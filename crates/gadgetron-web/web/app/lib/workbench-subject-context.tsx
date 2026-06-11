@@ -190,7 +190,7 @@ export function buildSubjectDraft(subject: WorkbenchSubject): string {
   const lines: string[] = [];
   lines.push(
     subject.prompt ??
-      "Review this workbench context with me and recommend the next step.",
+      "이 워크벤치 컨텍스트를 함께 검토하고 다음 단계를 추천해줘.",
   );
   lines.push("");
   lines.push(`Subject: ${subject.title}`);
@@ -220,6 +220,29 @@ export function buildSubjectDraft(subject: WorkbenchSubject): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * Guaranteed-delivery helper (ISSUE 53): combine the active
+ * conversation's pinned subject context with an outgoing first
+ * message. The seeded auto-send can silently lose its race with the
+ * chat runtime spinning up after a full-page navigation — when that
+ * happens the operator types a question like "이 버그에 대해서 알려줘"
+ * and Penny has no idea what "이 버그" is. Callers apply this to the
+ * FIRST message of a conversation; later turns rely on the transcript.
+ * Returns `text` unchanged when there is no subject, the text is a
+ * slash command, or the text already carries the draft.
+ */
+export function withSubjectContext(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith("/")) return text;
+  const conversationId = getActiveConversationId();
+  if (!conversationId) return text;
+  const subject = readConversationSubject(conversationId);
+  if (!subject) return text;
+  const draft = buildSubjectDraft(subject);
+  if (trimmed.startsWith(draft.slice(0, 80))) return text;
+  return `${draft}\n\n---\n\n질문: ${trimmed}`;
 }
 
 export function startPennyDiscussion(

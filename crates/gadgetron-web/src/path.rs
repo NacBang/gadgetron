@@ -11,7 +11,12 @@ use std::path::Component;
 /// Rejection categories:
 /// 1. Null bytes + backslashes (pre-decode — sign of bypass attempt)
 /// 2. Percent-decoding failure (invalid UTF-8 after decode)
-/// 3. Literal `..` or leading `/` after decode
+/// 3. A `..` path SEGMENT or leading `/` after decode. Segment
+///    equality, not substring: turbopack content hashes can end with a
+///    dot, producing legitimate chunk names like `10swcmy6r70o..js`
+///    whose `..` never crosses a directory. A substring check used to
+///    400 that chunk and knock the whole UI into Next's global-error
+///    page (ISSUE 57).
 /// 4. ASCII-only allowlist `[A-Za-z0-9._\-/]` — rejects fullwidth unicode dots (U+FF0E),
 ///    any Unicode lookalike bypass, and all non-ASCII input. The embedded asset tree
 ///    (Next.js static export) only emits ASCII filenames, so this is tight without
@@ -30,7 +35,7 @@ pub fn validate_and_decode(raw: &str) -> Result<String, ()> {
     let decoded = percent_decode_str(raw).decode_utf8().map_err(|_| ())?;
     let decoded = decoded.into_owned();
 
-    if decoded.starts_with('/') || decoded.contains("..") {
+    if decoded.starts_with('/') || decoded.split('/').any(|seg| seg == "..") {
         return Err(());
     }
 
@@ -70,6 +75,10 @@ mod tests {
             "favicon.ico",
             "_next/static/chunks/08~pvhfxkn~e1.js",
             "_next/static/chunks/16rjnlch9~l9_.css",
+            // Turbopack hashes can end with a dot — the `..` here is
+            // inside ONE segment and never crosses a directory.
+            "_next/static/chunks/10swcmy6r70o..js",
+            "_next/static/chunks/a.b..c.js",
         ] {
             assert!(validate_and_decode(ok).is_ok(), "should accept: {ok}");
         }
@@ -89,6 +98,9 @@ mod tests {
             ".env",
             "foo/.git/HEAD",
             "\u{FF0E}\u{FF0E}/etc/passwd",
+            "foo/../bar",
+            "..",
+            "chunks/..",
         ] {
             assert!(validate_and_decode(bad).is_err(), "should reject: {bad:?}");
         }

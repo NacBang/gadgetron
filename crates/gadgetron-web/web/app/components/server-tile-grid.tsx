@@ -14,10 +14,10 @@ import {
 } from "../lib/server-fleet-view";
 
 const COLOR_BY_OPTIONS: Array<{ key: TileColorBy; label: string }> = [
-  { key: "status", label: "상태" },
+  { key: "status", label: "Status" },
   { key: "cpu", label: "CPU" },
   { key: "gpu", label: "GPU util" },
-  { key: "temp", label: "GPU 온도" },
+  { key: "temp", label: "GPU temp" },
 ];
 
 export function ServerTileGrid({
@@ -39,7 +39,7 @@ export function ServerTileGrid({
         className="flex flex-wrap items-center gap-1.5"
         data-testid="server-tile-colorby"
       >
-        <span className="text-[11px] text-zinc-500">색 기준</span>
+        <span className="text-[11px] text-zinc-500">Color by</span>
         {COLOR_BY_OPTIONS.map((opt) => (
           <button
             key={opt.key}
@@ -61,7 +61,7 @@ export function ServerTileGrid({
           className="rounded-lg border border-zinc-800 bg-zinc-950 p-6 text-center text-xs text-zinc-500"
           data-testid="server-tiles-empty"
         >
-          조건에 맞는 서버가 없습니다.
+          No servers match the current filters.
         </div>
       ) : (
         <div className="flex flex-wrap gap-1.5" data-testid="server-tile-grid">

@@ -7,6 +7,9 @@
 # `gadgetron.toml` is gitignored so your local endpoints, API keys, and
 # absolute binary paths never leak into source control. This example stays
 # checked in as documentation for new operators.
+#
+# Precedence: CLI flag > environment variable > this file > built-in
+# default. Secrets belong in `.env` (see `.env.template`), never here.
 
 [server]
 # Bind address. Localhost-only by default for single-user demo.
@@ -113,3 +116,17 @@ admin_password_env = "GADGETRON_ADMIN_PW"
 # enabled = true
 # api_base_path = "/v1"
 # bundles_dir = "bundles"  # loads bundles/*/bundle.toml, including server-monitor actions
+
+# --- Rate limiting / bundle overrides (optional) -------------------------
+
+# [quota_rate_limit]
+# requests_per_minute = 600
+# burst = 60
+
+# [bundles.server-monitor]
+# # Per-bundle override: `false` keeps the bundle's plugs/gadgets from
+# # registering at all. Defaults to true.
+# enabled = true
+
+# Advanced sections not shown here: [[nodes]] / [[models]] for the local
+# inference scheduler, and [features].

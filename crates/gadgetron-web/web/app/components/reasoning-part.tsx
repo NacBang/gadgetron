@@ -42,10 +42,10 @@ export function ReasoningPart({
   };
 
   const label = isRunning
-    ? "생각 중..."
+    ? "Thinking..."
     : open
-      ? "생각 과정 숨기기"
-      : "생각 과정 보기";
+      ? "Hide reasoning"
+      : "Show reasoning";
 
   return (
     <Collapsible
