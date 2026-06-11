@@ -47,7 +47,7 @@ function reconnectHeaders(extra?: HeadersInit): Record<string, string> {
 
 interface ActiveJobSnapshot {
   job_id: string;
-  status: "streaming" | "complete" | "error";
+  status: "streaming" | "complete" | "error" | "cancelled";
   is_finished: boolean;
 }
 
@@ -456,6 +456,80 @@ function tryParseJson(raw: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/// History-hydration counterpart of the streaming segment parser.
+///
+/// Persisted assistant messages carry the same wire markers the live
+/// stream does (`> 💭 _…_`, `🔧 **name** \`args\``, `✓/❌ _…_`) because
+/// the producer accumulates `delta.content` verbatim. Rendering that
+/// raw string after a reload loses the tool/reasoning cards the user
+/// saw live. This converts one persisted assistant `content` string
+/// into assistant-ui-shaped parts, pairing each tool result with the
+/// preceding tool call (orphan results are dropped — same policy as
+/// the live transport).
+export type AssistantHistoryPart =
+  | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
+  | {
+      type: "tool-call";
+      toolCallId: string;
+      toolName: string;
+      argsText: string;
+      args?: Record<string, unknown>;
+      result?: unknown;
+      isError?: boolean;
+    };
+
+export function assistantContentToParts(
+  content: string,
+): AssistantHistoryPart[] {
+  const { segments } = parseSegments(content, true);
+  const parts: AssistantHistoryPart[] = [];
+  let lastToolCall: Extract<
+    AssistantHistoryPart,
+    { type: "tool-call" }
+  > | null = null;
+  let counter = 0;
+
+  for (const seg of segments) {
+    if (seg.kind === "text") {
+      if (!seg.text.trim()) continue;
+      const prev = parts[parts.length - 1];
+      if (prev && prev.type === "text") {
+        prev.text += seg.text;
+      } else {
+        parts.push({ type: "text", text: seg.text });
+      }
+      continue;
+    }
+    if (seg.kind === "thinking") {
+      parts.push({ type: "reasoning", text: seg.text });
+      continue;
+    }
+    if (seg.kind === "tool_use") {
+      const args = tryParseJson(seg.input);
+      const part: Extract<AssistantHistoryPart, { type: "tool-call" }> = {
+        type: "tool-call",
+        toolCallId: `history-tool-${counter++}`,
+        toolName: seg.name,
+        argsText: seg.input,
+        ...(args && typeof args === "object" && !Array.isArray(args)
+          ? { args: args as Record<string, unknown> }
+          : {}),
+      };
+      parts.push(part);
+      lastToolCall = part;
+      continue;
+    }
+    // tool_result — bind to the preceding tool call; drop orphans.
+    if (lastToolCall) {
+      lastToolCall.result = tryParseJson(seg.output) ?? seg.output;
+      lastToolCall.isError = !seg.success;
+      lastToolCall = null;
+    }
+  }
+  return parts;
 }
 
 /**

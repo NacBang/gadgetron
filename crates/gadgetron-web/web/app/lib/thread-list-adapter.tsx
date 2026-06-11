@@ -9,6 +9,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import { useAui } from "@assistant-ui/store";
+import { assistantContentToParts } from "../openai-transport";
 
 // Multi-thread chat adapter. Each conversation in the Gadgetron
 // backend (`conversations` table) becomes an assistant-ui "remote
@@ -44,6 +45,23 @@ function getWorkbenchBase(): string {
   return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
 
+/// Persisted assistant text carries Penny's wire markers (💭 / 🔧 /
+/// ✓). Re-parse them into reasoning + tool-call parts so reloaded
+/// history renders with the same cards as the live stream did. Pure
+/// prose stays a plain string (cheapest path, no behavior change).
+function assistantHistoryContent(
+  content: string,
+): ThreadMessageLike["content"] {
+  const parts = assistantContentToParts(content);
+  if (parts.length === 0) {
+    return content;
+  }
+  if (parts.length === 1 && parts[0].type === "text") {
+    return parts[0].text;
+  }
+  return parts as unknown as ThreadMessageLike["content"];
+}
+
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = {};
   if (typeof localStorage !== "undefined") {
@@ -75,7 +93,10 @@ function useHistoryAdapter(): ThreadHistoryAdapter {
             .filter((m) => m.role === "user" || m.role === "assistant")
             .map((m) => ({
               role: m.role as "user" | "assistant",
-              content: m.content,
+              content:
+                m.role === "assistant"
+                  ? assistantHistoryContent(m.content)
+                  : m.content,
             }));
           return ExportedMessageRepository.fromArray(likes);
         } catch {

@@ -122,3 +122,32 @@ describe("useWorkbenchPrefs", () => {
     expect(prefs.density).toBe("comfortable");
   });
 });
+
+describe("useWorkbenchPrefs cross-instance sync (ISSUE 50)", () => {
+  beforeEach(() => {
+    localStorageMock.clear();
+  });
+
+  it("a write from one instance does not roll back another's write", () => {
+    // Two simultaneously-mounted instances (WorkbenchShell + chat Home).
+    const a = renderHook(() => useWorkbenchPrefs());
+    const b = renderHook(() => useWorkbenchPrefs());
+
+    act(() => {
+      a.result.current[1]({ leftRailCollapsed: true });
+    });
+    act(() => {
+      b.result.current[1]({ chatMonitoringOpen: true });
+    });
+
+    const stored = JSON.parse(
+      window.localStorage.getItem(STORAGE_KEY) ?? "{}",
+    ) as { leftRailCollapsed?: boolean; chatMonitoringOpen?: boolean };
+    // Pre-fix, b's write was based on b's mount-time snapshot and
+    // reverted leftRailCollapsed to false.
+    expect(stored.leftRailCollapsed).toBe(true);
+    expect(stored.chatMonitoringOpen).toBe(true);
+    // And instance a observes b's change via the same-tab event.
+    expect(a.result.current[0].chatMonitoringOpen).toBe(true);
+  });
+});

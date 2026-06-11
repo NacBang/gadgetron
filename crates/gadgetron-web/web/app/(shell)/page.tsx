@@ -9,7 +9,14 @@ import {
   useMessage,
   useThreadViewport,
 } from "@assistant-ui/react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -30,11 +37,19 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
 import { authHeaders, useAuth } from "../lib/auth-context";
+import { WikiPagesProvider } from "../lib/wiki-link";
+import { MonitoringGrid } from "../components/copilot/monitoring-grid";
+import { ResizeHandle } from "../components/shell/resize-handle";
+import {
+  clampCopilotChatRatio,
+  useWorkbenchPrefs,
+} from "../components/shell/use-workbench-prefs";
 import {
   ACTIVE_CONVERSATION_EVENT,
   getActiveConversationId,
 } from "../lib/conversation-id";
 import { useWorkbenchSubject } from "../lib/workbench-subject-context";
+import { getApiBase } from "../lib/workbench-client";
 
 // ---------------------------------------------------------------------------
 // /web — Chat page. Runs inside `(shell)/layout.tsx`, which owns the
@@ -73,15 +88,6 @@ interface PennyBrainSettings {
   model_source?: "default" | "local";
   local_base_url?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
-}
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
 }
 
 function endpointHost(baseUrl: string | undefined): string {
@@ -561,11 +567,55 @@ function ActiveSubjectBanner() {
 export default function Home() {
   const [slashHelpOpen, setSlashHelpOpen] = useState(false);
   const history = useActiveHistory();
+  // Monitoring split — the merged successor of the /web/copilot route
+  // (ISSUE 47): same chat thread, optional live MonitoringGrid on the
+  // right, toggled from the chat header and persisted in prefs.
+  const [prefs, updatePrefs] = useWorkbenchPrefs();
+  const monitoringOpen = prefs.chatMonitoringOpen;
+  const ratio = clampCopilotChatRatio(prefs.copilotChatRatio);
+  const splitRef = useRef<HTMLDivElement | null>(null);
+  const onResizeSplit = useCallback(
+    (deltaPx: number) => {
+      const containerWidth = splitRef.current?.clientWidth ?? 1;
+      if (containerWidth <= 0) return;
+      updatePrefs({
+        copilotChatRatio: clampCopilotChatRatio(
+          ratio + deltaPx / containerWidth,
+        ),
+      });
+    },
+    [ratio, updatePrefs],
+  );
 
   return (
-    <>
-      <SlashHelpDialog open={slashHelpOpen} onOpenChange={setSlashHelpOpen} />
-      <ChatHeader />
+    // WikiPagesProvider feeds MarkdownText so wiki citations in Penny's
+    // answers (footnote definitions naming a page in inline code)
+    // linkify to /web/wiki?page=… (ISSUE 44).
+    <WikiPagesProvider>
+      <div
+        ref={splitRef}
+        className="flex flex-1 overflow-hidden"
+        data-testid="chat-split"
+      >
+        <div
+          // `.copilot-pane` activates the globals.css override that
+          // collapses the thread's max-width to the half-pane width.
+          className={`flex min-w-0 flex-col overflow-hidden ${
+            monitoringOpen ? "copilot-pane" : "flex-1"
+          }`}
+          style={monitoringOpen ? { width: `${ratio * 100}%` } : undefined}
+          data-testid="chat-pane"
+        >
+          <SlashHelpDialog
+            open={slashHelpOpen}
+            onOpenChange={setSlashHelpOpen}
+          />
+          <ChatHeader
+            monitoringOpen={monitoringOpen}
+            onToggleMonitoring={() =>
+              updatePrefs({ chatMonitoringOpen: !monitoringOpen })
+            }
+          />
 
       <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
         <ActiveConversationBanner />
@@ -602,7 +652,25 @@ export default function Home() {
           </div>
         </div>
       </ThreadPrimitive.Root>
-    </>
+        </div>
+        {monitoringOpen && (
+          <>
+            <ResizeHandle
+              orientation="vertical"
+              ariaLabel="Resize chat / monitoring split"
+              onResize={onResizeSplit}
+            />
+            <div
+              className="flex min-w-0 flex-col overflow-hidden"
+              style={{ width: `${(1 - ratio) * 100}%` }}
+              data-testid="chat-monitoring-pane"
+            >
+              <MonitoringGrid />
+            </div>
+          </>
+        )}
+      </div>
+    </WikiPagesProvider>
   );
 }
 
@@ -629,7 +697,13 @@ function ActiveTaskIndicator() {
   );
 }
 
-function ChatHeader() {
+function ChatHeader({
+  monitoringOpen,
+  onToggleMonitoring,
+}: {
+  monitoringOpen: boolean;
+  onToggleMonitoring: () => void;
+}) {
   return (
     <header
       className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
@@ -640,6 +714,24 @@ function ChatHeader() {
       </div>
       <div className="flex items-center gap-1.5">
         <ActiveTaskIndicator />
+        <button
+          type="button"
+          data-testid="chat-monitoring-toggle"
+          aria-pressed={monitoringOpen}
+          onClick={onToggleMonitoring}
+          title={
+            monitoringOpen
+              ? "모니터링 패널 닫기"
+              : "모니터링 패널 열기 — 채팅 옆에 호스트 상태 그리드"
+          }
+          className={`rounded border px-2 py-0.5 text-[11px] transition-colors ${
+            monitoringOpen
+              ? "border-blue-700 bg-blue-950/40 text-blue-300"
+              : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
+          }`}
+        >
+          모니터링
+        </button>
       </div>
     </header>
   );

@@ -15,7 +15,7 @@ import {
   StatusBadge,
   WorkbenchPage,
 } from "../../components/workbench";
-import { safeRandomUUID } from "../../lib/uuid";
+import { invokeAction, unwrapPayload } from "../../lib/workbench-client";
 
 // /web/findings — log analyzer triage view.
 //
@@ -89,47 +89,6 @@ const SEVERITY_ORDER: Finding["severity"][] = [
   "medium",
   "info",
 ];
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
-
-async function invokeAction(
-  apiKey: string | null,
-  actionId: string,
-  args: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ args, client_invocation_id: safeRandomUUID() }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${actionId}: ${res.status} ${text.slice(0, 200)}`);
-  }
-  return res.json();
-}
-
-function unwrapPayload(resp: Record<string, unknown>): unknown {
-  const result = resp.result as { payload?: Array<{ text?: string }> } | undefined;
-  const text = result?.payload?.[0]?.text;
-  if (typeof text !== "string") return undefined;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
 
 function relativeTime(iso: string): string {
   const d = new Date(iso);

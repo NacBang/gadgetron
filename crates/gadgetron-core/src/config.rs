@@ -1111,7 +1111,11 @@ enabled = true
         plug: Option<String>,
     }
 
-    static TRACING_CAPTURE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Serialized via the crate-wide `TRACING_TEST_LOCK` — the
+    // registry capture tests in `bundle::registry` touch the same
+    // process-global tracing state and must never interleave with the
+    // global-subscriber install + interest-cache rebuild here.
+    use crate::TRACING_TEST_LOCK as TRACING_CAPTURE_GUARD;
     static CAPTURED: std::sync::OnceLock<std::sync::Mutex<Vec<CapturedEvent>>> =
         std::sync::OnceLock::new();
     static SUBSCRIBER_INIT: std::sync::Once = std::sync::Once::new();

@@ -734,7 +734,7 @@ fn load_penny_registry_from_config(
                 p = p.with_metrics_writer(tx.clone(), counters.clone());
                 tokio::spawn(gadgetron_bundle_server_monitor::run_metrics_writer(
                     rx,
-                    pool,
+                    pool.clone(),
                     counters.clone(),
                 ));
                 // Server-side background poller — runs whether the web
@@ -747,6 +747,9 @@ fn load_penny_registry_from_config(
                     tx,
                     counters,
                     gadgetron_bundle_server_monitor::PollerConfig::default(),
+                    // Snapshot writes (host_stats_latest) — the same pool
+                    // the metrics writer uses (ISSUE 38).
+                    Some(pool),
                 ));
                 tracing::info!(
                     target: "server_monitor_metrics",
@@ -805,36 +808,42 @@ fn load_penny_registry_from_config(
                             .await
                         {
                             Ok(info) => {
-                                let mut updated = h.clone();
+                                // `modify` fills only the still-missing
+                                // fields under the store lock — upserting
+                                // the pre-collect snapshot `h` (loaded
+                                // seconds ago, before a slow SSH) could
+                                // roll back concurrent poller writes.
                                 let mut changed = false;
-                                if updated.cpu_model.is_none() && !info.cpu_model.is_empty() {
-                                    updated.cpu_model = Some(info.cpu_model.clone());
-                                    changed = true;
-                                }
-                                if updated.cpu_cores.is_none() && info.cpu_cores > 0 {
-                                    updated.cpu_cores = Some(info.cpu_cores);
-                                    changed = true;
-                                }
-                                if updated.gpus.is_empty() && !info.gpu_models.is_empty() {
-                                    updated.gpus = info.gpu_models;
-                                    changed = true;
-                                }
-                                if changed {
-                                    if let Err(e) = inv_backfill.upsert(updated).await {
-                                        tracing::warn!(
-                                            target: "server_monitor",
-                                            host_id = %h.id,
-                                            error = %e,
-                                            "hw backfill save failed",
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            target: "server_monitor",
-                                            host_id = %h.id,
-                                            alias = h.alias.as_deref().unwrap_or(""),
-                                            "hw backfill: captured cpu/gpu descriptors",
-                                        );
-                                    }
+                                let res = inv_backfill
+                                    .modify(h.id, |rec| {
+                                        if rec.cpu_model.is_none() && !info.cpu_model.is_empty() {
+                                            rec.cpu_model = Some(info.cpu_model.clone());
+                                            changed = true;
+                                        }
+                                        if rec.cpu_cores.is_none() && info.cpu_cores > 0 {
+                                            rec.cpu_cores = Some(info.cpu_cores);
+                                            changed = true;
+                                        }
+                                        if rec.gpus.is_empty() && !info.gpu_models.is_empty() {
+                                            rec.gpus = info.gpu_models.clone();
+                                            changed = true;
+                                        }
+                                    })
+                                    .await;
+                                match res {
+                                    Err(e) => tracing::warn!(
+                                        target: "server_monitor",
+                                        host_id = %h.id,
+                                        error = %e,
+                                        "hw backfill save failed",
+                                    ),
+                                    Ok(_) if changed => tracing::info!(
+                                        target: "server_monitor",
+                                        host_id = %h.id,
+                                        alias = h.alias.as_deref().unwrap_or(""),
+                                        "hw backfill: captured cpu/gpu descriptors",
+                                    ),
+                                    Ok(_) => {}
                                 }
                             }
                             Err(e) => tracing::warn!(
@@ -3028,8 +3037,21 @@ async fn audit_consumer_loop(
 /// - Write fails (permissions, disk full) → actionable error with cause + next step.
 fn cmd_init(output: &std::path::Path, yes: bool) -> Result<()> {
     if output.exists() && !yes {
+        // Only prompt when a human can actually answer. A blocking
+        // read_line treats EOF (/dev/null) as "N", but an OPEN pipe
+        // that never sends data blocks forever — `gadgetron init |
+        // tee …` (or a test runner holding stdin open) would hang
+        // instead of refusing.
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            println!(
+                "'{}' already exists and stdin is not interactive. \
+                 Aborted; pass --yes to overwrite.",
+                output.display()
+            );
+            return Ok(());
+        }
         println!("'{}' already exists. Overwrite? [y/N] ", output.display());
-        // In non-interactive / piped mode the user cannot respond → treat as N.
         use std::io::BufRead as _;
         let stdin = std::io::stdin();
         let mut line = String::new();

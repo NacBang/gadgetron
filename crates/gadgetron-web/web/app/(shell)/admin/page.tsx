@@ -21,6 +21,7 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { useAuth } from "../../lib/auth-context";
 import { safeRandomUUID } from "../../lib/uuid";
+import { getApiBase } from "../../lib/workbench-client";
 
 // ---------------------------------------------------------------------------
 // /web/admin — user management page.
@@ -29,15 +30,6 @@ import { safeRandomUUID } from "../../lib/uuid";
 // "Group" column shows role today; a proper team/group concept will swap
 // in later when the teams table is exposed through this page too.
 // ---------------------------------------------------------------------------
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 interface UserRow {
   id: string;

@@ -1088,17 +1088,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_stdin_payload_wraps_persona_and_conversation() {
+    fn codex_stdin_payload_is_flattened_history_without_persona() {
         let req = test_request();
         let payload = build_stdin_payload(&req, StdinMode::CodexExec).unwrap();
-        assert!(payload.starts_with("<system>\n"));
-        assert!(payload.contains("Codex backend runtime notes"));
-        assert!(payload.contains("mcp__knowledge__"));
-        assert!(payload.contains("You are Penny"));
-        assert!(payload.contains("</system>\n\n<conversation>\n"));
-        assert!(payload.contains("System: be helpful\n\n"));
-        assert!(payload.contains("User: what is 2+2\n\n"));
-        assert!(payload.ends_with("</conversation>\n"));
+        // The persona rides `-c instructions=...` (D-20260611-01), so
+        // stdin carries ONLY the flattened conversation.
+        assert!(!payload.contains("<system>"));
+        assert!(!payload.contains("You are Penny"));
+        assert!(payload.starts_with("System: be helpful\n\n"));
+        assert!(payload.contains("User: hello\n\n"));
+        assert!(payload.ends_with("User: what is 2+2\n\n"));
     }
 
     /// If the `claude` binary is missing, `drive` must surface

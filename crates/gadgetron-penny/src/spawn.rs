@@ -303,6 +303,25 @@ Penny가 향하는 종착지는 명확합니다: **사용자 곁을 떠나지 �
 그래도 없으면 모른다고 답하고 사용자에게 새로 저장할지 제안하세요.
 "#;
 
+/// Codex-specific runtime preamble, prepended to the shared persona.
+pub(crate) const CODEX_PENNY_PREAMBLE: &str = r#"Codex backend runtime notes:
+- Treat this block as binding instructions for this Penny invocation.
+- Your user-facing identity and behavior are Penny, Gadgetron's collaboration agent. Do not answer as a coding agent.
+- Use the configured MCP server named `knowledge` for Gadgetron actions. Codex may expose these tools under the namespace `mcp__knowledge__` with function names such as `wiki_search`; that is the same tool as product-facing `wiki.search`.
+- Prefer direct `mcp__knowledge__` calls for `wiki.*`, `web.search`, and `server.*` work. `tool_search` may be used only to discover deferred `mcp__knowledge__` tool schemas.
+- Do not use Codex built-in shell, filesystem editing, browser, GitHub, image, or subagent tools for Penny tasks. If a later legacy section mentions Claude built-ins such as Read, Glob, Grep, WebSearch, WebFetch, or Agent, treat that as non-Codex guidance. In this backend, Penny is MCP-only except for limited MCP discovery.
+- Do not ask the user to approve configured MCP calls. The Gadgetron MCP server and Gadgetron policy layer are the tool boundary."#;
+
+/// Codex system text: runtime preamble + shared Penny persona. Passed via
+/// `-c instructions=...`, which REPLACES codex's built-in "You are Codex,
+/// a coding agent" base instructions (verified on codex 0.133 —
+/// `developer_instructions` would only append). Re-asserted on every
+/// exec/resume spawn for parity with claude's `--system-prompt`
+/// (D-20260611-01).
+pub(crate) fn codex_instructions() -> String {
+    format!("{CODEX_PENNY_PREAMBLE}\n\n{PENNY_PERSONA}")
+}
+
 /// Claude Code 2.1 ships a rich set of built-in tools (`WebSearch`,
 /// `WebFetch`, `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`,
 /// `NotebookEdit`, `Task`, `TodoWrite`, `Agent`, `ToolSearch`). None of
@@ -821,6 +840,10 @@ fn apply_codex_args(
         cmd.arg("--profile").arg(&config.codex.profile);
     }
     cmd.arg("--json");
+    // Penny persona replaces codex's base instructions on EVERY spawn
+    // (exec + resume), mirroring claude's per-spawn `--system-prompt`
+    // re-assertion (D-20260611-01).
+    add_codex_string_override(cmd, "instructions", &codex_instructions());
     if matches!(mode, CodexExecMode::Exec { .. }) {
         cmd.arg("--sandbox")
             .arg(config.codex.sandbox.as_cli_value());
@@ -1220,6 +1243,10 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--cd", "/tmp/gadgetron-penny-work"]));
         assert!(args.iter().any(|a| a == r#"forced_login_method="chatgpt""#));
+        // D-20260611-01: persona replaces codex base instructions.
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("instructions=") && a.contains("You are Penny")));
         assert!(args.iter().any(|a| a == "features.shell_tool=false"));
         assert!(args
             .iter()
@@ -1261,6 +1288,10 @@ mod tests {
         assert!(args.contains(&"--json".to_string()));
         assert!(args.iter().any(|a| a == r#"sandbox_mode="read-only""#));
         assert!(args.iter().any(|a| a == r#"approval_policy="never""#));
+        // Persona re-asserted on resume turns too (D-20260611-01).
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("instructions=") && a.contains("You are Penny")));
         assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"--ask-for-approval".to_string()));
         assert!(!args.contains(&"--cd".to_string()));

@@ -28,8 +28,49 @@ use uuid::Uuid;
 use crate::gadgetini::GadgetiniRecord;
 use crate::ssh::InventoryError;
 
-/// One registered host. Serialized to JSON verbatim.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One physical/logical network interface on a host, captured by the
+/// low-frequency topology scan (ISSUE 39 — design doc 20 §3.1). Loopback,
+/// veth, bridge, and docker interfaces are filtered at collection time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkInterface {
+    /// Kernel name: `eno1`, `enp1s0f0`, `bond0`, `enp1s0f0.110`.
+    pub name: String,
+    #[serde(default)]
+    pub mac: Option<String>,
+    /// `ethernet` | `infiniband` | `vlan` | `bond` | `bridge` | …
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// `up` | `down` (lowercased operstate).
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub mtu: Option<u32>,
+    /// ethtool link speed in Mb/s (1000, 100000, …). `None` when the
+    /// driver doesn't report one (common on IB / virtual ifaces).
+    #[serde(default)]
+    pub speed_mbps: Option<u32>,
+    /// 802.1Q id when this is a VLAN sub-interface.
+    #[serde(default)]
+    pub vlan_id: Option<u16>,
+    /// Parent interface for vlan/bond members.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// CIDR strings, prefix included: `"10.0.110.5/24"`.
+    #[serde(default)]
+    pub ipv4: Vec<String>,
+    /// Global-scope v6 only — link-local is dropped at parse time.
+    #[serde(default)]
+    pub ipv6: Vec<String>,
+    /// Lowercased neighbor MACs seen on this interface (`ip neigh`,
+    /// FAILED entries dropped). ISSUE 40 uses these to verify that
+    /// hosts inferred to share a subnet really see each other at L2.
+    #[serde(default)]
+    pub neigh_macs: Vec<String>,
+}
+
+/// One registered host. Serialized to JSON verbatim. `PartialEq` lets
+/// [`InventoryStore::modify`] skip the file write on no-op mutations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostRecord {
     /// UUID — immutable, used by all other gadgets (`server.stats`, etc.).
     pub id: Uuid,
@@ -95,6 +136,19 @@ pub struct HostRecord {
     /// parent server. No passwords are serialized here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gadgetini: Option<GadgetiniRecord>,
+    /// Network interfaces from the last topology scan (ISSUE 39).
+    /// Empty for hosts never scanned — old inventory files load fine.
+    #[serde(default)]
+    pub network_interfaces: Vec<NetworkInterface>,
+    /// When the last successful topology scan ran. The background
+    /// poller rescans once this is older than
+    /// `PollerConfig::topology_refresh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_scanned_at: Option<DateTime<Utc>>,
+    /// Raw `lldpctl -f json0` from the last scan — stored for the
+    /// future switch-promotion stage, never interpreted today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lldp_raw: Option<serde_json::Value>,
 }
 
 fn default_ssh_port() -> u16 {
@@ -105,13 +159,14 @@ fn default_ssh_port() -> u16 {
 #[derive(Debug, Clone)]
 pub struct InventoryStore {
     root: PathBuf,
-    /// Serializes all `save()` calls so two concurrent gadget
-    /// invocations (e.g. `server.add` + `server.update` firing together)
-    /// can't race on the tmp file. Without this, both saves would open
-    /// the SAME tmp path with truncate, interleave their writes, and
-    /// the rename that wins could end up carrying trailing bytes from
-    /// the loser (observed: 1568-byte corrupt file containing
-    /// `...]}\n]` — two good JSONs spliced at the tail of the shorter).
+    /// Serializes every write — and, for `upsert` / `remove` / `modify`,
+    /// the whole load→mutate→save sequence — so two concurrent writers
+    /// can't interleave. Originally this only guarded the tmp-file write
+    /// (observed: 1568-byte corrupt file containing `...]}\n]` — two
+    /// good JSONs spliced at the tail of the shorter); since ISSUE 43 it
+    /// also closes the lost-update window where e.g. the poller's
+    /// topology write raced a `server.update` alias edit and one
+    /// overwrote the other's fields with stale values.
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -195,6 +250,11 @@ impl InventoryStore {
     ///      cleanly (no half-torn tmp reused across callers).
     pub async fn save(&self, hosts: &[HostRecord]) -> Result<(), InventoryError> {
         let _guard = self.write_lock.lock().await;
+        self.save_locked(hosts).await
+    }
+
+    /// Save body — caller must already hold `write_lock`.
+    async fn save_locked(&self, hosts: &[HostRecord]) -> Result<(), InventoryError> {
         self.ensure_layout().await?;
         let final_path = self.inventory_path();
         let tmp = final_path.with_file_name(format!(
@@ -235,15 +295,18 @@ impl InventoryStore {
         result
     }
 
-    /// Append / upsert by id.
+    /// Append / upsert by id. Replaces the WHOLE record — use this only
+    /// when the caller owns every field (registration); partial updates
+    /// belong in [`modify`](Self::modify).
     pub async fn upsert(&self, rec: HostRecord) -> Result<(), InventoryError> {
+        let _guard = self.write_lock.lock().await;
         let mut hosts = self.load().await?;
         if let Some(existing) = hosts.iter_mut().find(|h| h.id == rec.id) {
             *existing = rec;
         } else {
             hosts.push(rec);
         }
-        self.save(&hosts).await
+        self.save_locked(&hosts).await
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<HostRecord>, InventoryError> {
@@ -251,21 +314,44 @@ impl InventoryStore {
     }
 
     pub async fn remove(&self, id: Uuid) -> Result<Option<HostRecord>, InventoryError> {
+        let _guard = self.write_lock.lock().await;
         let mut hosts = self.load().await?;
         let pos = hosts.iter().position(|h| h.id == id);
         let removed = pos.map(|i| hosts.remove(i));
         if removed.is_some() {
-            self.save(&hosts).await?;
+            self.save_locked(&hosts).await?;
         }
         Ok(removed)
     }
 
-    pub async fn mark_ok(&self, id: Uuid, when: DateTime<Utc>) -> Result<(), InventoryError> {
+    /// Read-modify-write one record under the store lock. This is the
+    /// only safe way to update SOME of a record's fields: a bare
+    /// `get` + `upsert` pair lets a concurrent writer's fields get
+    /// rolled back to the stale snapshot the caller loaded (e.g. the
+    /// poller's topology write racing a `server.update` alias edit).
+    /// No-op mutations skip the file write. Returns the post-mutation
+    /// record, or `None` when the id is unknown.
+    pub async fn modify<F>(&self, id: Uuid, f: F) -> Result<Option<HostRecord>, InventoryError>
+    where
+        F: FnOnce(&mut HostRecord),
+    {
+        let _guard = self.write_lock.lock().await;
         let mut hosts = self.load().await?;
-        if let Some(h) = hosts.iter_mut().find(|h| h.id == id) {
-            h.last_ok_at = Some(when);
-            self.save(&hosts).await?;
+        let Some(h) = hosts.iter_mut().find(|h| h.id == id) else {
+            return Ok(None);
+        };
+        let before = h.clone();
+        f(h);
+        if *h == before {
+            return Ok(Some(before));
         }
+        let after = h.clone();
+        self.save_locked(&hosts).await?;
+        Ok(Some(after))
+    }
+
+    pub async fn mark_ok(&self, id: Uuid, when: DateTime<Utc>) -> Result<(), InventoryError> {
+        self.modify(id, |h| h.last_ok_at = Some(when)).await?;
         Ok(())
     }
 }
@@ -299,6 +385,9 @@ mod tests {
             cpu_cores: None,
             gpus: Vec::new(),
             gadgetini: None,
+            network_interfaces: Vec::new(),
+            network_scanned_at: None,
+            lldp_raw: None,
         }
     }
 
@@ -339,6 +428,49 @@ mod tests {
         store.mark_ok(id, t).await.unwrap();
         let fetched = store.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.last_ok_at, Some(t));
+    }
+
+    #[tokio::test]
+    async fn modify_updates_record_and_returns_it() {
+        let store = InventoryStore::new(tmp_root());
+        let rec = sample("10.0.0.40");
+        let id = rec.id;
+        store.upsert(rec).await.unwrap();
+        let out = store
+            .modify(id, |h| h.alias = Some("renamed".into()))
+            .await
+            .unwrap()
+            .expect("present");
+        assert_eq!(out.alias.as_deref(), Some("renamed"));
+        let fetched = store.get(id).await.unwrap().unwrap();
+        assert_eq!(fetched.alias.as_deref(), Some("renamed"));
+        // Unknown id → None, no error.
+        assert!(store
+            .modify(Uuid::new_v4(), |h| h.alias = None)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_modifies_do_not_lose_updates() {
+        // The old get→upsert pattern would let one of these two writers
+        // overwrite the other's field with its stale snapshot. `modify`
+        // holds the store lock across load→mutate→save, so both land.
+        let store = InventoryStore::new(tmp_root());
+        let rec = sample("10.0.0.41");
+        let id = rec.id;
+        store.upsert(rec).await.unwrap();
+        let (s1, s2) = (store.clone(), store.clone());
+        let (a, b) = tokio::join!(
+            s1.modify(id, |h| h.alias = Some("racer-a".into())),
+            s2.modify(id, |h| h.cpu_model = Some("EPYC 7763".into())),
+        );
+        a.unwrap();
+        b.unwrap();
+        let h = store.get(id).await.unwrap().unwrap();
+        assert_eq!(h.alias.as_deref(), Some("racer-a"));
+        assert_eq!(h.cpu_model.as_deref(), Some("EPYC 7763"));
     }
 
     #[tokio::test]

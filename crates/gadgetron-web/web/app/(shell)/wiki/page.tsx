@@ -27,7 +27,17 @@ import {
   WorkbenchPage,
 } from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
-import { safeRandomUUID } from "../../lib/uuid";
+import { invokeAction } from "../../lib/workbench-client";
+
+// Typed view over the shared client — wiki call sites read
+// `resp.result?.payload?.<field>` directly.
+async function invokeWiki(
+  apiKey: string | null,
+  actionId: string,
+  args: Record<string, unknown>,
+): Promise<WikiActionResponse> {
+  return (await invokeAction(apiKey, actionId, args)) as WikiActionResponse;
+}
 
 // ---------------------------------------------------------------------------
 // /web/wiki — wiki workbench page. Runs inside `(shell)/layout.tsx`,
@@ -36,15 +46,6 @@ import { safeRandomUUID } from "../../lib/uuid";
 // page-header + search bar + the 3-column body (Pages | Content |
 // Search hits).
 // ---------------------------------------------------------------------------
-
-function getApiBase(): string {
-  if (typeof document === "undefined") return "/api/v1/web";
-  const meta = document.querySelector<HTMLMetaElement>(
-    'meta[name="gadgetron-api-base"]',
-  );
-  const chatBase = meta?.content || "/v1";
-  return chatBase.replace(/\/v1$/, "/api/v1/web");
-}
 
 // ---------------------------------------------------------------------------
 // Tree rendering — wiki page names use '/' as a hierarchical separator
@@ -170,7 +171,7 @@ function TreeBranch({
   );
 }
 
-type ActionResponse = {
+type WikiActionResponse = {
   result?: {
     status?: string;
     payload?: {
@@ -200,28 +201,6 @@ function encodeUtf8Base64(text: string): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
-}
-
-async function invokeAction(
-  apiKey: string | null,
-  actionId: string,
-  args: Record<string, unknown>,
-): Promise<ActionResponse> {
-  const ciid = safeRandomUUID();
-  const res = await fetch(`${getApiBase()}/workbench/actions/${actionId}`, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ args, client_invocation_id: ciid }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${actionId} failed: ${res.status} ${text.slice(0, 200)}`);
-  }
-  return (await res.json()) as ActionResponse;
 }
 
 export default function WikiWorkbenchPage() {
@@ -263,7 +242,7 @@ export default function WikiWorkbenchPage() {
     setLoadingPages(true);
     setPagesError(null);
     try {
-      const resp = await invokeAction(apiKey, "wiki-list", {});
+      const resp = await invokeWiki(apiKey, "wiki-list", {});
       const payload = resp.result?.payload;
       const names: string[] = Array.isArray(payload?.pages)
         ? payload!.pages!
@@ -290,7 +269,7 @@ export default function WikiWorkbenchPage() {
       setEditing(false);
       setPageError(null);
       try {
-        const resp = await invokeAction(apiKey, "wiki-read", { name });
+        const resp = await invokeWiki(apiKey, "wiki-read", { name });
         setContent(resp.result?.payload?.content ?? "");
       } catch (e) {
         const msg = (e as Error).message;
@@ -308,7 +287,7 @@ export default function WikiWorkbenchPage() {
     setSaving(true);
     setPageError(null);
     try {
-      await invokeAction(apiKey, "wiki-write", {
+      await invokeWiki(apiKey, "wiki-write", {
         name: selected,
         content,
       });
@@ -336,7 +315,7 @@ export default function WikiWorkbenchPage() {
     setDeleting(true);
     setPageError(null);
     try {
-      await invokeAction(apiKey, "wiki-delete", { name: selected });
+      await invokeWiki(apiKey, "wiki-delete", { name: selected });
       toast.success(`Deleted ${selected}`, {
         description: "Moved to _archived/ and committed.",
       });
@@ -363,7 +342,7 @@ export default function WikiWorkbenchPage() {
     }
     setSearching(true);
     try {
-      const resp = await invokeAction(apiKey, "knowledge-search", { query: q });
+      const resp = await invokeWiki(apiKey, "knowledge-search", { query: q });
       setSearchHits(resp.result?.payload?.hits ?? []);
     } catch (e) {
       setSearchHits([]);
@@ -396,7 +375,7 @@ export default function WikiWorkbenchPage() {
     setImportError(null);
     setImportReceipt(null);
     try {
-      const resp = await invokeAction(apiKey, "wiki-import", {
+      const resp = await invokeWiki(apiKey, "wiki-import", {
         bytes: encodeUtf8Base64(rawText),
         content_type: rawContentType,
         overwrite: rawOverwrite,
