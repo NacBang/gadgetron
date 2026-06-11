@@ -11,6 +11,7 @@ import {
   hostStatusColor,
   networkColor,
   toCytoscapeElements,
+  topologyLayout,
   STATUS_BORDER_COLORS,
   type HostStatus,
   type TopologyGraph,
@@ -128,9 +129,9 @@ export function TopologyGraphView({
     if (!cy || !ready) return;
     cy.elements().remove();
     cy.add(toCytoscapeElements(graph, hidden, statusRef.current));
-    // <30 hosts: tidy grid; beyond that force-directed keeps hubs legible.
-    const name = graph.hosts.length < 30 ? "grid" : "fcose";
-    cy.layout({ name, animate: false, padding: 24 }).run();
+    // <30 hosts: hub-centered rings (spokes never cross a host);
+    // beyond that force-directed keeps hubs legible.
+    cy.layout(topologyLayout(graph.hosts.length)).run();
   }, [graph, hidden, ready]);
 
   // Status refresh path: update node data in place — no remove/add, no
