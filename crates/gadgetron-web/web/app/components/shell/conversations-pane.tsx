@@ -12,6 +12,7 @@ import {
   setActiveConversationId,
 } from "../../lib/conversation-id";
 import { cn } from "@/lib/utils";
+import { useConfirm } from "../ui/confirm";
 
 // ---------------------------------------------------------------------------
 // Left-rail bottom pane: per-user conversation list.
@@ -102,6 +103,7 @@ function writeActiveConvId(id: string | null): void {
 
 export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
   const { apiKey, identity } = useAuth();
+  const confirm = useConfirm();
   const [rows, setRows] = useState<ConvRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -216,7 +218,15 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
 
   const remove = useCallback(
     async (id: string) => {
-      if (!window.confirm("Delete this conversation? This cannot be undone.")) return;
+      if (
+        !(await confirm({
+          title: "Delete this conversation?",
+          description: "This cannot be undone.",
+          tone: "danger",
+          confirmLabel: "Delete",
+        }))
+      )
+        return;
       try {
         await deleteConversation(apiKey, id);
         if (active === id) {
@@ -228,7 +238,7 @@ export function ConversationsPane({ collapsed }: { collapsed: boolean }) {
         setErr((e as Error).message);
       }
     },
-    [apiKey, active, refresh],
+    [apiKey, confirm, active, refresh],
   );
 
   if (collapsed) {

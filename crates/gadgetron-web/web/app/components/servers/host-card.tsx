@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Sparkline, type SparkPoint } from "../sparkline";
 import { InlineNotice } from "../workbench";
@@ -268,6 +269,31 @@ export function HostCard({
   const fetchMs = data?.lastFetchMs ?? null;
   const loading = data?.loading ?? false;
 
+  // Single source of truth for the host's health, shared by the left
+  // accent bar, the header dot, and the footer dot (ISSUE 63). Error
+  // beats stale beats live; "unknown" until the first poll lands.
+  const health: "ok" | "stale" | "error" | "unknown" = err
+    ? "error"
+    : ageS == null
+      ? "unknown"
+      : ageS > 10
+        ? "stale"
+        : "ok";
+  const healthDot = {
+    ok: "bg-emerald-500",
+    stale: "bg-amber-500",
+    error: "bg-red-500",
+    unknown: "bg-zinc-600",
+  }[health];
+  // Left accent bar: colored for problems, transparent when healthy so
+  // the grid stays calm and only trouble hosts draw the eye.
+  const healthAccent = {
+    ok: "before:bg-transparent",
+    stale: "before:bg-amber-500/70",
+    error: "before:bg-red-500",
+    unknown: "before:bg-zinc-700/60",
+  }[health];
+
   // Build the metric list dynamically — only ask the API for series we
   // can actually render. CPU + Mem are always present; NIC is per-iface.
   const sparkMetrics = useMemo(() => {
@@ -350,9 +376,9 @@ export function HostCard({
   return (
     <div
       data-testid={`host-card-${host.host}`}
-      className="group/card flex h-[480px] flex-col gap-2 overflow-hidden rounded border border-zinc-800 bg-zinc-900 p-3 text-xs"
+      className={`surface-1 is-interactive group/card relative flex h-[480px] flex-col gap-2 overflow-hidden rounded-lg p-3 text-xs before:absolute before:inset-y-0 before:left-0 before:w-1 before:rounded-l-lg before:transition-colors ${healthAccent}`}
     >
-      <div className="flex min-w-0 flex-col gap-2">
+      <div className="flex min-w-0 flex-col gap-2 border-b border-white/[0.06] pb-2">
         <div className="min-w-0" data-testid="host-card-title-row">
           {editing ? (
             <div className="flex min-w-0 items-center gap-1">
@@ -372,45 +398,88 @@ export function HostCard({
                 className="h-6 px-1 py-0 text-sm"
                 disabled={saving}
               />
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="icon-xs"
                 onClick={() => void saveAlias()}
                 disabled={saving}
-                className="rounded border border-emerald-900 px-1.5 py-0.5 text-[11px] text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-50"
+                className="border-emerald-900 text-emerald-300 hover:bg-emerald-950/40 hover:text-emerald-200"
                 title="Save (Enter)"
+                aria-label="Save alias"
               >
-                <Check className="size-3" aria-hidden />
-              </button>
-              <button
+                <Check aria-hidden />
+              </Button>
+              <Button
                 type="button"
+                variant="outline"
+                size="icon-xs"
                 onClick={() => {
                   setEditing(false);
                   setDraft(host.alias ?? "");
                 }}
                 disabled={saving}
-                className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400 hover:text-zinc-200"
                 title="Cancel (Esc)"
+                aria-label="Cancel alias edit"
               >
-                <X className="size-3" aria-hidden />
-              </button>
+                <X aria-hidden />
+              </Button>
             </div>
           ) : (
-            <div className="flex min-w-0 items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              {/* Status dot — same health source as the footer / accent
+                * bar, here so the card reads at a glance (ISSUE 63). */}
+              <span
+                aria-hidden
+                title={`status: ${health}`}
+                className={`size-2 shrink-0 rounded-full ${healthDot}`}
+              />
               <div
                 className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100"
                 title={host.alias ?? host.host}
               >
                 {host.alias ?? host.host}
               </div>
-              <button
+              {/* Findings badge promoted to the title row so a warning
+                * isn't buried among the action icons (ISSUE 63). */}
+              {findingsCount && (() => {
+                const total =
+                  findingsCount.critical +
+                  findingsCount.high +
+                  findingsCount.medium +
+                  findingsCount.info;
+                if (total === 0) return null;
+                const tone =
+                  findingsCount.critical > 0
+                    ? "border-red-900 bg-red-950/40 text-red-200"
+                    : findingsCount.high > 0
+                      ? "border-amber-900 bg-amber-950/40 text-amber-200"
+                      : findingsCount.medium > 0
+                        ? "border-yellow-900 bg-yellow-950/30 text-yellow-200"
+                        : "border-zinc-700 bg-zinc-800 text-zinc-300";
+                return (
+                  <a
+                    href={`/web/findings?host=${host.id}`}
+                    title={`critical ${findingsCount.critical} · high ${findingsCount.high} · medium ${findingsCount.medium} · info ${findingsCount.info}`}
+                    className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${tone}`}
+                    data-testid={`host-findings-${host.id}`}
+                  >
+                    <TriangleAlert className="size-3" aria-hidden /> {total}
+                  </a>
+                );
+              })()}
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon-xs"
                 onClick={() => setEditing(true)}
-                className="shrink-0 rounded px-1 text-[11px] text-zinc-500 opacity-0 transition group-hover/card:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+                className="shrink-0 text-zinc-500 opacity-0 transition group-hover/card:opacity-100"
                 title="Rename alias"
+                aria-label="Rename alias"
                 data-testid={`host-alias-edit-${host.id}`}
               >
-                <Pencil className="size-3" aria-hidden />
-              </button>
+                <Pencil aria-hidden />
+              </Button>
             </div>
           )}
           {/* One connection line — the alias case used to add a second
@@ -448,84 +517,60 @@ export function HostCard({
           )}
         </div>
         <div
-          className="flex flex-wrap items-center justify-end gap-1"
+          className="flex flex-wrap items-center justify-end gap-1 opacity-65 transition-opacity group-hover/card:opacity-100 focus-within:opacity-100"
           data-testid={`host-card-actions-${host.id}`}
         >
-          {findingsCount && (() => {
-            const total =
-              findingsCount.critical +
-              findingsCount.high +
-              findingsCount.medium +
-              findingsCount.info;
-            if (total === 0) return null;
-            const tone =
-              findingsCount.critical > 0
-                ? "border-red-900 bg-red-950/40 text-red-200"
-                : findingsCount.high > 0
-                  ? "border-amber-900 bg-amber-950/40 text-amber-200"
-                  : findingsCount.medium > 0
-                    ? "border-yellow-900 bg-yellow-950/30 text-yellow-200"
-                    : "border-zinc-700 bg-zinc-800 text-zinc-300";
-            return (
-              <a
-                href={`/web/findings?host=${host.id}`}
-                title={`critical ${findingsCount.critical} · high ${findingsCount.high} · medium ${findingsCount.medium} · info ${findingsCount.info}`}
-                className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[11px] font-semibold ${tone}`}
-                data-testid={`host-findings-${host.id}`}
-              >
-                <TriangleAlert className="size-3" aria-hidden /> {total}
-              </a>
-            );
-          })()}
-          {/* Uniform icon-only action row. The old mix of emoji+text
-            * buttons ("🔧 shell", "+ gadgetini", "remove") wrapped to
-            * two lines on narrow cards; same-size icon buttons with
-            * tooltips keep the row to one tidy line. Testids and
-            * behavior unchanged. */}
-          <button
+          {/* Uniform icon-only action row (findings badge moved to the
+            * title row in ISSUE 63). Row is dimmed at rest and comes
+            * forward on card hover so the body stays the focus. Testids
+            * and behavior unchanged. */}
+          <Button
             type="button"
+            variant="outline"
+            size="icon-xs"
             data-testid={`host-expand-${host.host}`}
             onClick={() => setGpuExpanded((v) => !v)}
             aria-expanded={gpuExpanded}
             aria-label={gpuExpanded ? "Collapse host detail" : "Expand host detail"}
             title={gpuExpanded ? "Collapse" : "Expand inline"}
-            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
           >
             {gpuExpanded ? (
-              <ChevronDown className="size-3.5" aria-hidden />
+              <ChevronDown aria-hidden />
             ) : (
-              <ChevronRight className="size-3.5" aria-hidden />
+              <ChevronRight aria-hidden />
             )}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="outline"
+            size="icon-xs"
             data-testid={`host-detail-${host.host}`}
             onClick={onOpenDetail}
-            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 text-[11px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
             title="Open detail drawer"
             aria-label="Open detail drawer"
           >
-            <Maximize2 className="size-3" aria-hidden />
-          </button>
-          <button
+            <Maximize2 aria-hidden />
+          </Button>
+          <Button
             type="button"
+            variant="outline"
+            size="icon-xs"
             data-testid={`host-shell-${host.host}`}
             onClick={() => setShellOpen(true)}
-            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 font-mono text-[10px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
             title="Run remote bash (approval required per call)"
             aria-label="Run remote bash"
           >
-            <SquareTerminal className="size-3.5" aria-hidden />
-          </button>
-          <button
+            <SquareTerminal aria-hidden />
+          </Button>
+          <Button
             type="button"
+            variant="outline"
+            size="icon-xs"
             data-testid={`host-gadgetini-${host.host}`}
             onClick={() => setGadgetiniOpen(true)}
-            className={`inline-flex size-6 items-center justify-center rounded border text-[11px] hover:border-blue-700 hover:text-blue-300 ${
-              host.gadgetini
-                ? "border-blue-900/70 text-blue-300"
-                : "border-zinc-800 text-zinc-400"
-            }`}
+            className={
+              host.gadgetini ? "border-blue-900/70 text-blue-300" : undefined
+            }
             title={
               host.gadgetini
                 ? "Edit gadgetini connection"
@@ -533,18 +578,20 @@ export function HostCard({
             }
             aria-label="Gadgetini settings"
           >
-            <Droplets className="size-3.5" aria-hidden />
-          </button>
-          <button
+            <Droplets aria-hidden />
+          </Button>
+          <Button
             type="button"
+            variant="outline"
+            size="icon-xs"
             data-testid={`host-remove-${host.host}`}
             onClick={onRemove}
-            className="inline-flex size-6 items-center justify-center rounded border border-zinc-800 text-[11px] text-zinc-400 hover:border-red-800 hover:text-red-400"
+            className="hover:border-destructive/40 hover:text-destructive"
             title="Remove host"
             aria-label="Remove host"
           >
-            <X className="size-3.5" aria-hidden />
-          </button>
+            <X aria-hidden />
+          </Button>
         </div>
       </div>
       {shellOpen && (
@@ -642,7 +689,7 @@ export function HostCard({
             </button>
             <ProgressBar pct={avgUtil} label="" tone="amber" />
             {gpuExpanded && (
-              <div className="mt-1 flex max-h-[150px] flex-col gap-1 overflow-y-auto border-t border-zinc-800 pt-2 pr-1">
+              <div className="mt-1 flex max-h-[150px] flex-col gap-1 overflow-y-auto border-t border-white/[0.06] pt-2 pr-1">
                 {gpus.map((g) => {
                   const tempPowerBits: string[] = [];
                   if (g.temp_c != null) tempPowerBits.push(`${g.temp_c}°C`);
@@ -823,7 +870,7 @@ export function HostCard({
       )}
       {sparkMetrics.length > 0 && (
         <div
-          className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t border-zinc-800 pt-2"
+          className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t border-white/[0.06] pt-2"
           data-testid="host-sparklines"
         >
           <Sparkline
@@ -930,21 +977,14 @@ export function HostCard({
       )}
       <div
         data-testid="host-card-footer"
-        className="mt-auto flex items-center justify-between gap-2 border-t border-zinc-800 pt-2 text-[11px] text-zinc-500"
+        className="mt-auto flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2 text-[11px] text-zinc-500"
       >
         <span className="flex items-center gap-1.5">
-          {/* Static status dot. Color reflects last poll outcome; no
-            * pulse/animate so 1 Hz polling doesn't feel like strobe
-            * lighting. Err wins over stale. */}
+          {/* Static status dot — shared health source (ISSUE 63); no
+            * pulse so 1 Hz polling doesn't feel like strobe lighting. */}
           <span
             aria-hidden
-            className={`inline-block size-2 rounded-full ${
-              err
-                ? "bg-red-500"
-                : ageS != null && ageS > 10
-                  ? "bg-amber-500"
-                  : "bg-emerald-500"
-            }`}
+            className={`inline-block size-2 rounded-full ${healthDot}`}
           />
           <span className="font-mono">
             {ageS == null

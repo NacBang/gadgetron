@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { useAuth } from "../../lib/auth-context";
+import { useConfirm } from "../../components/ui/confirm";
 import {
   startPennyDiscussion,
   type WorkbenchSubject,
 } from "../../lib/workbench-subject-context";
 import { Button } from "../../components/ui/button";
+import { X, Zap } from "lucide-react";
 import {
   EmptyState,
   InlineNotice,
@@ -167,6 +169,7 @@ function CommentsSection({
   const [posting, setPosting] = useState(false);
   const count = finding.comment_count ?? 0;
   const isAdmin = identity?.role === "admin";
+  const confirm = useConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -220,7 +223,7 @@ function CommentsSection({
   const remove = useCallback(
     async (c: Comment) => {
       if (!identity?.user_id) return;
-      if (!window.confirm("Delete this comment?")) return;
+      if (!(await confirm({ title: "Delete this comment?", tone: "danger", confirmLabel: "Delete" }))) return;
       try {
         await invokeAction(apiKey, "loganalysis-comment-delete", {
           comment_id: c.id,
@@ -235,7 +238,7 @@ function CommentsSection({
         });
       }
     },
-    [apiKey, identity?.user_id, isAdmin, finding.id, count, onCountChange],
+    [apiKey, confirm, identity?.user_id, isAdmin, finding.id, count, onCountChange],
   );
 
   return (
@@ -286,14 +289,17 @@ function CommentsSection({
                   )}
                   <span className="text-zinc-600">{relativeTime(c.created_at)}</span>
                   {canDelete && (
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="icon-xs"
                       onClick={() => void remove(c)}
-                      className="ml-auto text-zinc-600 hover:text-red-400"
+                      className="ml-auto text-zinc-600 hover:text-destructive"
                       title="Delete"
+                      aria-label="Delete comment"
                     >
-                      ✕
-                    </button>
+                      <X aria-hidden />
+                    </Button>
                   )}
                 </div>
                 <div className="whitespace-pre-wrap text-[12px] text-zinc-200">
@@ -334,6 +340,7 @@ function CommentsSection({
 
 export default function FindingsPage() {
   const { apiKey, identity } = useAuth();
+  const confirm = useConfirm();
   const [findings, setFindings] = useState<Finding[]>([]);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [statuses, setStatuses] = useState<ScanStatus[]>([]);
@@ -458,7 +465,13 @@ export default function FindingsPage() {
         return;
       }
       const label = f.remediation.label ?? f.remediation.tool;
-      if (!window.confirm(`Run ${label} on ${f.host_id.slice(0, 8)}?`)) {
+      if (
+        !(await confirm({
+          title: `Run ${label}?`,
+          description: `Target host ${f.host_id.slice(0, 8)}`,
+          confirmLabel: "Run",
+        }))
+      ) {
         return;
       }
       try {
@@ -484,7 +497,7 @@ export default function FindingsPage() {
         toast.error((e as Error).message);
       }
     },
-    [apiKey, identity],
+    [apiKey, identity, confirm],
   );
 
   const hostsById = useMemo(() => {
@@ -620,13 +633,14 @@ export default function FindingsPage() {
               </button>
             ))}
             {hostFilter && (
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="sm"
                 onClick={() => void scanNow(hostFilter)}
-                className="h-8 rounded-md border border-zinc-800 px-2.5 text-xs text-zinc-300 hover:bg-zinc-900"
               >
                 Scan now
-              </button>
+              </Button>
             )}
           </PageToolbar>
         }
@@ -699,13 +713,14 @@ export default function FindingsPage() {
                       />
                       enabled
                     </label>
-                    <button
+                    <Button
                       type="button"
+                      variant="outline"
+                      size="xs"
                       onClick={() => void scanNow(s.host_id)}
-                      className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-blue-700 hover:text-blue-300"
                     >
                       Scan now
-                    </button>
+                    </Button>
                   </div>
                 );
               })
@@ -794,14 +809,15 @@ export default function FindingsPage() {
                                 {f.solution}
                               </span>
                               {f.remediation && (
-                                <button
+                                <Button
                                   type="button"
+                                  size="xs"
                                   onClick={() => void applyRemediation(f)}
                                   title={`${f.remediation.tool} ${JSON.stringify(f.remediation.args)}`}
-                                  className="shrink-0 rounded border border-blue-700 bg-blue-950/40 px-2 py-0.5 text-[11px] font-bold text-blue-200 hover:border-blue-500 hover:bg-blue-900/60"
+                                  className="shrink-0 border-blue-700 bg-blue-950/40 text-blue-200 hover:border-blue-500 hover:bg-blue-900/60 hover:text-blue-100"
                                 >
-                                  ⚡ {f.remediation.label ?? "Run"}
-                                </button>
+                                  <Zap aria-hidden /> {f.remediation.label ?? "Run"}
+                                </Button>
                               )}
                             </div>
                           )}
@@ -810,22 +826,25 @@ export default function FindingsPage() {
                           </pre>
                         </div>
                         <div className="flex shrink-0 flex-col gap-1">
-                          <button
+                          <Button
                             type="button"
+                            variant="outline"
+                            size="xs"
                             onClick={() => void dismiss(f.id)}
                             title="Hide this finding. If the same issue persists after the mute window, it can reopen."
-                            className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
                           >
                             Hide
-                          </button>
-                          <button
+                          </Button>
+                          <Button
                             type="button"
+                            variant="outline"
+                            size="xs"
                             onClick={() => openChatAboutFinding(f, hostLabel)}
                             title="Start a new Penny conversation about this finding."
-                            className="rounded border border-purple-800 bg-purple-950/30 px-2 py-1 text-[11px] text-purple-200 hover:border-purple-500 hover:bg-purple-900/40"
+                            className="border-purple-800 bg-purple-950/30 text-purple-200 hover:border-purple-500 hover:bg-purple-900/40 hover:text-purple-100"
                           >
                             Ask Penny
-                          </button>
+                          </Button>
                         </div>
                       </div>
                       <CommentsSection

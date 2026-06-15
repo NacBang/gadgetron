@@ -219,7 +219,7 @@ export function TopologyGraphView({
       <div className="relative">
         <div
           ref={containerRef}
-          className="h-[560px] w-full rounded-lg border border-zinc-800 bg-zinc-950"
+          className="surface-1 h-[560px] w-full rounded-lg"
           data-testid="topology-graph"
         />
         {graph.hosts.length === 0 && (

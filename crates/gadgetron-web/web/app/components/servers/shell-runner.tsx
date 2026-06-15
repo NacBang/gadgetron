@@ -8,6 +8,7 @@ import { useCallback, useState } from "react";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { invokeAction, unwrapPayload } from "../../lib/workbench-client";
+import { useConfirm } from "../ui/confirm";
 import type { Host } from "../../lib/server-types";
 
 // ---------------------------------------------------------------------------
@@ -39,14 +40,17 @@ export function ShellRunner({
     | null
   >(null);
   const label = host.alias ?? host.host;
+  const confirm = useConfirm();
 
   const run = useCallback(async () => {
     const trimmed = cmd.trim();
     if (!trimmed || running) return;
     const preview = trimmed.length > 120 ? trimmed.slice(0, 117) + "..." : trimmed;
-    const ok = window.confirm(
-      `Run on ${label}?\n\n${useSudo ? "[sudo] " : ""}${preview}`,
-    );
+    const ok = await confirm({
+      title: `Run on ${label}?`,
+      description: `${useSudo ? "[sudo] " : ""}${preview}`,
+      confirmLabel: "Run",
+    });
     if (!ok) return;
     setRunning(true);
     setResult(null);
@@ -69,7 +73,7 @@ export function ShellRunner({
     } finally {
       setRunning(false);
     }
-  }, [apiKey, cmd, host.id, label, running, useSudo]);
+  }, [apiKey, confirm, cmd, host.id, label, running, useSudo]);
 
   return (
     <div

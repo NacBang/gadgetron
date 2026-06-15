@@ -429,16 +429,22 @@ export default function WikiWorkbenchPage() {
   }, [apiKey, deeplinkHandled, openPage]);
 
   // -------- new-page shortcut -----------------------------------------------
+  // Replaces window.prompt() with a styled dialog (ISSUE 58): native
+  // prompt() breaks the product look and can't be tested.
+  const [newPageOpen, setNewPageOpen] = useState(false);
+  const [newPageName, setNewPageName] = useState("");
   const newPage = useCallback(() => {
-    const name = window.prompt(
-      "New page name (forward slashes for subdirs, no .md):",
-      "",
-    );
+    setNewPageName("");
+    setNewPageOpen(true);
+  }, []);
+  const createNewPage = useCallback(() => {
+    const name = newPageName.trim();
     if (!name) return;
     setSelected(name);
     setContent("# " + name.split("/").pop() + "\n\n");
     setEditing(true);
-  }, []);
+    setNewPageOpen(false);
+  }, [newPageName]);
 
   const pageTree = useMemo(() => buildTree(pages), [pages]);
   // Persist which folders are expanded across reloads. Default: every
@@ -526,6 +532,48 @@ export default function WikiWorkbenchPage() {
               data-testid="wiki-delete-confirm"
             >
               {deleting ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={newPageOpen} onOpenChange={setNewPageOpen}>
+        <DialogContent className="border-zinc-800 bg-zinc-950">
+          <DialogHeader>
+            <DialogTitle className="text-zinc-100">New page</DialogTitle>
+            <DialogDescription className="text-zinc-400">
+              Use forward slashes for subdirectories (no <code>.md</code>):
+              e.g. <span className="font-mono">ops/runbook-h100</span>.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={newPageName}
+            onChange={(e) => setNewPageName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                createNewPage();
+              }
+            }}
+            placeholder="ops/runbook-h100"
+            className="font-mono text-sm"
+            data-testid="wiki-new-page-input"
+          />
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setNewPageOpen(false)}
+              className="text-zinc-400"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={createNewPage}
+              disabled={!newPageName.trim()}
+              data-testid="wiki-new-page-create"
+            >
+              Create
             </Button>
           </DialogFooter>
         </DialogContent>

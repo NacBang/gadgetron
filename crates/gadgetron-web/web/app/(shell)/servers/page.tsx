@@ -29,6 +29,7 @@ import {
   WorkbenchPage,
 } from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
+import { useConfirm } from "../../components/ui/confirm";
 import { invokeAction, unwrapPayload } from "../../lib/workbench-client";
 import type { Host, ServerStats, StatsMap } from "../../lib/server-types";
 
@@ -49,6 +50,7 @@ const POLL_INTERVAL_MS = 1000;
 
 export default function ServersPage() {
   const { apiKey } = useAuth();
+  const confirm = useConfirm();
   const [hosts, setHosts] = useState<Host[]>([]);
   const [statsMap, setStatsMap] = useState<StatsMap>({});
   const [listError, setListError] = useState<string | null>(null);
@@ -266,7 +268,7 @@ export default function ServersPage() {
 
   const remove = useCallback(
     async (id: string, host: string) => {
-      if (!window.confirm(`Remove ${host}?`)) return;
+      if (!(await confirm({ title: `Remove ${host}?`, tone: "danger", confirmLabel: "Remove" }))) return;
       try {
         await invokeAction(apiKey, "server-remove", { id });
         toast.success(`Removed ${host}`);
@@ -275,7 +277,7 @@ export default function ServersPage() {
         toast.error("server.remove failed", { description: (e as Error).message });
       }
     },
-    [apiKey, refreshList],
+    [apiKey, confirm, refreshList],
   );
 
   useEffect(() => {
