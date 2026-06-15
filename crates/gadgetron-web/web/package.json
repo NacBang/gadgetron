@@ -1,6 +1,6 @@
 {
   "name": "gadgetron-web",
-  "version": "0.5.48",
+  "version": "0.5.54",
   "private": true,
   "scripts": {
     "dev": "next dev",

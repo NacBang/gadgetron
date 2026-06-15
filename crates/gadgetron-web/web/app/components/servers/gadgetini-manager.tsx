@@ -6,9 +6,11 @@
 
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
+import { X } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { invokeAction } from "../../lib/workbench-client";
+import { useConfirm } from "../ui/confirm";
 import type { Host } from "../../lib/server-types";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +49,7 @@ export function GadgetiniManager({
   const [password, setPassword2] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const label = host.alias ?? host.host;
+  const confirm = useConfirm();
   const hasExisting = initial !== null;
 
   const save = useCallback(async () => {
@@ -84,7 +87,14 @@ export function GadgetiniManager({
 
   const detach = useCallback(async () => {
     if (busy) return;
-    if (!window.confirm(`Detach gadgetini from ${label}?\n\nThe gadgetini's redis-side data is left untouched; gadgetron just stops collecting from it. The SSH key on the gadgetini remains installed.`)) {
+    if (
+      !(await confirm({
+        title: `Detach gadgetini from ${label}?`,
+        description:
+          "The gadgetini's redis-side data is left untouched; gadgetron just stops collecting from it. The SSH key on the gadgetini remains installed.",
+        confirmLabel: "Detach",
+      }))
+    ) {
       return;
     }
     setBusy(true);
@@ -116,13 +126,16 @@ export function GadgetiniManager({
           <div className="text-sm font-semibold text-zinc-100">
             Gadgetini @ <span className="font-mono text-blue-300">{label}</span>
           </div>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-xs"
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-200"
+            aria-label="Close"
+            className="text-zinc-500"
           >
-            ✕
-          </button>
+            <X aria-hidden />
+          </Button>
         </div>
         <div className="text-[10px] text-zinc-500">
           {hasExisting
@@ -230,14 +243,15 @@ export function GadgetiniManager({
         </p>
         <div className="mt-1 flex items-center justify-between gap-2">
           {hasExisting ? (
-            <button
+            <Button
               type="button"
+              variant="destructive"
+              size="sm"
               onClick={detach}
               disabled={busy}
-              className="rounded border border-red-900/60 px-2 py-1 text-[11px] text-red-300 hover:bg-red-950/40 disabled:opacity-50"
             >
               Detach
-            </button>
+            </Button>
           ) : (
             <span />
           )}

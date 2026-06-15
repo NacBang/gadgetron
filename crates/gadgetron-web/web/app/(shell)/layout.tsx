@@ -20,6 +20,7 @@ import { safeRandomUUID } from "../lib/uuid";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Card, CardContent } from "../components/ui/card";
+import { ConfirmProvider } from "../components/ui/confirm";
 
 // ---------------------------------------------------------------------------
 // /web post-auth shell — Next.js Route Group `(shell)` layout.
@@ -237,7 +238,9 @@ function AuthedShell({ children }: { children: ReactNode }) {
     <EvidenceProvider>
       <WorkbenchSubjectProvider>
         <AssistantRuntimeProvider runtime={runtime}>
-          <WorkbenchShell>{children}</WorkbenchShell>
+          <ConfirmProvider>
+            <WorkbenchShell>{children}</WorkbenchShell>
+          </ConfirmProvider>
         </AssistantRuntimeProvider>
       </WorkbenchSubjectProvider>
     </EvidenceProvider>

@@ -288,7 +288,7 @@ export default function DashboardPage() {
                   * to hundreds of hosts; click → /web/servers. */}
                 {summary.hosts.length > 0 && (
                   <div
-                    className="rounded border border-zinc-800 bg-zinc-900/40 p-3"
+                    className="surface-1 rounded-lg p-3"
                     data-testid="dashboard-host-strip"
                   >
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">

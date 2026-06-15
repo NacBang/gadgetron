@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
+import { X } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -304,26 +305,30 @@ export function AddHostForm({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-zinc-200">Register a server</h2>
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="xs"
             onClick={() => onCollapsedChange(true)}
             data-testid="server-add-minimize"
             title="Collapse — reopen later via '+ Add server'"
             aria-label="Collapse the register form"
-            className="rounded border border-zinc-800 px-1.5 py-px text-[10px] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+            className="text-zinc-500"
           >
             minimize
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            size="icon-xs"
             onClick={() => onCollapsedChange(true)}
             data-testid="server-add-close"
             title="Close the form"
             aria-label="Close the register form"
-            className="rounded border border-zinc-800 px-1.5 py-px font-mono text-[10px] text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+            className="text-zinc-500"
           >
-            ×
-          </button>
+            <X aria-hidden />
+          </Button>
         </div>
         <div className="flex gap-1" role="tablist" aria-label="auth mode">
           {(["password_bootstrap", "key_paste", "key_path"] as AuthMode[]).map((m) => (

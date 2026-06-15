@@ -10,8 +10,11 @@ import {
   MessageSquareText,
   Settings as SettingsIcon,
 } from "lucide-react";
+import { Button } from "../ui/button";
 import { useEvidence, type EvidenceItem } from "../../lib/evidence-context";
+import { toast } from "sonner";
 import { useAuth } from "../../lib/auth-context";
+import { useConfirm } from "../ui/confirm";
 import { ContextTab } from "./side-panel-context";
 import { getApiBase } from "../../lib/workbench-client";
 
@@ -309,30 +312,35 @@ function ApprovalCard({
         </pre>
       )}
       <div className="mt-2 flex items-center gap-1.5">
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="xs"
           onClick={() => setExpanded((v) => !v)}
-          className="rounded border border-purple-800 bg-purple-950/30 px-1.5 py-0.5 font-mono text-[10px] text-purple-300 hover:border-purple-500 hover:text-purple-100"
+          className="border-purple-800 bg-purple-950/30 font-mono text-purple-300 hover:border-purple-500 hover:text-purple-100"
         >
           {expanded ? "▴ Collapse" : "▾ Full arguments"}
-        </button>
+        </Button>
         <span className="ml-auto" />
-        <button
+        <Button
           type="button"
+          size="xs"
           onClick={() => void decide(a.id, true)}
-          className="shrink-0 rounded border border-emerald-700 bg-emerald-950/40 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-emerald-200 hover:border-emerald-500 hover:bg-emerald-900/60"
+          className="shrink-0 border-emerald-700 bg-emerald-950/40 font-mono text-emerald-200 hover:border-emerald-500 hover:bg-emerald-900/60 hover:text-emerald-100"
           title="Approve"
         >
-          ⚡ Approve
-        </button>
-        <button
+          <Zap aria-hidden /> Approve
+        </Button>
+        <Button
           type="button"
+          variant="destructive"
+          size="xs"
           onClick={() => void decide(a.id, false)}
-          className="shrink-0 rounded border border-red-800 bg-red-950/30 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-red-200 hover:border-red-500 hover:bg-red-900/40"
+          className="shrink-0 font-mono"
           title="Deny"
         >
-          ✕ Deny
-        </button>
+          <X aria-hidden /> Deny
+        </Button>
       </div>
     </li>
   );
@@ -398,15 +406,18 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
   const hostMap = useHostAliasMap(apiKey);
   const actions = useActionsFeed(apiKey);
   const approvals = usePendingApprovalsFeed(apiKey);
+  const confirm = useConfirm();
   const decide = useCallback(
     async (approvalId: string, approve: boolean, reason?: string) => {
       const verb = approve ? "approve" : "deny";
       if (
-        !window.confirm(
-          approve
+        !(await confirm({
+          title: approve
             ? "Approve this pending action?"
             : "Deny this pending action?",
-        )
+          tone: approve ? "default" : "danger",
+          confirmLabel: approve ? "Approve" : "Deny",
+        }))
       )
         return;
       try {
@@ -426,10 +437,10 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
         );
         if (!res.ok) {
           const body = await res.text();
-          alert(`${verb} failed: ${res.status} ${body.slice(0, 200)}`);
+          toast.error(`${verb} failed`, { description: `${res.status} ${body.slice(0, 200)}` });
         }
       } catch (e) {
-        alert(`${verb} failed: ${(e as Error).message}`);
+        toast.error(`${verb} failed`, { description: (e as Error).message });
       }
     },
     [apiKey],
@@ -439,7 +450,10 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
       const label =
         a.remediation.label ??
         `${a.remediation.tool} ${JSON.stringify(a.remediation.args)}`;
-      if (!window.confirm(`Run this action?\n\n${label}`)) return;
+      if (
+        !(await confirm({ title: "Run this action?", description: label, confirmLabel: "Run" }))
+      )
+        return;
       try {
         const actionId = a.remediation.tool.replace(".", "-");
         const args = { ...a.remediation.args, id: a.hostId };
@@ -466,7 +480,7 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
           },
         );
       } catch (e) {
-        alert(`Run failed: ${(e as Error).message}`);
+        toast.error("Run failed", { description: (e as Error).message });
       }
     },
     [apiKey],
@@ -519,13 +533,14 @@ function ActionsTab({ apiKey }: { apiKey: string | null }) {
                 .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
                 .join(" ")}
             </code>
-            <button
+            <Button
               type="button"
+              size="xs"
               onClick={() => void run(a)}
-              className="ml-auto shrink-0 rounded border border-blue-700 bg-blue-950/40 px-2 py-0.5 font-mono text-[10px] font-semibold text-blue-200 hover:border-blue-500 hover:bg-blue-900/60"
+              className="ml-auto shrink-0 border-blue-700 bg-blue-950/40 font-mono text-blue-200 hover:border-blue-500 hover:bg-blue-900/60 hover:text-blue-100"
             >
-              ⚡ {a.remediation.label ?? "Run"}
-            </button>
+              <Zap aria-hidden /> {a.remediation.label ?? "Run"}
+            </Button>
           </div>
         </li>
       ))}

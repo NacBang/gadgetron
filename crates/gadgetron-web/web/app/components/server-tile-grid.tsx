@@ -58,7 +58,7 @@ export function ServerTileGrid({
       </div>
       {hosts.length === 0 ? (
         <div
-          className="rounded-lg border border-zinc-800 bg-zinc-950 p-6 text-center text-xs text-zinc-500"
+          className="surface-1 rounded-lg p-6 text-center text-xs text-zinc-500"
           data-testid="server-tiles-empty"
         >
           No servers match the current filters.
