@@ -17,7 +17,7 @@ export interface FleetHostRow {
 }
 
 export type ServerStatusFilter = "all" | "online" | "offline" | "warn";
-export type ServerSortKey = "name" | "cpu" | "gpu" | "temp";
+export type ServerSortKey = "name" | "cpu" | "gpu" | "temp" | "warn";
 export type TileColorBy = "status" | "cpu" | "gpu" | "temp";
 
 interface FilterableHost {
@@ -65,7 +65,9 @@ export function filterSortHosts<H extends FilterableHost>(
         ? row.cpu_util_pct
         : sortKey === "gpu"
           ? row.gpu_avg_util_pct
-          : row.gpu_max_temp_c;
+          : sortKey === "warn"
+            ? row.warnings
+            : row.gpu_max_temp_c;
     return v ?? Number.NEGATIVE_INFINITY;
   };
   out = out.slice().sort((a, b) => {
@@ -81,7 +83,7 @@ export function filterSortHosts<H extends FilterableHost>(
 /** Unknown / no-data tile — light gray so dark text stays readable. */
 const TILE_UNKNOWN = "#a1a1aa";
 
-function utilizationColor(pct: number | null): string {
+export function utilizationColor(pct: number | null): string {
   if (pct == null) return TILE_UNKNOWN;
   if (pct < 50) return "#22c55e";
   if (pct < 75) return "#eab308";
@@ -89,7 +91,7 @@ function utilizationColor(pct: number | null): string {
   return "#ef4444";
 }
 
-function temperatureColor(celsius: number | null): string {
+export function temperatureColor(celsius: number | null): string {
   if (celsius == null) return TILE_UNKNOWN;
   if (celsius < 60) return "#22c55e";
   if (celsius < 75) return "#eab308";

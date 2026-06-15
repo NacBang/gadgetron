@@ -60,6 +60,12 @@ describe("filterSortHosts", () => {
     // name sort: alias/host lexicographic — bare-IP host comes first.
     expect(filterSortHosts(HOSTS, FLEET, "", "all", "name").map((h) => h.id)).toEqual(["c", "b", "a"]);
   });
+
+  it("sorts by warnings descending for triage, ties broken by name", () => {
+    // b has 2 warnings; a and c have 0, so they tie and fall back to
+    // name order (bare-IP host "10.0.0.7" before alias "train-01").
+    expect(filterSortHosts(HOSTS, FLEET, "", "all", "warn").map((h) => h.id)).toEqual(["b", "c", "a"]);
+  });
 });
 
 describe("tileColor / tileMetricLabel", () => {

@@ -311,6 +311,105 @@ describe("ServersPage", () => {
     });
   });
 
+  it("renders a sortable table view with fleet metrics when Table is selected", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/workbench/actions/server-list")) {
+        return jsonResponse(
+          actionPayload({
+            hosts: [
+              {
+                id: "host-1",
+                host: "10.100.1.110",
+                ssh_user: "root",
+                ssh_port: 22,
+                created_at: "2026-05-03T10:00:00Z",
+                last_ok_at: null,
+                alias: "dg5R-PRO6000-8",
+                machine_id: null,
+                cpu_model: "AMD EPYC 7763 64-Core Processor",
+                cpu_cores: 64,
+                gpus: ["NVIDIA RTX PRO 6000 Blackwell Server Edition"],
+              },
+            ],
+          }),
+        );
+      }
+      if (url.includes("/workbench/actions/server-fleet")) {
+        return jsonResponse(
+          actionPayload({
+            snapshots_available: true,
+            hosts: [
+              {
+                id: "host-1",
+                host: "10.100.1.110",
+                alias: "dg5R-PRO6000-8",
+                online: true,
+                cpu_util_pct: 42,
+                gpu_count: 1,
+                gpu_avg_util_pct: 88,
+                gpu_max_temp_c: 71,
+                warnings: 0,
+              },
+            ],
+          }),
+        );
+      }
+      if (url.includes("/workbench/actions/loganalysis-list")) {
+        return jsonResponse(actionPayload({ findings: [] }));
+      }
+      if (url.includes("/workbench/actions/server-stats")) {
+        return jsonResponse(
+          actionPayload({
+            cpu: null,
+            mem: null,
+            disks: [],
+            temps: [],
+            gpus: [],
+            power: null,
+            network: [],
+            uptime_secs: null,
+            fetched_at: "2026-05-03T10:00:00Z",
+            warnings: [],
+          }),
+        );
+      }
+      if (url.includes("/workbench/servers/host-1/metrics")) {
+        return jsonResponse({
+          metric: "cpu.util",
+          unit: null,
+          resolution: "auto",
+          points: [],
+          refresh_lag_seconds: 0,
+          dropped_frames: 0,
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    render(<ServersPage />);
+
+    // Inventory loads in the default cards view first.
+    await screen.findByTestId("host-card-title-row");
+
+    fireEvent.click(screen.getByRole("button", { name: "Table" }));
+
+    const table = await screen.findByTestId("server-table");
+    const rows = screen.getAllByTestId("server-table-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("dg5R-PRO6000-8");
+
+    // Fleet summary supplies the metric columns once it lands.
+    await waitFor(() => {
+      expect(table.textContent).toContain("88%");
+      expect(table.textContent).toContain("71°C");
+    });
+
+    // Column headers drive the shared sort state (same as the dropdown).
+    fireEvent.click(screen.getByRole("button", { name: /GPU util/ }));
+    expect(screen.getByTestId("servers-sort-select")).toHaveValue("gpu");
+  });
+
   it("uses byte counters for NIC sparklines so bursty samples render as a rolling rate", async () => {
     const now = new Date("2026-05-04T10:00:10Z").getTime();
     vi.spyOn(Date, "now").mockReturnValue(now);
