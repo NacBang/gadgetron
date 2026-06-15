@@ -7,6 +7,7 @@ import { Input } from "../../components/ui/input";
 import { HostDetailDrawer } from "../../components/host-detail-drawer";
 import { TopologyGraphView } from "../../components/topology-graph";
 import { ServerTileGrid } from "../../components/server-tile-grid";
+import { ServerTable } from "../../components/server-table";
 import { AddHostForm } from "../../components/servers/add-host-form";
 import { HostCard } from "../../components/servers/host-card";
 import {
@@ -62,10 +63,13 @@ export default function ServersPage() {
   // Cards vs topology graph (ISSUE 41). The graph fetches once on
   // entry + every 60 s — topology changes on cabling work, not
   // per-second, and the action is an inventory read (no SSH).
-  const [view, setView] = useState<"cards" | "tiles" | "graph">("cards");
+  const [view, setView] = useState<"cards" | "tiles" | "graph" | "table">(
+    "cards",
+  );
   const [topology, setTopology] = useState<TopologyGraph | null>(null);
   const [topologyError, setTopologyError] = useState<string | null>(null);
-  // Shared filter / sort bar (ISSUE 48) — applies to cards AND tiles.
+  // Shared filter / sort bar (ISSUE 48) — applies to cards, tiles, and
+  // the table view (every non-graph view).
   // Status + metric values come from the single-call `server-fleet`
   // action; without it (legacy no-DB mode) filters degrade to no-ops.
   const [query, setQuery] = useState("");
@@ -374,7 +378,7 @@ export default function ServersPage() {
 
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1" data-testid="servers-view-toggle">
-            {(["cards", "tiles", "graph"] as const).map((v) => (
+            {(["cards", "tiles", "table", "graph"] as const).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -385,7 +389,13 @@ export default function ServersPage() {
                     : "border-zinc-800 text-zinc-500 hover:text-zinc-300"
                 }`}
               >
-                {v === "cards" ? "Cards" : v === "tiles" ? "Tiles" : "Graph"}
+                {v === "cards"
+                  ? "Cards"
+                  : v === "tiles"
+                    ? "Tiles"
+                    : v === "table"
+                      ? "Table"
+                      : "Graph"}
               </button>
             ))}
           </div>
@@ -437,6 +447,7 @@ export default function ServersPage() {
                   <option value="cpu">CPU util</option>
                   <option value="gpu">GPU util</option>
                   <option value="temp">GPU temp</option>
+                  <option value="warn">Warnings</option>
                 </select>
               </label>
               {(query.trim() !== "" || statusFilter !== "all") && (
@@ -486,6 +497,19 @@ export default function ServersPage() {
               fleet={fleet}
               colorBy={tileColorBy}
               onColorByChange={setTileColorBy}
+              onSelect={(id) => {
+                const h = hosts.find((x) => x.id === id);
+                if (h) setDetailHost(h);
+              }}
+            />
+          </section>
+        ) : view === "table" ? (
+          <section data-testid="table-section">
+            <ServerTable
+              hosts={hostList}
+              fleet={fleet}
+              sortKey={sortKey}
+              onSortChange={setSortKey}
               onSelect={(id) => {
                 const h = hosts.find((x) => x.id === id);
                 if (h) setDetailHost(h);
