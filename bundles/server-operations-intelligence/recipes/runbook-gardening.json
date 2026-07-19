@@ -1,0 +1,8 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "server-operations-intelligence",
+  "role": "gardener",
+  "inputs": ["candidate_id", "source_ids", "verified_outcome_ids"],
+  "rules": ["preserve_contradictions", "preserve_applicability", "require_rollback", "do_not_promote_unverified_workaround"],
+  "output": {"canonical_kind": "lesson", "review_required": true}
+}

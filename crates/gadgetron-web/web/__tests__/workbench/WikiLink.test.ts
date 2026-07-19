@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { wikiPageFromCode } from "../../app/lib/wiki-link";
+import {
+  knowledgeSearchHref,
+  wikiPageFromCode,
+} from "../../app/lib/wiki-link";
 
 // Pins the inline-code → wiki-page matching behind chat citations
 // (ISSUE 44): only EXACT members of the real page list linkify, so
@@ -41,5 +44,19 @@ describe("wikiPageFromCode", () => {
     expect(
       wikiPageFromCode("ops/runbook-h100-ecc", undefined, new Set()),
     ).toBeNull();
+  });
+});
+
+describe("knowledgeSearchHref", () => {
+  it("generates direct Knowledge URLs for in-app citations", () => {
+    expect(knowledgeSearchHref("ops/runbook-h100-ecc")).toBe(
+      "/knowledge?q=ops%2Frunbook-h100-ecc",
+    );
+    expect(knowledgeSearchHref("복구 절차", "/web/knowledge")).toBe(
+      "/web/knowledge?q=%EB%B3%B5%EA%B5%AC%20%EC%A0%88%EC%B0%A8",
+    );
+    expect(knowledgeSearchHref("  ", "/web/knowledge")).toBe(
+      "/web/knowledge",
+    );
   });
 });

@@ -1,0 +1,105 @@
+-- Record verified return to usable capacity in the same transaction as the
+-- final enrollment transition. The earlier recovery guard already rejects
+-- stale health and validation evidence; this trigger makes the successful
+-- incident-linked outcome durable for the operator timeline and learning.
+
+CREATE OR REPLACE FUNCTION server_track_incident_recovery()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    recovery_incident_id UUID;
+    recovery_operation_id UUID;
+    recovery_target_revision UUID;
+    recovery_ready BOOLEAN;
+BEGIN
+    IF NEW.lifecycle_state <> 'active'
+       OR OLD.lifecycle_state = 'active'
+       OR NOT (NEW.progress ? 'incident_id')
+       OR NOT (NEW.progress ? 'operation_id')
+       OR NOT (NEW.progress ? 'fault_cleared_target_revision') THEN
+        RETURN NEW;
+    END IF;
+
+    recovery_incident_id := (NEW.progress ->> 'incident_id')::UUID;
+    recovery_operation_id := (NEW.progress ->> 'operation_id')::UUID;
+    recovery_target_revision := (NEW.progress ->> 'fault_cleared_target_revision')::UUID;
+
+    SELECT EXISTS (
+        SELECT 1
+          FROM server_incidents AS incident
+          JOIN server_target_health AS health
+            ON health.tenant_id = incident.tenant_id
+           AND health.host_id = incident.host_id
+         WHERE incident.tenant_id = NEW.tenant_id
+           AND incident.incident_id = recovery_incident_id
+           AND incident.status = 'closed'
+           AND health.target_id = NEW.target_id
+           AND health.status = 'healthy'
+           AND health.revision = recovery_target_revision
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM server_incident_signals AS signal
+                WHERE signal.tenant_id = incident.tenant_id
+                  AND signal.host_id = incident.host_id
+                  AND signal.ended_at IS NULL
+                  AND signal.source_state = 'firing'
+                  AND signal.severity = 'critical'
+           )
+    ) INTO recovery_ready;
+
+    IF NOT recovery_ready THEN
+        RAISE EXCEPTION 'incident recovery outcome requires exact fresh healthy evidence'
+            USING ERRCODE = '23514';
+    END IF;
+
+    INSERT INTO server_operation_outcomes (
+        id,
+        tenant_id,
+        operation_id,
+        target_kind,
+        target_id,
+        action,
+        before_state,
+        after_state,
+        observed_outcome,
+        actor_ref,
+        incident_id
+    ) VALUES (
+        recovery_operation_id,
+        NEW.tenant_id,
+        recovery_operation_id::TEXT,
+        'server_target',
+        NEW.target_id,
+        'incident-recovery',
+        jsonb_build_object(
+            'lifecycle_state', OLD.lifecycle_state,
+            'health_status', OLD.health_status,
+            'compliance_status', OLD.compliance_status,
+            'qualification_status', OLD.qualification_status,
+            'capacity', 'isolated'
+        ),
+        jsonb_build_object(
+            'lifecycle_state', NEW.lifecycle_state,
+            'health_status', NEW.health_status,
+            'compliance_status', NEW.compliance_status,
+            'qualification_status', NEW.qualification_status,
+            'capacity', 'available',
+            'health_revision', recovery_target_revision
+        ),
+        'succeeded',
+        COALESCE(NULLIF(NEW.progress ->> 'transitioned_by', ''), 'server-administrator'),
+        recovery_incident_id
+    );
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS server_enrollment_incident_recovery_outcome ON server_enrollments;
+CREATE TRIGGER server_enrollment_incident_recovery_outcome
+AFTER UPDATE OF lifecycle_state, progress ON server_enrollments
+FOR EACH ROW EXECUTE FUNCTION server_track_incident_recovery();
+
+COMMENT ON FUNCTION server_track_incident_recovery() IS
+    'Atomically links fresh health and current-cycle validation to verified incident recovery and returned capacity.';

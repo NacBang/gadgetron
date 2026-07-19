@@ -18,8 +18,13 @@ import {
   Eraser,
   type LucideIcon,
 } from "lucide-react";
+import {
+  searchCommandIndex,
+  type CommandIndexEntry,
+} from "../lib/command-index";
 
-type Command = {
+type Command = CommandIndexEntry & {
+  id: string;
   trigger: string; // what goes into the composer when selected
   label: string; // display, e.g. "/wiki list"
   description: string;
@@ -32,6 +37,7 @@ type Command = {
 
 const COMMANDS: readonly Command[] = [
   {
+    id: "slash-help",
     trigger: "/help",
     label: "/help",
     description: "List slash commands (opens dialog)",
@@ -39,6 +45,7 @@ const COMMANDS: readonly Command[] = [
     submitOnSelect: true,
   },
   {
+    id: "slash-clear",
     trigger: "/clear",
     label: "/clear",
     description: "Clear the conversation (page reload)",
@@ -46,6 +53,7 @@ const COMMANDS: readonly Command[] = [
     submitOnSelect: true,
   },
   {
+    id: "slash-wiki-list",
     trigger: "/wiki list",
     label: "/wiki list",
     description: "List all wiki pages",
@@ -53,6 +61,7 @@ const COMMANDS: readonly Command[] = [
     submitOnSelect: true,
   },
   {
+    id: "slash-wiki-search",
     trigger: "/wiki search ",
     label: "/wiki search <query>",
     description: "Search the wiki",
@@ -60,6 +69,7 @@ const COMMANDS: readonly Command[] = [
     placeholderAfter: "query",
   },
   {
+    id: "slash-wiki-get",
     trigger: "/wiki get ",
     label: "/wiki get <page>",
     description: "Read a specific page",
@@ -67,6 +77,7 @@ const COMMANDS: readonly Command[] = [
     placeholderAfter: "page",
   },
   {
+    id: "slash-wiki-delete",
     trigger: "/wiki delete ",
     label: "/wiki delete <page>",
     description: "Delete a page (soft → _archived/)",
@@ -74,6 +85,7 @@ const COMMANDS: readonly Command[] = [
     placeholderAfter: "page",
   },
   {
+    id: "slash-wiki-rename",
     trigger: "/wiki rename ",
     label: "/wiki rename <from> <to>",
     description: "Rename a page",
@@ -104,20 +116,18 @@ export function SlashAutocomplete({
   const shouldShow = text.trim().startsWith("/") && !text.includes("\n");
   const query = shouldShow ? text.trim() : "";
 
-  const matches = useMemo<Command[]>(() => {
-    if (!shouldShow) return [];
-    // Filter: prefix-first, then substring.
-    const q = query.toLowerCase();
-    const prefix = COMMANDS.filter((c) =>
-      c.trigger.toLowerCase().startsWith(q),
-    );
-    const substring = COMMANDS.filter(
-      (c) =>
-        !c.trigger.toLowerCase().startsWith(q) &&
-        c.label.toLowerCase().includes(q),
-    );
-    return [...prefix, ...substring];
-  }, [query, shouldShow]);
+  const matches = useMemo<Command[]>(
+    () => shouldShow
+      ? searchCommandIndex(
+          COMMANDS.map((command) => ({
+            ...command,
+            keywords: [command.trigger],
+          })),
+          query,
+        )
+      : [],
+    [query, shouldShow],
+  );
 
   useEffect(() => {
     setSelectedIdx(0);
@@ -180,7 +190,7 @@ export function SlashAutocomplete({
   return (
     <div
       ref={containerRef}
-      className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-lg"
+      className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-72 overflow-y-auto rounded border border-border bg-popover p-1 text-popover-foreground"
       role="listbox"
     >
       {matches.map((cmd, i) => {

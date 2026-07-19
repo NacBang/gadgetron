@@ -7,6 +7,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "./ui/collapsible";
+import { useI18n } from "../lib/i18n";
 
 /**
  * Renders a ReasoningMessagePart — Penny's internal thinking/scratch text.
@@ -14,9 +15,7 @@ import {
  *
  * Live-state polish:
  *   - While `isRunning`, the trigger auto-expands, the Brain icon pulses,
- *     and the label flips to "생각 중..." so the UI feels like it's actually
- *     thinking (vs. a static "생각 과정 보기" button that shows up seconds
- *     after the fact).
+ *     and the localized label switches to the active thinking state.
  *   - When `isRunning` drops to false, the trigger auto-collapses back so
  *     the final answer isn't buried under multiple expanded reasoning
  *     blocks — the user can click to re-expand if they want the detail.
@@ -28,6 +27,8 @@ export function ReasoningPart({
   text: string;
   isRunning?: boolean;
 }) {
+  const { labels } = useI18n();
+  const copy = labels.chat.reasoning;
   const [open, setOpen] = useState(!!isRunning);
   const [userOverride, setUserOverride] = useState(false);
 
@@ -42,10 +43,10 @@ export function ReasoningPart({
   };
 
   const label = isRunning
-    ? "Thinking..."
+    ? copy.thinking
     : open
-      ? "Hide reasoning"
-      : "Show reasoning";
+      ? copy.hide
+      : copy.show;
 
   return (
     <Collapsible
@@ -56,7 +57,7 @@ export function ReasoningPart({
       <CollapsibleTrigger
         className={`flex w-full items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
           isRunning
-            ? "border-blue-500/30 bg-blue-500/5 text-blue-300/90 hover:bg-blue-500/10"
+            ? "border-[var(--copper)] bg-[var(--surface-2)] text-[var(--copper-hi)] hover:bg-[var(--surface)]"
             : "border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50"
         }`}
       >
@@ -64,13 +65,13 @@ export function ReasoningPart({
           className={`size-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
         />
         <Brain
-          className={`size-3 shrink-0 ${isRunning ? "motion-safe:animate-pulse text-blue-400" : ""}`}
+          className={`size-3 shrink-0 ${isRunning ? "motion-safe:animate-pulse text-[var(--copper-hi)]" : ""}`}
         />
         <span className="flex-1 text-left truncate">{label}</span>
         {isRunning && (
-          <span className="ml-auto flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-400/70">
-            <span className="size-1 rounded-full bg-blue-400 animate-pulse" />
-            live
+          <span className="ml-auto flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--copper-hi)]">
+            <span className="size-1 rounded-full bg-[var(--copper)] animate-pulse" />
+            {copy.live}
           </span>
         )}
       </CollapsibleTrigger>

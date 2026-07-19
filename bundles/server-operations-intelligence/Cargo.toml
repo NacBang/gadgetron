@@ -1,0 +1,26 @@
+[package]
+name = "gadgetron-bundle-server-operations-intelligence"
+version = "0.1.2"
+edition = "2021"
+license-file = "../../LICENSE"
+repository = "https://github.com/NacBang/gadgetron"
+rust-version = "1.80"
+description = "Independent Server Operations Intelligence Bundle"
+
+[[bin]]
+name = "server-operations-intelligence"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+gadgetron-bundle-runtime = { path = "../../crates/gadgetron-bundle-runtime" }
+gadgetron-bundle-sdk = { path = "../../crates/gadgetron-bundle-sdk" }
+hex = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+tokio = { workspace = true, features = ["io-std", "macros", "rt"] }
+uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]

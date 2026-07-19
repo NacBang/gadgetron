@@ -1,0 +1,9 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "server-operations-intelligence",
+  "role": "researcher",
+  "inputs": ["question", "space_id", "source_ids", "environment", "finding_revision"],
+  "required_sections": ["error_signature", "environment_match", "supporting_evidence", "contradicting_evidence", "procedure", "rollback", "limitations"],
+  "output": {"canonical_kind": "candidate", "target_kind": "lesson", "requires_source_revision": true},
+  "limits": {"max_sources": 20, "max_wall_seconds": 180, "max_gadget_calls": 1}
+}

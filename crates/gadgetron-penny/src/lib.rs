@@ -28,6 +28,7 @@ pub mod home;
 pub mod prompt;
 pub mod provider;
 pub mod redact;
+mod responses_bridge;
 pub mod session;
 pub mod session_store;
 pub mod spawn;

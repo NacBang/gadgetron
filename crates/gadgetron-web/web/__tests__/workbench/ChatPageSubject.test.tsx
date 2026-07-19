@@ -148,11 +148,11 @@ describe("Chat page subject context", () => {
       ...subjectHook.value,
       activeConversationId: "conv-1",
       subject: {
-        id: "finding-1",
-        kind: "log_finding",
-        bundle: "logs",
-        title: "SMART pending sectors",
-        href: "/web/findings?host=host-1",
+        id: "article-1",
+        kind: "knowledge_article",
+        bundle: "knowledge",
+        title: "PostgreSQL recovery playbook",
+        href: "/web/knowledge?q=postgres-recovery",
       },
     };
 
@@ -162,10 +162,10 @@ describe("Chat page subject context", () => {
       "Talking about",
     );
     expect(screen.getByTestId("active-subject-banner").textContent).toContain(
-      "SMART pending sectors",
+      "PostgreSQL recovery playbook",
     );
     expect(screen.getByText("View source").getAttribute("href")).toBe(
-      "/web/findings?host=host-1",
+      "/web/knowledge?q=postgres-recovery",
     );
   });
 
@@ -174,20 +174,20 @@ describe("Chat page subject context", () => {
       ...subjectHook.value,
       activeConversationId: "conv-1",
       subject: {
-        id: "finding-1",
-        kind: "log_finding",
-        bundle: "logs",
-        title: "SSH login failure (possible brute-force)",
+        id: "article-1",
+        kind: "knowledge_article",
+        bundle: "knowledge",
+        title: "PostgreSQL recovery playbook",
       },
     };
 
     render(<Home />);
 
     expect(
-      screen.getByText('Ask about "SSH login failure (possible brute-force)"'),
+      screen.getByText("Ask about “PostgreSQL recovery playbook”"),
     ).toBeTruthy();
-    expect(screen.getByText("이 주제의 원인을 분석해줘")).toBeTruthy();
-    expect(screen.getByText("해결 절차를 단계별로 정리해줘")).toBeTruthy();
+    expect(screen.getByText("Analyze the cause of this subject")).toBeTruthy();
+    expect(screen.getByText("Lay out the resolution steps")).toBeTruthy();
   });
 
   it("dismisses the subject banner via the clear button (ISSUE 52)", () => {
@@ -197,10 +197,10 @@ describe("Chat page subject context", () => {
       activeConversationId: "conv-1",
       clearActiveSubject,
       subject: {
-        id: "finding-1",
-        kind: "log_finding",
-        bundle: "logs",
-        title: "SMART pending sectors",
+        id: "article-1",
+        kind: "knowledge_article",
+        bundle: "knowledge",
+        title: "PostgreSQL recovery playbook",
       },
     };
 
@@ -287,22 +287,22 @@ describe("Chat page subject context", () => {
 
   it("shows the active Penny backend next to the running indicator", async () => {
     threadHook.isRunning = true;
+    setActiveConversationId("conv-running");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/workbench/admin/agent/brain")) {
+      if (url.includes("/workbench/conversations/conv-running/agent-profile")) {
         return {
           ok: true,
           json: async () => ({
-            mode: "external_proxy",
-            external_base_url: "http://10.100.1.5:8101",
-            model: "gemma4",
-            external_auth_token_env: "PENNY_CCR_AUTH_TOKEN",
-            custom_model_option: false,
-            backend: "claude_code",
-            model_source: "local",
-            local_base_url: "http://10.100.1.5:8101",
-            effort: "max",
-            source: "database",
+            pinned: true,
+            profile: {
+              backend: "claude_code",
+              model: "gemma4",
+              model_source: "local",
+              local_base_url: "http://10.100.1.5:8101",
+              local_api_key_env: "PENNY_CCR_AUTH_TOKEN",
+              effort: "max",
+            },
           }),
         } as Response;
       }

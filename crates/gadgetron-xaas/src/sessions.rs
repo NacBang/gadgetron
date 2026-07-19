@@ -232,62 +232,68 @@ pub async fn upsert_user_from_google(
     default_role: &str,
     avatar_url: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
+    let mut tx = pool.begin().await?;
     // Match-by-sub first (stable).
     let by_sub: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND google_sub = $2")
             .bind(tenant_id)
             .bind(google_sub)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await?;
-    if let Some(id) = by_sub {
-        let _ = sqlx::query(
+    let id = if let Some(id) = by_sub {
+        sqlx::query(
             "UPDATE users SET display_name = $1, avatar_url = COALESCE($2, avatar_url), \
              updated_at = NOW() WHERE id = $3",
         )
         .bind(display_name)
         .bind(avatar_url)
         .bind(id)
-        .execute(pool)
-        .await;
-        return Ok(id);
-    }
-
-    // Match-by-email (existing account linking first-time to Google).
-    let by_email: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND email = $2")
+        .execute(&mut *tx)
+        .await?;
+        id
+    } else {
+        // Match-by-email (existing account linking first-time to Google).
+        let by_email: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(tenant_id)
+                .bind(email)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(id) = by_email {
+            sqlx::query(
+                "UPDATE users SET google_sub = $1, display_name = $2, \
+                 avatar_url = COALESCE($3, avatar_url), updated_at = NOW() \
+                 WHERE id = $4",
+            )
+            .bind(google_sub)
+            .bind(display_name)
+            .bind(avatar_url)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            id
+        } else {
+            // Fresh insert.
+            sqlx::query_scalar(
+                "INSERT INTO users (tenant_id, email, display_name, role, google_sub, avatar_url, is_active) \
+                 VALUES ($1, $2, $3, $4, $5, $6, TRUE) \
+                 RETURNING id",
+            )
             .bind(tenant_id)
             .bind(email)
-            .fetch_optional(pool)
-            .await?;
-    if let Some(id) = by_email {
-        let _ = sqlx::query(
-            "UPDATE users SET google_sub = $1, display_name = $2, \
-             avatar_url = COALESCE($3, avatar_url), updated_at = NOW() \
-             WHERE id = $4",
-        )
-        .bind(google_sub)
-        .bind(display_name)
-        .bind(avatar_url)
-        .bind(id)
-        .execute(pool)
-        .await;
-        return Ok(id);
-    }
-
-    // Fresh insert.
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (tenant_id, email, display_name, role, google_sub, avatar_url, is_active) \
-         VALUES ($1, $2, $3, $4, $5, $6, TRUE) \
-         RETURNING id",
+            .bind(display_name)
+            .bind(default_role)
+            .bind(google_sub)
+            .bind(avatar_url)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
+    crate::default_onboarding::ensure_default_team_onboarding_in_transaction(
+        &mut tx, tenant_id, id,
     )
-    .bind(tenant_id)
-    .bind(email)
-    .bind(display_name)
-    .bind(default_role)
-    .bind(google_sub)
-    .bind(avatar_url)
-    .fetch_one(pool)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 

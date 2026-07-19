@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "types": [
+    {"id":"ArticleSnapshot","label":"Article snapshot","family":"source"},
+    {"id":"Claim","label":"News claim","family":"claim"},
+    {"id":"NewsEvent","label":"News event","family":"event"},
+    {"id":"Briefing","label":"News briefing","family":"insight"}
+  ],
+  "relations": [
+    {"id":"reports_on","label":"Reports on event","family":"supports","source_types":["ArticleSnapshot"],"target_types":["NewsEvent"]},
+    {"id":"claim_from","label":"Derived from article","family":"derived_from","source_types":["Claim"],"target_types":["ArticleSnapshot"]},
+    {"id":"supports_event","label":"Supports event","family":"supports","source_types":["Claim"],"target_types":["NewsEvent"]},
+    {"id":"contradicts_claim","label":"Contradicts claim","family":"contradicts","source_types":["Claim"],"target_types":["Claim"]},
+    {"id":"corrects_claim","label":"Corrects claim","family":"supersedes","source_types":["Claim"],"target_types":["Claim"]},
+    {"id":"summarizes_event","label":"Summarizes event","family":"derived_from","source_types":["Briefing"],"target_types":["NewsEvent"]},
+    {"id":"cites_article","label":"Cites article","family":"cites","source_types":["Briefing"],"target_types":["ArticleSnapshot"]}
+  ],
+  "migrations": []
+}

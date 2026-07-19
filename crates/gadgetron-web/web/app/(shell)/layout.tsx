@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Toaster } from "sonner";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { useRemoteThreadListRuntime } from "@assistant-ui/react";
@@ -9,6 +10,8 @@ import { WorkbenchShell } from "../components/shell/workbench-shell";
 import { AuthProvider, useAuth } from "../lib/auth-context";
 import { EvidenceProvider } from "../lib/evidence-context";
 import { WorkbenchSubjectProvider } from "../lib/workbench-subject-context";
+import { WorkbenchPageContextProvider } from "../lib/workbench-page-context";
+import { PlatformStateProvider } from "../lib/platform-state-context";
 import { makeGadgetronThreadListAdapter } from "../lib/thread-list-adapter";
 import {
   ACTIVE_CONVERSATION_EVENT,
@@ -21,21 +24,25 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Card, CardContent } from "../components/ui/card";
 import { ConfirmProvider } from "../components/ui/confirm";
+import { readCachedConversationAgentProfile } from "../lib/agent-profile";
+import { CapabilityProvider } from "../lib/capability-context";
+import { InspectorProvider } from "../lib/inspector-context";
+import { LocaleProvider } from "../lib/i18n";
 
 // ---------------------------------------------------------------------------
 // /web post-auth shell — Next.js Route Group `(shell)` layout.
 //
-// All routes under `(shell)/` (chat at `/`, `/wiki`, `/dashboard`) share
+// All routes under `(shell)/` (chat at `/`, `/knowledge`, `/dashboard`) share
 // this layout. The layout mounts:
 //   1. <AuthProvider>   — one source of truth for the pasted API key
 //   2. <WorkbenchShell> — shared chrome (StatusStrip / LeftRail / EvidencePane)
 //   3. <AssistantRuntimeProvider> — chat runtime hoisted here so the
-//      chat thread survives navigation to /wiki or /dashboard
+//      chat thread survives navigation to /knowledge or /dashboard
 //      (previously inside page.tsx, which unmounted on route change
 //      and reset in-flight responses).
 //
 // Route Group `(shell)` does not affect the URL — visitors still browse
-// `/web`, `/web/wiki`, `/web/dashboard`. It only scopes this layout so
+// `/web`, `/web/knowledge`, `/web/dashboard`. It only scopes this layout so
 // future non-shell routes (e.g. a stripped-down `/debug` page) can opt
 // out by living outside the group.
 // ---------------------------------------------------------------------------
@@ -145,7 +152,28 @@ function AuthedShell({ children }: { children: ReactNode }) {
         const convId = ensureActiveConversationId(
           () => convIdRef.current || safeRandomUUID(),
         );
-        if (convId) h["X-Gadgetron-Conversation-Id"] = convId;
+        if (convId) {
+          h["X-Gadgetron-Conversation-Id"] = convId;
+          const profile = readCachedConversationAgentProfile(convId);
+          if (profile) {
+            const put = (name: string, value: string) => {
+              if (/^[\x20-\x7e]*$/.test(value)) h[name] = value;
+            };
+            put("X-Gadgetron-Agent-Backend", profile.backend);
+            put("X-Gadgetron-Agent-Model", profile.model);
+            put("X-Gadgetron-Agent-Effort", profile.effort);
+            put("X-Gadgetron-Agent-Model-Source", profile.model_source);
+            if (profile.llm_endpoint_id) {
+              put("X-Gadgetron-Agent-Endpoint-Id", profile.llm_endpoint_id);
+            } else {
+              // Legacy raw-config profile compatibility. Registry-backed
+              // selections send only the endpoint id; the server resolves
+              // URL and credential env from its tenant-scoped record.
+              put("X-Gadgetron-Agent-Local-Base-Url", profile.local_base_url);
+              put("X-Gadgetron-Agent-Local-Api-Key-Env", profile.local_api_key_env);
+            }
+          }
+        }
       }
       return h;
     };
@@ -236,13 +264,26 @@ function AuthedShell({ children }: { children: ReactNode }) {
 
   return (
     <EvidenceProvider>
-      <WorkbenchSubjectProvider>
-        <AssistantRuntimeProvider runtime={runtime}>
-          <ConfirmProvider>
-            <WorkbenchShell>{children}</WorkbenchShell>
-          </ConfirmProvider>
-        </AssistantRuntimeProvider>
-      </WorkbenchSubjectProvider>
+      <InspectorProvider>
+        <WorkbenchSubjectProvider>
+          <PlatformStateProvider>
+            <WorkbenchPageContextProvider>
+              <CapabilityProvider>
+                <AssistantRuntimeProvider runtime={runtime}>
+                  <ConfirmProvider>
+                    <WorkbenchShell>{children}</WorkbenchShell>
+                  </ConfirmProvider>
+                </AssistantRuntimeProvider>
+              </CapabilityProvider>
+            </WorkbenchPageContextProvider>
+          </PlatformStateProvider>
+        </WorkbenchSubjectProvider>
+      </InspectorProvider>
+      {/* Shell-wide alert toasts (ISSUE 65) — the alert evaluator
+          publishes AlertFired/Resolved on the ActivityBus → /events/ws,
+          and EvidenceProvider's WS handler raises them here so a firing
+          alert is visible on any /web page. */}
+      <Toaster theme="dark" richColors position="top-right" closeButton />
     </EvidenceProvider>
   );
 }
@@ -328,8 +369,10 @@ void LoginCard;
 
 export default function ShellLayout({ children }: { children: ReactNode }) {
   return (
-    <AuthProvider>
-      <ShellSwitch>{children}</ShellSwitch>
-    </AuthProvider>
+    <LocaleProvider>
+      <AuthProvider>
+        <ShellSwitch>{children}</ShellSwitch>
+      </AuthProvider>
+    </LocaleProvider>
   );
 }

@@ -1,0 +1,12 @@
+{
+  "revision": "community-research-v1",
+  "objective": "Materialize cited discussions without treating popularity or accepted answers as truth.",
+  "inputs": ["topic", "official_provider_snapshots", "existing_discussions"],
+  "outputs": ["discussion_snapshots", "claims", "disagreements"],
+  "rules": [
+    "Use the exact Core-verified collection_id as topic_id and list existing discussions before writing.",
+    "For every relevant provider discussion, call community.discussion-upsert with its visible canonical link and the pinned Source id, revision, hash and fetched time.",
+    "Record score and accepted-answer state only as observed metadata; never use either as factual verification.",
+    "Keep reproduced facts, environment-dependent reports, contradictions and unverified workarounds distinct."
+  ]
+}

@@ -26,6 +26,7 @@ import {
   type UIMessage,
   type UIMessageChunk,
 } from "ai";
+import { currentDictionary } from "./lib/i18n";
 
 function getWorkbenchBase(): string {
   if (typeof document === "undefined") return "/api/v1/web";
@@ -149,7 +150,9 @@ export class OpenAIChatTransport<
       credentials: "include",
     });
     if (!syncRes.ok) {
-      throw new Error((await syncRes.text()) || "Failed to resume chat stream.");
+      throw new Error(
+        (await syncRes.text()) || currentDictionary().chat.transport.resumeFailed,
+      );
     }
     if (!syncRes.body) return null;
     return this.processResponseStream(syncRes.body);
@@ -276,7 +279,7 @@ export class OpenAIChatTransport<
         // server-side `looks_like_internal_tool_result` suppression.
         // Silently drop: emitting `tool-output-available` with a fresh
         // segId appears in the UI as an unpaired card AND (observed in
-        // the 매니코어소프트 설명 case) causes assistant-ui to drop the
+        // a company-description case) causes assistant-ui to drop the
         // assistant answer text that follows.
         if (!lastToolCallId) {
           return;
@@ -370,8 +373,10 @@ export class OpenAIChatTransport<
           if (currentEventType === "error" || errObj) {
             const msg =
               errObj?.message ??
-              (typeof errObj === "string" ? errObj : "unknown server error");
-            const pretty = `\n\n❌ **Error**: ${msg}`;
+              (typeof errObj === "string"
+                ? errObj
+                : currentDictionary().chat.transport.unknownServerError);
+            const pretty = `\n\n❌ **${currentDictionary().chat.transport.errorPrefix}**: ${msg}`;
             contentBuffer += pretty;
             flushContentBuffer(controller, true);
             if (activeTextStreaming) {

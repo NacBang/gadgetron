@@ -1,0 +1,123 @@
+manifest_version = 3
+
+[bundle]
+id = "travel-intelligence"
+version = "0.1.0"
+class = "intelligence"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.7.16, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/travel-intelligence"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 64
+open_files = 24
+cpu_seconds = 10
+
+[capabilities]
+
+[[capabilities.provides]]
+id = "gadgetron.intelligence.travel-context"
+version = "1.0.0"
+description = "Cited destination, option and advisory research through the Core knowledge exchange"
+
+[[capabilities.domain_schemas]]
+id = "travel-intelligence-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "2bfb1c34e3e5cbb217c29208c1168f6e03d57bcadee36bab7bf984f7e9962926"
+
+[[capabilities.jobs]]
+id = "travel-destination-research"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 180 }
+
+[[capabilities.jobs]]
+id = "travel-option-gardening"
+role = "gardener"
+triggers = ["on_demand"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 180 }
+
+[[capabilities.jobs]]
+id = "travel-insight-synthesis"
+role = "insight_synthesizer"
+triggers = ["on_demand"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 180 }
+
+[[capabilities.collection_profiles]]
+id = "travel-public-sources"
+label = "Travel intelligence sources"
+description = "Collect bounded official, provider and community travel sources through Core"
+connector = "core-source-fetch"
+source_classes = ["official", "provider", "community", "user"]
+allowlisted_domains = ["travel.state.gov", "www.gov.uk", "www.iatatravelcentre.com", "www.japan.travel", "www.wikivoyage.org"]
+extractor_hints = ["article", "advisory", "price", "accessibility"]
+freshness_seconds = 86400
+schedule = "0 6 * * *"
+budget = { max_sources = 20, max_bytes = 12582912, max_wall_seconds = 180 }
+recipe_asset = "travel-source-collection"
+
+[[capabilities.agent_roles]]
+id = "travel-destination-researcher"
+label = "Destination researcher"
+description = "Researches destination, option and advisory evidence for a revision-pinned Trip"
+core_role = "researcher"
+job = "travel-destination-research"
+recipe_asset = "travel-destination-research"
+collection_profile = "travel-public-sources"
+prompt_contract_revision = "travel-destination-research-v1"
+
+[[capabilities.agent_roles]]
+id = "travel-option-gardener"
+label = "Option gardener"
+description = "Turns reviewed option candidates and outcomes into time-bounded travel lessons"
+core_role = "gardener"
+job = "travel-option-gardening"
+recipe_asset = "travel-option-gardening"
+prompt_contract_revision = "travel-option-gardening-v1"
+
+[[capabilities.agent_roles]]
+id = "travel-insight-synthesizer"
+label = "Travel insight synthesizer"
+description = "Synthesizes cross-source travel insights only when verified outcomes support them"
+core_role = "insight_synthesizer"
+job = "travel-insight-synthesis"
+recipe_asset = "travel-insight-synthesis"
+prompt_contract_revision = "travel-insight-synthesis-v1"
+
+[[capabilities.seed_assets]]
+id = "travel-source-collection"
+path = "recipes/source-collection.json"
+media_type = "application/json"
+sha256 = "151cf78839a9d9a7ccf754ea4ce9a2f762af58cc409cf83279708dab25307320"
+
+[[capabilities.seed_assets]]
+id = "travel-destination-research"
+path = "recipes/destination-research.json"
+media_type = "application/json"
+sha256 = "2fcf9afd5b657742e15f3fa73acee4e1a4aaca76519b0c794829b21bbab71eb0"
+
+[[capabilities.seed_assets]]
+id = "travel-option-gardening"
+path = "recipes/option-gardening.json"
+media_type = "application/json"
+sha256 = "2be7e51524258edb573c3bd5eceec83ebaf9c54625d83c4cfa918b401d018158"
+
+[[capabilities.seed_assets]]
+id = "travel-insight-synthesis"
+path = "recipes/insight-synthesis.json"
+media_type = "application/json"
+sha256 = "7285d03a3f361843d5bade4202c6b012d9c430dffe1e1bcd80af35b08c4adf28"

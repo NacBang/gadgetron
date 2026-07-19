@@ -112,6 +112,7 @@ fn build_config_json_with_env_and_gadgets(
             "args".to_string(),
             serde_json::Value::Array(args.into_iter().map(serde_json::Value::String).collect()),
         ),
+        ("alwaysLoad".to_string(), serde_json::Value::Bool(true)),
     ]);
 
     if let Some(env_map) = knowledge_server_env(config_path, env, gadgets_override) {
@@ -141,7 +142,18 @@ pub fn write_config_file_for_agent(
     config_path: Option<&Path>,
     config: &AgentConfig,
 ) -> std::io::Result<NamedTempFile> {
-    let json = build_config_json_for_agent(config_path, config);
+    write_config_file_for_agent_with_env(config_path, config, &StdEnv)
+}
+
+/// Write an MCP config using an invocation-scoped environment resolver.
+/// Agent turns use this to override only the parent callback credential while
+/// retaining the normal allow-listed process environment.
+pub fn write_config_file_for_agent_with_env(
+    config_path: Option<&Path>,
+    config: &AgentConfig,
+    env: &dyn EnvResolver,
+) -> std::io::Result<NamedTempFile> {
+    let json = build_config_json_for_agent_with_env(config_path, config, env);
     write_config_json_to_tempfile(&json)
 }
 
@@ -193,11 +205,10 @@ fn knowledge_server_env(
         }
     }
 
-    // Forward Ask-mode tool calls back to the parent gateway. The
-    // grandchild's GadgetRegistry reads these to wire its
-    // `ForwardConfig`; without them, Ask-mode tools collapse to Never
-    // (the parent's in-memory ApprovalStore is unreachable from a
-    // separate process).
+    // Forward parent-owned tools back to the gateway. Normal Penny turns
+    // override the key with a short-lived lease; a process value is only the
+    // standalone compatibility fallback. Without both values the child
+    // exposes local providers only.
     for var in [
         "GADGETRON_GATEWAY_CALLBACK_URL",
         "GADGETRON_GATEWAY_CALLBACK_KEY",
@@ -247,6 +258,7 @@ mod tests {
         );
         assert_eq!(v["mcpServers"]["knowledge"]["args"][0], "gadget");
         assert_eq!(v["mcpServers"]["knowledge"]["args"][1], "serve");
+        assert_eq!(v["mcpServers"]["knowledge"]["alwaysLoad"], true);
         // Without a config_path the args stop after `serve`.
         assert_eq!(
             v["mcpServers"]["knowledge"]["args"]
@@ -293,7 +305,10 @@ api_key_env = "OPENAI_API_KEY"
     #[test]
     fn build_config_json_for_agent_forwards_live_gadget_modes() {
         let mut cfg = gadgetron_core::agent::config::AgentConfig::default();
-        cfg.gadgets.write.server_admin = gadgetron_core::agent::config::GadgetMode::Auto;
+        cfg.gadgets.write.namespace_modes.insert(
+            "example-domain".into(),
+            gadgetron_core::agent::config::GadgetMode::Auto,
+        );
 
         let v = build_config_json_for_agent(None, &cfg);
         let server_env = v["mcpServers"]["knowledge"]["env"]
@@ -306,8 +321,8 @@ api_key_env = "OPENAI_API_KEY"
             serde_json::from_str(raw).expect("parse gadgets override");
 
         assert_eq!(
-            parsed.write.server_admin,
-            gadgetron_core::agent::config::GadgetMode::Auto
+            parsed.write.namespace_mode("example-domain"),
+            Some(gadgetron_core::agent::config::GadgetMode::Auto)
         );
     }
 

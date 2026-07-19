@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "types": [
+    {"id":"Destination","label":"Destination","family":"entity"},
+    {"id":"Place","label":"Place","family":"entity"},
+    {"id":"LodgingOption","label":"Lodging option","family":"entity"},
+    {"id":"TransportOption","label":"Transport option","family":"entity"},
+    {"id":"Activity","label":"Activity","family":"entity"},
+    {"id":"TravelAdvisory","label":"Travel advisory","family":"claim"},
+    {"id":"PriceSnapshot","label":"Price snapshot","family":"source"},
+    {"id":"Alternative","label":"Travel alternative","family":"decision"},
+    {"id":"TravelLesson","label":"Travel lesson","family":"lesson"},
+    {"id":"TravelOutcome","label":"Travel outcome","family":"outcome"}
+  ],
+  "relations": [
+    {"id":"located_in","label":"Located in","family":"applies_to","source_types":["Place","LodgingOption","Activity"],"target_types":["Destination"]},
+    {"id":"serves_destination","label":"Serves destination","family":"applies_to","source_types":["TransportOption"],"target_types":["Destination"]},
+    {"id":"supports_option","label":"Supports option","family":"supports","source_types":["PriceSnapshot","TravelAdvisory"],"target_types":["LodgingOption","TransportOption","Activity","Alternative"]},
+    {"id":"contradicts_option","label":"Contradicts option","family":"contradicts","source_types":["TravelAdvisory","PriceSnapshot"],"target_types":["LodgingOption","TransportOption","Activity","Alternative"]},
+    {"id":"alternative_to","label":"Alternative to","family":"bridge_to","source_types":["Alternative"],"target_types":["LodgingOption","TransportOption","Activity"]},
+    {"id":"outcome_of","label":"Outcome of","family":"outcome_of","source_types":["TravelOutcome"],"target_types":["Alternative","LodgingOption","TransportOption","Activity"]},
+    {"id":"derived_from","label":"Derived from evidence","family":"derived_from","source_types":["TravelLesson"],"target_types":["TravelAdvisory","PriceSnapshot","TravelOutcome","Alternative"]}
+  ],
+  "migrations": []
+}

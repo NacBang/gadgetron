@@ -41,6 +41,10 @@ export function LlmEndpointSettings({
   const [detectPort, setDetectPort] = useState("");
   const [detectAlias, setDetectAlias] = useState("");
   const [detectScheme, setDetectScheme] = useState<"http" | "https">("http");
+  const [detectModel, setDetectModel] = useState("");
+  const [detectAuthEnv, setDetectAuthEnv] = useState("");
+  const [detectAuthToken, setDetectAuthToken] = useState("");
+  const [probeModelByEndpoint, setProbeModelByEndpoint] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -113,29 +117,43 @@ export function LlmEndpointSettings({
         port,
         alias: detectAlias.trim() || undefined,
         scheme: detectScheme,
+        model_id: detectModel.trim() || undefined,
+        auth_token_env: detectAuthEnv.trim() || undefined,
+        auth_token_value: detectAuthToken.trim() || undefined,
       });
       setEndpoints((prev) => {
         const rest = prev.filter((endpoint) => endpoint.id !== result.endpoint.id);
         return [result.endpoint, ...rest];
       });
       toast[result.ok ? "success" : "error"](
-        result.models.length > 0
-          ? `${result.endpoint.name}: ${result.models[0]}`
-          : result.message,
+        `${result.endpoint.name}: ${result.message}`,
       );
+      setDetectAuthToken("");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(null);
     }
-  }, [apiKey, detectAlias, detectHost, detectPort, detectScheme]);
+  }, [
+    apiKey,
+    detectAlias,
+    detectAuthEnv,
+    detectAuthToken,
+    detectHost,
+    detectModel,
+    detectPort,
+    detectScheme,
+  ]);
 
   const probe = useCallback(
     async (endpoint: LlmEndpointRow) => {
       setBusy(`probe:${endpoint.id}`);
       setErr(null);
       try {
-        const result = await probeLlmEndpoint(apiKey, endpoint.id);
+        const result = await probeLlmEndpoint(apiKey, endpoint.id, {
+          model_id:
+            probeModelByEndpoint[endpoint.id] || endpoint.model_id || undefined,
+        });
         toast[result.ok ? "success" : "error"](
           result.models.length > 0
             ? `${endpoint.name}: ${result.models.length} models`
@@ -148,7 +166,7 @@ export function LlmEndpointSettings({
         setBusy(null);
       }
     },
-    [apiKey, refresh],
+    [apiKey, probeModelByEndpoint, refresh],
   );
 
   const remove = useCallback(
@@ -178,18 +196,25 @@ export function LlmEndpointSettings({
         await useLlmEndpoint(
           apiKey,
           endpoint.id,
-          token ? { external_auth_token_value: token } : undefined,
+          {
+            model_id:
+              probeModelByEndpoint[endpoint.id] ||
+              endpoint.tool_model_id ||
+              endpoint.model_id ||
+              undefined,
+            ...(token ? { external_auth_token_value: token } : {}),
+          },
         );
         setUseTokenEndpoint(null);
         setUseTokenValue("");
-        toast.success(`Penny endpoint applied: ${endpoint.name}`);
+        toast.success(`New-chat default endpoint: ${endpoint.name}`);
       } catch (e) {
         setErr((e as Error).message);
       } finally {
         setBusy(null);
       }
     },
-    [apiKey],
+    [apiKey, probeModelByEndpoint],
   );
 
   const startUseForPenny = useCallback(
@@ -300,7 +325,7 @@ export function LlmEndpointSettings({
       });
       setEndpoints((prev) => [next, ...prev.filter((endpoint) => endpoint.id !== next.id)]);
       setBridgeSource(null);
-      toast.success(`CCR bridge created: ${next.name}`);
+      toast.success(`CCR bridge target registered: ${next.name}`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -321,9 +346,9 @@ export function LlmEndpointSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Agent Backend</h2>
+          <h2 className="text-sm font-medium text-zinc-200">Local model endpoints</h2>
           <p className="text-[11px] text-zinc-500">
-            IP/port detection · automatic model discovery · CCR/Anthropic endpoints connect to Penny
+            Connect → detect protocol → verify an actual model tool call
           </p>
         </div>
         <Button
@@ -347,7 +372,7 @@ export function LlmEndpointSettings({
         <div className="rounded border border-zinc-800 bg-zinc-950/50 px-3 py-2">
           <div className="text-[11px] font-medium text-zinc-200">Endpoint</div>
           <div className="mt-1 text-[10px] text-zinc-500">
-            {endpoints.filter((endpoint) => endpoint.protocol === "openai_chat").length} OpenAI/vLLM
+            {endpoints.filter((endpoint) => endpoint.protocol === "openai_chat").length} Chat-only
           </div>
         </div>
         <div className="rounded border border-zinc-800 bg-zinc-950/50 px-3 py-2">
@@ -360,7 +385,7 @@ export function LlmEndpointSettings({
         <div className="rounded border border-zinc-800 bg-zinc-950/50 px-3 py-2">
           <div className="text-[11px] font-medium text-zinc-200">Penny</div>
           <div className="mt-1 text-[10px] text-zinc-500">
-            {endpoints.filter((endpoint) => endpoint.protocol === "anthropic_messages").length} ready
+            {endpoints.filter((endpoint) => endpoint.tool_status === "passed").length} tool-verified
           </div>
         </div>
       </div>
@@ -424,6 +449,44 @@ export function LlmEndpointSettings({
             </Button>
           </div>
         </div>
+        <details className="mt-3 border-t border-zinc-800 pt-2">
+          <summary className="cursor-pointer text-[10px] text-zinc-500">
+            Authentication or explicit model (optional)
+          </summary>
+          <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">Model ID</label>
+              <Input
+                value={detectModel}
+                onChange={(event) => setDetectModel(event.target.value)}
+                placeholder="Auto from /v1/models"
+                autoComplete="off"
+                aria-label="Detection Model ID"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">Token Env</label>
+              <Input
+                value={detectAuthEnv}
+                onChange={(event) => setDetectAuthEnv(event.target.value)}
+                placeholder="LOCAL_LLM_API_KEY"
+                autoComplete="off"
+                aria-label="Detection Token Env"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">Token Value</label>
+              <Input
+                type="password"
+                value={detectAuthToken}
+                onChange={(event) => setDetectAuthToken(event.target.value)}
+                placeholder="Write-only; not stored"
+                autoComplete="new-password"
+                aria-label="Detection Token Value"
+              />
+            </div>
+          </div>
+        </details>
       </div>
 
       <details className="mt-3 rounded border border-zinc-800 bg-zinc-950/30 p-3">
@@ -464,6 +527,7 @@ export function LlmEndpointSettings({
               className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
             >
               <option value="openai_chat">openai_chat</option>
+              <option value="openai_responses">openai_responses</option>
               <option value="anthropic_messages">anthropic_messages</option>
             </select>
           </div>
@@ -497,7 +561,7 @@ export function LlmEndpointSettings({
         <div className="mt-3 rounded border border-zinc-800 bg-zinc-950/50 p-3">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
-              <h3 className="text-xs font-medium text-zinc-200">CCR bridge</h3>
+              <h3 className="text-xs font-medium text-zinc-200">CCR bridge registry target</h3>
               <p className="flex items-center gap-1.5 text-[11px] text-zinc-500">
                 <span>{bridgeSource.name}</span>
                 <ArrowRight
@@ -506,6 +570,9 @@ export function LlmEndpointSettings({
                   data-testid="ccr-bridge-direction-icon"
                 />
                 <span>Anthropic-compatible endpoint</span>
+              </p>
+              <p className="mt-1 text-[10px] text-amber-300/80">
+                This registers the target only. Start the bridge separately, then probe it before use.
               </p>
             </div>
             <Button
@@ -589,7 +656,7 @@ export function LlmEndpointSettings({
                 disabled={busy === "ccr:create" || !canCall}
                 className="w-full"
               >
-                {busy === "ccr:create" ? "Creating…" : "Create bridge"}
+                  {busy === "ccr:create" ? "Registering…" : "Register target"}
               </Button>
             </div>
           </div>
@@ -597,13 +664,13 @@ export function LlmEndpointSettings({
       )}
 
       {useTokenEndpoint && (
-        <div className="mt-3 rounded border border-blue-900/50 bg-blue-950/20 p-3">
+        <div className="mt-3 rounded border border-[var(--copper)] bg-[var(--surface-2)] p-3">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
-              <h3 className="text-xs font-medium text-blue-100">
+              <h3 className="text-xs font-medium text-[var(--copper-hi)]">
                 Apply {useTokenEndpoint.name} to Penny
               </h3>
-              <p className="text-[11px] leading-5 text-blue-200/70">
+              <p className="text-[11px] leading-5 text-[var(--ink-2)]">
                 Paste the auth token for {useTokenEndpoint.auth_token_env}. If the
                 server already has that environment variable, use the existing env.
               </p>
@@ -671,7 +738,10 @@ export function LlmEndpointSettings({
             </tr>
           </thead>
           <tbody>
-            {endpoints.map((endpoint) => (
+            {endpoints.map((endpoint) => {
+              const selectedModel =
+                probeModelByEndpoint[endpoint.id] || endpoint.model_id || "";
+              return (
               <tr key={endpoint.id} className="border-t border-zinc-800 text-zinc-300">
                 <td className="px-3 py-2">
                   <div className="font-medium text-zinc-200">{endpoint.name}</div>
@@ -686,8 +756,26 @@ export function LlmEndpointSettings({
                 <td className="max-w-56 truncate px-3 py-2 font-mono text-xs">
                   {endpoint.base_url}
                 </td>
-                <td className="max-w-56 truncate px-3 py-2 font-mono text-xs">
-                  {endpoint.model_id || "Auto"}
+                <td className="max-w-64 px-3 py-2 font-mono text-xs">
+                  {(endpoint.discovered_models ?? []).length > 0 ? (
+                    <select
+                      aria-label={`Probe model for ${endpoint.name}`}
+                      value={selectedModel}
+                      onChange={(event) =>
+                        setProbeModelByEndpoint((current) => ({
+                          ...current,
+                          [endpoint.id]: event.target.value,
+                        }))
+                      }
+                      className="h-7 max-w-64 rounded border border-zinc-800 bg-zinc-950 px-1 text-[10px]"
+                    >
+                      {(endpoint.discovered_models ?? []).map((model) => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    endpoint.model_id || "No model detected"
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   <span
@@ -699,7 +787,21 @@ export function LlmEndpointSettings({
                           : "rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
                     }
                   >
-                    {endpoint.health_status}
+                    connection:{endpoint.health_status}
+                  </span>
+                  <span className="ml-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                    {endpoint.runtime_compatibility}
+                  </span>
+                  <span
+                    className={
+                      endpoint.tool_status === "passed"
+                        ? "ml-1 rounded bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                        : endpoint.tool_status === "failed"
+                          ? "ml-1 rounded bg-red-950/40 px-1.5 py-0.5 text-[10px] text-red-300"
+                          : "ml-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                    }
+                  >
+                    tool:{endpoint.tool_status}
                   </span>
                   {endpoint.last_latency_ms != null && (
                     <span className="ml-2 text-[10px] text-zinc-500">
@@ -709,6 +811,11 @@ export function LlmEndpointSettings({
                   {endpoint.last_error && (
                     <div className="mt-1 max-w-56 truncate text-[10px] text-red-300">
                       {endpoint.last_error}
+                    </div>
+                  )}
+                  {endpoint.last_tool_error && (
+                    <div className="mt-1 max-w-72 truncate text-[10px] text-red-300">
+                      {endpoint.last_tool_error}
                     </div>
                   )}
                 </td>
@@ -729,19 +836,24 @@ export function LlmEndpointSettings({
                       size="sm"
                       variant="ghost"
                       onClick={() =>
-                        endpoint.protocol === "anthropic_messages"
+                        endpoint.runtime_compatibility !== "bridge_required"
                           ? startUseForPenny(endpoint)
                           : void openBridgeForm(endpoint)
                       }
-                      disabled={busy === `use:${endpoint.id}` || busy === `hosts:${endpoint.id}`}
+                      disabled={
+                        busy === `use:${endpoint.id}` ||
+                        busy === `hosts:${endpoint.id}` ||
+                        (endpoint.runtime_compatibility !== "bridge_required" &&
+                          endpoint.tool_status !== "passed")
+                      }
                       className="h-6 px-2 text-[11px]"
                       title={
-                        endpoint.protocol === "anthropic_messages"
-                          ? "Apply to Agent Backend"
-                          : "Create a CCR bridge in front of the OpenAI-compatible endpoint"
+                        endpoint.runtime_compatibility !== "bridge_required"
+                          ? "Use the tool-verified model as the new-chat default"
+                          : "Register a CCR target; this does not install or start the bridge"
                       }
                     >
-                      {endpoint.protocol === "anthropic_messages" ? "Use" : "Create CCR"}
+                      {endpoint.runtime_compatibility !== "bridge_required" ? "Use" : "Register CCR"}
                     </Button>
                     <Button
                       type="button"
@@ -756,7 +868,8 @@ export function LlmEndpointSettings({
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
             {endpoints.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-3 py-6 text-center text-[11px] text-zinc-600">

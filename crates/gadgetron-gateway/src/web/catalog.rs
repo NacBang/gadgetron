@@ -4,8 +4,8 @@
 //! descriptors. It is designed to be cheap to clone (all `Vec` members)
 //! and replaces the hot-reload BundleRegistry path (deferred).
 //!
-//! Currently ships with a single hand-coded seed catalog (`seed_p2b`)
-//! for end-to-end testing.
+//! Core descriptors come from `seed_p2b`; installed Bundle catalogs are
+//! validated and added without replacing that Core surface.
 
 use gadgetron_core::{
     context::Scope,
@@ -14,6 +14,7 @@ use gadgetron_core::{
         WorkbenchRendererKind, WorkbenchViewDescriptor, WorkbenchViewPlacement,
     },
 };
+use serde::Deserialize;
 
 /// Bundled catalog + pre-compiled validators. The unit atomically
 /// swapped into the runtime's `Arc<ArcSwap<CatalogSnapshot>>` handle on
@@ -57,10 +58,35 @@ pub struct BundleMetadata {
     /// `required_scope = None` (descriptors with their own stricter
     /// scope keep that stricter scope). Typical use: a bundle that
     /// only makes sense for operators sets
-    /// `required_scope = "Management"` once instead of repeating
+    /// `required_scope = "management"` once instead of repeating
     /// the scope on every descriptor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_bundle_scope"
+    )]
     pub required_scope: Option<gadgetron_core::context::Scope>,
+}
+
+fn deserialize_bundle_scope<'de, D>(
+    deserializer: D,
+) -> Result<Option<gadgetron_core::context::Scope>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| match value.as_str() {
+            "openai_compat" | "OpenAiCompat" => Ok(gadgetron_core::context::Scope::OpenAiCompat),
+            "management" | "Management" => Ok(gadgetron_core::context::Scope::Management),
+            "xaas_admin" | "XaasAdmin" => Ok(gadgetron_core::context::Scope::XaasAdmin),
+            _ => Err(D::Error::custom(format!(
+                "unknown Bundle scope {value:?}; expected openai_compat, management, or xaas_admin"
+            ))),
+        })
+        .transpose()
 }
 
 /// On-disk catalog file shape consumed by
@@ -142,6 +168,56 @@ impl DescriptorCatalog {
         }
     }
 
+    /// Keep the built-in Core workbench surface while adding descriptors
+    /// discovered from installed Bundles. Bundle discovery is additive: it
+    /// must never make Knowledge actions disappear merely because an operator
+    /// configured `bundles_dir`. The caller supplies the static-catalog policy
+    /// because `catalog_path` may explicitly disable direct Core actions while
+    /// signed runtime Bundle actions use their own policy authority.
+    pub fn with_core_seed(
+        mut self,
+        allow_direct_actions: bool,
+    ) -> gadgetron_core::error::Result<Self> {
+        let mut core = Self::seed_p2b();
+        let includes_legacy_core = self
+            .bundle
+            .iter()
+            .chain(self.bundles.iter())
+            .any(|bundle| bundle.id == "gadgetron-core");
+
+        for view in self.views.drain(..) {
+            if core.find_view(&view.id).is_some() {
+                if includes_legacy_core && view.owner_bundle == "core" {
+                    continue;
+                }
+                return Err(gadgetron_core::error::GadgetronError::Config(format!(
+                    "Bundle view {:?} collides with a Core capability",
+                    view.id
+                )));
+            }
+            core.views.push(view);
+        }
+        for action in self.actions.drain(..) {
+            if core.find_action(&action.id).is_some() {
+                if includes_legacy_core && action.owner_bundle == "core" {
+                    continue;
+                }
+                return Err(gadgetron_core::error::GadgetronError::Config(format!(
+                    "Bundle action {:?} collides with a Core capability",
+                    action.id
+                )));
+            }
+            core.actions.push(action);
+        }
+
+        let mut bundles = self.bundles;
+        bundles.extend(self.bundle);
+        bundles.retain(|bundle| bundle.id != "gadgetron-core");
+        core.bundles = bundles;
+        core.allow_direct_actions = allow_direct_actions;
+        Ok(core)
+    }
+
     /// Read-only access to the bundle metadata carried by this
     /// catalog. `Some` when the catalog came from a `[bundle]`-
     /// declaring TOML file; `None` otherwise.
@@ -162,6 +238,7 @@ impl DescriptorCatalog {
             source_id: "recent".into(),
             placement: WorkbenchViewPlacement::LeftRail,
             renderer: WorkbenchRendererKind::Timeline,
+            collection_profile: None,
             data_endpoint: "/api/v1/web/workbench/views/knowledge-activity-recent/data".into(),
             refresh_seconds: Some(5),
             action_ids: vec![
@@ -528,7 +605,13 @@ impl DescriptorCatalog {
             })?
             .filter_map(|r| r.ok())
             .map(|e| e.path())
-            .filter(|p| p.is_dir())
+            .filter(|p| {
+                p.is_dir()
+                    && !p
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with('.'))
+            })
             .collect();
         entries.sort();
 
@@ -772,6 +855,14 @@ input_schema = { type = "object", properties = { n = { type = "integer" } }, req
             catalog.find_action("a1").unwrap().gadget_name.as_deref(),
             Some("test.ping")
         );
+        let merged = catalog
+            .clone()
+            .with_core_seed(catalog.allow_direct_actions())
+            .expect("Core merge");
+        assert!(merged.find_action("wiki-list").is_some());
+        assert!(merged.find_action("a1").is_some());
+        assert_eq!(merged.actions.len(), 7);
+        assert!(!merged.allow_direct_actions());
 
         // Snapshotting must compile a validator for the action.
         let snap = catalog.into_snapshot();
@@ -841,10 +932,10 @@ input_schema = { type = "object" }
 
     #[test]
     fn bundle_required_scope_floors_descriptors_without_their_own() {
-        // A bundle that declares
-        // `required_scope = "Management"` must push that floor down
-        // to every descriptor that didn't set one, so OpenAiCompat
-        // actors see NONE of the bundle's descriptors.
+        // Signed Bundle contracts use canonical lowercase scopes; the catalog
+        // bridge accepts them without changing the global API/DB Scope wire.
+        // The floor is pushed to every descriptor, so OpenAiCompat actors see
+        // NONE of this Bundle's descriptors.
         let dir =
             std::env::temp_dir().join(format!("gadgetron-bundle-scope-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -855,7 +946,7 @@ input_schema = { type = "object" }
 [bundle]
 id = "ops-bundle"
 version = "1.0.0"
-required_scope = "Management"
+required_scope = "management"
 
 [[actions]]
 id = "ops-action"
@@ -956,69 +1047,21 @@ input_schema = { type = "object" }
     }
 
     #[test]
-    fn first_party_server_monitor_update_schema_accepts_gadgetini() {
-        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("crate nested under workspace root")
-            .to_path_buf();
-        let bundle_path = workspace_root.join("bundles/server-monitor/bundle.toml");
-        let catalog = DescriptorCatalog::from_toml_file(&bundle_path)
-            .expect("server-monitor bundle must parse");
-        let snapshot = catalog.into_snapshot();
-        let validator = snapshot
-            .validators
-            .get("server-update")
-            .expect("server-update validator must compile");
-        let args = serde_json::json!({
-            "id": "00000000-0000-0000-0000-000000000001",
-            "gadgetini": {
-                "enabled": true
-            }
-        });
-        let errors: Vec<_> = validator.iter_errors(&args).collect();
-        assert!(
-            errors.is_empty(),
-            "server-update descriptor must allow gadgetini, got {errors:?}"
-        );
-    }
-
-    #[test]
-    fn debug_probe_repo_bundles_dir() {
-        // One-shot diagnostic: load the live `bundles/` directory exactly
-        // like the runtime does at startup and dump every action + view
-        // that survived the merge. Run with `--nocapture` to read the
-        // dump in test output. Always passes (use `eprintln!` for the
-        // human-readable surface; `assert!(true)` for cargo).
+    fn repo_bundles_dir_contains_only_the_core_compatibility_catalog() {
+        // The source tree is not the signed package install root. It keeps
+        // only the Core compatibility descriptor used by legacy deployments.
         let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())
             .expect("crate nested under workspace root")
             .to_path_buf();
         let dir = workspace_root.join("bundles");
-        match super::DescriptorCatalog::from_bundle_dir(&dir) {
-            Ok(cat) => {
-                eprintln!(
-                    "[probe] OK: actions={}, views={}, bundles={}",
-                    cat.actions.len(),
-                    cat.views.len(),
-                    cat.bundles.len()
-                );
-                for b in &cat.bundles {
-                    eprintln!("[probe] bundle: {} v{}", b.id, b.version);
-                }
-                for a in &cat.actions {
-                    eprintln!(
-                        "[probe] action: id={} owner={} kind={:?} placement={:?}",
-                        a.id, a.owner_bundle, a.kind, a.placement
-                    );
-                }
-                for v in &cat.views {
-                    eprintln!("[probe] view: id={} owner={}", v.id, v.owner_bundle);
-                }
-            }
-            Err(e) => eprintln!("[probe] FAIL: {e:?}"),
-        }
+        let cat = super::DescriptorCatalog::from_bundle_dir(&dir)
+            .expect("repository Bundle descriptor directory must load");
+        assert_eq!(cat.bundles.len(), 1);
+        assert_eq!(cat.bundles[0].id, "gadgetron-core");
+        assert_eq!(cat.actions.len(), 6);
+        assert_eq!(cat.views.len(), 1);
     }
 
     #[test]
@@ -1225,6 +1268,7 @@ version = "1"
             source_id: "sys".into(),
             placement: WorkbenchViewPlacement::LeftRail,
             renderer: WorkbenchRendererKind::Table,
+            collection_profile: None,
             data_endpoint: "/api/v1/web/workbench/views/admin-view/data".into(),
             refresh_seconds: None,
             action_ids: vec![],

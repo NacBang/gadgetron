@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gadgetron://bundle/restaurant-research/domain/v1",
+  "title": "Restaurant Research domain",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "entities": {
+      "const": ["Branch", "MenuSnapshot", "ReviewSnapshot", "Recommendation", "VisitOutcome"]
+    },
+    "relations": {
+      "const": ["serves", "supports_recommendation", "contradicts_recommendation", "outcome_of", "bridge_to"]
+    }
+  },
+  "required": ["entities", "relations"]
+}
+

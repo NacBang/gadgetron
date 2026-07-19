@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { LocaleProvider, useI18n } from "../lib/i18n";
 
 // ---------------------------------------------------------------------------
 // /web/login — sign-in screen.
@@ -34,7 +35,9 @@ async function whoami(): Promise<{ user_id: string } | null> {
   }
 }
 
-export default function LoginPage() {
+function LoginContent() {
+  const { locale, labels, setLocale } = useI18n();
+  const copy = labels.login;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -78,7 +81,29 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-950 p-6">
+    <div className="relative flex min-h-screen items-center justify-center bg-zinc-950 p-6">
+      <div
+        className="absolute right-4 top-4 flex rounded border border-zinc-800 bg-zinc-900 p-0.5 text-[11px]"
+        role="group"
+        aria-label={labels.locale.selector}
+      >
+        <button
+          type="button"
+          aria-pressed={locale === "en"}
+          className={`rounded px-2 py-1 ${locale === "en" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-200"}`}
+          onClick={() => setLocale("en")}
+        >
+          {labels.locale.english}
+        </button>
+        <button
+          type="button"
+          aria-pressed={locale === "ko"}
+          className={`rounded px-2 py-1 ${locale === "ko" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-200"}`}
+          onClick={() => setLocale("ko")}
+        >
+          {labels.locale.korean}
+        </button>
+      </div>
       <div className="w-full max-w-sm space-y-6 rounded-lg border border-zinc-800 bg-zinc-900 p-6">
         <div className="flex items-center gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -90,9 +115,9 @@ export default function LoginPage() {
           <span className="text-lg font-semibold text-zinc-100">Gadgetron</span>
         </div>
         <div>
-          <h1 className="text-xl font-semibold text-zinc-100">Sign in</h1>
+          <h1 className="text-xl font-semibold text-zinc-100">{copy.title}</h1>
           <p className="mt-1 text-[11px] text-zinc-500">
-            Google 계정 또는 이메일/비밀번호로 로그인
+            {copy.description}
           </p>
         </div>
 
@@ -111,21 +136,22 @@ export default function LoginPage() {
           >
             G
           </span>
-          Sign in with Google
+          {copy.google}
         </a>
 
         <div className="flex items-center gap-3 text-[10px] uppercase text-zinc-600">
           <span className="h-px flex-1 bg-zinc-800" />
-          or
+          {copy.or}
           <span className="h-px flex-1 bg-zinc-800" />
         </div>
 
         <form onSubmit={submit} className="space-y-3">
           <div>
-            <label className="mb-1 block text-[11px] text-zinc-500">
-              Email
+            <label htmlFor="login-email" className="mb-1 block text-[11px] text-zinc-500">
+              {copy.email}
             </label>
             <input
+              id="login-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -136,10 +162,11 @@ export default function LoginPage() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-[11px] text-zinc-500">
-              Password
+            <label htmlFor="login-password" className="mb-1 block text-[11px] text-zinc-500">
+              {copy.password}
             </label>
             <input
+              id="login-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -156,12 +183,20 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={busy}
-            className="flex h-9 w-full items-center justify-center rounded bg-blue-600 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+            className="flex h-9 w-full items-center justify-center rounded bg-[var(--copper)] text-sm font-medium text-[var(--bg)] hover:bg-[var(--copper-hi)] disabled:opacity-50"
           >
-            {busy ? "Signing in…" : "Sign in"}
+            {busy ? copy.signingIn : copy.submit}
           </button>
         </form>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <LocaleProvider>
+      <LoginContent />
+    </LocaleProvider>
   );
 }

@@ -1,0 +1,25 @@
+[package]
+name = "gadgetron-bundle-migrations"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core-owned transactional migration and legacy adoption gate for Bundles"
+
+[dependencies]
+futures = { workspace = true }
+gadgetron-bundle-host = { workspace = true }
+gadgetron-bundle-sdk = { workspace = true }
+hex = { workspace = true }
+semver = { workspace = true }
+sha2 = "0.11"
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["v4"] }

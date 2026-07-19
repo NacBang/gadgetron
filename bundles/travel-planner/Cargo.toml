@@ -1,0 +1,25 @@
+[package]
+name = "gadgetron-bundle-travel-planner"
+version = "0.2.0"
+edition = "2021"
+license-file = "../../LICENSE"
+repository = "https://github.com/NacBang/gadgetron"
+rust-version = "1.80"
+description = "Independent Travel Planner Bundle runtime"
+
+[dependencies]
+chrono = { workspace = true }
+chrono-tz = "0.10"
+gadgetron-bundle-runtime = { path = "../../crates/gadgetron-bundle-runtime" }
+gadgetron-bundle-sdk = { path = "../../crates/gadgetron-bundle-sdk" }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt", "sync"] }
+uuid = { workspace = true, features = ["serde", "v4"] }
+
+[dev-dependencies]
+hex = { workspace = true }
+sha2 = "0.11"
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }

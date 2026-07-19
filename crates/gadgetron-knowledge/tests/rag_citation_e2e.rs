@@ -2,7 +2,7 @@
 //!
 //! # What this covers
 //!
-//! 1. Import a markdown document via `wiki.import`.
+//! 1. Seed a legacy canonical page via `wiki.write`.
 //! 2. Query `wiki.search` with a keyword from the imported doc.
 //! 3. Assert the search returns a hit referencing the imported
 //!    page's path (the footnote anchor Penny would use).
@@ -17,15 +17,13 @@
 //! pipeline. It does NOT spawn a real Penny subprocess — the LLM
 //! itself is stubbed out. What it validates:
 //!
-//! - `wiki.search` over an imported page returns the path Penny
+//! - `wiki.search` over a canonical page returns the path Penny
 //!   would need to cite.
 //! - The citation parser in `gadgetron-penny::citation` round-trips
 //!   with the path verbatim (no escaping / truncation).
-//! - Content-type filtering (PDF) rejects at the gadget layer
-//!   when the `pdf` feature is not wired into
-//!   `KnowledgeGadgetProvider` (the current default — PDF lands via
-//!   `DocumentFormatsBundle` install, validated by the plugin-level
-//!   tests in `bundles/document-formats/src/pdf.rs`).
+//! - Content-type filtering (PDF) rejects at the gadget layer while the
+//!   Source path uses the compile-time document-format Plug. The Plug's PDF
+//!   contract is validated in `plugs/document-formats/src/pdf.rs`.
 //!
 //! # Skipping
 //!
@@ -69,7 +67,7 @@ fn build_service(wiki: Arc<Wiki>) -> Arc<KnowledgeService> {
         .expect("service build")
 }
 
-/// Core E2E: import a wiki page via `wiki.import`, then search for a
+/// Core E2E: write a canonical wiki page via `wiki.write`, then search for a
 /// keyword from its body via `wiki.search`, then assemble a
 /// Penny-style citation referencing the imported path and validate
 /// that the citation parser extracts the page path verbatim.
@@ -88,35 +86,27 @@ async fn rag_citation_round_trip_through_search_and_footnote_parser() {
     let service = build_service(wiki);
     let provider = KnowledgeGadgetProvider::from_service(service, None, 10);
 
-    // Step 1 — Import a markdown document that mentions "quarterly
+    // Step 1 — Seed a canonical document that mentions "quarterly
     // review" so keyword search will land on it deterministically.
     let body = "# Quarterly Review Process\n\n\
         Each quarter we review all team-level OKRs. The canonical \
         source for this process is owned by the operator team.";
-    let bytes_b64 = {
-        use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
-    };
-
-    let import_result = provider
+    let write_result = provider
         .call(
-            "wiki.import",
+            "wiki.write",
             serde_json::json!({
-                "bytes": bytes_b64,
-                "content_type": "text/markdown",
-                "title_hint": "Quarterly Review",
+                "name": "runbooks/quarterly-review",
+                "content": body,
             }),
         )
         .await
-        .expect("wiki.import must succeed");
-    assert!(!import_result.is_error);
-    let imported_path = import_result.content["path"]
+        .expect("wiki.write must succeed");
+    assert!(!write_result.is_error);
+    let imported_path = write_result.content["name"]
         .as_str()
         .expect("receipt path is a string")
         .to_string();
-    // Spec: default path = imports/<kebab-title>. The title_hint
-    // "Quarterly Review" kebab-cases to "quarterly-review".
-    assert_eq!(imported_path, "imports/quarterly-review");
+    assert_eq!(imported_path, "runbooks/quarterly-review");
 
     // Step 2 — Keyword search finds the imported page.
     let search_result = provider
@@ -196,38 +186,33 @@ async fn rag_citation_multi_page_response_preserves_order_and_paths() {
     let service = build_service(wiki);
     let provider = KnowledgeGadgetProvider::from_service(service, None, 10);
 
-    use base64::Engine as _;
-    let encode = |s: &str| base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-
-    // Import page A.
+    // Seed page A.
     let a = provider
         .call(
-            "wiki.import",
+            "wiki.write",
             serde_json::json!({
-                "bytes": encode("# Alpha Runbook\n\nHandle alpha events."),
-                "content_type": "text/markdown",
-                "title_hint": "Alpha Runbook",
+                "name": "runbooks/alpha",
+                "content": "# Alpha Runbook\n\nHandle alpha events.",
             }),
         )
         .await
-        .expect("import alpha");
-    let path_a = a.content["path"].as_str().unwrap().to_string();
-    assert_eq!(path_a, "imports/alpha-runbook");
+        .expect("write alpha");
+    let path_a = a.content["name"].as_str().unwrap().to_string();
+    assert_eq!(path_a, "runbooks/alpha");
 
-    // Import page B.
+    // Seed page B.
     let b = provider
         .call(
-            "wiki.import",
+            "wiki.write",
             serde_json::json!({
-                "bytes": encode("# Beta Incident\n\nHandle beta pagers."),
-                "content_type": "text/markdown",
-                "title_hint": "Beta Incident",
+                "name": "incidents/beta",
+                "content": "# Beta Incident\n\nHandle beta pagers.",
             }),
         )
         .await
-        .expect("import beta");
-    let path_b = b.content["path"].as_str().unwrap().to_string();
-    assert_eq!(path_b, "imports/beta-incident");
+        .expect("write beta");
+    let path_b = b.content["name"].as_str().unwrap().to_string();
+    assert_eq!(path_b, "incidents/beta");
 
     // Assemble a multi-citation response. Penny's prompt allows both
     // `[^1]` and `[^2]` in one message when two distinct sources are
@@ -259,32 +244,29 @@ async fn rag_citation_multi_page_response_preserves_order_and_paths() {
     assert_eq!(inline, vec!["1".to_string(), "2".to_string()]);
 }
 
-/// PDF extractor bundle-level smoke test.
+/// PDF extractor Plug smoke test.
 ///
 /// The `KnowledgeGadgetProvider` default path uses an in-crate
 /// markdown extractor and rejects `application/pdf` at the gadget
 /// layer (see `gadget.rs` `wiki.import` content_type check). The PDF
-/// path lands via the `DocumentFormatsBundle` install — this test
-/// exercises the bundle-level contract by calling `PdfExtractor`
+/// Source path uses the trusted compile-time document-format Plug. This test
+/// exercises the public ingest-port contract by calling `PdfExtractor`
 /// directly and validating that it produces the same
 /// `ExtractedDocument` shape that `IngestPipeline` would accept.
 ///
-/// Gated by the `pdf` feature on `gadgetron-bundle-document-formats`
+/// Gated by the `pdf` feature on `gadgetron-plug-document-formats`
 /// (enabled via dev-dep). Compiles always; runs always when the
 /// feature is on.
 #[tokio::test]
 async fn pdf_extractor_produces_pipeline_ready_output() {
-    use gadgetron_bundle_document_formats::PdfExtractor;
     use gadgetron_core::ingest::{ExtractHints, Extractor};
+    use gadgetron_plug_document_formats::PdfExtractor;
 
     // Minimal valid PDF copied from the extractor's own test
     // module — a 1-page "Hello World from Gadgetron" fixture. In a
-    // Bundle-driven run the extractor comes from
-    // `ctx.plugs.extractors.register(..., PdfExtractor::new())` in
-    // `DocumentFormatsBundle::install` (`bundles/document-formats/src/lib.rs`),
-    // which `IngestPipeline` would call on a PDF-typed `ImportRequest`.
-    // Re-exercising the fixture from here validates the end-to-end
-    // wire shape without building a full bundle harness.
+    // Production Source ingestion selects the same compile-time provider.
+    // Re-exercising the fixture here validates the end-to-end wire shape
+    // without a PostgreSQL Source harness.
     let pdf: &[u8] = &[
         0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a, 0x31, 0x20, 0x30, 0x20, 0x6f, 0x62,
         0x6a, 0x0a, 0x3c, 0x3c, 0x20, 0x2f, 0x54, 0x79, 0x70, 0x65, 0x20, 0x2f, 0x43, 0x61, 0x74,

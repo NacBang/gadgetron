@@ -78,8 +78,7 @@ pub struct BundleRegistry {
     /// Consumed by the core router (LlmProvider Plug axis).
     llm_providers: BTreeMap<PlugId, Arc<dyn LlmProvider>>,
     /// Consumed by `gadgetron-knowledge::ingest::IngestPipeline` (Extractor
-    /// Plug axis). The `plugin-document-formats` Bundle registers its
-    /// markdown extractor through the same plumbing as LlmProvider.
+    /// Plug axis) for legacy in-process Bundle registration.
     ///
     /// Other Plug axis maps (BlobStore, Scheduler, EmbeddingProvider,
     /// EntityKind, HTTP routes) land later when their Rust traits ship.

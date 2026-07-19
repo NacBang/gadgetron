@@ -17,8 +17,8 @@ gadgetron-xaas = { workspace = true }
 gadgetron-tui = { workspace = true }
 gadgetron-penny = { workspace = true }
 gadgetron-knowledge = { workspace = true }
-gadgetron-bundle-server-monitor = { path = "../../bundles/server-monitor" }
-gadgetron-bundle-log-analyzer = { path = "../../bundles/log-analyzer" }
+gadgetron-bundle-migrations = { workspace = true }
+gadgetron-bundle-supervisor = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -26,6 +26,7 @@ axum = { workspace = true }
 sqlx = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 toml = { workspace = true }
@@ -33,8 +34,15 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 arc-swap = { workspace = true }
+semver = { workspace = true }
 
 [dev-dependencies]
+base64 = "0.22"
+ed25519-dalek = { workspace = true }
+gadgetron-bundle-sdk = { workspace = true }
+gadgetron-testing = { workspace = true }
+hex = { workspace = true }
+sha2 = "0.11"
 tempfile = { workspace = true }
 
 [features]

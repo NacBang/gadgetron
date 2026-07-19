@@ -1,0 +1,456 @@
+manifest_version = 3
+
+[bundle]
+id = "news-intelligence"
+version = "0.1.0"
+class = "intelligence"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.7.18, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/news-intelligence"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 192
+open_files = 48
+cpu_seconds = 30
+
+[[permissions]]
+id = "news-read"
+kind = "database"
+description = "Read tenant-scoped News Intelligence records"
+resources = ["postgres:table:news_article_snapshots", "postgres:table:news_events", "postgres:table:news_claims", "postgres:table:news_briefings"]
+
+[[permissions]]
+id = "news-write"
+kind = "database"
+description = "Write tenant-scoped News Intelligence records through Core-compiled mutations"
+resources = ["postgres:table:news_article_snapshots", "postgres:table:news_events", "postgres:table:news_claims", "postgres:table:news_briefings"]
+
+[[permissions]]
+id = "news-collections"
+kind = "knowledge_collection"
+description = "Manage only News Intelligence Topics through the Core collection authority"
+resources = ["knowledge:collection"]
+
+[capabilities]
+gadget_namespaces = ["news"]
+
+[[capabilities.provides]]
+id = "gadgetron.intelligence.news-context"
+version = "1.0.0"
+description = "Cited event, claim, correction and briefing context through the Core knowledge exchange"
+
+[[capabilities.domain_schemas]]
+id = "news-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "6825fe858938b2da590ff59369c4c8feb0a716aaa894e56de9eb4acf6869bf3f"
+
+[[capabilities.gadgets]]
+name = "news.topic-list"
+description = "List News Topics and their collection state"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.topic-collect"
+description = "Collect approved sources for this Topic now"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { collection_id = { type = "string", format = "uuid", title = "Topic" }, expected_revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["collection_id", "expected_revision"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.article-upsert"
+description = "Persist a revision-pinned article snapshot summary"
+tier = "write"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, canonical_url = { type = "string", format = "uri", maxLength = 2000 }, headline = { type = "string", minLength = 1, maxLength = 500 }, publisher = { type = "string", minLength = 1, maxLength = 200 }, source_class = { type = "string", enum = ["official", "editorial", "community"] }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, published_at = { type = "string", format = "date-time" }, fetched_at = { type = "string", format = "date-time" }, content_hash = { type = "string", pattern = "^[0-9a-fA-F]{64}$" }, summary = { type = "string", minLength = 1, maxLength = 4000 } }, required = ["topic_id", "canonical_url", "headline", "publisher", "source_class", "source_id", "source_revision", "fetched_at", "content_hash", "summary"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "news.event-list"
+description = "List news events with change and evidence diversity"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.event-upsert"
+description = "Create or revise a source-backed news event"
+tier = "write"
+input_schema = { type = "object", properties = { event_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, topic_id = { type = "string", format = "uuid" }, title = { type = "string", minLength = 1, maxLength = 300 }, summary = { type = "string", minLength = 1, maxLength = 4000 }, state = { type = "string", enum = ["developing", "confirmed", "corrected", "uncertain", "closed"] }, first_seen_at = { type = "string", format = "date-time" }, last_seen_at = { type = "string", format = "date-time" }, official_sources = { type = "integer", minimum = 0 }, editorial_sources = { type = "integer", minimum = 0 }, community_sources = { type = "integer", minimum = 0 }, supporting_claims = { type = "integer", minimum = 0 }, contradicting_claims = { type = "integer", minimum = 0 } }, required = ["topic_id", "title", "summary", "state", "first_seen_at", "last_seen_at", "official_sources", "editorial_sources", "community_sources", "supporting_claims", "contradicting_claims"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "news.claim-list"
+description = "List claims and correction state for one event"
+tier = "read"
+input_schema = { type = "object", properties = { event_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, required = ["event_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.claim-upsert"
+description = "Create or revise a cited claim, contradiction or correction"
+tier = "write"
+input_schema = { type = "object", properties = { claim_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, event_id = { type = "string", format = "uuid" }, article_id = { type = "string", format = "uuid" }, statement = { type = "string", minLength = 1, maxLength = 2000 }, speaker = { type = "string", maxLength = 300 }, status = { type = "string", enum = ["reported", "corroborated", "contradicted", "corrected", "unverified"] }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, observed_at = { type = "string", format = "date-time" }, supersedes_claim_id = { type = "string", format = "uuid" } }, required = ["event_id", "statement", "status", "source_id", "source_revision", "observed_at"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "news.briefing-list"
+description = "List cited briefings with freshness and evidence diversity"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.briefing-upsert"
+description = "Create or revise a cited News briefing"
+tier = "write"
+input_schema = { type = "object", properties = { briefing_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, topic_id = { type = "string", format = "uuid" }, title = { type = "string", minLength = 1, maxLength = 300 }, key_changes = { type = "string", minLength = 1, maxLength = 6000 }, why_it_matters = { type = "string", minLength = 1, maxLength = 4000 }, open_questions = { type = "string", maxLength = 4000 }, status = { type = "string", enum = ["current", "aging", "stale", "conflicted"] }, window_start = { type = "string", format = "date-time" }, window_end = { type = "string", format = "date-time" }, official_sources = { type = "integer", minimum = 0 }, editorial_sources = { type = "integer", minimum = 0 }, community_sources = { type = "integer", minimum = 0 }, supporting_claims = { type = "integer", minimum = 0 }, contradicting_claims = { type = "integer", minimum = 0 }, citations = { type = "array", minItems = 2, maxItems = 64, items = { type = "object", properties = { source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, title = { type = "string", minLength = 1, maxLength = 500 }, locator = { type = "string", minLength = 1, maxLength = 2000 }, stance = { type = "string", enum = ["supports", "contradicts", "context"] } }, required = ["source_id", "source_revision", "title", "locator", "stance"], additionalProperties = false } } }, required = ["topic_id", "title", "key_changes", "why_it_matters", "status", "window_start", "window_end", "official_sources", "editorial_sources", "community_sources", "supporting_claims", "contradicting_claims", "citations"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "news.event-graph"
+description = "View claim, correction and event connections"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { nodes = { type = "array" }, edges = { type = "array" } }, required = ["nodes", "edges"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.subject-context"
+description = "Build bounded Penny context for one news event"
+tier = "read"
+input_schema = { type = "object", properties = { event_id = { type = "string", format = "uuid" } }, required = ["event_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "news.dashboard-summary"
+description = "Summarize developing events and briefing attention"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.jobs]]
+id = "news-topic-scouting"
+role = "source_scout"
+triggers = ["on_demand"]
+gadget_allowlist = ["news.topic-list"]
+budget = { max_gadget_calls = 4, max_wall_seconds = 120 }
+
+[[capabilities.jobs]]
+id = "news-event-research"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = ["news.topic-list", "news.article-upsert", "news.event-list", "news.event-upsert", "news.claim-list", "news.claim-upsert"]
+budget = { max_gadget_calls = 24, max_wall_seconds = 300 }
+
+[[capabilities.jobs]]
+id = "news-briefing-distillation"
+role = "gardener"
+triggers = ["on_demand"]
+gadget_allowlist = ["news.event-list", "news.claim-list", "news.briefing-list", "news.briefing-upsert", "news.event-graph"]
+budget = { max_gadget_calls = 16, max_wall_seconds = 240 }
+
+[[capabilities.collection_profiles]]
+id = "news-public-sources"
+label = "Public news sources"
+description = "Collect bounded official, editorial and community news sources through Core"
+connector = "core-source-fetch"
+source_classes = ["official", "editorial", "community"]
+allowlisted_domains = ["www.nasa.gov", "www.jpl.nasa.gov", "apnews.com", "news.ycombinator.com", "hacker-news.firebaseio.com"]
+extractor_hints = ["article", "rss", "atom", "news-item", "discussion"]
+freshness_seconds = 3600
+schedule = "*/30 * * * *"
+budget = { max_sources = 24, max_bytes = 12582912, max_wall_seconds = 180 }
+recipe_asset = "news-source-collection"
+
+[[capabilities.agent_roles]]
+id = "news-topic-scout"
+label = "Topic scout"
+description = "Finds source coverage gaps and proposes bounded source candidates"
+core_role = "source_scout"
+job = "news-topic-scouting"
+recipe_asset = "news-source-collection"
+collection_profile = "news-public-sources"
+prompt_contract_revision = "news-topic-scout-v1"
+
+[[capabilities.agent_roles]]
+id = "news-researcher"
+label = "News researcher"
+description = "Builds cited claims and event chronology from collected snapshots"
+core_role = "researcher"
+job = "news-event-research"
+recipe_asset = "news-research"
+collection_profile = "news-public-sources"
+followup_role = "news-distiller"
+prompt_contract_revision = "news-research-v2"
+
+[[capabilities.agent_roles]]
+id = "news-distiller"
+label = "News distiller"
+description = "Connects updates, contradictions and corrections into cited briefings"
+core_role = "gardener"
+job = "news-briefing-distillation"
+recipe_asset = "news-distillation"
+collection_profile = "news-public-sources"
+prompt_contract_revision = "news-distillation-v2"
+
+[[capabilities.workspaces]]
+id = "topics"
+label = "Topics"
+renderer = "table"
+data_capability = "news.topic-list"
+collection_profile = "news-public-sources"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "news"
+label = "News"
+renderer = "cards"
+data_capability = "news.event-list"
+action_gadgets = ["news.subject-context"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "briefings"
+label = "Briefings"
+renderer = "cards"
+data_capability = "news.briefing-list"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "news-graph"
+label = "News graph"
+renderer = "graph"
+data_capability = "news.event-graph"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.ui_contributions]]
+id = "news-main"
+kind = "workspace"
+label = "News"
+placement = "main"
+order_hint = 130
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No researched news events yet"
+error_state = "News events are unavailable"
+workspace = "news"
+
+[[capabilities.ui_contributions]]
+id = "news-navigation"
+kind = "navigation"
+label = "News"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 130
+icon = "document"
+required_scopes = ["management"]
+empty_state = "News Intelligence is not enabled"
+error_state = "News navigation is unavailable"
+workspace = "news"
+
+[[capabilities.ui_contributions]]
+id = "topics-main"
+kind = "workspace"
+label = "Topics"
+placement = "main"
+order_hint = 140
+icon = "search"
+required_scopes = ["management"]
+empty_state = "No News Topics yet"
+error_state = "News Topics are unavailable"
+workspace = "topics"
+
+[[capabilities.ui_contributions]]
+id = "topics-navigation"
+kind = "navigation"
+label = "Topics"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 140
+icon = "search"
+required_scopes = ["management"]
+empty_state = "No News Topics yet"
+error_state = "News Topics are unavailable"
+workspace = "topics"
+
+[[capabilities.ui_contributions]]
+id = "briefings-main"
+kind = "workspace"
+label = "Briefings"
+placement = "main"
+order_hint = 150
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "No News briefings yet"
+error_state = "News briefings are unavailable"
+workspace = "briefings"
+
+[[capabilities.ui_contributions]]
+id = "briefings-navigation"
+kind = "navigation"
+label = "Briefings"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 150
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "No News briefings yet"
+error_state = "News briefings are unavailable"
+workspace = "briefings"
+
+[[capabilities.ui_contributions]]
+id = "news-graph-main"
+kind = "workspace"
+label = "News graph"
+placement = "main"
+order_hint = 160
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No connected News claims yet"
+error_state = "News graph is unavailable"
+workspace = "news-graph"
+
+[[capabilities.ui_contributions]]
+id = "news-graph-navigation"
+kind = "navigation"
+label = "News graph"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 160
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No connected News claims yet"
+error_state = "News graph is unavailable"
+workspace = "news-graph"
+
+[[capabilities.ui_contributions]]
+id = "news-dashboard"
+kind = "dashboard_widget"
+label = "News intelligence"
+placement = "dashboard"
+order_hint = 130
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No active News events"
+error_state = "News summary is unavailable"
+gadget = "news.dashboard-summary"
+renderer = "dashboard"
+refresh_seconds = 60
+
+[[capabilities.ui_contributions]]
+id = "news-subject"
+kind = "subject_context"
+label = "News event"
+placement = "penny_context"
+order_hint = 130
+icon = "document"
+required_scopes = ["management"]
+empty_state = "News event context is unavailable"
+error_state = "News event context could not be created"
+gadget = "news.subject-context"
+
+[[capabilities.seed_assets]]
+id = "news-source-collection"
+path = "recipes/source-collection.json"
+media_type = "application/json"
+sha256 = "54c3421dcd4abe1521f98d90878271936876cc1dac77b8b5a1ce71e66ecf77db"
+
+[[capabilities.seed_assets]]
+id = "news-research"
+path = "recipes/news-research.json"
+media_type = "application/json"
+sha256 = "9dc9b0145b6409454161c3671a5601c55375a48ab719ed88615d03fbd4dbe0b0"
+
+[[capabilities.seed_assets]]
+id = "news-distillation"
+path = "recipes/news-distillation.json"
+media_type = "application/json"
+sha256 = "cc26ab68e5885c9e95a5b8fd42f25ea67ffdcb2f91a8cbfcf31777408a9f61a9"
+
+[[capabilities.migrations]]
+id = "news-base"
+revision = 20260713000001
+kind = "schema"
+path = "migrations/20260713000001_news_base.sql"
+sha256 = "5046efa49a94f9ecfa3984234eda0a4624f863c1a3f449522cbca3e650c1c4a7"
+
+[[capabilities.migrations]]
+id = "news-article-source-identity"
+revision = 20260713000002
+kind = "schema"
+path = "migrations/20260713000002_article_source_identity.sql"
+sha256 = "156791317f68c9245483e53962c264cfc3ef529468cf721ccd41c500565f1216"

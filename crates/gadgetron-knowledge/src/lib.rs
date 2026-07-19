@@ -6,17 +6,23 @@
 
 pub mod candidate;
 pub mod config;
+mod conversation_source;
 pub mod embedding;
 pub mod error;
 pub mod gadget;
+pub mod graph;
 pub mod ingest;
 pub mod keyword_index;
 pub mod llm_wiki;
 pub mod maintenance;
+pub mod ontology;
+mod reviewed_vault;
 pub mod search;
 pub mod semantic;
 pub mod semantic_index;
 pub mod service;
+pub mod source;
+pub mod vault;
 pub mod wiki;
 
 pub use embedding::{EmbeddingError, EmbeddingProvider, OpenAiCompatEmbedding};
@@ -29,6 +35,13 @@ pub use llm_wiki::LlmWikiStore;
 pub use maintenance::{
     audit_wiki, run_reindex, MaintenanceError, ReindexAction, ReindexActionKind, ReindexMode,
     ReindexOptions, ReindexReport, StalePage, WikiAuditReport,
+};
+pub use ontology::{
+    OntologyActivationAction, OntologyActivationCommand, OntologyActivationEvent,
+    OntologyActivationReceipt, OntologyKernel, OntologyMappingCommand, OntologyMappingDisposition,
+    OntologyMappingEvent, OntologyPackageRegistration, OntologyRegistrationReceipt,
+    OntologyRegistry, OntologyRegistryEntry, OntologyRegistryError, OntologyRevision,
+    OntologySchemaRegistration,
 };
 pub use semantic_index::SemanticPgVectorIndex;
 pub use service::{KnowledgeService, KnowledgeServiceBuilder};

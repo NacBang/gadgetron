@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{header, StatusCode},
     middleware,
     response::{IntoResponse, Redirect, Response},
@@ -28,13 +28,18 @@ use crate::middleware::{
     scope::scope_guard_middleware, tenant_context::tenant_context_middleware,
 };
 use crate::penny::shared_context::PennySharedSurfaceService;
-use crate::web::workbench::{workbench_routes, GatewayWorkbenchService};
+use crate::web::workbench::{
+    bundle_source_routes, workbench_routes, GatewayWorkbenchService,
+    MAX_BUNDLE_SOURCE_REQUEST_BYTES,
+};
 use gadgetron_core::agent::config::AgentConfig;
 use gadgetron_core::knowledge::candidate::{ActivityCaptureStore, KnowledgeCandidateCoordinator};
 
 /// 4 MiB body limit (outermost layer of defense-in-depth).
 /// Rationale: 128k-token window × ~4 bytes/token ≈ 512 KB; 8× headroom.
 pub(crate) const MAX_BODY_BYTES: usize = 4_194_304;
+pub(crate) const SOURCE_UPLOAD_BODY_BYTES: usize =
+    gadgetron_knowledge::source::MAX_SOURCE_BYTES + 64 * 1024;
 
 /// Format a byte count as a human-readable MiB string (e.g. 4_194_304 → "4 MiB").
 /// Used by `openai_shape_413` so the 413 error message stays in sync with
@@ -59,13 +64,13 @@ fn format_body_limit(limit: usize) -> String {
 ///
 /// Non-413 responses pass through unchanged. Async signature is required by
 /// `axum::middleware::map_response` even though the body is sync.
-async fn openai_shape_413(mut resp: Response<Body>) -> Response<Body> {
+fn shape_413(resp: &mut Response<Body>, limit: usize) {
     if resp.status() != StatusCode::PAYLOAD_TOO_LARGE {
-        return resp;
+        return;
     }
     let message = format!(
         "Request body exceeds the {} limit. Reduce your request size or split it across multiple calls.",
-        format_body_limit(MAX_BODY_BYTES),
+        format_body_limit(limit),
     );
     let body_json = json!({
         "error": {
@@ -86,7 +91,6 @@ async fn openai_shape_413(mut resp: Response<Body>) -> Response<Body> {
         header::CONTENT_LENGTH,
         header::HeaderValue::from_str(&len.to_string()).expect("usize string is ASCII"),
     );
-    resp
 }
 
 /// Shared application state injected into every handler via `axum::State`.
@@ -327,8 +331,44 @@ pub async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
 /// Requests traverse layers top-to-bottom; responses bottom-to-top.
 ///
 /// CorsLayer is intentionally absent (D-6: no `CorsLayer::permissive()`).
+fn authenticated_with_limit(
+    routes: Router<AppState>,
+    state: AppState,
+    body_limit: usize,
+) -> Router {
+    // All authenticated route groups use the exact same identity/scope/audit
+    // chain. Only the outer body bound differs for the one multipart source
+    // route; this avoids raising the 4 MiB JSON/chat surface globally.
+    let routes = routes
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            scope_guard_middleware,
+        ))
+        .layer(middleware::from_fn(tenant_context_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(body_limit))
+        .layer(RequestBodyLimitLayer::new(body_limit));
+    routes
+        .layer(middleware::map_response(
+            move |mut response: Response<Body>| async move {
+                shape_413(&mut response, body_limit);
+                response
+            },
+        ))
+        .with_state(state)
+}
+
 pub fn build_router(state: AppState) -> Router {
-    let authenticated_routes = Router::new()
+    let standard_authenticated_routes = Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/v1/models", get(list_models_handler))
         // MCP-style tool discovery endpoint.
@@ -344,48 +384,24 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/models/status", get(model_status_handler))
         .route("/api/v1/usage", get(usage_handler))
-        .route("/api/v1/costs", get(costs_handler))
-        // Auth middleware stack (layers 3–7). These all operate on `Body` (not
-        // `Limited<Body>`), so they must be separate from RequestBodyLimitLayer
-        // which wraps the body type and would require downstream middleware to
-        // accept `Request<Limited<Body>>`.
-        //
-        // Layer ordering in axum: each `.layer()` call on `Router` is the NEW
-        // outermost layer — it wraps all previously applied layers. Therefore we
-        // call `.layer()` from innermost-to-outermost (metrics first, then scope, auth, etc.).
-        //
-        // Final inbound request flow:
-        //   [body-limit] → [trace] → [request-id] → [auth] → [tenant-ctx] → [scope] → [metrics] → handler
-        //
-        // Layer 7 (innermost — closest to handler): emit RequestLog after handler completes.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            metrics_middleware,
-        ))
-        // Layer 6: scope enforcement → 403 on mismatch.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            scope_guard_middleware,
-        ))
-        // Layer 5: build TenantContext from ValidatedKey.
-        .layer(middleware::from_fn(tenant_context_middleware))
-        // Layer 4: Bearer auth → insert Arc<ValidatedKey> into extensions.
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ))
-        // Layer 3: generate request UUID, insert into extensions + response header.
-        .layer(middleware::from_fn(request_id_middleware))
-        // Layer 2: distributed tracing spans.
-        .layer(TraceLayer::new_for_http())
-        // Layer 1b: body size guard (4 MiB). The raw 413 produced here
-        // is plain text ("length limit exceeded"), which breaks OpenAI SDK clients
-        // that call `response.json()`.
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        // Layer 1a (outermost): response shape guard. Catches the 413 above and
-        // rewrites the body to OpenAI-shaped JSON. Non-413 responses pass through.
-        .layer(middleware::map_response(openai_shape_413))
-        .with_state(state.clone()); // clone BEFORE consuming state in public_routes
+        .route("/api/v1/costs", get(costs_handler));
+    let source_upload_routes = Router::new().nest(
+        "/api/v1/web/workbench",
+        crate::web::knowledge_sources::upload_routes(),
+    );
+    let bundle_source_routes = Router::new().nest("/api/v1/web/workbench", bundle_source_routes());
+    let authenticated_routes =
+        authenticated_with_limit(standard_authenticated_routes, state.clone(), MAX_BODY_BYTES)
+            .merge(authenticated_with_limit(
+                source_upload_routes,
+                state.clone(),
+                SOURCE_UPLOAD_BODY_BYTES,
+            ))
+            .merge(authenticated_with_limit(
+                bundle_source_routes,
+                state.clone(),
+                MAX_BUNDLE_SOURCE_REQUEST_BYTES,
+            ));
 
     let public_routes = Router::new()
         .route("/health", get(health_handler))
@@ -1124,5 +1140,102 @@ mod tests {
             msg.contains("MiB"),
             "error.message must embed dynamic MiB limit (no hard-coded '4 MB'), got {msg:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn json_between_axum_default_and_global_limit_is_not_rejected() {
+        let state = make_state_with_validator(MockKeyValidator::new(vec![Scope::OpenAiCompat]));
+        let app = build_router(state);
+        let body = serde_json::to_vec(&json!({
+            "model": "missing-provider",
+            "messages": [{"role": "user", "content": "x".repeat(2_500_000)}]
+        }))
+        .unwrap();
+        assert!(body.len() > 2 * 1024 * 1024 && body.len() < MAX_BODY_BYTES);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn source_upload_has_a_separate_bounded_body_budget() {
+        let state = make_state_with_validator(MockKeyValidator::new(vec![Scope::Management]));
+        let app = build_router(state);
+        let between_limits = vec![b'x'; MAX_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/web/workbench/knowledge/vaults/00000000-0000-0000-0000-000000000001/sources/upload")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "multipart/form-data; boundary=x")
+            .header(header::CONTENT_LENGTH, between_limits.len())
+            .body(Body::from(between_limits))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let oversized = vec![b'x'; SOURCE_UPLOAD_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/web/workbench/knowledge/vaults/00000000-0000-0000-0000-000000000001/sources/upload")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "multipart/form-data; boundary=x")
+            .header(header::CONTENT_LENGTH, oversized.len())
+            .body(Body::from(oversized))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "request_too_large");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format_body_limit(SOURCE_UPLOAD_BODY_BYTES)));
+    }
+
+    #[tokio::test]
+    async fn bundle_source_has_a_separate_bounded_body_budget() {
+        let state = make_state_with_validator(MockKeyValidator::new(vec![Scope::Management]));
+        let app = build_router(state);
+        let between_limits = vec![b'x'; MAX_BODY_BYTES + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/web/workbench/admin/bundles/inspect")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "application/json")
+            .header(header::CONTENT_LENGTH, between_limits.len())
+            .body(Body::from(between_limits))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let oversized = vec![b'x'; MAX_BUNDLE_SOURCE_REQUEST_BYTES + 1];
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/web/workbench/admin/bundles/inspect")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "application/json")
+            .header(header::CONTENT_LENGTH, oversized.len())
+            .body(Body::from(oversized))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "request_too_large");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format_body_limit(MAX_BUNDLE_SOURCE_REQUEST_BYTES)));
     }
 }

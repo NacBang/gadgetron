@@ -3,7 +3,7 @@
 //! Exposes two layered config types:
 //!
 //! - `KnowledgeConfig` — the toml surface under `[knowledge]`. Includes
-//!   `wiki_path`, `wiki_autocommit`, `wiki_git_author`, `wiki_max_page_bytes`,
+//!   `wiki_path`, `vault_path`, `wiki_autocommit`, `wiki_git_author`, `wiki_max_page_bytes`,
 //!   optional nested `[knowledge.search]` / `[knowledge.embedding]`
 //!   sections, and a `[knowledge.reindex]` policy block.
 //! - `WikiConfig` — the internal runtime config consumed by `Wiki::open`.
@@ -545,6 +545,15 @@ pub struct KnowledgeConfig {
     /// see.
     pub wiki_path: PathBuf,
 
+    /// Root for tenant-scoped Domain Vault repositories. Each tenant owns one
+    /// Git/Obsidian working tree under `vault_path/tenants/<tenant>/vault`.
+    /// When omitted, defaults to a `vaults` sibling of `wiki_path`; it never
+    /// creates nested repositories inside the legacy wiki.
+    /// Env: `GADGETRON_KNOWLEDGE_VAULT_PATH` (loader integration follows the
+    /// same config-file projection as `wiki_path`).
+    #[serde(default)]
+    pub vault_path: Option<PathBuf>,
+
     /// Auto-commit on every write. If false, writes are staged but
     /// never committed — the operator handles commits manually.
     /// Default true.
@@ -613,7 +622,7 @@ impl KnowledgeConfig {
         Ok(Some(cfg))
     }
 
-    /// Rewrite relative `wiki_path` to an absolute path resolved against
+    /// Rewrite relative `wiki_path` / `vault_path` to absolute paths resolved against
     /// `config_dir` (the directory containing `gadgetron.toml`). Absolute
     /// paths are left untouched.
     ///
@@ -626,6 +635,20 @@ impl KnowledgeConfig {
         if self.wiki_path.is_relative() {
             self.wiki_path = config_dir.join(&self.wiki_path);
         }
+        if let Some(path) = &mut self.vault_path {
+            if path.is_relative() {
+                *path = config_dir.join(&*path);
+            }
+        }
+    }
+
+    pub fn effective_vault_path(&self) -> PathBuf {
+        self.vault_path.clone().unwrap_or_else(|| {
+            self.wiki_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("vaults")
+        })
     }
 
     /// Validates at load time. Rules:
@@ -670,6 +693,19 @@ impl KnowledgeConfig {
             return Err(format!(
                 "wiki_path parent does not exist: {}",
                 parent.display()
+            ));
+        }
+        let vault_path = self.effective_vault_path();
+        let vault_parent = vault_path.parent().ok_or_else(|| {
+            format!(
+                "vault_path must not be the filesystem root: {}",
+                vault_path.display()
+            )
+        })?;
+        if !vault_parent.as_os_str().is_empty() && !vault_parent.exists() {
+            return Err(format!(
+                "vault_path parent does not exist: {}",
+                vault_parent.display()
             ));
         }
         if !(1..=104_857_600).contains(&self.wiki_max_page_bytes) {
@@ -799,6 +835,7 @@ mod knowledge_config_tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = KnowledgeConfig {
             wiki_path: tmp.path().join("wiki"),
+            vault_path: None,
             wiki_autocommit: true,
             wiki_git_author: Some("Test <test@example.com>".into()),
             wiki_max_page_bytes: 1024,
@@ -814,6 +851,7 @@ mod knowledge_config_tests {
     fn knowledge_config_rejects_missing_parent() {
         let cfg = KnowledgeConfig {
             wiki_path: "/definitely/not/here/ever/wiki".into(),
+            vault_path: None,
             wiki_autocommit: true,
             wiki_git_author: None,
             wiki_max_page_bytes: 1024,
@@ -830,6 +868,7 @@ mod knowledge_config_tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = KnowledgeConfig {
             wiki_path: tmp.path().join("wiki"),
+            vault_path: None,
             wiki_autocommit: true,
             wiki_git_author: None,
             wiki_max_page_bytes: 200_000_000, // 200 MiB
@@ -846,6 +885,7 @@ mod knowledge_config_tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = KnowledgeConfig {
             wiki_path: tmp.path().join("wiki"),
+            vault_path: None,
             wiki_autocommit: false,
             wiki_git_author: Some("Penny <k@g.local>".into()),
             wiki_max_page_bytes: 2048,
@@ -944,10 +984,38 @@ stale_threshold_days = 30
     }
 
     #[test]
+    fn vault_path_is_separate_from_legacy_wiki_and_resolves_from_config_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = KnowledgeConfig::extract_from_toml_str(
+            r#"
+[knowledge]
+wiki_path = "state/wiki"
+vault_path = "state/vaults"
+"#,
+        )
+        .unwrap()
+        .unwrap();
+        config.resolve_relative_paths(root.path());
+        assert_eq!(config.wiki_path, root.path().join("state/wiki"));
+        assert_eq!(
+            config.effective_vault_path(),
+            root.path().join("state/vaults")
+        );
+        assert!(!config.effective_vault_path().starts_with(&config.wiki_path));
+
+        config.vault_path = None;
+        assert_eq!(
+            config.effective_vault_path(),
+            root.path().join("state/vaults")
+        );
+    }
+
+    #[test]
     fn knowledge_config_validate_without_embedding_env_allows_audit_use_case() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = KnowledgeConfig {
             wiki_path: tmp.path().join("wiki"),
+            vault_path: None,
             wiki_autocommit: true,
             wiki_git_author: Some("Penny <penny@gadgetron.local>".into()),
             wiki_max_page_bytes: 1024 * 1024,

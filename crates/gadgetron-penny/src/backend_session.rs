@@ -6,10 +6,19 @@
 //! resume through the same Gadgetron conversation id after a server restart.
 
 use async_trait::async_trait;
-use gadgetron_core::agent::AgentBackend;
+use gadgetron_core::agent::{AgentBackend, ConversationAgentProfile};
 
 #[async_trait]
 pub trait AgentBackendSessionPersistence: Send + Sync {
+    /// Load the immutable-backend/per-chat model profile. The default keeps
+    /// non-DB test adapters source-compatible and falls back to global config.
+    async fn load_conversation_agent_profile(
+        &self,
+        _conversation_id: &str,
+    ) -> Option<ConversationAgentProfile> {
+        None
+    }
+
     async fn load_backend_session_id(
         &self,
         conversation_id: &str,

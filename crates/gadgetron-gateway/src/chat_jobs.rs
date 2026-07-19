@@ -19,16 +19,20 @@
 //! the producer has already buffered plus a live tail until the job
 //! completes.
 //!
-//! This module owns the in-memory state (`JobStore` +
-//! `Arc<JobState>`). The HTTP wiring lives in `handlers.rs` (job
-//! creation on chat-completion request) and in
-//! `web/workbench.rs` (the resume endpoints).
+//! `JobStore` and `JobState` own the live chunk buffer. PostgreSQL-backed
+//! deployments also record job start and terminal metadata so startup can
+//! turn an interrupted generation into an explicit retryable error. Chunk
+//! replay remains process-local. The HTTP wiring lives in `handlers.rs` and
+//! the resume endpoints live in `web/workbench.rs`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use gadgetron_core::agent::ConversationAgentProfile;
+use gadgetron_xaas::chat_completion_jobs;
+use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
 
@@ -65,7 +69,7 @@ struct JobInner {
     /// `/conversations/{id}/active-job` and replayed as the final
     /// SSE error event on `sync`.
     error_message: Option<String>,
-    /// Set when the job finishes (Complete or Error). `sync` waiters
+    /// Set when the job finishes (Complete, Error, or Cancelled). `sync` waiters
     /// check this before parking on `notify` so they don't sleep
     /// past the producer's last push.
     is_finished: bool,
@@ -82,6 +86,9 @@ pub struct JobState {
     pub user_id: Option<Uuid>,
     pub tenant_id: Uuid,
     pub model: String,
+    /// Effective per-conversation runtime/model/effort snapshot used for this
+    /// generation. Immutable even if the user edits the next turn's profile.
+    pub agent_profile: Option<ConversationAgentProfile>,
     pub created_at: Instant,
     /// Last write timestamp — used by cleanup to bias toward
     /// killing the truly idle jobs first.
@@ -95,6 +102,7 @@ pub struct JobState {
     /// sync client on each cancel request.
     cancel_requested: std::sync::atomic::AtomicBool,
     cancel_notify: Notify,
+    persistence: Option<PgPool>,
 }
 
 impl JobState {
@@ -104,6 +112,8 @@ impl JobState {
         user_id: Option<Uuid>,
         tenant_id: Uuid,
         model: String,
+        agent_profile: Option<ConversationAgentProfile>,
+        persistence: Option<PgPool>,
     ) -> Self {
         Self {
             job_id,
@@ -111,6 +121,7 @@ impl JobState {
             user_id,
             tenant_id,
             model,
+            agent_profile,
             created_at: Instant::now(),
             completed_at: Mutex::new(None),
             inner: Mutex::new(JobInner {
@@ -122,6 +133,7 @@ impl JobState {
             watchers: Notify::new(),
             cancel_requested: std::sync::atomic::AtomicBool::new(false),
             cancel_notify: Notify::new(),
+            persistence,
         }
     }
 
@@ -138,35 +150,76 @@ impl JobState {
     /// `tail_after` that was blocked gets a chance to drain the
     /// last chunks and observe `is_finished == true`.
     pub async fn mark_complete(&self) {
+        self.mark_complete_with_assistant(None).await;
+    }
+
+    pub async fn mark_complete_with_assistant_message(&self, message: &str) {
+        self.mark_complete_with_assistant(Some(message)).await;
+    }
+
+    async fn mark_complete_with_assistant(&self, assistant_message: Option<&str>) {
         let mut inner = self.inner.lock().await;
         inner.status = JobStatus::Complete;
         inner.is_finished = true;
+        let chunk_count = inner.chunks.len();
         drop(inner);
         *self.completed_at.lock().await = Some(Instant::now());
         self.watchers.notify_waiters();
+        self.persist_terminal(
+            chat_completion_jobs::TerminalStatus::Complete,
+            chunk_count,
+            None,
+            assistant_message,
+        )
+        .await;
     }
 
     /// Mark the job as failed. `error_message` is surfaced through
     /// the metadata endpoint and the SSE tail.
     pub async fn mark_error(&self, message: impl Into<String>) {
+        let message = message.into();
         let mut inner = self.inner.lock().await;
         inner.status = JobStatus::Error;
-        inner.error_message = Some(message.into());
+        inner.error_message = Some(message.clone());
         inner.is_finished = true;
+        let chunk_count = inner.chunks.len();
         drop(inner);
         *self.completed_at.lock().await = Some(Instant::now());
         self.watchers.notify_waiters();
+        self.persist_terminal(
+            chat_completion_jobs::TerminalStatus::Error,
+            chunk_count,
+            Some(&message),
+            None,
+        )
+        .await;
     }
 
     /// Mark the job as cancelled by the operator. Terminal like
     /// `mark_complete` — subscribers drain the buffer and stop.
     pub async fn mark_cancelled(&self) {
+        self.mark_cancelled_with_assistant(None).await;
+    }
+
+    pub async fn mark_cancelled_with_assistant_message(&self, message: &str) {
+        self.mark_cancelled_with_assistant(Some(message)).await;
+    }
+
+    async fn mark_cancelled_with_assistant(&self, assistant_message: Option<&str>) {
         let mut inner = self.inner.lock().await;
         inner.status = JobStatus::Cancelled;
         inner.is_finished = true;
+        let chunk_count = inner.chunks.len();
         drop(inner);
         *self.completed_at.lock().await = Some(Instant::now());
         self.watchers.notify_waiters();
+        self.persist_terminal(
+            chat_completion_jobs::TerminalStatus::Cancelled,
+            chunk_count,
+            None,
+            assistant_message,
+        )
+        .await;
     }
 
     /// Ask the producer to stop pulling from the upstream stream. The
@@ -209,6 +262,7 @@ impl JobState {
             chunk_count: inner.chunks.len(),
             is_finished: inner.is_finished,
             error_message: inner.error_message.clone(),
+            agent_profile: self.agent_profile.clone(),
         }
     }
 
@@ -258,6 +312,35 @@ impl JobState {
             notified.await;
         }
     }
+
+    async fn persist_terminal(
+        &self,
+        status: chat_completion_jobs::TerminalStatus,
+        chunk_count: usize,
+        error_message: Option<&str>,
+        assistant_message: Option<&str>,
+    ) {
+        let Some(pool) = self.persistence.as_ref() else {
+            return;
+        };
+        if let Err(error) = chat_completion_jobs::finish_with_assistant_message(
+            pool,
+            self.job_id,
+            status,
+            chunk_count,
+            error_message,
+            assistant_message,
+        )
+        .await
+        {
+            tracing::error!(
+                job_id = %self.job_id,
+                status = status.as_str(),
+                error = %error,
+                "chat job terminal state persistence failed"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +363,8 @@ pub struct JobSnapshot {
     pub chunk_count: usize,
     pub is_finished: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_profile: Option<ConversationAgentProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
 }
 
@@ -298,11 +383,29 @@ pub struct JobSnapshot {
 pub struct JobStore {
     by_id: RwLock<HashMap<Uuid, Arc<JobState>>>,
     by_conv: RwLock<HashMap<Uuid, Uuid>>,
+    /// Serializes the check-and-register sequence for active-job exclusivity.
+    create_guard: Mutex<()>,
+    persistence: Option<PgPool>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CreateJobError {
+    #[error("conversation already has an active generation")]
+    Active(Arc<JobState>),
+    #[error("chat job persistence failed: {0}")]
+    Persistence(#[from] sqlx::Error),
 }
 
 impl JobStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_postgres(pool: PgPool) -> Self {
+        Self {
+            persistence: Some(pool),
+            ..Self::default()
+        }
     }
 
     /// Register a fresh job and return the `Arc<JobState>` so the
@@ -314,6 +417,18 @@ impl JobStore {
         tenant_id: Uuid,
         model: String,
     ) -> Arc<JobState> {
+        self.create_with_profile(conversation_id, user_id, tenant_id, model, None)
+            .await
+    }
+
+    pub async fn create_with_profile(
+        &self,
+        conversation_id: Uuid,
+        user_id: Option<Uuid>,
+        tenant_id: Uuid,
+        model: String,
+        agent_profile: Option<ConversationAgentProfile>,
+    ) -> Arc<JobState> {
         let job_id = Uuid::new_v4();
         let job = Arc::new(JobState::new(
             job_id,
@@ -321,10 +436,108 @@ impl JobStore {
             user_id,
             tenant_id,
             model,
+            agent_profile,
+            self.persistence.clone(),
         ));
         self.by_id.write().await.insert(job_id, Arc::clone(&job));
         self.by_conv.write().await.insert(conversation_id, job_id);
         job
+    }
+
+    /// Register a job only when the conversation has no unfinished producer.
+    /// The guard closes the race between active lookup and insertion; callers
+    /// receive the existing job so they can return a deterministic conflict.
+    pub async fn create_exclusive(
+        &self,
+        conversation_id: Uuid,
+        user_id: Option<Uuid>,
+        tenant_id: Uuid,
+        model: String,
+        agent_profile: Option<ConversationAgentProfile>,
+    ) -> Result<Arc<JobState>, CreateJobError> {
+        let _guard = self.create_guard.lock().await;
+        if let Some(existing) = self.active_for_conversation(conversation_id).await {
+            if !existing.snapshot().await.is_finished {
+                return Err(CreateJobError::Active(existing));
+            }
+        }
+        let job_id = Uuid::new_v4();
+        if let (Some(pool), Some(user_id)) = (self.persistence.as_ref(), user_id) {
+            if !conversation_id.is_nil() {
+                chat_completion_jobs::start(
+                    pool,
+                    chat_completion_jobs::StartChatCompletionJob {
+                        job_id,
+                        conversation_id,
+                        tenant_id,
+                        user_id,
+                        model: &model,
+                        agent_profile: agent_profile.as_ref(),
+                    },
+                )
+                .await?;
+            }
+        }
+        let job = Arc::new(JobState::new(
+            job_id,
+            conversation_id,
+            user_id,
+            tenant_id,
+            model,
+            agent_profile,
+            self.persistence.clone(),
+        ));
+        self.by_id.write().await.insert(job_id, Arc::clone(&job));
+        self.by_conv.write().await.insert(conversation_id, job_id);
+        Ok(job)
+    }
+
+    pub async fn recover_interrupted(&self) -> Result<u64, sqlx::Error> {
+        let Some(pool) = self.persistence.as_ref() else {
+            return Ok(0);
+        };
+        chat_completion_jobs::recover_interrupted(pool).await
+    }
+
+    pub async fn latest_terminal_for_conversation(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Option<JobSnapshot>, sqlx::Error> {
+        let Some(pool) = self.persistence.as_ref() else {
+            return Ok(None);
+        };
+        let Some(row) = chat_completion_jobs::latest_terminal_for_conversation(
+            pool,
+            tenant_id,
+            user_id,
+            conversation_id,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let status = match row.status.as_str() {
+            "complete" => JobStatus::Complete,
+            "error" => JobStatus::Error,
+            "cancelled" => JobStatus::Cancelled,
+            _ => return Ok(None),
+        };
+        let agent_profile = row
+            .agent_profile
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        Ok(Some(JobSnapshot {
+            job_id: row.job_id,
+            conversation_id: row.conversation_id,
+            status,
+            chunk_count: usize::try_from(row.chunk_count).unwrap_or_default(),
+            is_finished: true,
+            agent_profile,
+            error_message: row.error_message,
+        }))
     }
 
     /// Look up a job by id. None when expired or never registered.
@@ -397,6 +610,7 @@ impl JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gadgetron_core::agent::{AgentBackend, AgentEffort, ModelSource};
 
     fn fresh_store() -> Arc<JobStore> {
         Arc::new(JobStore::new())
@@ -432,6 +646,48 @@ mod tests {
             tail.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
             vec![b"c".as_ref()]
         );
+    }
+
+    #[tokio::test]
+    async fn create_exclusive_rejects_a_second_live_job_and_snapshots_profile() {
+        let store = fresh_store();
+        let conv = Uuid::new_v4();
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: "gpt-5.5".into(),
+            effort: AgentEffort::High,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+        let first = store
+            .create_exclusive(
+                conv,
+                None,
+                Uuid::nil(),
+                "penny".into(),
+                Some(profile.clone()),
+            )
+            .await
+            .unwrap();
+        let snapshot = first.snapshot().await;
+        assert_eq!(snapshot.agent_profile, Some(profile));
+
+        let existing = store
+            .create_exclusive(conv, None, Uuid::nil(), "penny".into(), None)
+            .await
+            .expect_err("second unfinished job must be rejected");
+        let CreateJobError::Active(existing) = existing else {
+            panic!("expected active-job conflict");
+        };
+        assert_eq!(existing.job_id, first.job_id);
+
+        first.mark_complete().await;
+        assert!(store
+            .create_exclusive(conv, None, Uuid::nil(), "penny".into(), None)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

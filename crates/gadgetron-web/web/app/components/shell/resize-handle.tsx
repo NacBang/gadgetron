@@ -10,8 +10,8 @@ import { cn } from "@/lib/utils";
 // The component is "delta-only" — it reports `deltaPx` to the parent
 // on every pointermove, and the parent owns the persisted width /
 // ratio state. Keeping the handle stateless lets one component drive
-// either an absolute-pixel pane (left rail, evidence pane) or a
-// ratio-based pane (copilot 50/50) without conditional logic here.
+// either an absolute-pixel pane or a ratio-based pane without
+// conditional logic here.
 //
 // `setPointerCapture` is the load-bearing primitive: once captured,
 // pointermove fires on this element even when the cursor leaves it,
@@ -24,8 +24,7 @@ import { cn } from "@/lib/utils";
 interface ResizeHandleProps {
   /// Vertical = a tall thin bar between two side-by-side panes.
   /// Horizontal would be a wide thin bar between stacked panes —
-  /// not used yet but kept parametric so a future "monitoring grid
-  /// over chat" layout can plug in.
+  /// not used yet but kept parametric for future stacked layouts.
   orientation: "vertical" | "horizontal";
   /// Called on every pointermove during a drag with the delta since
   /// the last call. Sign convention:
@@ -37,6 +36,11 @@ interface ResizeHandleProps {
   keyboardStep?: number;
   className?: string;
   ariaLabel: string;
+  ariaControls?: string;
+  valueMin?: number;
+  valueMax?: number;
+  valueNow?: number;
+  onResizeTo?: (edge: "min" | "max") => void;
 }
 
 export function ResizeHandle({
@@ -45,6 +49,11 @@ export function ResizeHandle({
   keyboardStep = 16,
   className,
   ariaLabel,
+  ariaControls,
+  valueMin,
+  valueMax,
+  valueNow,
+  onResizeTo,
 }: ResizeHandleProps) {
   const lastClient = useRef<number | null>(null);
 
@@ -85,10 +94,11 @@ export function ResizeHandle({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      // Arrow keys nudge by `keyboardStep`. ←/↑ shrink the left/top
-      // pane, →/↓ grow it. Home / End / Esc are intentionally not
-      // handled — those keys would imply min/max/cancel semantics
-      // the parent owns the policy for; we keep this primitive lean.
+      if ((e.key === "Home" || e.key === "End") && onResizeTo) {
+        e.preventDefault();
+        onResizeTo(e.key === "Home" ? "min" : "max");
+        return;
+      }
       let delta = 0;
       if (orientation === "vertical") {
         if (e.key === "ArrowLeft") delta = -keyboardStep;
@@ -102,7 +112,7 @@ export function ResizeHandle({
         onResize(delta);
       }
     },
-    [orientation, onResize, keyboardStep],
+    [orientation, onResize, keyboardStep, onResizeTo],
   );
 
   return (
@@ -110,11 +120,15 @@ export function ResizeHandle({
       role="separator"
       aria-orientation={orientation}
       aria-label={ariaLabel}
+      aria-controls={ariaControls}
+      aria-valuemin={valueMin}
+      aria-valuemax={valueMax}
+      aria-valuenow={valueNow}
       tabIndex={0}
       data-testid="resize-handle"
       data-orientation={orientation}
       className={cn(
-        "group relative shrink-0 bg-zinc-800 transition-colors hover:bg-blue-500/40 focus:bg-blue-500/40 focus:outline-none",
+        "group relative shrink-0 bg-[var(--line)] transition-colors hover:bg-[var(--copper)] focus:bg-[var(--copper)] focus:outline-none",
         orientation === "vertical"
           ? "w-px cursor-col-resize"
           : "h-px cursor-row-resize",

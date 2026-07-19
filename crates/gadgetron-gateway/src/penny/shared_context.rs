@@ -410,6 +410,66 @@ fn workbench_err_to_gadgetron(err: WorkbenchHttpError) -> GadgetronError {
             },
             message: "Chat job not found.".into(),
         },
+        WorkbenchHttpError::BundleConflict { detail } => GadgetronError::Config(detail),
+        WorkbenchHttpError::BundleOperationFailed { code, detail } => {
+            GadgetronError::Config(format!("{code}: {detail}"))
+        }
+        WorkbenchHttpError::ContributionNotFound { contribution_id } => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: format!("contribution/{contribution_id}"),
+            },
+            message: "UI contribution not found.".into(),
+        },
+        WorkbenchHttpError::KnowledgeNotFound => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: "space-resource".into(),
+            },
+            message: "Knowledge resource not found or not visible.".into(),
+        },
+        WorkbenchHttpError::KnowledgeForbidden => GadgetronError::Forbidden,
+        WorkbenchHttpError::KnowledgeConflict => {
+            GadgetronError::Config("knowledge revision conflict".into())
+        }
+        WorkbenchHttpError::KnowledgeInvalidInput { detail } => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::InvalidQuery {
+                reason: detail.clone(),
+            },
+            message: detail,
+        },
+        WorkbenchHttpError::PolicyNotFound => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: "policy".into(),
+            },
+            message: "Policy revision not found.".into(),
+        },
+        WorkbenchHttpError::PolicyConflict { current_revision } => GadgetronError::Config(format!(
+            "policy revision conflict (current={current_revision})"
+        )),
+        WorkbenchHttpError::PolicyInvalidInput { detail } => GadgetronError::Config(detail),
+        WorkbenchHttpError::PolicyDenied { .. } => GadgetronError::Forbidden,
+        WorkbenchHttpError::PolicyUnavailable { detail } => {
+            GadgetronError::Config(format!("policy unavailable: {detail}"))
+        }
+        WorkbenchHttpError::PolicyBindingMismatch => {
+            GadgetronError::Config("approved request no longer matches its policy input".into())
+        }
+        WorkbenchHttpError::ManagerNotFound => GadgetronError::Knowledge {
+            kind: gadgetron_core::error::KnowledgeErrorKind::DocumentNotFound {
+                path: "manager-record".into(),
+            },
+            message: "Manager record not found or not visible.".into(),
+        },
+        WorkbenchHttpError::ManagerConflict => {
+            GadgetronError::Config("manager record revision conflict".into())
+        }
+        WorkbenchHttpError::ManagerInvalidInput { detail } => GadgetronError::Config(detail),
+        WorkbenchHttpError::ManagerIdentityRequired => GadgetronError::Forbidden,
+        WorkbenchHttpError::KnowledgeSourceFailed { code, detail, .. } => {
+            GadgetronError::Knowledge {
+                kind: gadgetron_core::error::KnowledgeErrorKind::InvalidQuery { reason: code },
+                message: detail,
+            }
+        }
     }
 }
 
@@ -710,11 +770,16 @@ mod tests {
             _actor_scopes: &[gadgetron_core::context::Scope],
         ) -> Result<gadgetron_core::workbench::WorkbenchRegisteredViewsResponse, WorkbenchHttpError>
         {
-            Ok(gadgetron_core::workbench::WorkbenchRegisteredViewsResponse { views: vec![] })
+            Ok(
+                gadgetron_core::workbench::WorkbenchRegisteredViewsResponse {
+                    capability_revision: None,
+                    views: vec![],
+                },
+            )
         }
         async fn view_data(
             &self,
-            _actor_scopes: &[gadgetron_core::context::Scope],
+            _actor: &gadgetron_core::context::TenantContext,
             view_id: &str,
         ) -> Result<gadgetron_core::workbench::WorkbenchViewData, WorkbenchHttpError> {
             Err(WorkbenchHttpError::ViewNotFound {
@@ -726,7 +791,12 @@ mod tests {
             _actor_scopes: &[gadgetron_core::context::Scope],
         ) -> Result<gadgetron_core::workbench::WorkbenchRegisteredActionsResponse, WorkbenchHttpError>
         {
-            Ok(gadgetron_core::workbench::WorkbenchRegisteredActionsResponse { actions: vec![] })
+            Ok(
+                gadgetron_core::workbench::WorkbenchRegisteredActionsResponse {
+                    capability_revision: None,
+                    actions: vec![],
+                },
+            )
         }
     }
 

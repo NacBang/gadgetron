@@ -1,0 +1,23 @@
+[package]
+name = "gadgetron-bundle-restaurant-research"
+version = "0.1.4"
+edition = "2021"
+license-file = "../../LICENSE"
+repository = "https://github.com/NacBang/gadgetron"
+rust-version = "1.80"
+description = "Independent Restaurant Research Bundle runtime"
+
+[dependencies]
+chrono = { workspace = true }
+gadgetron-bundle-runtime = { path = "../../crates/gadgetron-bundle-runtime" }
+gadgetron-bundle-sdk = { path = "../../crates/gadgetron-bundle-sdk" }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt", "sync"] }
+uuid = { workspace = true, features = ["serde", "v4"] }
+
+[dev-dependencies]
+hex = { workspace = true }
+sha2 = "0.11"

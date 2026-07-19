@@ -1,0 +1,15 @@
+{
+  "revision": "community-solution-distillation-v1",
+  "objective": "Persist a rollback-aware solution pattern and propose one cited Knowledge note for common Review.",
+  "inputs": ["core_collection_binding", "discussions", "claims", "contradictions"],
+  "domain_outputs": ["solution_pattern", "pattern_evidence"],
+  "core_review_output": ["create_note_candidate", "typed_cross_bundle_relations", "citations"],
+  "rules": [
+    "List the bound Topic's discussions and current patterns before writing.",
+    "A pattern must include problem signature, environment, procedure, rollback and an honest applicability status.",
+    "Persist supporting and contradicting evidence separately and never convert one successful anecdote into reproduced status.",
+    "Complete one community.solution-pattern-upsert and its community.pattern-evidence-upsert calls before returning the common Gardener create_note proposal.",
+    "Cross-Bundle Server applicability is a reviewed Knowledge relation proposal; do not write another Bundle's table or claim the relation is already accepted.",
+    "When the dossier or an ACL-filtered Knowledge tool supplies an existing Server note object id, include it in the create_note operation as properties.applies_to; never invent or infer a target id."
+  ]
+}

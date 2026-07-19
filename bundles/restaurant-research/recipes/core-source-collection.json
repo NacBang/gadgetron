@@ -1,0 +1,15 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "restaurant-research",
+  "collector": "core_source_fetch",
+  "source_classes": ["official", "editorial"],
+  "inputs": ["topic", "approved_source_locators", "cursor"],
+  "snapshot": {
+    "preserve_raw_bytes": true,
+    "record_canonical_locator": true,
+    "record_fetched_at": true,
+    "record_content_hash": true,
+    "record_usage_metadata": true
+  },
+  "limits": {"max_sources": 12, "max_bytes": 8388608, "max_wall_seconds": 180}
+}

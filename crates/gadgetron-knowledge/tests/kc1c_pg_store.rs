@@ -44,6 +44,14 @@ fn actor() -> AuthenticatedContext {
     AuthenticatedContext::system()
 }
 
+fn scoped_actor(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedContext {
+    AuthenticatedContext {
+        api_key_id: Uuid::new_v4(),
+        tenant_id,
+        real_user_id: Some(user_id),
+    }
+}
+
 /// Return true iff the local Postgres has the `vector` extension available.
 ///
 /// `PgHarness::new()` runs ALL workspace migrations, including
@@ -413,6 +421,86 @@ async fn kc1c_pg_store_append_candidate_unknown_event_errors() {
         }
         other => panic!("expected Knowledge(DocumentNotFound), got: {other:?}"),
     }
+
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn kc1c_pg_store_injects_actor_and_hides_cross_tenant_candidates() {
+    if !pg_available().await {
+        eprintln!("skipping kc1c actor boundary: pgvector unavailable");
+        return;
+    }
+    let harness = PgHarness::new().await;
+    let store = PgActivityCaptureStore::new(harness.pool().clone());
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let actor_a = scoped_actor(tenant_a, user_a);
+    let actor_b = scoped_actor(tenant_b, user_b);
+    let event = make_event(tenant_b, user_b, Uuid::new_v4());
+    let event_id = event.id;
+
+    store.append_activity(&actor_a, event).await.unwrap();
+    let stored: (Uuid, Uuid) =
+        sqlx::query_as("SELECT tenant_id, actor_user_id FROM activity_events WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(harness.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, (tenant_a, user_a));
+
+    let candidate = store
+        .append_candidate(
+            &actor_a,
+            event_id,
+            CandidateHint {
+                summary: "tenant A only".to_string(),
+                proposed_path: None,
+                tags: vec![],
+                reason: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(candidate.tenant_id, tenant_a);
+    assert!(store
+        .list_candidates(&actor_b, 10, false)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .get_candidate(&actor_b, candidate.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        store
+            .decide_candidate(
+                &actor_b,
+                CandidateDecision {
+                    candidate_id: candidate.id,
+                    decision: CandidateDecisionKind::Reject,
+                    decided_by_user_id: Some(user_b),
+                    decided_by_penny: false,
+                    rationale: None,
+                },
+            )
+            .await,
+        Err(GadgetronError::Knowledge {
+            kind: KnowledgeErrorKind::DocumentNotFound { .. },
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .list_candidates(&actor_a, 10, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     harness.cleanup().await;
 }

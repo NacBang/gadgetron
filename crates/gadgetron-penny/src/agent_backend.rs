@@ -5,14 +5,17 @@
 //! command mode, how stdin is shaped, how stream-json lines are interpreted, and
 //! which native session id should be persisted.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use gadgetron_core::agent::AgentBackend;
 use gadgetron_core::audit::{
     GadgetAuditEvent, GadgetAuditEventSink, GadgetCallOutcome, GadgetMetadata, GadgetTier,
 };
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
-use gadgetron_core::provider::{ChatChunk, ChatRequest};
+use gadgetron_core::provider::{ChatAuditContext, ChatChunk, ChatRequest};
 use uuid::Uuid;
 
 use crate::prompt::StdinMode;
@@ -22,6 +25,16 @@ use crate::stream::{
     codex_event_to_chat_chunks_ex, codex_tool_call_to_chat_chunks, event_to_chat_chunks_ex,
     parse_codex_exec_event, parse_event, CodexExecEvent, StreamJsonEvent,
 };
+
+/// Normalize backend-specific MCP event names to Gadgetron's canonical
+/// dotted gadget id. Claude and Codex must share this exact function so tool
+/// audit/policy behavior cannot drift by runtime.
+pub(crate) fn canonical_gadget_name(name: &str) -> String {
+    name.strip_prefix("knowledge.")
+        .or_else(|| name.strip_prefix("mcp__knowledge__"))
+        .unwrap_or(name)
+        .replace('_', ".")
+}
 
 /// Logical session phase before it is rendered into a backend-specific
 /// command/prompt shape.
@@ -166,6 +179,7 @@ pub(crate) struct BackendLineResult {
 pub(crate) enum BackendStreamHandler {
     Claude {
         has_streamed_deltas: bool,
+        pending_tool_calls: HashMap<String, PendingClaudeToolCall>,
     },
     Codex {
         has_streamed_deltas: bool,
@@ -185,6 +199,7 @@ impl BackendStreamHandler {
         match backend {
             AgentBackend::ClaudeCode => Self::Claude {
                 has_streamed_deltas: false,
+                pending_tool_calls: HashMap::new(),
             },
             AgentBackend::CodexExec => Self::Codex {
                 has_streamed_deltas: false,
@@ -208,6 +223,7 @@ impl BackendStreamHandler {
         match self {
             Self::Claude {
                 has_streamed_deltas,
+                pending_tool_calls,
             } => handle_claude_line(
                 line,
                 request,
@@ -216,6 +232,7 @@ impl BackendStreamHandler {
                 conversation_id,
                 claude_session_uuid,
                 has_streamed_deltas,
+                pending_tool_calls,
             ),
             Self::Codex {
                 has_streamed_deltas,
@@ -256,6 +273,7 @@ fn handle_claude_line(
     conversation_id: Option<&str>,
     claude_session_uuid: Option<&str>,
     has_streamed_deltas: &mut bool,
+    pending_tool_calls: &mut HashMap<String, PendingClaudeToolCall>,
 ) -> Result<Option<BackendLineResult>> {
     let event = match parse_event(line) {
         Ok(Some(event)) => event,
@@ -294,10 +312,12 @@ fn handle_claude_line(
     }
     let emitted_activity = emit_tool_audit_if_needed(
         &event,
+        pending_tool_calls,
         tool_metadata,
         audit_sink,
         conversation_id,
         claude_session_uuid,
+        request.audit_context.as_ref(),
     );
     let chunks = event_to_chat_chunks_ex(event, request, *has_streamed_deltas);
     Ok(Some(BackendLineResult {
@@ -358,13 +378,15 @@ fn handle_codex_line(
     {
         let include_start =
             should_emit_codex_tool_start(call_id.as_deref(), result.is_some(), started_tool_calls);
-        if include_start {
-            emit_codex_tool_audit_if_needed(
+        if let Some(result) = result {
+            emit_codex_tool_audit_result(
                 name,
                 input,
+                result.is_error,
                 tool_metadata,
                 audit_sink,
                 conversation_id,
+                request.audit_context.as_ref(),
             );
         }
         chunks_override = Some(codex_tool_call_to_chat_chunks(
@@ -374,7 +396,7 @@ fn handle_codex_line(
             request,
             include_start,
         ));
-        include_start
+        include_start || result.is_some()
     } else {
         false
     };
@@ -417,74 +439,141 @@ fn should_emit_codex_tool_start(
     started_tool_calls.insert(call_id.to_string())
 }
 
+pub(crate) struct PendingClaudeToolCall {
+    name: String,
+    input: serde_json::Value,
+    started_at: Instant,
+}
+
 pub(crate) fn emit_tool_audit_if_needed(
     event: &StreamJsonEvent,
+    pending: &mut HashMap<String, PendingClaudeToolCall>,
     tool_metadata: &HashMap<String, GadgetMetadata>,
     audit_sink: &dyn GadgetAuditEventSink,
     conversation_id: Option<&str>,
     claude_session_uuid: Option<&str>,
+    audit_context: Option<&ChatAuditContext>,
 ) -> bool {
-    let calls: Vec<(&str, &serde_json::Value)> = match event {
-        StreamJsonEvent::ToolUse { name, input, .. } => vec![(name.as_str(), input)],
+    let calls: Vec<(&str, &str, &serde_json::Value)> = match event {
+        StreamJsonEvent::ToolUse { id, name, input } => {
+            vec![(id.as_str(), name.as_str(), input)]
+        }
         StreamJsonEvent::Assistant { message } => message
             .content
             .iter()
             .filter_map(|b| match b {
-                crate::stream::ContentBlock::ToolUse { name, input, .. } => {
-                    Some((name.as_str(), input))
+                crate::stream::ContentBlock::ToolUse { id, name, input } => {
+                    Some((id.as_str(), name.as_str(), input))
                 }
                 _ => None,
             })
             .collect(),
-        _ => return false,
+        _ => Vec::new(),
     };
-    let mut emitted = false;
-    for (name, input) in calls {
-        let without_prefix = name.strip_prefix("mcp__knowledge__").unwrap_or(name);
-        let canonical = without_prefix.replace('_', ".");
-        let (tier, category) = match tool_metadata.get(canonical.as_str()) {
-            Some(meta) => (meta.tier, meta.category.clone()),
-            None => match tool_metadata.get(without_prefix) {
-                Some(meta) => (meta.tier, meta.category.clone()),
-                None => (GadgetTier::Read, "unknown".to_string()),
-            },
-        };
-        let arguments_summary = summarize_tool_input(input);
-        audit_sink.send(GadgetAuditEvent::GadgetCallCompleted {
-            gadget_name: canonical.clone(),
-            tier,
-            category,
-            outcome: GadgetCallOutcome::Success,
-            elapsed_ms: 0,
-            conversation_id: conversation_id.map(|s| s.to_string()),
-            claude_session_uuid: claude_session_uuid.map(|s| s.to_string()),
-            owner_id: None,
-            tenant_id: None,
-            arguments_summary,
-        });
-        emitted = true;
+    let mut activity = false;
+    for (id, name, input) in calls {
+        let canonical = canonical_gadget_name(name);
+        let is_product_gadget = name.starts_with("mcp__")
+            || tool_metadata.contains_key(name)
+            || tool_metadata.contains_key(canonical.as_str());
+        if is_product_gadget && !id.is_empty() && !pending.contains_key(id) {
+            pending.insert(
+                id.to_string(),
+                PendingClaudeToolCall {
+                    name: name.to_string(),
+                    input: input.clone(),
+                    started_at: Instant::now(),
+                },
+            );
+            activity = true;
+        }
     }
-    emitted
+
+    let results: Vec<(&str, bool)> = match event {
+        StreamJsonEvent::ToolResult {
+            tool_use_id,
+            is_error,
+            ..
+        } => vec![(tool_use_id.as_str(), *is_error)],
+        StreamJsonEvent::User { message } => message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                crate::stream::UserContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } => Some((tool_use_id.as_str(), *is_error)),
+                crate::stream::UserContentBlock::Unknown => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (id, is_error) in results {
+        let Some(call) = pending.remove(id) else {
+            continue;
+        };
+        emit_completed_tool_audit(
+            &call.name,
+            &call.input,
+            is_error,
+            call.started_at
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+            tool_metadata,
+            audit_sink,
+            conversation_id,
+            claude_session_uuid,
+            audit_context,
+        );
+        activity = true;
+    }
+    activity
 }
 
-fn emit_codex_tool_audit_if_needed(
+fn emit_codex_tool_audit_result(
     name: &str,
     input: &serde_json::Value,
+    is_error: bool,
     tool_metadata: &HashMap<String, GadgetMetadata>,
     audit_sink: &dyn GadgetAuditEventSink,
     conversation_id: Option<&str>,
+    audit_context: Option<&ChatAuditContext>,
 ) {
-    // Codex surfaces the same gadget under two shapes depending on the
-    // event family: `knowledge.wiki.search` (event_msg invocation
-    // server+tool) and `mcp__knowledge__wiki_search` (function_call
-    // namespace). Strip whichever prefix is present — chaining
-    // `unwrap_or(name)` between the two strips would silently restore
-    // the unstripped original whenever the second prefix doesn't match.
+    emit_completed_tool_audit(
+        name,
+        input,
+        is_error,
+        0,
+        tool_metadata,
+        audit_sink,
+        conversation_id,
+        None,
+        audit_context,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_completed_tool_audit(
+    name: &str,
+    input: &serde_json::Value,
+    is_error: bool,
+    elapsed_ms: u64,
+    tool_metadata: &HashMap<String, GadgetMetadata>,
+    audit_sink: &dyn GadgetAuditEventSink,
+    conversation_id: Option<&str>,
+    claude_session_uuid: Option<&str>,
+    audit_context: Option<&ChatAuditContext>,
+) {
+    // Agent runtimes surface the same gadget as `knowledge.wiki.search`,
+    // `mcp__knowledge__wiki_search`, or its canonical dotted id. Keep the
+    // metadata fallback compatible with all three shapes.
     let without_prefix = name
         .strip_prefix("knowledge.")
         .or_else(|| name.strip_prefix("mcp__knowledge__"))
         .unwrap_or(name);
-    let canonical = without_prefix.replace('_', ".");
+    let canonical = canonical_gadget_name(name);
     let (tier, category) = match tool_metadata.get(canonical.as_str()) {
         Some(meta) => (meta.tier, meta.category.clone()),
         None => match tool_metadata.get(without_prefix) {
@@ -496,12 +585,18 @@ fn emit_codex_tool_audit_if_needed(
         gadget_name: canonical,
         tier,
         category,
-        outcome: GadgetCallOutcome::Success,
-        elapsed_ms: 0,
+        outcome: if is_error {
+            GadgetCallOutcome::Error {
+                error_code: "agent_tool_result_error",
+            }
+        } else {
+            GadgetCallOutcome::Success
+        },
+        elapsed_ms,
         conversation_id: conversation_id.map(|s| s.to_string()),
-        claude_session_uuid: None,
-        owner_id: None,
-        tenant_id: None,
+        claude_session_uuid: claude_session_uuid.map(|s| s.to_string()),
+        owner_id: audit_context.and_then(|context| context.owner_id.clone()),
+        tenant_id: audit_context.map(|context| context.tenant_id.clone()),
         arguments_summary: summarize_tool_input(input),
     });
 }
@@ -564,6 +659,7 @@ mod tests {
             stream: true,
             stop: None,
             conversation_id: None,
+            audit_context: None,
         }
     }
 
@@ -614,9 +710,21 @@ mod tests {
         let mut handler = BackendStreamHandler::new(AgentBackend::CodexExec);
         let sink = CaptureSink::default();
         let line = r#"{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"call_1","invocation":{"server":"knowledge","tool":"wiki.write","arguments":{"name":"home"}},"result":{"Ok":{}}}}"#;
+        let mut request = req();
+        request.audit_context = Some(ChatAuditContext {
+            tenant_id: "tenant-1".into(),
+            owner_id: Some("owner-1".into()),
+        });
 
         handler
-            .handle_line(line, &req(), &metadata_with_wiki_write(), &sink, None, None)
+            .handle_line(
+                line,
+                &request,
+                &metadata_with_wiki_write(),
+                &sink,
+                None,
+                None,
+            )
             .expect("line handled")
             .expect("event recognized");
 
@@ -627,23 +735,27 @@ mod tests {
                 gadget_name,
                 tier,
                 category,
+                owner_id,
+                tenant_id,
                 ..
             } => {
                 assert_eq!(gadget_name, "wiki.write");
                 assert_eq!(*tier, GadgetTier::Write);
                 assert_eq!(category, "knowledge");
+                assert_eq!(owner_id.as_deref(), Some("owner-1"));
+                assert_eq!(tenant_id.as_deref(), Some("tenant-1"));
             }
             other => panic!("wrong event: {other:?}"),
         }
     }
 
-    /// The `function_call` namespace shape (`mcp__knowledge__wiki_write`)
-    /// must canonicalize to the same gadget name + tier.
+    /// The MCP namespace shape (`mcp__knowledge__wiki_write`) must
+    /// canonicalize to the same gadget name + tier after completion.
     #[test]
     fn codex_tool_audit_canonicalizes_mcp_namespace_names() {
         let mut handler = BackendStreamHandler::new(AgentBackend::CodexExec);
         let sink = CaptureSink::default();
-        let line = r#"{"type":"response_item","payload":{"type":"function_call","name":"wiki_write","namespace":"mcp__knowledge__","arguments":"{\"name\":\"home\"}","call_id":"call_2"}}"#;
+        let line = r#"{"type":"response_item","payload":{"type":"mcp_tool_call_end","name":"mcp__knowledge__wiki_write","arguments":{"name":"home"},"call_id":"call_2","result":{"Ok":{}}}}"#;
 
         handler
             .handle_line(line, &req(), &metadata_with_wiki_write(), &sink, None, None)
@@ -658,6 +770,60 @@ mod tests {
             } => {
                 assert_eq!(gadget_name, "wiki.write");
                 assert_eq!(*tier, GadgetTier::Write);
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_tool_audit_waits_for_result_and_records_errors() {
+        let mut handler = BackendStreamHandler::new(AgentBackend::ClaudeCode);
+        let sink = CaptureSink::default();
+        let start = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_3","name":"mcp__knowledge__wiki.write","input":{"name":"home"}}]}}"#;
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_3","content":"permission denied","is_error":true}]}}"#;
+
+        handler
+            .handle_line(
+                start,
+                &req(),
+                &metadata_with_wiki_write(),
+                &sink,
+                Some("conversation-1"),
+                Some("claude-session-1"),
+            )
+            .expect("start handled")
+            .expect("start recognized");
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "a tool request is not a completed call"
+        );
+
+        handler
+            .handle_line(
+                result,
+                &req(),
+                &metadata_with_wiki_write(),
+                &sink,
+                Some("conversation-1"),
+                Some("claude-session-1"),
+            )
+            .expect("result handled")
+            .expect("result recognized");
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            GadgetAuditEvent::GadgetCallCompleted {
+                gadget_name,
+                outcome,
+                conversation_id,
+                claude_session_uuid,
+                ..
+            } => {
+                assert_eq!(gadget_name, "wiki.write");
+                assert!(matches!(outcome, GadgetCallOutcome::Error { .. }));
+                assert_eq!(conversation_id.as_deref(), Some("conversation-1"));
+                assert_eq!(claude_session_uuid.as_deref(), Some("claude-session-1"));
             }
             other => panic!("wrong event: {other:?}"),
         }
@@ -697,5 +863,15 @@ mod tests {
             }
             other => panic!("wrong error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn both_backend_tool_name_shapes_share_one_canonicalizer() {
+        assert_eq!(
+            canonical_gadget_name("mcp__knowledge__wiki_write"),
+            "wiki.write"
+        );
+        assert_eq!(canonical_gadget_name("knowledge.wiki.write"), "wiki.write");
+        assert_eq!(canonical_gadget_name("wiki.write"), "wiki.write");
     }
 }

@@ -13,12 +13,13 @@ pub mod shared_context;
 pub mod tools;
 
 pub use config::{
-    AgentBackend, AgentBrainSettings, AgentBrainSettingsSource, AgentConfig, AgentEffort,
-    BrainConfig, BrainMode, BrainShimConfig, CodexApprovalPolicy, CodexAuthMode, CodexConfig,
-    CodexSandboxMode, DestructiveGadgetsConfig, ExtraConfirmation, GadgetMode, GadgetsConfig,
-    ModelSource, UpdateAgentBrainSettingsRequest, WriteGadgetsConfig,
+    classify_agent_task, AgentBackend, AgentBrainSettings, AgentBrainSettingsSource, AgentConfig,
+    AgentEffort, AgentTaskComplexity, BrainConfig, BrainMode, BrainShimConfig, CodexApprovalPolicy,
+    CodexAuthMode, CodexConfig, CodexSandboxMode, ConversationAgentProfile,
+    DestructiveGadgetsConfig, ExtraConfirmation, GadgetMode, GadgetsConfig, ModelSource,
+    UpdateAgentBrainSettingsRequest, WriteGadgetsConfig, AUTO_MODEL_ID,
 };
 pub use tools::{
-    GadgetDispatcher, GadgetError, GadgetModeReconfigurer, GadgetProvider, GadgetResult,
-    GadgetSchema, GadgetTier,
+    DynamicGadgetSurface, GadgetDispatchContext, GadgetDispatcher, GadgetError,
+    GadgetModeReconfigurer, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
 };

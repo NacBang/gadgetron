@@ -1,0 +1,27 @@
+[package]
+name = "gadgetron-bundle-social-media-intelligence"
+version = "0.1.0"
+edition = "2021"
+license-file = "../../LICENSE"
+repository = "https://github.com/NacBang/gadgetron"
+rust-version = "1.80"
+description = "Independent Social Media Intelligence Bundle runtime"
+
+[[bin]]
+name = "social-media-intelligence"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+gadgetron-bundle-runtime = { path = "../../crates/gadgetron-bundle-runtime" }
+gadgetron-bundle-sdk = { path = "../../crates/gadgetron-bundle-sdk" }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "macros", "net", "rt"] }
+uuid = { workspace = true, features = ["serde", "v4"] }
+
+[dev-dependencies]
+hex = { workspace = true }
+sha2 = "0.11"

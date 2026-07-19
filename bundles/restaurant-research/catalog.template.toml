@@ -1,0 +1,6 @@
+[bundle]
+id = "restaurant-research"
+version = "0.1.4"
+required_scope = "management"
+
+allow_direct_actions = false

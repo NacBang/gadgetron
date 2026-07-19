@@ -22,8 +22,10 @@ unless you prefer to remain anonymous.
 
 ## Supported versions
 
-Only the **latest release** receives security fixes today. The project
-is at v0.x — we will publish a clearer support policy when we cut a 1.0.
+Until `v1.0.0` is tagged, development releases do not carry a production
+support promise. After 1.0, the latest `1.0.x` patch is the supported line and
+receives security fixes; an older patch may need to be upgraded before a defect
+can be reproduced. See the [packaged support scope](docs/manual/support.md).
 
 ## Scope
 

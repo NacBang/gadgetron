@@ -8,8 +8,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { toast } from "sonner";
 import { useAuth } from "./auth-context";
 import { getApiBase } from "./workbench-client";
+import { knowledgeSearchHref } from "./wiki-link";
 
 // Live evidence feed: subscribes to /workbench/events/ws once per session,
 // keeps the most recent 50 read-tier tool calls + knowledge-category
@@ -33,37 +35,8 @@ export interface EvidenceItem {
   href?: string | null;
 }
 
-/// One host the operator (or Penny on their behalf) has touched in the
-/// current chat. Surfaced in the evidence pane as a collapsed card so
-/// the operator can see "I've been talking about these N servers"
-/// without scrolling tool-call history.
-///
-/// Bus source: `tool_call_completed` events whose `tool_name` starts
-/// with `server.` AND whose parsed `arguments_summary` carries an
-/// `id` UUID. `server.list` (no host id) is intentionally skipped —
-/// it doesn't bind the chat to one specific host.
-export interface ServerContextItem {
-  /// `HostRecord.id` — UUID. Stable key into `/api/v1/web/workbench/
-  /// servers/{id}/metrics` for the live drawer fetch.
-  hostId: string;
-  /// Last `server.*` tool call's tool_name (e.g. `server.stats`).
-  /// Surfaces what Penny was doing with the host so the operator can
-  /// recall "ah I asked it to check journal logs", not just "host X".
-  lastToolName: string;
-  /// `Date.now()` of the most recent reference. Used to sort the stack
-  /// so the most-recently-discussed host floats to the top.
-  lastSeenAt: number;
-  /// Total `server.*` calls touching this host in the current
-  /// conversation. Hint: high number = "Penny keeps coming back to
-  /// this host" → operator probably wants live status.
-  mentionCount: number;
-}
-
 interface EvidenceContextValue {
   items: EvidenceItem[];
-  /// Host-keyed roll-up of `server.*` tool calls in the active chat.
-  /// Sorted by `lastSeenAt` descending (most recent first).
-  serverContext: ServerContextItem[];
   wsStatus: "disconnected" | "connecting" | "open" | "closed";
   clear: () => void;
 }
@@ -100,19 +73,17 @@ function deriveHref(
   if (!args) {
     // Defaults: tool-level jumps even without args.
     if (name === "wiki.list" || name === "wiki.search" || name === "wiki.get") {
-      return "/web/wiki";
+      return knowledgeSearchHref(null, "/web/knowledge");
     }
     return null;
   }
   if (name === "wiki.get" || name === "wiki.read") {
     const page = typeof args.name === "string" ? args.name : null;
-    return page ? `/web/wiki?page=${encodeURIComponent(page)}` : "/web/wiki";
+    return knowledgeSearchHref(page, "/web/knowledge");
   }
   if (name === "wiki.search" || name === "wiki.list") {
     const q = typeof args.query === "string" ? args.query : "";
-    return q
-      ? `/web/wiki?q=${encodeURIComponent(q)}`
-      : "/web/wiki";
+    return knowledgeSearchHref(q, "/web/knowledge");
   }
   if (name === "web.search") {
     const q = typeof args.query === "string" ? args.query : "";
@@ -196,41 +167,19 @@ function toEvidenceItem(ev: Record<string, unknown>): EvidenceItem | null {
 }
 
 const MAX_ITEMS = 50;
-/// UUID-shaped string check for `args.id` — the host_id field is a
-/// real UUID (per server-monitor schemas, see `bundles/server-monitor/
-/// src/gadgets.rs::schema_server_*`). Validating here avoids raising a
-/// card on an off-by-one accident where `arguments_summary` JSON drifts
-/// to e.g. `{"id": "audit_log"}` for an unrelated tool that shares the
-/// `server.` prefix in some future bundle.
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/// Pull a host id out of a `tool_call_completed` event when the tool
-/// name targets a single host. Returns null for `server.list`,
-/// `server.add`, and any non-`server.*` tool. `server.remove` is
-/// intentionally surfaced too — even though the host is going away,
-/// the operator still benefits from seeing its last-known card while
-/// the destructive call resolves.
-function deriveServerContextRef(
-  toolName: string,
-  args: Record<string, unknown> | null,
-): { hostId: string; toolName: string } | null {
-  if (!toolName.startsWith("server.")) return null;
-  if (toolName === "server.list" || toolName === "server.add") return null;
-  if (!args) return null;
-  const id = args.id;
-  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
-  return { hostId: id, toolName };
-}
 
 export function EvidenceProvider({ children }: { children: ReactNode }) {
   const { apiKey, identity } = useAuth();
   const [items, setItems] = useState<EvidenceItem[]>([]);
-  const [serverContext, setServerContext] = useState<ServerContextItem[]>([]);
   const [wsStatus, setWsStatus] = useState<
     "disconnected" | "connecting" | "open" | "closed"
   >("disconnected");
   const wsRef = useRef<WebSocket | null>(null);
+  // Fingerprints this session actually toasted as firing — so a resolve
+  // for an alert the user never saw fire (connected after the fire edge;
+  // the bus has no backfill) only dismisses, it doesn't pop a stray
+  // "Resolved: …" success toast.
+  const firedAlertsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     // Either an API key OR a logged-in session is enough — the gateway
@@ -258,30 +207,27 @@ export function EvidenceProvider({ children }: { children: ReactNode }) {
           if (item) {
             setItems((prev) => [item, ...prev].slice(0, MAX_ITEMS));
           }
-          // 2. Server-context cards (host-id-keyed roll-up). Driven
-          //    by the same `tool_call_completed` events but with a
-          //    different filter — a `server.stats` call is "evidence"
-          //    AND a "host context update" simultaneously.
-          if (parsed.type === "tool_call_completed") {
-            const toolName = String(parsed.tool_name ?? "");
-            const argsRaw = parsed.arguments_summary as
-              | string
-              | null
-              | undefined;
-            const args = parseArgsJson(argsRaw);
-            const ref = deriveServerContextRef(toolName, args);
-            if (ref) {
-              const now = Date.now();
-              setServerContext((prev) => {
-                const next = prev.filter((h) => h.hostId !== ref.hostId);
-                const existing = prev.find((h) => h.hostId === ref.hostId);
-                next.unshift({
-                  hostId: ref.hostId,
-                  lastToolName: ref.toolName,
-                  lastSeenAt: now,
-                  mentionCount: (existing?.mentionCount ?? 0) + 1,
-                });
-                return next;
+          // 2. Bundle alerts — surface as a shell-wide
+          //    toast keyed by fingerprint so a re-notify replaces rather
+          //    than stacks, and a resolve dismisses it.
+          if (parsed.type === "alert_fired") {
+            const sev = String(parsed.severity ?? "");
+            const message = String(parsed.message ?? "Alert");
+            const fp = String(parsed.fingerprint ?? "");
+            const opts = {
+              id: fp || undefined,
+              duration: sev === "critical" ? Infinity : 12000,
+            };
+            if (sev === "critical") toast.error(message, opts);
+            else toast.warning(message, opts);
+            if (fp) firedAlertsRef.current.add(fp);
+          } else if (parsed.type === "alert_resolved") {
+            const fp = String(parsed.fingerprint ?? "");
+            if (fp) toast.dismiss(fp);
+            // Only celebrate a resolve the user actually saw fire.
+            if (fp && firedAlertsRef.current.delete(fp)) {
+              toast.success(`Resolved: ${String(parsed.message ?? "")}`, {
+                duration: 5000,
               });
             }
           }
@@ -301,12 +247,8 @@ export function EvidenceProvider({ children }: { children: ReactNode }) {
     <EvidenceContext.Provider
       value={{
         items,
-        serverContext,
         wsStatus,
-        clear: () => {
-          setItems([]);
-          setServerContext([]);
-        },
+        clear: () => setItems([]),
       }}
     >
       {children}
@@ -319,7 +261,6 @@ export function useEvidence(): EvidenceContextValue {
   if (!ctx) {
     return {
       items: [],
-      serverContext: [],
       wsStatus: "disconnected",
       clear: () => {},
     };

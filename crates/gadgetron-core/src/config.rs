@@ -179,6 +179,10 @@ pub struct WebConfig {
     /// bundle's actions.
     #[serde(default)]
     pub bundles_dir: Option<String>,
+    /// Persistent external Bundle instance state. Must remain outside
+    /// `bundles_dir` so package uninstall never deletes user data.
+    #[serde(default = "default_bundle_state_dir")]
+    pub bundle_state_dir: String,
     /// Bundle install-time signature verification.
     /// Operators who trust a publisher's Ed25519 public key add it
     /// here; then `POST /admin/bundles` requires a matching detached
@@ -234,6 +238,9 @@ fn default_web_enabled() -> bool {
 fn default_api_base_path() -> String {
     "/v1".to_string()
 }
+fn default_bundle_state_dir() -> String {
+    ".gadgetron/bundle-state".to_string()
+}
 
 impl Default for WebConfig {
     fn default() -> Self {
@@ -242,6 +249,7 @@ impl Default for WebConfig {
             api_base_path: default_api_base_path(),
             catalog_path: None,
             bundles_dir: None,
+            bundle_state_dir: default_bundle_state_dir(),
             bundle_signing: BundleSigningConfig::default(),
             // Default OFF. Operator running the binary on plain HTTP
             // (dev, LAN, no reverse proxy) would otherwise see every
@@ -273,6 +281,11 @@ impl WebConfig {
                 "web.api_base_path must start with '/'; got {:?}",
                 self.api_base_path
             )));
+        }
+        if self.bundle_state_dir.trim().is_empty() {
+            return Err(crate::error::GadgetronError::Config(
+                "web.bundle_state_dir must not be empty".into(),
+            ));
         }
         Ok(())
     }
@@ -547,7 +560,7 @@ impl AppConfig {
         config.resolve_env_vars();
         config.web.validate()?;
         config.agent.validate(&config.providers)?;
-        config.agent.warn_unusable_modes_in_p2a();
+        config.agent.warn_unusable_agent_settings();
         config.validate_bundles()?;
         Ok(config)
     }

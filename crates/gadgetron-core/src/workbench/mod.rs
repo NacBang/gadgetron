@@ -6,7 +6,10 @@
 
 pub mod approval;
 
-pub use approval::{ApprovalError, ApprovalRequest, ApprovalState, ApprovalStore};
+pub use approval::{
+    ApprovalError, ApprovalPolicyBinding, ApprovalRequest, ApprovalResumeStrategy, ApprovalState,
+    ApprovalStore,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -161,8 +164,18 @@ pub enum WorkbenchActionPlacement {
 #[serde(rename_all = "snake_case")]
 pub enum WorkbenchRendererKind {
     Table,
+    List,
+    Detail,
+    Graph,
+    Form,
     Timeline,
+    Dashboard,
     Cards,
+    Calendar,
+    Map,
+    Telemetry,
+    Timeseries,
+    Operation,
     MarkdownDoc,
 }
 
@@ -189,6 +202,9 @@ pub struct WorkbenchViewDescriptor {
     pub source_id: String,
     pub placement: WorkbenchViewPlacement,
     pub renderer: WorkbenchRendererKind,
+    /// Optional signed profile rendered by the Core Knowledge collection UI.
+    #[serde(default)]
+    pub collection_profile: Option<String>,
     /// Same-origin canonical route, e.g. `/api/v1/web/workbench/views/<id>/data`.
     pub data_endpoint: String,
     pub refresh_seconds: Option<u32>,
@@ -268,13 +284,193 @@ pub struct InvokeWorkbenchActionResponse {
 /// Response for `GET /api/v1/web/workbench/views`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbenchRegisteredViewsResponse {
+    /// Opaque digest of the actor-visible signed Bundle capability snapshot.
+    /// `None` means no dynamic Bundle surface is wired in this build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_revision: Option<String>,
     pub views: Vec<WorkbenchViewDescriptor>,
 }
 
 /// Response for `GET /api/v1/web/workbench/actions`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbenchRegisteredActionsResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_revision: Option<String>,
     pub actions: Vec<WorkbenchActionDescriptor>,
+}
+
+/// One enabled Bundle represented in the actor-visible capability aggregate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkbenchCapabilityBundle {
+    pub bundle_id: String,
+    pub bundle_version: String,
+    pub package_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_revision: Option<String>,
+    pub published_at_ms: u64,
+    pub gadget_names: Vec<String>,
+    pub workspace_ids: Vec<String>,
+    pub action_ids: Vec<String>,
+    pub contribution_ids: Vec<String>,
+}
+
+/// Signed declarative contribution after Bundle-local references have been
+/// expanded into globally stable ids. The response contains no HTML, CSS,
+/// scripts, remote asset URLs, credentials, or executable paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkbenchUiContributionDescriptor {
+    pub id: String,
+    pub owner_bundle: String,
+    pub kind: WorkbenchUiContributionKind,
+    pub label: String,
+    pub placement: WorkbenchUiContributionPlacement,
+    pub order_hint: i32,
+    pub icon: WorkbenchUiIconToken,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation_section: Option<WorkbenchNavigationSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_registry: Option<WorkbenchTargetRegistryKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_profile: Option<WorkbenchTargetProfileDescriptor>,
+    pub required_scopes: Vec<String>,
+    pub empty_state: String,
+    pub error_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gadget_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_schema_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<WorkbenchRendererKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkbenchTargetProfileDescriptor {
+    pub id: String,
+    pub label: String,
+    pub default: bool,
+    pub allowed_operations: Vec<String>,
+    #[serde(default)]
+    pub setup_features: Vec<String>,
+    pub bootstrap_input_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_route: Option<WorkbenchTargetSshRouteDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkbenchTargetSshRouteDescriptor {
+    SshParent {
+        activation_parameter: String,
+        activation_value: String,
+        parent_target_parameter: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkbenchUiContributionKind {
+    Workspace,
+    Navigation,
+    DashboardWidget,
+    Command,
+    SearchResult,
+    SubjectContext,
+    ToolResult,
+    ReviewPresentation,
+    JobPresentation,
+    KnowledgeContribution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkbenchUiContributionPlacement {
+    Main,
+    PrimaryNavigation,
+    SecondaryNavigation,
+    Dashboard,
+    CommandPalette,
+    ContextMenu,
+    Search,
+    PennyContext,
+    ToolResult,
+    Review,
+    Jobs,
+    Knowledge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkbenchNavigationSection {
+    Workspace,
+    Knowledge,
+    Operations,
+    Diagnostics,
+    Planning,
+    Oversight,
+    Management,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkbenchTargetRegistryKind {
+    Ssh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkbenchUiIconToken {
+    Activity,
+    Calendar,
+    Dashboard,
+    Document,
+    Fleet,
+    Graph,
+    Jobs,
+    Knowledge,
+    List,
+    Logs,
+    Map,
+    Review,
+    Search,
+    Settings,
+    Table,
+    Terminal,
+    Timeline,
+}
+
+/// One actor-filtered immutable discovery response. Consumers replace the
+/// whole value when `revision` changes; they never join independently fetched
+/// nav/view/action revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkbenchCapabilityProjectionResponse {
+    pub revision: String,
+    pub bundles: Vec<WorkbenchCapabilityBundle>,
+    pub ui_contributions: Vec<WorkbenchUiContributionDescriptor>,
+    pub views: Vec<WorkbenchViewDescriptor>,
+    pub actions: Vec<WorkbenchActionDescriptor>,
+}
+
+impl Default for WorkbenchCapabilityProjectionResponse {
+    fn default() -> Self {
+        Self {
+            revision: "0".repeat(64),
+            bundles: Vec::new(),
+            ui_contributions: Vec::new(),
+            views: Vec::new(),
+            actions: Vec::new(),
+        }
+    }
 }
 
 /// Response for `GET /api/v1/web/workbench/knowledge-status`.
@@ -291,6 +487,72 @@ pub struct WorkbenchKnowledgeStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbenchViewData {
     pub view_id: String,
+    /// Exact signed capability snapshot used to select a dynamic Bundle
+    /// workspace. Static Core views omit this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_revision: Option<String>,
     /// Typed renderer payload. Raw HTML is forbidden; use typed renderer shapes.
     pub payload: serde_json::Value,
+}
+
+/// Data returned for one actor-visible signed UI contribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkbenchContributionData {
+    pub contribution_id: String,
+    pub capability_revision: String,
+    /// Typed renderer payload. Raw HTML/script/style/remote code is forbidden.
+    pub payload: serde_json::Value,
+}
+
+/// Live declarative workspace surface supplied by enabled external Bundles.
+///
+/// Implementors publish only signed, enabled, healthy descriptors. Discovery
+/// is actor-filtered and data reads return through the same authenticated
+/// Gadget boundary as chat and direct actions. Core owns this generic seam;
+/// domain Bundle crates never link into the gateway.
+#[async_trait::async_trait]
+pub trait DynamicWorkbenchSurface: Send + Sync + 'static {
+    fn visible_views(&self, actor_scopes: &[crate::context::Scope])
+        -> Vec<WorkbenchViewDescriptor>;
+
+    fn visible_actions(
+        &self,
+        actor_scopes: &[crate::context::Scope],
+    ) -> Vec<WorkbenchActionDescriptor>;
+
+    fn find_action(
+        &self,
+        actor_scopes: &[crate::context::Scope],
+        action_id: &str,
+    ) -> Option<WorkbenchActionDescriptor>;
+
+    /// Return one actor-filtered immutable Bundle capability aggregate.
+    /// Existing surface implementors may rely on the empty default until they
+    /// adopt the signed contribution contract.
+    fn capability_projection(
+        &self,
+        _actor_scopes: &[crate::context::Scope],
+    ) -> WorkbenchCapabilityProjectionResponse {
+        WorkbenchCapabilityProjectionResponse::default()
+    }
+
+    async fn load_view_data(
+        &self,
+        context: crate::agent::tools::GadgetDispatchContext,
+        actor_scopes: &[crate::context::Scope],
+        view_id: &str,
+    ) -> Result<WorkbenchViewData, crate::agent::tools::GadgetError>;
+
+    /// Load data for a signed contribution whose Gadget reference is fixed by
+    /// the enabled package. The caller supplies no Gadget name or arguments.
+    async fn load_contribution_data(
+        &self,
+        _context: crate::agent::tools::GadgetDispatchContext,
+        _actor_scopes: &[crate::context::Scope],
+        contribution_id: &str,
+    ) -> Result<WorkbenchContributionData, crate::agent::tools::GadgetError> {
+        Err(crate::agent::tools::GadgetError::UnknownGadget(
+            contribution_id.to_string(),
+        ))
+    }
 }

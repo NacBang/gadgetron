@@ -6,3 +6,7 @@ export { PageToolbar } from "./page-toolbar";
 export { RecordRow, ResponsiveRecordList } from "./responsive-record-list";
 export { StatusBadge, statusLabel, type WorkbenchStatus } from "./status-badge";
 export { WorkbenchPage } from "./workbench-page";
+export { DeclarativeRenderer, asRecord, collection, scalarText, type DeclarativeRowAction, type PlatformRendererState } from "./declarative-renderer";
+export { SchemaForm } from "./schema-form";
+export { PlatformScopeChip } from "./platform-scope-chip";
+export { InteractiveGraphRenderer } from "./interactive-graph-renderer";

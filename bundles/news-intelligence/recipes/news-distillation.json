@@ -1,0 +1,15 @@
+{
+  "revision": "news-distillation-v2",
+  "objective": "Persist a human-readable News briefing, then propose one source-backed Knowledge note for common Review.",
+  "inputs": ["core_collection_binding", "events", "claims", "source_diversity", "knowledge_candidate"],
+  "domain_outputs": ["briefing"],
+  "core_review_output": ["create_note_candidate", "citations"],
+  "rules": [
+    "Use the exact Core-verified collection_id as topic_id. List that Topic's Events and each Event's Claims before writing.",
+    "Lead with what changed, why it matters and what remains unknown.",
+    "Show supporting and contradicting evidence and source-class diversity.",
+    "Complete one successful news.briefing-upsert for the bound Topic before returning the final response; never claim success without the tool result.",
+    "After the domain write succeeds, return exactly the Core Gardener JSON requested in the user message with one create_note operation and source citations. This operation is a Review proposal, not an already-written note.",
+    "Send cross-Bundle relations through that common Review proposal before Shared Knowledge Mesh publication. Do not ask the user for approval inside this background job."
+  ]
+}

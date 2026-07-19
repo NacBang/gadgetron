@@ -254,6 +254,7 @@ mod tests {
             stream: false,
             stop: None,
             conversation_id: None,
+            audit_context: None,
         }
     }
 

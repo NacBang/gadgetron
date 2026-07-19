@@ -1,0 +1,326 @@
+manifest_version = 3
+
+[bundle]
+id = "restaurant-research"
+version = "0.1.4"
+class = "intelligence"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.6.8, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/restaurant-research"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 192
+open_files = 48
+cpu_seconds = 30
+
+[[permissions]]
+id = "restaurant-read"
+kind = "database"
+description = "Read tenant-scoped Restaurant Research records"
+resources = ["postgres:table:restaurant_branches", "postgres:table:restaurant_menu_items", "postgres:table:restaurant_review_snapshots", "postgres:table:restaurant_recommendations", "postgres:table:restaurant_visit_outcomes"]
+
+[[permissions]]
+id = "restaurant-write"
+kind = "database"
+description = "Write tenant-scoped Restaurant Research records through Core-compiled mutations"
+resources = ["postgres:table:restaurant_branches", "postgres:table:restaurant_menu_items", "postgres:table:restaurant_review_snapshots", "postgres:table:restaurant_recommendations", "postgres:table:restaurant_visit_outcomes"]
+
+[capabilities]
+gadget_namespaces = ["restaurant"]
+
+[[capabilities.provides]]
+id = "gadgetron.intelligence.restaurant-context"
+version = "1.0.0"
+description = "Cited restaurant research context through the Core knowledge exchange"
+
+[[capabilities.domain_schemas]]
+id = "restaurant-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "121ca49ed56635d1feb402463d1ca0d7d80e906442d69170a5ef78575a9654da"
+
+[[capabilities.gadgets]]
+name = "restaurant.branch-list"
+description = "List cited restaurant branches"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.branch-get"
+description = "Read one branch with its source revision"
+tier = "read"
+input_schema = { type = "object", properties = { branch_id = { type = "string", format = "uuid", title = "Branch" } }, required = ["branch_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.branch-upsert"
+description = "Add or update a restaurant branch"
+tier = "write"
+input_schema = { type = "object", properties = { branch_id = { type = "string", format = "uuid", title = "Branch ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" }, name = { type = "string", minLength = 1, maxLength = 200, title = "Name" }, address = { type = "string", minLength = 1, maxLength = 500, title = "Address" }, cuisine = { type = "string", minLength = 1, maxLength = 120, title = "Cuisine" }, status = { type = "string", enum = ["open", "temporarily_closed", "closed", "unknown"], title = "Status" }, source_id = { type = "string", format = "uuid", title = "Knowledge source" }, source_revision = { type = "integer", minimum = 1, title = "Source revision" }, observed_at = { type = "string", format = "date-time", title = "Observed at" } }, required = ["name", "address", "cuisine", "status", "source_id", "source_revision", "observed_at"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "restaurant.menu-list"
+description = "List observed menu items for one branch"
+tier = "read"
+input_schema = { type = "object", properties = { branch_id = { type = "string", format = "uuid", title = "Branch" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, required = ["branch_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.menu-upsert"
+description = "Add or update a menu observation"
+tier = "write"
+input_schema = { type = "object", properties = { menu_item_id = { type = "string", format = "uuid", title = "Menu item ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" }, branch_id = { type = "string", format = "uuid", title = "Branch" }, name = { type = "string", minLength = 1, maxLength = 200, title = "Item" }, category = { type = "string", minLength = 1, maxLength = 100, title = "Category" }, price_minor = { type = "integer", minimum = 0, title = "Price (minor units)" }, currency = { type = "string", pattern = "^[A-Z]{3}$", title = "Currency" }, dietary_notes = { type = "string", maxLength = 500, title = "Dietary notes" }, allergen_notes = { type = "string", maxLength = 500, title = "Allergen notes" }, source_id = { type = "string", format = "uuid", title = "Knowledge source" }, source_revision = { type = "integer", minimum = 1, title = "Source revision" }, observed_at = { type = "string", format = "date-time", title = "Observed at" } }, required = ["branch_id", "name", "category", "source_id", "source_revision", "observed_at"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "restaurant.review-list"
+description = "List bounded review snapshots for one branch"
+tier = "read"
+input_schema = { type = "object", properties = { branch_id = { type = "string", format = "uuid", title = "Branch" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 50 } }, required = ["branch_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.review-upsert"
+description = "Add or update a review snapshot"
+tier = "write"
+input_schema = { type = "object", properties = { review_id = { type = "string", format = "uuid", title = "Review ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" }, branch_id = { type = "string", format = "uuid", title = "Branch" }, source_name = { type = "string", minLength = 1, maxLength = 120, title = "Source" }, passage = { type = "string", minLength = 1, maxLength = 2000, title = "Observed passage" }, bias_context = { type = "string", maxLength = 500, title = "Bias context" }, sentiment = { type = "string", enum = ["positive", "mixed", "negative", "unrated"], title = "Sentiment" }, source_id = { type = "string", format = "uuid", title = "Knowledge source" }, source_revision = { type = "integer", minimum = 1, title = "Source revision" }, captured_at = { type = "string", format = "date-time", title = "Captured at" } }, required = ["branch_id", "source_name", "passage", "sentiment", "source_id", "source_revision", "captured_at"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "restaurant.recommendation-list"
+description = "List current source-backed restaurant recommendations"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.recommend"
+description = "Save or update a restaurant recommendation"
+tier = "write"
+input_schema = { type = "object", properties = { recommendation_id = { type = "string", format = "uuid", title = "Recommendation ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" }, branch_id = { type = "string", format = "uuid", title = "Branch" }, query = { type = "string", minLength = 1, maxLength = 500, title = "Need" }, reason = { type = "string", minLength = 1, maxLength = 1000, title = "Why this fits" }, conditions = { type = "string", maxLength = 1000, title = "Conditions" }, freshness = { type = "string", enum = ["current", "aging", "stale", "conflicted"], title = "Evidence freshness" }, supporting_source_id = { type = "string", format = "uuid", title = "Supporting source" }, supporting_source_revision = { type = "integer", minimum = 1, title = "Supporting revision" }, contradicting_source_id = { type = "string", format = "uuid", title = "Contradicting source" }, contradicting_source_revision = { type = "integer", minimum = 1, title = "Contradicting revision" }, valid_at = { type = "string", format = "date-time", title = "Valid at" } }, required = ["branch_id", "query", "reason", "freshness", "supporting_source_id", "supporting_source_revision", "valid_at"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "restaurant.compare"
+description = "Compare two restaurants"
+tier = "read"
+input_schema = { type = "object", properties = { branch_id = { type = "string", format = "uuid", title = "First branch" }, compare_to_branch_id = { type = "string", format = "uuid", title = "Second branch" } }, required = ["branch_id", "compare_to_branch_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.research"
+description = "Prepare a bounded Core-source research handoff; performs no network request"
+tier = "read"
+input_schema = { type = "object", properties = { question = { type = "string", minLength = 1, maxLength = 500 }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 } }, required = ["question", "source_id", "source_revision"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "restaurant.record-visit-outcome"
+description = "Record a restaurant visit"
+tier = "write"
+input_schema = { type = "object", properties = { outcome_id = { type = "string", format = "uuid", title = "Outcome ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" }, recommendation_id = { type = "string", format = "uuid", title = "Recommendation" }, visited_at = { type = "string", format = "date-time", title = "Visited at" }, result = { type = "string", enum = ["better_than_expected", "as_expected", "worse_than_expected", "not_visited"], title = "Result" }, feedback = { type = "string", maxLength = 2000, title = "Feedback" }, actual_cost_minor = { type = "integer", minimum = 0, title = "Actual cost (minor units)" }, currency = { type = "string", pattern = "^[A-Z]{3}$", title = "Currency" } }, required = ["recommendation_id", "visited_at", "result"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "restaurant.subject-context"
+description = "Build bounded Penny context for one recommendation"
+tier = "read"
+input_schema = { type = "object", properties = { recommendation_id = { type = "string", format = "uuid" } }, required = ["recommendation_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "restaurant.plan-summary"
+description = "Summarize recommendation freshness and conflicts for Dashboard"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.jobs]]
+id = "restaurant-core-source-research"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = ["restaurant.research", "restaurant.branch-upsert", "restaurant.menu-upsert", "restaurant.review-upsert", "restaurant.recommend"]
+budget = { max_gadget_calls = 8, max_wall_seconds = 180 }
+
+[[capabilities.collection_profiles]]
+id = "restaurant-public-sources"
+label = "Restaurant source collection"
+description = "Collect bounded official and editorial restaurant sources through Core"
+connector = "core-source-fetch"
+source_classes = ["official", "editorial"]
+allowlisted_domains = ["guide.michelin.com", "www.timeout.com"]
+extractor_hints = ["article", "business-hours", "menu"]
+freshness_seconds = 86400
+schedule = "0 6 * * *"
+budget = { max_sources = 12, max_bytes = 8388608, max_wall_seconds = 180 }
+recipe_asset = "restaurant-core-source-collection"
+
+[[capabilities.agent_roles]]
+id = "restaurant-researcher"
+label = "Restaurant researcher"
+description = "Researches cited branches, menus, opening status and review context"
+core_role = "researcher"
+job = "restaurant-core-source-research"
+recipe_asset = "restaurant-core-source-recipe"
+collection_profile = "restaurant-public-sources"
+prompt_contract_revision = "restaurant-research-v1"
+
+[[capabilities.workspaces]]
+id = "restaurants"
+label = "Restaurants"
+renderer = "cards"
+data_capability = "restaurant.recommendation-list"
+action_gadgets = ["restaurant.subject-context", "restaurant.branch-upsert", "restaurant.menu-upsert", "restaurant.review-upsert", "restaurant.recommend", "restaurant.compare", "restaurant.record-visit-outcome"]
+required_scopes = ["management"]
+
+[[capabilities.ui_contributions]]
+id = "restaurants-main"
+kind = "workspace"
+label = "Restaurants"
+placement = "main"
+order_hint = 220
+icon = "search"
+required_scopes = ["management"]
+empty_state = "No researched restaurants yet"
+error_state = "Restaurant recommendations are unavailable"
+workspace = "restaurants"
+
+[[capabilities.ui_contributions]]
+id = "restaurants-navigation"
+kind = "navigation"
+label = "Restaurants"
+placement = "primary_navigation"
+navigation_section = "planning"
+order_hint = 220
+icon = "search"
+required_scopes = ["management"]
+empty_state = "Restaurant research is not enabled"
+error_state = "Restaurant navigation is unavailable"
+workspace = "restaurants"
+
+[[capabilities.ui_contributions]]
+id = "restaurant-dashboard"
+kind = "dashboard_widget"
+label = "Restaurant research"
+placement = "dashboard"
+order_hint = 220
+icon = "search"
+required_scopes = ["management"]
+empty_state = "No saved recommendations"
+error_state = "Restaurant summary is unavailable"
+gadget = "restaurant.plan-summary"
+renderer = "dashboard"
+refresh_seconds = 60
+
+[[capabilities.ui_contributions]]
+id = "restaurant-subject"
+kind = "subject_context"
+label = "Restaurant recommendation"
+placement = "penny_context"
+order_hint = 220
+icon = "search"
+required_scopes = ["management"]
+empty_state = "Recommendation context is unavailable"
+error_state = "Recommendation context could not be created"
+gadget = "restaurant.subject-context"
+
+[[capabilities.seed_assets]]
+id = "restaurant-core-source-collection"
+path = "recipes/core-source-collection.json"
+media_type = "application/json"
+sha256 = "10fea1c6ac24b673e2e16d0596a8bb3d5edf288a698bf6049d02ddd528e356a2"
+
+[[capabilities.seed_assets]]
+id = "restaurant-core-source-recipe"
+path = "recipes/core-source-research.json"
+media_type = "application/json"
+sha256 = "f8a3dcf6b3bc10bdacc7721163a7114c8ebdde9c3691b406b801c340d06177a2"
+
+[[capabilities.migrations]]
+id = "restaurant-base"
+revision = 20260712000001
+kind = "schema"
+path = "migrations/20260712000001_restaurant_base.sql"
+sha256 = "c5ad9166ffd181b3140bb13a45851f0da4979a18f7e6d753e2adde1630187f37"

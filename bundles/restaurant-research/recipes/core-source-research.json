@@ -1,0 +1,15 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "restaurant-research",
+  "role": "researcher",
+  "network": "core_source_fetch_only",
+  "inputs": ["question", "space_id", "vault_id", "source_ids"],
+  "required_claims": ["branch_identity", "menu_price", "opening_status", "review_context"],
+  "output": {
+    "gadget": "restaurant.recommend",
+    "requires_source_revision": true,
+    "preserve_supporting_and_contradicting_evidence": true
+  },
+  "limits": {"max_sources": 12, "max_wall_seconds": 180, "max_gadget_calls": 8}
+}
+

@@ -1,0 +1,9 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "travel-intelligence",
+  "role": "researcher",
+  "inputs": ["question", "space_id", "source_ids", "trip_revision", "constraints"],
+  "required_sections": ["options", "location", "time", "price", "accessibility", "supporting_evidence", "contradicting_evidence", "freshness", "limitations"],
+  "output": {"canonical_kind": "candidate", "target_kind": "lesson", "requires_source_revision": true},
+  "limits": {"max_sources": 20, "max_wall_seconds": 180, "max_gadget_calls": 1}
+}

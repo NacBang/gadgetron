@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "types": [
+    {"id":"SocialPost","label":"Public social post","family":"source"},
+    {"id":"Conversation","label":"Social conversation","family":"event"},
+    {"id":"Signal","label":"Social signal","family":"claim"},
+    {"id":"SocialBriefing","label":"Social briefing","family":"insight"},
+    {"id":"ResponseDraft","label":"Response draft","family":"procedure"}
+  ],
+  "relations": [
+    {"id":"post_in_conversation","label":"Appears in conversation","family":"supports","source_types":["SocialPost"],"target_types":["Conversation"]},
+    {"id":"signal_from_conversation","label":"Derived from conversation","family":"derived_from","source_types":["Signal"],"target_types":["Conversation"]},
+    {"id":"supports_signal","label":"Supports signal","family":"supports","source_types":["SocialPost"],"target_types":["Signal"]},
+    {"id":"contradicts_signal","label":"Contradicts signal","family":"contradicts","source_types":["SocialPost"],"target_types":["Signal"]},
+    {"id":"briefing_cites_signal","label":"Cites signal","family":"cites","source_types":["SocialBriefing"],"target_types":["Signal"]},
+    {"id":"draft_from_briefing","label":"Drafted from briefing","family":"derived_from","source_types":["ResponseDraft"],"target_types":["SocialBriefing"]}
+  ],
+  "migrations": []
+}

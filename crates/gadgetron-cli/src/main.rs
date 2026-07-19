@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use gadgetron_core::config::{AppConfig, ProviderConfig};
 use gadgetron_core::provider::LlmProvider;
 use gadgetron_core::secret::Secret;
@@ -23,13 +23,19 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 type SharedKeyValidator = Arc<dyn gadgetron_xaas::auth::validator::KeyValidator + Send + Sync>;
+type SharedCallbackCredentialIssuer =
+    Arc<dyn gadgetron_core::provider::CallbackCredentialIssuer + Send + Sync>;
 type SharedQuotaEnforcer = Arc<dyn gadgetron_xaas::quota::enforcer::QuotaEnforcer + Send + Sync>;
 type SharedProviderMap = HashMap<String, Arc<dyn LlmProvider + Send + Sync>>;
 type RouterProviderMap = HashMap<String, Arc<dyn LlmProvider>>;
 
+static CORE_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../gadgetron-xaas/migrations");
+
 struct DatabaseRuntime {
     key_validator: SharedKeyValidator,
+    callback_credential_issuer: SharedCallbackCredentialIssuer,
     pg_pool: Option<sqlx::PgPool>,
+    bundle_migrations: Option<Arc<gadgetron_bundle_migrations::BundleMigrationManager>>,
 }
 
 struct ServerRuntimeHandles {
@@ -37,6 +43,12 @@ struct ServerRuntimeHandles {
     audit_handle: tokio::task::JoinHandle<()>,
     tui_tx: Option<broadcast::Sender<WsMessage>>,
     tui_thread: Option<std::thread::JoinHandle<()>>,
+    knowledge_worker: Option<gadgetron_gateway::knowledge_jobs::KnowledgeJobWorkerHandle>,
+    knowledge_event_worker: Option<gadgetron_gateway::knowledge_events::KnowledgeEventWorkerHandle>,
+    collection_worker:
+        Option<gadgetron_gateway::knowledge_collections::KnowledgeCollectionWorkerHandle>,
+    manager_webhook_worker:
+        Option<gadgetron_gateway::web::manager_oversight::ManagerWebhookWorkerHandle>,
     pg_pool: Option<sqlx::PgPool>,
 }
 
@@ -83,6 +95,13 @@ struct AppStateParts {
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum InitProfile {
+    #[default]
+    Development,
+    System,
 }
 
 #[derive(Subcommand)]
@@ -167,6 +186,26 @@ enum Commands {
         /// Required when stdout is not a TTY (e.g., scripts, CI).
         #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Configuration profile. `system` emits the v1 systemd baseline.
+        #[arg(long, value_enum, default_value_t)]
+        profile: InitProfile,
+
+        /// Bind address written by the system profile.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+
+        /// Persistent data root written by the system profile.
+        #[arg(long, default_value = "/var/lib/gadgetron")]
+        data_dir: PathBuf,
+
+        /// First administrator email written by the system profile.
+        #[arg(long, default_value = "admin@localhost")]
+        admin_email: String,
+
+        /// First administrator display name written by the system profile.
+        #[arg(long, default_value = "Gadgetron Administrator")]
+        admin_display_name: String,
     },
 
     /// Diagnose Gadgetron configuration and connectivity.
@@ -424,8 +463,27 @@ enum TeamCmd {
 // Entry point
 // ---------------------------------------------------------------------------
 
+fn main() -> Result<()> {
+    // The sandbox helper must run before Tokio creates worker threads: mount,
+    // chroot, rlimit and capability changes are process security setup, not an
+    // async command. The marker is emitted only by the Core-owned supervisor.
+    let mut raw_args = std::env::args();
+    let _program = raw_args.next();
+    if raw_args.next().as_deref() == Some(gadgetron_bundle_supervisor::INTERNAL_HELPER_MARKER) {
+        let encoded_spec = raw_args
+            .next()
+            .context("internal Bundle sandbox helper requires one encoded spec")?;
+        if raw_args.next().is_some() {
+            anyhow::bail!("internal Bundle sandbox helper received extra arguments");
+        }
+        return gadgetron_bundle_supervisor::run_internal_helper(&encoded_spec)
+            .context("internal Bundle sandbox helper failed");
+    }
+    async_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn async_main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Serve {
@@ -522,7 +580,23 @@ async fn main() -> Result<()> {
             let pool = connect_pg().await?;
             cmd_team_delete(&pool, id).await
         }
-        Some(Commands::Init { output, yes }) => cmd_init(&output, yes),
+        Some(Commands::Init {
+            output,
+            yes,
+            profile,
+            bind,
+            data_dir,
+            admin_email,
+            admin_display_name,
+        }) => cmd_init(
+            &output,
+            yes,
+            profile,
+            &bind,
+            &data_dir,
+            &admin_email,
+            &admin_display_name,
+        ),
         Some(Commands::Doctor { config }) => cmd_doctor(config).await,
         Some(Commands::Reindex {
             config,
@@ -605,10 +679,10 @@ fn cmd_gadget_list_stub() -> Result<()> {
 
 /// `gadgetron gadget serve` — run the stdio Gadget server.
 ///
-/// Reads the `[knowledge]` section from the config file, builds a
-/// `KnowledgeGadgetProvider`, freezes it into a `GadgetRegistry`, and
-/// calls `gadgetron_penny::serve_stdio(registry)` to handle the
-/// JSON-RPC 2.0 message loop on stdin/stdout.
+/// Builds local providers from config and, when launched by a Penny parent,
+/// projects the parent's current non-local Gadget schemas as authenticated
+/// forward-only capabilities. Claude Code and Codex Exec therefore consume
+/// the same MCP surface without linking domain Bundle crates into this child.
 ///
 /// Exits cleanly on stdin EOF. Errors in config loading or provider
 /// construction produce a descriptive message on stderr and exit
@@ -639,8 +713,9 @@ async fn cmd_gadget_serve(config_path_override: Option<PathBuf>) -> Result<()> {
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "`[knowledge]` section is missing in {}. `gadgetron gadget serve` \
-                 requires the knowledge layer to be configured.",
+                "no Gadget capability source is available in {}. Configure \
+                 `[knowledge]` for standalone use or launch through a parent \
+                 gateway callback.",
                 config_path.display()
             )
         })?;
@@ -669,13 +744,6 @@ fn apply_agent_gadgets_env_override(
     Ok(())
 }
 
-fn log_analyzer_auto_scan_enabled(raw: Option<&str>) -> bool {
-    !matches!(
-        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("0" | "false" | "no" | "off")
-    )
-}
-
 fn resolve_existing_config_path(config_path_override: Option<PathBuf>) -> Result<PathBuf> {
     let config_path: PathBuf = config_path_override
         .or_else(|| std::env::var("GADGETRON_CONFIG").ok().map(PathBuf::from))
@@ -694,313 +762,20 @@ fn resolve_existing_config_path(config_path_override: Option<PathBuf>) -> Result
 fn load_penny_registry_from_config(
     config_path: &std::path::Path,
     agent_cfg: &gadgetron_core::agent::AgentConfig,
-    pg_pool: Option<sqlx::PgPool>,
     approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
     let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? else {
         return Ok(None);
     };
 
-    let provider = gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg, None)
+    let provider = gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg, pg_pool)
         .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
 
     let mut builder = gadgetron_penny::GadgetRegistryBuilder::new();
     builder
         .register(Arc::new(provider))
         .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
-
-    // server-monitor bundle — inventory is lazy-created on first
-    // `server.add`. Registration is unconditional because the provider
-    // has no upstream config requirement. A `SshError` at this layer
-    // would only happen if `$HOME` is unreadable; we log and skip
-    // rather than aborting the whole serve path.
-    //
-    // When a Postgres pool is wired, also spawn the timeseries
-    // ingestion writer so every `server.stats` call fans out into the
-    // `host_metrics` hypertable. Without a pool the bundle still works
-    // (legacy pull-only path) — the provider just keeps an empty
-    // sender slot and `try_ship` no-ops.
-    let pg_pool_for_logs = pg_pool.clone();
-    match gadgetron_bundle_server_monitor::ServerMonitorProvider::with_default_inventory() {
-        Ok(mut p) => {
-            if let Some(pool) = pg_pool {
-                let (tx, rx) = tokio::sync::mpsc::channel::<
-                    Vec<gadgetron_bundle_server_monitor::MetricSample>,
-                >(4096);
-                let counters = gadgetron_bundle_server_monitor::IngestionCounters::default();
-                // Attach pool FIRST so server.remove can cascade-clean
-                // log_scan_* / log_findings rows for the removed host.
-                p = p.with_pg_pool(pool.clone());
-                p = p.with_metrics_writer(tx.clone(), counters.clone());
-                tokio::spawn(gadgetron_bundle_server_monitor::run_metrics_writer(
-                    rx,
-                    pool.clone(),
-                    counters.clone(),
-                ));
-                // Server-side background poller — runs whether the web
-                // UI is open or not, so `host_metrics` stays continuous.
-                // Uses the same inventory + writer channel as the gadget
-                // path; SSH ControlMaster multiplexes the two callers
-                // onto one connection per host.
-                tokio::spawn(gadgetron_bundle_server_monitor::run_background_poller(
-                    p.inventory(),
-                    tx,
-                    counters,
-                    gadgetron_bundle_server_monitor::PollerConfig::default(),
-                    // Snapshot writes (host_stats_latest) — the same pool
-                    // the metrics writer uses (ISSUE 38).
-                    Some(pool),
-                ));
-                tracing::info!(
-                    target: "server_monitor_metrics",
-                    "metrics ingestion writer + background poller spawned — \
-                     host_metrics will be filled continuously at 1 Hz"
-                );
-            } else {
-                tracing::info!(
-                    target: "server_monitor_metrics",
-                    "no Postgres pool — server-monitor runs pull-only \
-                     (no timeseries history)",
-                );
-            }
-            let inv = p.inventory();
-            // Backfill static hardware descriptors (cpu_model, cpu_cores,
-            // gpus) for hosts registered before 0.5.21. The UI renders
-            // these on every server card; without a one-shot probe the
-            // operator would have to click server.info (or manually
-            // re-register) per host. Staggered by 5 s so a busy fleet
-            // doesn't hammer the monitor at startup.
-            //
-            // Guard on `Handle::try_current()` so unit tests that drive
-            // `load_penny_registry_from_config` outside a runtime (e.g.
-            // `load_penny_registry_resolves_relative_wiki_path_against_config_dir`)
-            // don't panic at `tokio::spawn`. Production `serve` always
-            // runs inside the multi-thread runtime so the guard is a
-            // no-op there.
-            let inv_backfill = inv.clone();
-            let known_hosts_path = inv.root().join("known_hosts");
-            if tokio::runtime::Handle::try_current().is_ok() {
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let hosts = match inv_backfill.load().await {
-                        Ok(h) => h,
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "server_monitor",
-                                error = %e,
-                                "hw backfill: could not load inventory",
-                            );
-                            return;
-                        }
-                    };
-                    for h in hosts {
-                        if h.cpu_model.is_some() && !h.gpus.is_empty() {
-                            continue;
-                        }
-                        let target = gadgetron_bundle_server_monitor::ssh::SshTarget {
-                            host: h.host.clone(),
-                            user: h.ssh_user.clone(),
-                            port: h.ssh_port,
-                            key_path: Some(h.key_path.clone()),
-                            known_hosts: known_hosts_path.clone(),
-                        };
-                        match gadgetron_bundle_server_monitor::collectors::collect_info(&target)
-                            .await
-                        {
-                            Ok(info) => {
-                                // `modify` fills only the still-missing
-                                // fields under the store lock — upserting
-                                // the pre-collect snapshot `h` (loaded
-                                // seconds ago, before a slow SSH) could
-                                // roll back concurrent poller writes.
-                                let mut changed = false;
-                                let res = inv_backfill
-                                    .modify(h.id, |rec| {
-                                        if rec.cpu_model.is_none() && !info.cpu_model.is_empty() {
-                                            rec.cpu_model = Some(info.cpu_model.clone());
-                                            changed = true;
-                                        }
-                                        if rec.cpu_cores.is_none() && info.cpu_cores > 0 {
-                                            rec.cpu_cores = Some(info.cpu_cores);
-                                            changed = true;
-                                        }
-                                        if rec.gpus.is_empty() && !info.gpu_models.is_empty() {
-                                            rec.gpus = info.gpu_models.clone();
-                                            changed = true;
-                                        }
-                                    })
-                                    .await;
-                                match res {
-                                    Err(e) => tracing::warn!(
-                                        target: "server_monitor",
-                                        host_id = %h.id,
-                                        error = %e,
-                                        "hw backfill save failed",
-                                    ),
-                                    Ok(_) if changed => tracing::info!(
-                                        target: "server_monitor",
-                                        host_id = %h.id,
-                                        alias = h.alias.as_deref().unwrap_or(""),
-                                        "hw backfill: captured cpu/gpu descriptors",
-                                    ),
-                                    Ok(_) => {}
-                                }
-                            }
-                            Err(e) => tracing::warn!(
-                                target: "server_monitor",
-                                host_id = %h.id,
-                                error = %e,
-                                "hw backfill: collect_info failed",
-                            ),
-                        }
-                        // Pace the fleet sweep so a 10-host registration
-                        // doesn't fire 10 parallel SSH sessions at boot.
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                });
-            }
-            builder
-                .register(Arc::new(p))
-                .map_err(|e| anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}"))?;
-
-            // Log-analyzer bundle — only meaningful with a pg_pool
-            // (findings + cursor live in PG). Reuses the same
-            // inventory Arc so add/remove flows through. LLM
-            // Optional Penny LLM fallback for log lines that look
-            // error-ish but didn't match a regex rule. Wired when
-            // `GADGETRON_LOG_ANALYZER_KEY` is set — typically a
-            // service-role API key minted at deploy time:
-            //
-            //   gadgetron key create --tenant-id <T> --scope OpenAiCompat
-            //   export GADGETRON_LOG_ANALYZER_KEY=gad_live_...
-            //
-            // Without the env var the scanner runs rule-only (no
-            // unknown-line classification), which still catches every
-            // pattern in `rules.rs` — the LLM only widens the net.
-            if let Some(pool) = pg_pool_for_logs.as_ref() {
-                // Reconcile log-analyzer tables against the current
-                // inventory: any host_id present in log_scan_cursor /
-                // log_scan_config / log_findings but NOT in
-                // inventory.json is an orphan from a pre-cascade
-                // server.remove (or a manual inventory edit). Purge so
-                // the Logs tab stops showing "phantom" hosts that
-                // don't appear in Servers. Best-effort: DB blip here
-                // is logged and the CLI proceeds normally.
-                let inv_snapshot = inv.clone();
-                let pool_for_recon = pool.clone();
-                tokio::spawn(async move {
-                    match inv_snapshot.load().await {
-                        Ok(hosts) => {
-                            let ids: Vec<uuid::Uuid> = hosts.iter().map(|h| h.id).collect();
-                            let tables = ["log_scan_cursor", "log_scan_config", "log_findings"];
-                            let mut total: u64 = 0;
-                            for t in &tables {
-                                let sql = format!("DELETE FROM {t} WHERE host_id <> ALL($1)");
-                                match sqlx::query(&sql).bind(&ids).execute(&pool_for_recon).await {
-                                    Ok(r) => total += r.rows_affected(),
-                                    Err(e) => tracing::warn!(
-                                        target: "log_analyzer",
-                                        table = %t,
-                                        error = %e,
-                                        "startup orphan purge failed",
-                                    ),
-                                }
-                            }
-                            if total > 0 {
-                                tracing::info!(
-                                    target: "log_analyzer",
-                                    purged_rows = total,
-                                    live_hosts = ids.len(),
-                                    "startup: purged orphan log rows for hosts no \
-                                     longer in inventory",
-                                );
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            target: "log_analyzer",
-                            error = %e,
-                            "could not load inventory for startup reconciliation",
-                        ),
-                    }
-                });
-
-                let classifier: Option<Arc<dyn gadgetron_bundle_log_analyzer::llm::Classifier>> =
-                    match std::env::var("GADGETRON_LOG_ANALYZER_KEY").ok() {
-                        Some(api_key) if !api_key.trim().is_empty() => {
-                            let gateway_url = std::env::var("GADGETRON_LOG_ANALYZER_GATEWAY")
-                                .unwrap_or_else(|_| "http://127.0.0.1:18080".to_string());
-                            tracing::info!(
-                                target: "log_analyzer",
-                                gateway = %gateway_url,
-                                "Penny classifier enabled — error-ish lines without a rule \
-                                 match will be sent to /v1/chat/completions for triage"
-                            );
-                            let client = reqwest::Client::builder()
-                                .build()
-                                .expect("reqwest client builds");
-                            Some(Arc::new(
-                                gadgetron_bundle_log_analyzer::llm::GatewayClassifier {
-                                    gateway_url,
-                                    api_key,
-                                    model: std::env::var("GADGETRON_LOG_ANALYZER_MODEL")
-                                        .unwrap_or_else(|_| "penny".to_string()),
-                                    client,
-                                },
-                            ))
-                        }
-                        _ => {
-                            tracing::info!(
-                                target: "log_analyzer",
-                                "Penny classifier disabled (set GADGETRON_LOG_ANALYZER_KEY \
-                                 to enable LLM fallback) — running rules-only"
-                            );
-                            None
-                        }
-                    };
-
-                let mut log_provider =
-                    gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool.clone())
-                        .with_inventory(inv.clone());
-                if let Some(c) = classifier.clone() {
-                    log_provider = log_provider.with_classifier(c);
-                }
-                builder.register(Arc::new(log_provider)).map_err(|e| {
-                    anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}")
-                })?;
-
-                // Background scanner is on by default. It is rule-only
-                // unless `GADGETRON_LOG_ANALYZER_KEY` is set above, so the
-                // default monitoring path does not spend Penny LLM tokens.
-                // Operators can opt out with
-                // `GADGETRON_LOG_ANALYZER_AUTO=0|false|no|off`.
-                let auto_scan = log_analyzer_auto_scan_enabled(
-                    std::env::var("GADGETRON_LOG_ANALYZER_AUTO").ok().as_deref(),
-                );
-                if auto_scan {
-                    tokio::spawn(gadgetron_bundle_log_analyzer::run_background_scanner(
-                        inv,
-                        pool.clone(),
-                        classifier,
-                        gadgetron_bundle_log_analyzer::ScannerConfig::default(),
-                    ));
-                    tracing::info!(
-                        target: "log_analyzer",
-                        "log-analyzer bundle registered + background scanner spawned"
-                    );
-                } else {
-                    tracing::info!(
-                        target: "log_analyzer",
-                        "log-analyzer bundle registered; background scanner DISABLED \
-                         by GADGETRON_LOG_ANALYZER_AUTO. On-demand scans via \
-                         `loganalysis.scan_now` continue to work."
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)")
-        }
-    }
 
     // Freeze against the operator's [agent] config so `dispatch()` can
     // enforce L3 defense-in-depth on any tool call that reaches this
@@ -1016,87 +791,88 @@ async fn load_penny_registry_from_config_for_gadget_serve(
     config_path: &std::path::Path,
     agent_cfg: &gadgetron_core::agent::AgentConfig,
 ) -> Result<Option<Arc<gadgetron_penny::GadgetRegistry>>> {
-    let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? else {
-        return Ok(None);
-    };
-
-    let pg_pool = connect_optional_pg_for_knowledge().await;
-    let provider =
-        gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg, pg_pool.clone())
-            .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
-
     let mut builder = gadgetron_penny::GadgetRegistryBuilder::new();
-    builder
-        .register(Arc::new(provider))
-        .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
-    // server-monitor bundle — same registration rationale as the main
-    // serve path (see `load_penny_registry_from_config`). Kept in sync
-    // so `gadgetron mcp serve` exposes the same tool surface. We hold
-    // onto the inventory handle so the log-analyzer registration below
-    // can hostname-resolve findings without re-reading inventory.json.
-    let inv_for_logs =
-        match gadgetron_bundle_server_monitor::ServerMonitorProvider::with_default_inventory() {
-            Ok(p) => {
-                let inv = p.inventory();
-                builder.register(Arc::new(p)).map_err(|e| {
-                    anyhow::anyhow!("failed to register ServerMonitorProvider: {e:?}")
-                })?;
-                Some(inv)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "server-monitor bundle disabled (inventory setup failed)");
-                None
-            }
-        };
-    // log-analyzer bundle — exposes loganalysis.{list,dismiss,scan_now,
-    // status,set_interval,comment_*} to Penny via this MCP grandchild.
-    // Without this branch the gateway path saw the tools but the Claude
-    // Code subprocess (which talks ONLY to `gadget serve`) did not, so
-    // operators got "I don't have loganalysis.* in my toolbox" replies.
-    // Requires a Postgres pool — without one the findings DB is unreachable
-    // and the bundle can't function, so we skip registration with a warn.
-    if let Some(pool) = pg_pool {
-        let mut log_provider = gadgetron_bundle_log_analyzer::LogAnalyzerProvider::new(pool);
-        if let Some(inv) = inv_for_logs {
-            log_provider = log_provider.with_inventory(inv);
-        }
+    let mut has_local_provider = false;
+    if let Some(knowledge_cfg) = load_knowledge_config_from_path(config_path)? {
+        let pg_pool = connect_optional_pg_for_knowledge(config_path).await;
+        let provider =
+            gadgetron_knowledge::KnowledgeGadgetProvider::new(knowledge_cfg, pg_pool.clone())
+                .map_err(|e| anyhow::anyhow!("failed to open knowledge provider: {e:?}"))?;
         builder
-            .register(Arc::new(log_provider))
-            .map_err(|e| anyhow::anyhow!("failed to register LogAnalyzerProvider: {e:?}"))?;
-    } else {
-        tracing::warn!(
-            "log-analyzer bundle skipped in gadget serve (no Postgres pool); \
-             loganalysis.* gadgets will not be exposed to Penny"
-        );
+            .register(Arc::new(provider))
+            .map_err(|e| anyhow::anyhow!("failed to register KnowledgeGadgetProvider: {e:?}"))?;
+        drop(pg_pool);
+        has_local_provider = true;
     }
-    // When the parent gateway exported callback env vars (set in the
-    // `serve` startup just before Penny's Claude Code subprocess
-    // spawns), wire a `ForwardConfig` so this grandchild routes
-    // Ask-mode tools back to the parent's `/v1/tools/{name}/invoke`.
-    // The parent owns the in-memory `ApprovalStore` + the Side Panel
-    // queue, so the operator clicks ⚡ once and the result flows back
-    // through Claude Code → Penny → the chat UI.
+
+    // The normal serve path injects a turn-scoped key; standalone callers may
+    // provide the compatibility key explicitly. With both callback values,
+    // import only schemas absent from this child and forward every call to the
+    // parent-owned lifecycle, policy, approval, and audit path.
     let registry = match (
         std::env::var("GADGETRON_GATEWAY_CALLBACK_URL").ok(),
         std::env::var("GADGETRON_GATEWAY_CALLBACK_KEY").ok(),
     ) {
         (Some(url), Some(key)) if !url.trim().is_empty() && !key.trim().is_empty() => {
+            let schemas = fetch_parent_gadget_schemas(&url, &key).await?;
             tracing::info!(
                 target: "gadget_serve",
                 gateway = %url,
-                "forwarding Ask-mode tool calls to parent gateway"
+                schemas = schemas.len(),
+                "projecting parent Gadget catalog through authenticated forwarding"
             );
-            builder.freeze_with_forwarding(
-                agent_cfg,
-                gadgetron_penny::ForwardConfig {
-                    base_url: url,
-                    auth_token: key,
-                },
-            )
+            builder
+                .freeze_with_forwarding_and_schemas(
+                    agent_cfg,
+                    gadgetron_penny::ForwardConfig {
+                        base_url: url,
+                        auth_token: key,
+                    },
+                    schemas,
+                )
+                .map_err(|error| anyhow::anyhow!("invalid parent Gadget catalog: {error}"))?
         }
-        _ => builder.freeze(agent_cfg),
+        _ if has_local_provider => builder.freeze(agent_cfg),
+        _ => return Ok(None),
     };
     Ok(Some(Arc::new(registry)))
+}
+
+async fn fetch_parent_gadget_schemas(
+    base_url: &str,
+    auth_token: &str,
+) -> Result<Vec<gadgetron_core::agent::tools::GadgetSchema>> {
+    let url = format!("{}/v1/tools", base_url.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch parent Gadget catalog from {url}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .with_context(|| format!("failed to decode parent Gadget catalog from {url}"))?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "parent Gadget catalog request to {url} returned {}: {}",
+            status.as_u16(),
+            body
+        );
+    }
+    let tools = body
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("parent Gadget catalog from {url} has no tools array"))?;
+    tools
+        .iter()
+        .cloned()
+        .map(|tool| {
+            serde_json::from_value(tool)
+                .with_context(|| format!("invalid Gadget schema returned by parent {url}"))
+        })
+        .collect()
 }
 
 fn load_knowledge_config_from_path(
@@ -1130,6 +906,12 @@ where
         return Ok(None);
     };
 
+    if let Some(path) = std::env::var_os("GADGETRON_KNOWLEDGE_VAULT_PATH") {
+        if !path.is_empty() {
+            knowledge_cfg.vault_path = Some(path.into());
+        }
+    }
+
     if let Some(config_dir) = config_path.parent() {
         knowledge_cfg.resolve_relative_paths(config_dir);
     }
@@ -1139,7 +921,24 @@ where
     Ok(Some(knowledge_cfg))
 }
 
-async fn connect_optional_pg_for_knowledge() -> Option<sqlx::PgPool> {
+fn build_bundle_migration_manager(
+    pool: sqlx::PgPool,
+    config: &AppConfig,
+) -> Result<Arc<gadgetron_bundle_migrations::BundleMigrationManager>> {
+    let core_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .context("invalid Core package version")?;
+    Ok(Arc::new(
+        gadgetron_bundle_migrations::BundleMigrationManager::new(
+            pool,
+            &CORE_MIGRATOR,
+            config.web.bundles_dir.clone(),
+            config.web.bundle_signing.public_keys_hex.clone(),
+            core_version,
+        )?,
+    ))
+}
+
+async fn connect_optional_pg_for_knowledge(config_path: &std::path::Path) -> Option<sqlx::PgPool> {
     let Ok(url) = std::env::var("GADGETRON_DATABASE_URL") else {
         return None;
     };
@@ -1154,10 +953,15 @@ async fn connect_optional_pg_for_knowledge() -> Option<sqlx::PgPool> {
         .await
     {
         Ok(pool) => {
-            if let Err(error) = sqlx::migrate!("../gadgetron-xaas/migrations")
-                .run(&pool)
-                .await
-            {
+            let migration_result: Result<()> = async {
+                let config = AppConfig::load(config_path.to_str().unwrap_or("gadgetron.toml"))?;
+                build_bundle_migration_manager(pool.clone(), &config)?
+                    .migrate_core()
+                    .await?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = migration_result {
                 tracing::warn!(
                     target: "knowledge_semantic",
                     error = %error,
@@ -1178,7 +982,7 @@ async fn connect_optional_pg_for_knowledge() -> Option<sqlx::PgPool> {
     }
 }
 
-async fn connect_required_pg_for_knowledge() -> Result<sqlx::PgPool> {
+async fn connect_required_pg_for_knowledge(config_path: &std::path::Path) -> Result<sqlx::PgPool> {
     let url = std::env::var("GADGETRON_DATABASE_URL")
         .context("GADGETRON_DATABASE_URL is required for semantic reindex")?;
     if url.trim().is_empty() {
@@ -1192,8 +996,10 @@ async fn connect_required_pg_for_knowledge() -> Result<sqlx::PgPool> {
         .await
         .context("failed to connect to PostgreSQL for semantic reindex")?;
 
-    sqlx::migrate!("../gadgetron-xaas/migrations")
-        .run(&pool)
+    let config = AppConfig::load(config_path.to_str().unwrap_or("gadgetron.toml"))
+        .with_context(|| format!("failed to load {}", config_path.display()))?;
+    build_bundle_migration_manager(pool.clone(), &config)?
+        .migrate_core()
         .await
         .context("failed to run PostgreSQL migrations for semantic reindex")?;
 
@@ -1208,10 +1014,14 @@ struct PennyRouterRegistration {
     backend_session_persistence: Option<Arc<dyn gadgetron_penny::AgentBackendSessionPersistence>>,
     config_path_for_mcp: PathBuf,
     brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
+    callback_credential_issuer: SharedCallbackCredentialIssuer,
 }
 
 impl PennyRouterRegistration {
-    fn register(self, providers: &mut HashMap<String, Arc<dyn LlmProvider>>) {
+    fn register(
+        self,
+        providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
+    ) -> Arc<gadgetron_penny::PennyProvider> {
         gadgetron_penny::register_with_router_and_brain_config(
             self.agent_cfg,
             self.registry,
@@ -1221,8 +1031,239 @@ impl PennyRouterRegistration {
             Some(self.config_path_for_mcp),
             self.brain_config,
             self.backend_session_persistence,
-        );
+            Some(self.callback_credential_issuer),
+        )
     }
+}
+
+struct PennyKnowledgeAgentExecutor {
+    provider: Arc<gadgetron_penny::PennyProvider>,
+}
+
+impl std::fmt::Debug for PennyKnowledgeAgentExecutor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PennyKnowledgeAgentExecutor")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl gadgetron_gateway::knowledge_jobs::KnowledgeAgentExecutor for PennyKnowledgeAgentExecutor {
+    async fn execute(
+        &self,
+        request: gadgetron_gateway::knowledge_jobs::AgentInvocation,
+    ) -> std::result::Result<
+        gadgetron_gateway::knowledge_jobs::AgentExecution,
+        gadgetron_gateway::knowledge_jobs::AgentExecutionError,
+    > {
+        use futures::StreamExt as _;
+        use gadgetron_core::{
+            agent::config::{AgentBackend, AgentEffort, ConversationAgentProfile, ModelSource},
+            provider::{ChatAuditContext, ChatRequest},
+        };
+        let invalid = |detail: String| gadgetron_gateway::knowledge_jobs::AgentExecutionError {
+            detail,
+            retryable: false,
+            already_terminal: false,
+        };
+        let backend = AgentBackend::parse(&request.job.runtime_backend).ok_or_else(|| {
+            invalid(format!(
+                "unknown pinned agent backend {}",
+                request.job.runtime_backend
+            ))
+        })?;
+        let effort = AgentEffort::parse(&request.job.runtime_effort).ok_or_else(|| {
+            invalid(format!(
+                "unknown pinned agent effort {}",
+                request.job.runtime_effort
+            ))
+        })?;
+        let model_source = match request.job.runtime_model_source.as_str() {
+            "default" => ModelSource::Default,
+            "local" => ModelSource::Local,
+            value => return Err(invalid(format!("unknown pinned model source {value}"))),
+        };
+        let profile = ConversationAgentProfile {
+            backend,
+            llm_endpoint_id: request.job.runtime_endpoint_id,
+            model: request.job.runtime_model.clone(),
+            effort,
+            model_source,
+            local_base_url: request.job.runtime_local_base_url.clone(),
+            local_api_key_env: request.job.runtime_local_api_key_env.clone(),
+        };
+        let mut stream = self.provider.chat_stream_with_profile_and_allowed_tools(
+            ChatRequest {
+                model: "penny".to_string(),
+                messages: knowledge_job_messages(request.prompt, request.system_prompt),
+                temperature: Some(0.1),
+                max_tokens: Some(request.job.max_tokens as u32),
+                top_p: None,
+                tools: None,
+                stream: true,
+                stop: None,
+                conversation_id: None,
+                audit_context: Some(ChatAuditContext {
+                    tenant_id: request.job.tenant_id.to_string(),
+                    owner_id: Some(
+                        knowledge_job_callback_owner(
+                            request.job.on_behalf_of_user_id,
+                            request.job.service_actor_user_id,
+                        )
+                        .to_string(),
+                    ),
+                }),
+            },
+            &profile,
+            &request.allowed_tools,
+        );
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(
+                    |error| gadgetron_gateway::knowledge_jobs::AgentExecutionError {
+                        detail: error.to_string(),
+                        retryable: true,
+                        already_terminal: false,
+                    },
+                )?;
+            for choice in chunk.choices {
+                if let Some(content) = choice.delta.content {
+                    request.output_capture.record(&content);
+                    text.push_str(&content);
+                }
+            }
+        }
+        if text.trim().is_empty() {
+            return Err(gadgetron_gateway::knowledge_jobs::AgentExecutionError {
+                detail: "knowledge agent returned no content".to_string(),
+                retryable: true,
+                already_terminal: false,
+            });
+        }
+        Ok(gadgetron_gateway::knowledge_jobs::AgentExecution {
+            text,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl gadgetron_gateway::web::bundle_scheduler::BundleEventAgentExecutor
+    for PennyKnowledgeAgentExecutor
+{
+    async fn execute(
+        &self,
+        request: gadgetron_gateway::web::bundle_scheduler::EventAgentInvocation,
+    ) -> std::result::Result<
+        gadgetron_gateway::knowledge_jobs::AgentExecution,
+        gadgetron_gateway::knowledge_jobs::AgentExecutionError,
+    > {
+        use futures::StreamExt as _;
+        use gadgetron_core::{
+            agent::config::{AgentBackend, AgentEffort, ConversationAgentProfile, ModelSource},
+            provider::{ChatAuditContext, ChatRequest},
+        };
+        let invalid = |detail: String| gadgetron_gateway::knowledge_jobs::AgentExecutionError {
+            detail,
+            retryable: false,
+            already_terminal: false,
+        };
+        let backend = AgentBackend::parse(&request.runtime.backend).ok_or_else(|| {
+            invalid(format!(
+                "unknown pinned event agent backend {}",
+                request.runtime.backend
+            ))
+        })?;
+        let effort = AgentEffort::parse(&request.runtime.effort).ok_or_else(|| {
+            invalid(format!(
+                "unknown pinned event agent effort {}",
+                request.runtime.effort
+            ))
+        })?;
+        let model_source = match request.runtime.model_source.as_str() {
+            "default" => ModelSource::Default,
+            "local" => ModelSource::Local,
+            value => return Err(invalid(format!("unknown pinned model source {value}"))),
+        };
+        let profile = ConversationAgentProfile {
+            backend,
+            llm_endpoint_id: request.runtime.endpoint_id,
+            model: request.runtime.model,
+            effort,
+            model_source,
+            local_base_url: request.runtime.local_base_url,
+            local_api_key_env: request.runtime.local_api_key_env,
+        };
+        let mut stream = self.provider.chat_stream_with_profile_and_allowed_tools(
+            ChatRequest {
+                model: "penny".to_string(),
+                messages: knowledge_job_messages(request.prompt, None),
+                temperature: Some(0.1),
+                max_tokens: Some(request.max_tokens),
+                top_p: None,
+                tools: None,
+                stream: true,
+                stop: None,
+                conversation_id: None,
+                audit_context: Some(ChatAuditContext {
+                    tenant_id: request.tenant_id.to_string(),
+                    owner_id: Some(request.service_actor_user_id.to_string()),
+                }),
+            },
+            &profile,
+            &request.allowed_tools,
+        );
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(
+                    |error| gadgetron_gateway::knowledge_jobs::AgentExecutionError {
+                        detail: error.to_string(),
+                        retryable: true,
+                        already_terminal: false,
+                    },
+                )?;
+            for choice in chunk.choices {
+                if let Some(content) = choice.delta.content {
+                    text.push_str(&content);
+                }
+            }
+        }
+        if text.trim().is_empty() {
+            return Err(gadgetron_gateway::knowledge_jobs::AgentExecutionError {
+                detail: "event agent returned no content".to_string(),
+                retryable: true,
+                already_terminal: false,
+            });
+        }
+        Ok(gadgetron_gateway::knowledge_jobs::AgentExecution {
+            text,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        })
+    }
+}
+
+fn knowledge_job_callback_owner(
+    on_behalf_of_user_id: Option<Uuid>,
+    service_actor_user_id: Uuid,
+) -> Uuid {
+    on_behalf_of_user_id.unwrap_or(service_actor_user_id)
+}
+
+fn knowledge_job_messages(
+    prompt: String,
+    system_prompt: Option<String>,
+) -> Vec<gadgetron_core::message::Message> {
+    let mut messages = Vec::with_capacity(usize::from(system_prompt.is_some()) + 1);
+    if let Some(system_prompt) = system_prompt {
+        messages.push(gadgetron_core::message::Message::system(system_prompt));
+    }
+    messages.push(gadgetron_core::message::Message::user(prompt));
+    messages
 }
 
 struct PgAgentBackendSessionPersistence {
@@ -1231,6 +1272,30 @@ struct PgAgentBackendSessionPersistence {
 
 #[async_trait::async_trait]
 impl gadgetron_penny::AgentBackendSessionPersistence for PgAgentBackendSessionPersistence {
+    async fn load_conversation_agent_profile(
+        &self,
+        conversation_id: &str,
+    ) -> Option<gadgetron_core::agent::ConversationAgentProfile> {
+        let (_owner, local_id) = gadgetron_penny::parse_conversation_id(conversation_id);
+        let Ok(id) = uuid::Uuid::parse_str(local_id) else {
+            return None;
+        };
+        match gadgetron_xaas::conversations::get_conversation_agent_profile_unscoped(&self.pool, id)
+            .await
+        {
+            Ok(profile) => profile,
+            Err(e) => {
+                tracing::warn!(
+                    target: "agent_backend_session",
+                    conversation_id,
+                    error = %e,
+                    "failed to load persisted conversation agent profile"
+                );
+                None
+            }
+        }
+    }
+
     async fn load_backend_session_id(
         &self,
         conversation_id: &str,
@@ -1300,14 +1365,16 @@ fn canonicalize_config_path_for_mcp(config_path: &std::path::Path) -> PathBuf {
 fn prepare_penny_router_registration(
     config_path: &std::path::Path,
     app_config: &AppConfig,
-    pg_pool: Option<sqlx::PgPool>,
-    brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
-    activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
-    candidate_coordinator: Option<
-        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
-    >,
-    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
+    runtime: PennyRegistrationRuntime,
 ) -> Result<Option<PennyRouterRegistration>> {
+    let PennyRegistrationRuntime {
+        pg_pool,
+        agent_brain: brain_config,
+        activity_bus,
+        candidate_coordinator,
+        approval_store,
+        callback_credential_issuer,
+    } = runtime;
     if !config_path.exists() {
         return Ok(None);
     }
@@ -1315,8 +1382,8 @@ fn prepare_penny_router_registration(
     let Some(registry) = load_penny_registry_from_config(
         config_path,
         &app_config.agent,
-        pg_pool.clone(),
         approval_store,
+        pg_pool.clone(),
     )?
     else {
         return Ok(None);
@@ -1378,6 +1445,7 @@ fn prepare_penny_router_registration(
         backend_session_persistence,
         config_path_for_mcp: canonicalize_config_path_for_mcp(config_path),
         brain_config,
+        callback_credential_issuer,
     }))
 }
 
@@ -1449,7 +1517,7 @@ async fn tenant_create(pool: &sqlx::PgPool, name: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Create an API key for a tenant, insert the hash into PostgreSQL, and print
-/// the raw key to stdout exactly once.
+/// the raw key to stderr exactly once.
 ///
 /// The raw key is printed to stderr (not stdout) so that it cannot be
 /// accidentally captured in a script without the operator noticing.
@@ -1458,6 +1526,9 @@ async fn tenant_create(pool: &sqlx::PgPool, name: &str) -> Result<()> {
 /// Output matches design doc §1.4 Stage 4-B exactly.
 async fn key_create(pool: &sqlx::PgPool, tenant_id: Uuid, scope: &str) -> Result<()> {
     let (raw_key, key_hash) = gadgetron_xaas::auth::key_gen::generate_api_key("live");
+    let owner = gadgetron_xaas::service_principals::ensure_cli_api_key_owner(pool, tenant_id)
+        .await
+        .context("Failed to create the tenant-bound CLI API-key identity")?;
 
     // `--scope` is documented as comma-separated; split into a proper
     // array so `{Management,OpenAiCompat}` lands in the DB instead of a
@@ -1469,10 +1540,11 @@ async fn key_create(pool: &sqlx::PgPool, tenant_id: Uuid, scope: &str) -> Result
         .collect();
 
     sqlx::query(
-        "INSERT INTO api_keys (tenant_id, prefix, key_hash, kind, scopes) \
-         VALUES ($1, 'gad_live', $2, 'live', $3)",
+        "INSERT INTO api_keys (tenant_id, user_id, prefix, key_hash, kind, scopes) \
+         VALUES ($1, $2, 'gad_live', $3, 'live', $4)",
     )
     .bind(tenant_id)
+    .bind(owner.user_id)
     .bind(&key_hash)
     .bind(&scopes)
     .execute(pool)
@@ -1871,8 +1943,12 @@ fn should_use_no_db(
         || database_url_env.is_none_or(str::is_empty)
 }
 
-async fn init_database_runtime(use_no_db: bool) -> Result<DatabaseRuntime> {
-    let (key_validator, pg_pool): (SharedKeyValidator, Option<sqlx::PgPool>) = if use_no_db {
+async fn init_database_runtime(use_no_db: bool, config: &AppConfig) -> Result<DatabaseRuntime> {
+    let (key_validator, pg_pool, bundle_migrations): (
+        SharedKeyValidator,
+        Option<sqlx::PgPool>,
+        Option<Arc<gadgetron_bundle_migrations::BundleMigrationManager>>,
+    ) = if use_no_db {
         // Both eprintln! and tracing::warn! are kept: eprintln! ensures visibility
         // when RUST_LOG=off silences the tracing subscriber. No redundant "WARNING:"
         // prefix — stderr channel and WARN level already imply it.
@@ -1881,6 +1957,7 @@ async fn init_database_runtime(use_no_db: bool) -> Result<DatabaseRuntime> {
         tracing::warn!(mode = "no-db", "{}", msg);
         (
             Arc::new(gadgetron_xaas::auth::validator::InMemoryKeyValidator),
+            None,
             None,
         )
     } else {
@@ -1909,22 +1986,34 @@ async fn init_database_runtime(use_no_db: bool) -> Result<DatabaseRuntime> {
             })?;
         eprintln!(" done");
 
-        // Step 4b: Run sqlx migrations from gadgetron-xaas/migrations/.
+        // Step 4b: validate/adopt the complete historical ledger, then run
+        // Core-only migrations. Bundle SQL remains pending until explicit
+        // runtime enable.
         eprint!("  Running migrations...");
-        sqlx::migrate!("../gadgetron-xaas/migrations")
-            .run(&pool)
+        let manager = build_bundle_migration_manager(pool.clone(), config)?;
+        let report = manager
+            .migrate_core()
             .await
-            .context("failed to run database migrations")?;
+            .context("failed to validate/adopt and run database migrations")?;
         eprintln!(" done");
-        tracing::info!("database migrations applied");
+        tracing::info!(
+            core_applied = report.core_applied,
+            legacy_bundle_adopted = report.legacy_adopted,
+            "Core migrations applied and Bundle ownership ledger validated"
+        );
 
         let kv = Arc::new(PgKeyValidator::new(pool.clone())) as SharedKeyValidator;
-        (kv, Some(pool))
+        (kv, Some(pool), Some(manager))
     };
 
+    let delegated_validator = Arc::new(
+        gadgetron_xaas::auth::validator::DelegatedKeyValidator::new(key_validator),
+    );
     Ok(DatabaseRuntime {
-        key_validator,
+        key_validator: delegated_validator.clone() as SharedKeyValidator,
+        callback_credential_issuer: delegated_validator as SharedCallbackCredentialIssuer,
         pg_pool,
+        bundle_migrations,
     })
 }
 
@@ -1965,21 +2054,18 @@ fn init_tui_channel(tui_enabled: bool) -> Option<broadcast::Sender<WsMessage>> {
     }
 }
 
+struct ProviderMaps {
+    shared: SharedProviderMap,
+    router: RouterProviderMap,
+    penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
+    penny_provider: Option<Arc<gadgetron_penny::PennyProvider>>,
+}
+
 fn build_provider_maps(
     config: &AppConfig,
     config_path: &std::path::Path,
-    pg_pool: Option<sqlx::PgPool>,
-    agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
-    activity_bus: Option<gadgetron_core::activity_bus::ActivityBus>,
-    candidate_coordinator: Option<
-        Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
-    >,
-    approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
-) -> Result<(
-    SharedProviderMap,
-    RouterProviderMap,
-    Option<Arc<gadgetron_penny::GadgetRegistry>>,
-)> {
+    runtime: PennyRegistrationRuntime,
+) -> Result<ProviderMaps> {
     eprint!("  Checking provider(s)...");
     let providers_ss = build_providers(config).context("failed to initialise LLM providers")?;
     eprintln!(" done ({} configured)", providers_ss.len());
@@ -1994,19 +2080,26 @@ fn build_provider_maps(
         .map(|(k, v)| (k.clone(), Arc::clone(v) as Arc<dyn LlmProvider>))
         .collect();
 
-    let penny_registry = register_penny_if_configured(
-        config_path,
-        config,
-        &mut providers_for_router,
-        PennyRegistrationRuntime {
-            pg_pool,
-            agent_brain,
-            activity_bus,
-            candidate_coordinator,
-            approval_store,
-        },
-    );
-    Ok((providers_ss, providers_for_router, penny_registry))
+    let approval_store = runtime.approval_store.clone();
+    let penny_registration =
+        register_penny_if_configured(config_path, config, &mut providers_for_router, runtime);
+    let penny_provider = penny_registration
+        .as_ref()
+        .map(|registration| registration.1.clone());
+    let tool_registry = penny_registration
+        .map(|registration| registration.0)
+        .or_else(|| {
+            Some(Arc::new(
+                gadgetron_penny::GadgetRegistryBuilder::new()
+                    .freeze_with_approvals(&config.agent, approval_store),
+            ))
+        });
+    Ok(ProviderMaps {
+        shared: providers_ss,
+        router: providers_for_router,
+        penny_registry: tool_registry,
+        penny_provider,
+    })
 }
 
 struct PennyRegistrationRuntime {
@@ -2016,6 +2109,7 @@ struct PennyRegistrationRuntime {
     candidate_coordinator:
         Option<Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>>,
     approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
+    callback_credential_issuer: SharedCallbackCredentialIssuer,
 }
 
 fn build_llm_router(providers: RouterProviderMap, config: &AppConfig) -> Arc<LlmRouter> {
@@ -2067,18 +2161,25 @@ fn build_knowledge_service(
 #[allow(clippy::too_many_arguments)]
 fn build_workbench(
     knowledge_service: Option<Arc<gadgetron_knowledge::service::KnowledgeService>>,
+    vault_layout: Option<Arc<gadgetron_knowledge::vault::TenantVaultLayout>>,
     candidate_coordinator: Option<
         Arc<dyn gadgetron_core::knowledge::candidate::KnowledgeCandidateCoordinator>,
     >,
     penny_registry: Option<Arc<gadgetron_penny::GadgetRegistry>>,
+    event_executor: Option<
+        Arc<dyn gadgetron_gateway::web::bundle_scheduler::BundleEventAgentExecutor>,
+    >,
     pg_pool: Option<sqlx::PgPool>,
     agent_brain: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     catalog_path: Option<String>,
     bundles_dir: Option<String>,
+    bundle_state_dir: String,
     bundle_signing: gadgetron_core::config::BundleSigningConfig,
+    bundle_migrations: Option<Arc<gadgetron_bundle_migrations::BundleMigrationManager>>,
     billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
     approval_store: Arc<dyn gadgetron_core::workbench::ApprovalStore>,
     agent_config: Arc<gadgetron_core::agent::AgentConfig>,
+    policy_evaluator: Option<Arc<dyn gadgetron_core::policy::PolicyEvaluator>>,
 ) -> Option<Arc<gadgetron_gateway::web::workbench::GatewayWorkbenchService>> {
     use gadgetron_core::agent::tools::GadgetDispatcher;
     use gadgetron_core::audit::{ActionAuditSink, NoopActionAuditSink};
@@ -2095,21 +2196,127 @@ fn build_workbench(
     // `DescriptorCatalog` with its pre-compiled JSON-Schema validators
     // so the admin reload endpoint swaps both together — no window
     // where a new catalog validates against stale validators.
+    let base_catalog = DescriptorCatalog::seed_p2b();
+    let all_scopes = [
+        gadgetron_core::context::Scope::OpenAiCompat,
+        gadgetron_core::context::Scope::Management,
+        gadgetron_core::context::Scope::XaasAdmin,
+    ];
+    let reserved_workspace_ids: Vec<String> = base_catalog
+        .visible_views(&all_scopes)
+        .into_iter()
+        .map(|view| view.id)
+        .collect();
+    let reserved_action_ids: Vec<String> = base_catalog
+        .visible_actions(&all_scopes)
+        .into_iter()
+        .map(|action| action.id)
+        .collect();
     let catalog = Arc::new(arc_swap::ArcSwap::from_pointee(
-        DescriptorCatalog::seed_p2b().into_snapshot(),
+        base_catalog.into_snapshot(),
     ));
+
+    let reserved_gadget_names: Vec<String> = penny_registry
+        .as_ref()
+        .map(|registry| {
+            registry
+                .all_schemas()
+                .into_iter()
+                .map(|schema| schema.name)
+                .collect()
+        })
+        .unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let runtime_manager = bundles_dir.as_ref().and_then(|packages| {
+        match gadgetron_bundle_supervisor::LinuxSandboxSupervisor::for_current_executable()
+            .map_err(|error| error.to_string())
+            .and_then(|supervisor| {
+                gadgetron_gateway::web::bundle_runtime::BundleRuntimeManager::new_with_core_brokers_and_reserved_surfaces(
+                    supervisor,
+                    packages,
+                    &bundle_state_dir,
+                    bundle_signing.clone(),
+                    bundle_migrations.clone(),
+                    pg_pool.clone(),
+                    vault_layout.clone(),
+                    policy_evaluator.clone(),
+                    agent_brain.clone(),
+                    reserved_gadget_names.clone(),
+                    reserved_workspace_ids.clone(),
+                    reserved_action_ids.clone(),
+                )
+                .map_err(|error| format!("{error:?}"))
+            }) {
+            Ok(manager) => Some(Arc::new(manager)),
+            Err(error) => {
+                tracing::warn!(
+                    target: "bundle_runtime",
+                    error = %error,
+                    "external Bundle runtime manager unavailable; packages remain installed_not_enabled"
+                );
+                None
+            }
+        }
+    });
+    #[cfg(not(target_os = "linux"))]
+    let runtime_manager = None;
+    if let Some(manager) = &runtime_manager {
+        let manager = manager.clone();
+        let scheduler_pool = pg_pool.clone();
+        let scheduler_policy = policy_evaluator.clone();
+        let scheduler_approvals = approval_store.clone();
+        let scheduler_event_executor = event_executor.clone();
+        tokio::spawn(async move {
+            manager.restore_runtime_intents().await;
+            if let Some(pool) = scheduler_pool {
+                tracing::info!(
+                    target: "bundle_scheduler",
+                    "signed target scheduler started after Bundle runtime restoration"
+                );
+                if let Err(error) =
+                    gadgetron_gateway::web::bundle_scheduler::spawn_target_scheduler(
+                        manager,
+                        pool,
+                        scheduler_policy,
+                        Some(scheduler_approvals),
+                        scheduler_event_executor,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        target: "bundle_scheduler",
+                        detail = %error,
+                        "signed target scheduler stopped unexpectedly"
+                    );
+                }
+            }
+        });
+    }
+    if let (Some(registry), Some(manager)) = (&penny_registry, &runtime_manager) {
+        registry.attach_dynamic_surface(manager.clone());
+    }
+    let dynamic_workbench: Option<Arc<dyn gadgetron_core::workbench::DynamicWorkbenchSurface>> =
+        runtime_manager
+            .clone()
+            .map(|manager| manager as Arc<dyn gadgetron_core::workbench::DynamicWorkbenchSurface>);
 
     let projection: Arc<dyn WorkbenchProjectionService> = Arc::new(InProcessWorkbenchProjection {
         knowledge: knowledge_service,
         gateway_version: env!("CARGO_PKG_VERSION"),
         descriptor_catalog: catalog.clone(),
+        dynamic_workbench: dynamic_workbench.clone(),
     });
 
     let gadget_mode_reconfigurer: Option<
         Arc<dyn gadgetron_core::agent::tools::GadgetModeReconfigurer>,
     > = penny_registry.clone().map(|r| r as _);
-    let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> =
-        penny_registry.map(|r| r as Arc<dyn GadgetDispatcher>);
+    let gadget_catalog: Option<Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>> =
+        penny_registry
+            .clone()
+            .map(|registry| registry as Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>);
+    let gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>> = penny_registry
+        .clone()
+        .map(|r| r as Arc<dyn GadgetDispatcher>);
 
     // Wire Postgres-backed action audit sink when a pool is available;
     // otherwise fall back to Noop. Unit / no-db flows keep the Noop
@@ -2135,7 +2342,7 @@ fn build_workbench(
     // approved-action dispatches emit a billing_events row (kind=Action,
     // source_event_id = audit_event_id). No pool = no-op; audit still
     // fires.
-    let action_svc_impl = InProcessWorkbenchActionService::new_full(
+    let mut action_svc_impl = InProcessWorkbenchActionService::new_full(
         catalog.clone(),
         InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
         candidate_coordinator,
@@ -2143,6 +2350,12 @@ fn build_workbench(
         audit_sink,
         Some(approval_store.clone()),
     );
+    if let Some(surface) = dynamic_workbench {
+        action_svc_impl = action_svc_impl.with_dynamic_workbench(surface);
+    }
+    if let (Some(evaluator), Some(catalog)) = (policy_evaluator.clone(), gadget_catalog.clone()) {
+        action_svc_impl = action_svc_impl.with_policy_enforcement(evaluator, catalog);
+    }
     // Share the billing failure counter with the action service so
     // `emit_action_billing`'s error arm increments the same `Arc`
     // that the chat enforcer + tool handler do.
@@ -2162,14 +2375,18 @@ fn build_workbench(
         projection,
         actions: Some(action_svc),
         approval_store: Some(approval_store),
+        policy_evaluator,
+        gadget_catalog,
         descriptor_catalog: Some(catalog),
         catalog_path,
         bundles_dir,
         bundle_signing,
+        runtime_manager,
         gadget_modes,
         gadget_mode_reconfigurer,
         agent_brain,
         agent_config_base: Some(agent_config),
+        vault_layout,
     });
     // Prime the catalog from `[web] bundles_dir` / `catalog_path` at
     // startup so the operator doesn't have to SIGHUP / hit
@@ -2298,6 +2515,11 @@ fn build_app_state(parts: AppStateParts) -> AppState {
         billing_failures,
     } = parts;
 
+    let chat_jobs = Arc::new(match pg_pool.clone() {
+        Some(pool) => gadgetron_gateway::chat_jobs::JobStore::with_postgres(pool),
+        None => gadgetron_gateway::chat_jobs::JobStore::new(),
+    });
+
     AppState {
         key_validator,
         quota_enforcer,
@@ -2322,7 +2544,7 @@ fn build_app_state(parts: AppStateParts) -> AppState {
             .map(|r| r as Arc<dyn gadgetron_core::agent::tools::GadgetDispatcher>),
         tool_audit_sink,
         billing_failures,
-        chat_jobs: Arc::new(gadgetron_gateway::chat_jobs::JobStore::new()),
+        chat_jobs,
     }
 }
 
@@ -2341,11 +2563,16 @@ fn build_http_app(state: AppState, web_config: &gadgetron_core::config::WebConfi
 async fn init_serve_runtime(
     config: &AppConfig,
     config_path: &std::path::Path,
-    key_validator: SharedKeyValidator,
-    pg_pool: Option<sqlx::PgPool>,
+    database: DatabaseRuntime,
     no_db: bool,
     tui_enabled: bool,
 ) -> Result<(axum::Router, ServerRuntimeHandles)> {
+    let DatabaseRuntime {
+        key_validator,
+        callback_credential_issuer,
+        pg_pool,
+        bundle_migrations,
+    } = database;
     // Quota enforcement pipeline:
     // - base enforcer: `PgQuotaEnforcer` when a pool is available
     //   (pg spend tracking + billing ledger), else
@@ -2382,6 +2609,14 @@ async fn init_serve_runtime(
             ),
         }
     }
+    let default_onboarding_topologies = match pg_pool.as_ref() {
+        Some(pool) => {
+            gadgetron_xaas::default_onboarding::ensure_existing_default_team_onboarding(pool)
+                .await
+                .context("reconcile default Team onboarding")?
+        }
+        None => Vec::new(),
+    };
 
     let billing_failures_for_enforcer =
         Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new());
@@ -2432,7 +2667,7 @@ async fn init_serve_runtime(
     // `.with_coordinator(coord)` and fan out tool calls to
     // `/workbench/activity`.
     let knowledge_cfg = load_knowledge_config_from_path(config_path)?;
-    let pg_pool_for_knowledge = connect_optional_pg_for_knowledge().await;
+    let pg_pool_for_knowledge = pg_pool.clone();
     let knowledge_service = build_knowledge_service(knowledge_cfg.as_ref(), pg_pool_for_knowledge)?;
     let (activity_capture_store, candidate_coordinator) =
         match (knowledge_service.as_ref(), knowledge_cfg.as_ref()) {
@@ -2482,6 +2717,7 @@ async fn init_serve_runtime(
                     external_auth_token_env: saved.external_auth_token_env,
                     custom_model_option: saved.custom_model_option,
                     backend: saved.backend,
+                    llm_endpoint_id: saved.llm_endpoint_id,
                     model_source: saved.model_source,
                     local_base_url: saved.local_base_url,
                     local_api_key_env: saved.local_api_key_env,
@@ -2524,32 +2760,76 @@ async fn init_serve_runtime(
     }
     let agent_brain = Arc::new(arc_swap::ArcSwap::from_pointee(startup_agent));
 
-    let (providers_ss, providers_for_router, penny_registry) = build_provider_maps(
+    let policy_evaluator: Option<Arc<dyn gadgetron_core::policy::PolicyEvaluator>> =
+        pg_pool.as_ref().map(|pool| {
+            Arc::new(gadgetron_xaas::policy::PgPolicyEvaluator::new(
+                pool.clone(),
+                agent_brain.load().gadgets.clone(),
+            )) as Arc<dyn gadgetron_core::policy::PolicyEvaluator>
+        });
+
+    let ProviderMaps {
+        shared: providers_ss,
+        router: providers_for_router,
+        penny_registry,
+        penny_provider,
+    } = build_provider_maps(
         config,
         config_path,
-        pg_pool.clone(),
-        Some(agent_brain.clone()),
-        Some(activity_bus.clone()),
-        candidate_coordinator.clone(),
-        Some(approval_store.clone()),
+        PennyRegistrationRuntime {
+            pg_pool: pg_pool.clone(),
+            agent_brain: Some(agent_brain.clone()),
+            activity_bus: Some(activity_bus.clone()),
+            candidate_coordinator: candidate_coordinator.clone(),
+            approval_store: Some(approval_store.clone()),
+            callback_credential_issuer,
+        },
     )?;
     let llm_router = build_llm_router(providers_for_router, config);
 
     let agent_config = Arc::new(config.agent.clone());
+    let event_executor = penny_provider.as_ref().map(|provider| {
+        Arc::new(PennyKnowledgeAgentExecutor {
+            provider: provider.clone(),
+        }) as Arc<dyn gadgetron_gateway::web::bundle_scheduler::BundleEventAgentExecutor>
+    });
 
     let workbench = build_workbench(
         knowledge_service.clone(),
+        knowledge_cfg.as_ref().map(|config| {
+            Arc::new(gadgetron_knowledge::vault::TenantVaultLayout::new(
+                config.effective_vault_path(),
+            ))
+        }),
         candidate_coordinator.clone(),
         penny_registry.clone(),
+        event_executor,
         pg_pool.clone(),
         Some(agent_brain.clone()),
         config.web.catalog_path.clone(),
         config.web.bundles_dir.clone(),
+        config.web.bundle_state_dir.clone(),
         config.web.bundle_signing.clone(),
+        bundle_migrations,
         Arc::clone(&billing_failures_for_enforcer),
         approval_store.clone(),
         agent_config.clone(),
+        policy_evaluator.clone(),
     );
+    if let (Some(pool), Some(vault_layout)) = (
+        pg_pool.as_ref(),
+        workbench
+            .as_ref()
+            .and_then(|workbench| workbench.vault_layout.as_ref()),
+    ) {
+        gadgetron_gateway::default_onboarding::ensure_default_team_guides(
+            pool,
+            vault_layout,
+            &default_onboarding_topologies,
+        )
+        .await
+        .context("materialize default Team guide")?;
+    }
 
     let (penny_shared_surface, penny_assembler) =
         match (&workbench, &activity_capture_store, &candidate_coordinator) {
@@ -2593,6 +2873,24 @@ async fn init_serve_runtime(
             Arc::new(gadgetron_core::audit::NoopGadgetAuditEventSink)
         };
 
+    let knowledge_worker = match (
+        pg_pool.clone(),
+        workbench
+            .as_ref()
+            .and_then(|workbench| workbench.vault_layout.clone()),
+        penny_provider,
+    ) {
+        (Some(pool), Some(vault_layout), Some(provider)) => {
+            Some(gadgetron_gateway::knowledge_jobs::spawn_worker(
+                pool,
+                vault_layout,
+                Arc::new(PennyKnowledgeAgentExecutor { provider }),
+                policy_evaluator.clone(),
+            ))
+        }
+        _ => None,
+    };
+
     let state = build_app_state(AppStateParts {
         key_validator,
         quota_enforcer,
@@ -2614,6 +2912,42 @@ async fn init_serve_runtime(
         tool_audit_sink,
         billing_failures: Arc::clone(&billing_failures_for_enforcer),
     });
+    let recovered_chat_jobs = state
+        .chat_jobs
+        .recover_interrupted()
+        .await
+        .context("recover interrupted chat jobs")?;
+    if recovered_chat_jobs > 0 {
+        tracing::warn!(
+            recovered_chat_jobs,
+            "chat jobs interrupted by the previous process were terminalized"
+        );
+    }
+    let collection_worker = state
+        .pg_pool
+        .as_ref()
+        .zip(state.workbench.as_ref())
+        .filter(|(_, workbench)| {
+            workbench.vault_layout.is_some()
+                && workbench.runtime_manager.is_some()
+                && workbench.policy_evaluator.is_some()
+        })
+        .map(|_| gadgetron_gateway::knowledge_collections::spawn_worker(state.clone()));
+    let knowledge_event_worker = state
+        .pg_pool
+        .as_ref()
+        .zip(state.workbench.as_ref())
+        .filter(|(_, workbench)| {
+            workbench.vault_layout.is_some()
+                && workbench.runtime_manager.is_some()
+                && workbench.agent_brain.is_some()
+                && workbench.policy_evaluator.is_some()
+        })
+        .map(|_| gadgetron_gateway::knowledge_events::spawn_worker(state.clone()));
+    let manager_webhook_worker = state
+        .pg_pool
+        .clone()
+        .map(gadgetron_gateway::web::manager_oversight::spawn_webhook_worker);
     let tui_thread = spawn_tui_thread(tui_tx.as_ref());
 
     // Arm the SIGHUP reloader while we still have
@@ -2639,6 +2973,10 @@ async fn init_serve_runtime(
             audit_handle,
             tui_tx,
             tui_thread,
+            knowledge_worker,
+            knowledge_event_worker,
+            collection_worker,
+            manager_webhook_worker,
             pg_pool,
         },
     ))
@@ -2719,29 +3057,11 @@ async fn bind_and_serve(app: axum::Router, bind_addr: &str, config: &AppConfig) 
     eprintln!(" done");
     tracing::info!(addr = %bind_addr, "listening");
 
-    // Export callback env so the `gadget serve` grandchild that
-    // Claude Code spawns under Penny can forward Ask-mode tool calls
-    // back to this parent gateway. `GADGETRON_GATEWAY_CALLBACK_URL`
-    // tells the grandchild where; `GADGETRON_GATEWAY_CALLBACK_KEY`
-    // is the bearer token. We default the key to the existing
-    // `GADGETRON_LOG_ANALYZER_KEY` admin key when set — it's already
-    // an operator-managed secret used for the same kind of internal
-    // loopback callback. When neither is set, the grandchild's
-    // registry falls back to "Ask collapses to Never".
+    // Export only the loopback callback location. Each authenticated Penny
+    // turn receives its own delegated bearer lease from the provider wiring;
+    // the raw value is never installed as process-global state.
     let callback_url = bind_addr_to_loopback_url(bind_addr);
     std::env::set_var("GADGETRON_GATEWAY_CALLBACK_URL", &callback_url);
-    if std::env::var("GADGETRON_GATEWAY_CALLBACK_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
-        if let Some(k) = std::env::var("GADGETRON_LOG_ANALYZER_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-        {
-            std::env::set_var("GADGETRON_GATEWAY_CALLBACK_KEY", k);
-        }
-    }
 
     // Print startup banner to stdout (matches design §1.4 Stage 3-B).
     print_serve_banner(
@@ -2767,8 +3087,25 @@ async fn drain_server_runtime(runtime: ServerRuntimeHandles) {
         audit_handle,
         tui_tx,
         tui_thread,
+        knowledge_worker,
+        knowledge_event_worker,
+        collection_worker,
+        manager_webhook_worker,
         pg_pool,
     } = runtime;
+
+    if let Some(worker) = knowledge_event_worker {
+        worker.shutdown().await;
+    }
+    if let Some(worker) = collection_worker {
+        worker.shutdown().await;
+    }
+    if let Some(worker) = knowledge_worker {
+        worker.shutdown().await;
+    }
+    if let Some(worker) = manager_webhook_worker {
+        worker.shutdown().await;
+    }
 
     // Drop TUI broadcast Sender after axum drains so no new RequestLog emits race with shutdown.
     drop(tui_tx);
@@ -2858,19 +3195,9 @@ async fn serve(
     );
 
     // Step 4: PostgreSQL connection pool (skipped in no-db mode).
-    let DatabaseRuntime {
-        key_validator,
-        pg_pool: pg_pool_opt,
-    } = init_database_runtime(use_no_db).await?;
-    let (app, runtime) = init_serve_runtime(
-        &config,
-        &config_path,
-        key_validator,
-        pg_pool_opt,
-        use_no_db,
-        tui_enabled,
-    )
-    .await?;
+    let database = init_database_runtime(use_no_db, &config).await?;
+    let (app, runtime) =
+        init_serve_runtime(&config, &config_path, database, use_no_db, tui_enabled).await?;
 
     // Step 16: axum::serve with graceful shutdown on SIGTERM or Ctrl-C.
     bind_and_serve(app, &bind_addr, &config).await?;
@@ -2909,21 +3236,16 @@ fn register_penny_if_configured(
     app_config: &AppConfig,
     providers: &mut HashMap<String, Arc<dyn LlmProvider>>,
     runtime: PennyRegistrationRuntime,
-) -> Option<Arc<gadgetron_penny::GadgetRegistry>> {
+) -> Option<(
+    Arc<gadgetron_penny::GadgetRegistry>,
+    Arc<gadgetron_penny::PennyProvider>,
+)> {
     // We re-read the toml file to extract the `[knowledge]` section.
     // The main AppConfig load path doesn't include a `knowledge`
     // field — adding one would require cross-crate type sharing
     // (gadgetron-core ↔ gadgetron-knowledge) that's more churn than
     // a ~5 ms second file read.
-    let registration = match prepare_penny_router_registration(
-        config_path,
-        app_config,
-        runtime.pg_pool,
-        runtime.agent_brain,
-        runtime.activity_bus,
-        runtime.candidate_coordinator,
-        runtime.approval_store,
-    ) {
+    let registration = match prepare_penny_router_registration(config_path, app_config, runtime) {
         Ok(Some(registration)) => registration,
         Ok(None) => {
             // No [knowledge] section → penny not available.
@@ -2954,7 +3276,7 @@ fn register_penny_if_configured(
     // plumbing; for now Penny silently drops tool-call events when the
     // DB is not configured, which preserves the previous tracing-only
     // behavior.
-    registration.register(providers);
+    let provider = registration.register(providers);
     tracing::info!(
         model = "penny",
         "penny: registered (KnowledgeGadgetProvider active; web.search = {})",
@@ -2964,7 +3286,7 @@ fn register_penny_if_configured(
             "none"
         }
     );
-    Some(registry)
+    Some((registry, provider))
 }
 
 async fn shutdown_signal() {
@@ -3035,7 +3357,15 @@ async fn audit_consumer_loop(
 /// What happened / why / what to do:
 /// - File exists and `--yes` not passed → print warning and exit without writing.
 /// - Write fails (permissions, disk full) → actionable error with cause + next step.
-fn cmd_init(output: &std::path::Path, yes: bool) -> Result<()> {
+fn cmd_init(
+    output: &std::path::Path,
+    yes: bool,
+    profile: InitProfile,
+    bind: &str,
+    data_dir: &std::path::Path,
+    admin_email: &str,
+    admin_display_name: &str,
+) -> Result<()> {
     if output.exists() && !yes {
         // Only prompt when a human can actually answer. A blocking
         // read_line treats EOF (/dev/null) as "N", but an OPEN pipe
@@ -3062,9 +3392,14 @@ fn cmd_init(output: &std::path::Path, yes: bool) -> Result<()> {
         }
     }
 
-    let content = ANNOTATED_CONFIG_TEMPLATE;
+    let content = match profile {
+        InitProfile::Development => ANNOTATED_CONFIG_TEMPLATE.to_string(),
+        InitProfile::System => {
+            render_system_config(bind, data_dir, admin_email, admin_display_name)?
+        }
+    };
 
-    std::fs::write(output, content).map_err(|e| {
+    std::fs::write(output, &content).map_err(|e| {
         anyhow::anyhow!(
             "Failed to write config to '{path}'.\n\n  \
              Cause:     {e}\n  \
@@ -3073,15 +3408,79 @@ fn cmd_init(output: &std::path::Path, yes: bool) -> Result<()> {
         )
     })?;
 
-    println!("Config written to {}\n", output.display());
-    println!("  Next steps:");
     println!(
-        "    1. Review {} — uncomment additional providers as needed.",
+        "{} config written to {}\n",
+        match profile {
+            InitProfile::Development => "Development",
+            InitProfile::System => "System",
+        },
         output.display()
     );
-    println!("    2. Run: gadgetron serve");
+    println!("  Next steps:");
+    match profile {
+        InitProfile::Development => {
+            println!(
+                "    1. Review {} — uncomment additional providers as needed.",
+                output.display()
+            );
+            println!("    2. Run: gadgetron serve");
+        }
+        InitProfile::System => {
+            println!("    1. Keep runtime secrets in the systemd EnvironmentFile.");
+            println!("    2. Start the managed service and verify /ready.");
+        }
+    }
 
     Ok(())
+}
+
+fn render_system_config(
+    bind: &str,
+    data_dir: &std::path::Path,
+    admin_email: &str,
+    admin_display_name: &str,
+) -> Result<String> {
+    bind.parse::<std::net::SocketAddr>()
+        .with_context(|| format!("system init bind must be an IP socket address: {bind}"))?;
+    if !data_dir.is_absolute() {
+        anyhow::bail!("system init data directory must be absolute");
+    }
+    if admin_email.trim().is_empty() || !admin_email.contains('@') {
+        anyhow::bail!("system init administrator email is invalid");
+    }
+    if admin_display_name.trim().is_empty() {
+        anyhow::bail!("system init administrator display name is empty");
+    }
+    let data = data_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("system init data directory is not UTF-8"))?;
+    let toml_string = |value: &str| toml::Value::String(value.to_string()).to_string();
+    Ok(format!(
+        "# Gadgetron system configuration\n\
+         # Generated by: gadgetron init --profile system\n\
+         # Secrets live in /etc/gadgetron/gadgetron.env, not this file.\n\n\
+         [server]\n\
+         bind = {}\n\n\
+         [web]\n\
+         enabled = true\n\
+         bundles_dir = {}\n\
+         bundle_state_dir = {}\n\n\
+         [auth.bootstrap]\n\
+         admin_email = {}\n\
+         admin_display_name = {}\n\
+         admin_password_env = \"GADGETRON_ADMIN_PW\"\n\n\
+         [knowledge]\n\
+         wiki_path = {}\n\
+         vault_path = {}\n\
+         wiki_autocommit = true\n",
+        toml_string(bind),
+        toml_string(&format!("{data}/bundles")),
+        toml_string(&format!("{data}/bundle-state")),
+        toml_string(admin_email),
+        toml_string(admin_display_name),
+        toml_string(&format!("{data}/wiki")),
+        toml_string(&format!("{data}/vaults")),
+    ))
 }
 
 async fn cmd_reindex(
@@ -3104,7 +3503,7 @@ async fn cmd_reindex(
         (false, _) => gadgetron_knowledge::ReindexMode::Incremental,
     };
 
-    let pool = connect_required_pg_for_knowledge().await?;
+    let pool = connect_required_pg_for_knowledge(&config_path).await?;
     let report = gadgetron_knowledge::run_reindex(
         &knowledge_cfg,
         pool.clone(),
@@ -3499,6 +3898,7 @@ type = "round_robin"
 
 # [knowledge]
 # wiki_path = "./.gadgetron/wiki"
+# vault_path = "./.gadgetron/vaults"
 # wiki_autocommit = true
 # wiki_git_author = "Penny <penny@gadgetron.local>"
 # wiki_max_page_bytes = 1048576
@@ -3682,14 +4082,9 @@ fn build_providers(
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
 
-    // Default filter exposes the bundle init/runtime targets so an
-    // operator can see at-a-glance whether the log-analyzer scanner
-    // is auto-running, the server-monitor poller is alive, etc.
-    // Bumping a target up: set RUST_LOG=log_analyzer=debug, etc.
+    // Domain Bundle runtimes own their log targets and filters.
     let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| {
-        "gadgetron=info,tower_http=info,log_analyzer=info,\
-         server_monitor=info,server_monitor_metrics=info,\
-         server_monitor_poller=info,penny_audit=info"
+        "gadgetron=info,tower_http=info,penny_audit=info"
             .parse()
             .unwrap()
     });
@@ -3714,6 +4109,122 @@ fn default_config() -> AppConfig {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn k11_actual_penny_researcher_runtime_smoke() {
+        if std::env::var("GADGETRON_K11_ACTUAL_RUNTIME").as_deref() != Ok("1") {
+            eprintln!(
+                "skipping K1.1 actual Penny runtime smoke; set GADGETRON_K11_ACTUAL_RUNTIME=1"
+            );
+            return;
+        }
+        let Some(config_path) = std::env::var("GADGETRON_K11_ACTUAL_CONFIG")
+            .ok()
+            .or_else(|| std::env::var("GADGETRON_CONFIG").ok())
+            .map(PathBuf::from)
+        else {
+            eprintln!("skipping K1.1 actual Penny runtime smoke; set GADGETRON_K11_ACTUAL_CONFIG");
+            return;
+        };
+        if !config_path.is_file() {
+            eprintln!(
+                "skipping K1.1 actual Penny runtime smoke; config does not exist: {}",
+                config_path.display()
+            );
+            return;
+        }
+        let config = AppConfig::load(config_path.to_string_lossy().as_ref())
+            .expect("load actual Penny runtime config");
+        let prompt = "Run one bounded Researcher smoke turn. Return a JSON object with title, summary, dossier_markdown, and citations. The evidence is: service health changed from failing to healthy after a dependency check. Do not call tools.";
+        let profile =
+            gadgetron_core::agent::config::ConversationAgentProfile::from_agent(&config.agent)
+                .resolve_auto(prompt);
+        let registry =
+            Arc::new(gadgetron_penny::GadgetRegistryBuilder::new().freeze(&config.agent));
+        let provider = Arc::new(gadgetron_penny::PennyProvider::new_without_audit(
+            Arc::new(config.agent),
+            registry,
+        ));
+        let executor = PennyKnowledgeAgentExecutor { provider };
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let job = gadgetron_xaas::knowledge_jobs::KnowledgeJobRow {
+            id: Uuid::new_v4(),
+            tenant_id,
+            space_id: Uuid::new_v4(),
+            output_vault_id: Uuid::new_v4(),
+            role: "researcher".to_string(),
+            kind: "on_demand".to_string(),
+            status: "running".to_string(),
+            priority: 5,
+            service_actor_user_id: actor_id,
+            requested_by_user_id: actor_id,
+            on_behalf_of_user_id: Some(actor_id),
+            input: serde_json::json!({"question": prompt}),
+            input_hash: "a".repeat(64),
+            idempotency_key: format!("k11-actual-runtime:{tenant_id}"),
+            runtime_backend: profile.backend.as_str().to_string(),
+            runtime_model: profile.model,
+            runtime_effort: profile.effort.as_str().to_string(),
+            runtime_endpoint_id: profile.llm_endpoint_id,
+            runtime_model_source: match profile.model_source {
+                gadgetron_core::agent::config::ModelSource::Default => "default",
+                gadgetron_core::agent::config::ModelSource::Local => "local",
+            }
+            .to_string(),
+            runtime_local_base_url: profile.local_base_url,
+            runtime_local_api_key_env: profile.local_api_key_env,
+            prompt_contract_revision: "researcher-v2".to_string(),
+            tool_policy_revision: "k11-actual-smoke".to_string(),
+            role_profile_source: Some("global".to_string()),
+            role_profile_ref: Some("b".repeat(64)),
+            bundle_id: None,
+            bundle_role_id: None,
+            package_manifest_sha256: None,
+            recipe_asset_id: None,
+            recipe_sha256: None,
+            max_tokens: 1_024,
+            max_sources: 1,
+            max_wall_seconds: 120,
+            used_tokens: 0,
+            used_sources: 0,
+            progress_percent: 40,
+            checkpoint: serde_json::json!({"phase": "agent_running"}),
+            attempt: 1,
+            max_attempts: 1,
+            scheduled_at: now,
+            lease_owner: Some("k11-actual-smoke".to_string()),
+            lease_expires_at: Some(now + chrono::Duration::seconds(120)),
+            heartbeat_at: Some(now),
+            cancel_requested_at: None,
+            terminal_reason: None,
+            revision: 1,
+            created_at: now,
+            started_at: Some(now),
+            finished_at: None,
+            updated_at: now,
+        };
+        let capture = gadgetron_gateway::knowledge_jobs::AgentOutputCapture::default();
+        let result = gadgetron_gateway::knowledge_jobs::KnowledgeAgentExecutor::execute(
+            &executor,
+            gadgetron_gateway::knowledge_jobs::AgentInvocation {
+                job,
+                prompt: prompt.to_string(),
+                system_prompt: Some(
+                    "You are the actual Gadgetron Knowledge Researcher runtime smoke. Keep the response bounded."
+                        .to_string(),
+                ),
+                allowed_tools: Vec::new(),
+                output_capture: capture.clone(),
+            },
+        )
+        .await
+        .expect("actual Penny Researcher turn must complete");
+        assert!(!result.text.trim().is_empty());
+        assert_eq!(capture.snapshot(), result.text);
+        assert!(result.text.contains('{'));
+    }
+
     // ------------------------------------------------------------------
     // Existing tests (preserved)
     // ------------------------------------------------------------------
@@ -3722,6 +4233,73 @@ mod tests {
     #[test]
     fn main_compiles() {
         // Compilation is the assertion.
+    }
+
+    #[tokio::test]
+    async fn no_db_runtime_wires_turn_scoped_callback_credentials() {
+        let runtime = init_database_runtime(true, &AppConfig::default())
+            .await
+            .expect("initialize no-db runtime");
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let actor = gadgetron_core::provider::ChatAuditContext {
+            tenant_id: tenant_id.to_string(),
+            owner_id: Some(user_id.to_string()),
+        };
+        let lease = runtime
+            .callback_credential_issuer
+            .issue(&actor)
+            .expect("issue turn callback credential");
+        let parsed = gadgetron_xaas::auth::key::ApiKey::parse(lease.expose())
+            .expect("parse delegated callback key");
+        let validated = runtime
+            .key_validator
+            .validate(&parsed.hash)
+            .await
+            .expect("validate delegated callback key");
+
+        assert_eq!(validated.tenant_id, tenant_id);
+        assert_eq!(validated.user_id, Some(user_id));
+        assert_eq!(
+            validated.scopes,
+            vec![gadgetron_core::context::Scope::OpenAiCompat]
+        );
+        drop(lease);
+        let fallback = runtime
+            .key_validator
+            .validate(&parsed.hash)
+            .await
+            .expect("no-db validator accepts any non-delegated key");
+        assert_eq!(fallback.api_key_id, Uuid::nil());
+        assert_eq!(fallback.tenant_id, Uuid::nil());
+        assert_ne!(fallback.tenant_id, tenant_id);
+    }
+
+    #[test]
+    fn knowledge_job_callback_runs_on_behalf_of_the_requesting_user() {
+        let service_actor = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        assert_eq!(
+            knowledge_job_callback_owner(Some(user), service_actor),
+            user
+        );
+        assert_eq!(
+            knowledge_job_callback_owner(None, service_actor),
+            service_actor
+        );
+    }
+
+    #[test]
+    fn knowledge_job_keeps_signed_role_contract_in_the_system_channel() {
+        let messages = knowledge_job_messages(
+            "untrusted source body".to_string(),
+            Some("signed role contract".to_string()),
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, gadgetron_core::message::Role::System);
+        assert_eq!(messages[1].role, gadgetron_core::message::Role::User);
+        assert_eq!(messages[0].content.text(), Some("signed role contract"));
+        assert_eq!(messages[1].content.text(), Some("untrusted source body"));
     }
 
     // ------------------------------------------------------------------
@@ -4152,13 +4730,19 @@ mod tests {
         let cli =
             Cli::try_parse_from(["gadgetron", "init"]).expect("parse must succeed for 'init'");
         match cli.command {
-            Some(Commands::Init { output, yes }) => {
+            Some(Commands::Init {
+                output,
+                yes,
+                profile,
+                ..
+            }) => {
                 assert_eq!(
                     output,
                     std::path::PathBuf::from("gadgetron.toml"),
                     "default output must be 'gadgetron.toml'"
                 );
                 assert!(!yes, "yes must default to false");
+                assert_eq!(profile, InitProfile::Development);
             }
             _ => panic!("expected Commands::Init"),
         }
@@ -4170,11 +4754,43 @@ mod tests {
         let cli = Cli::try_parse_from(["gadgetron", "init", "--output", "/tmp/test.toml"])
             .expect("parse must succeed for 'init --output /tmp/test.toml'");
         match cli.command {
-            Some(Commands::Init { output, yes }) => {
+            Some(Commands::Init { output, yes, .. }) => {
                 assert_eq!(output, std::path::PathBuf::from("/tmp/test.toml"));
                 assert!(!yes);
             }
             _ => panic!("expected Commands::Init"),
+        }
+    }
+
+    #[test]
+    fn clap_init_system_profile_is_explicit_and_typed() {
+        let cli = Cli::try_parse_from([
+            "gadgetron",
+            "init",
+            "--profile",
+            "system",
+            "--bind",
+            "127.0.0.1:18080",
+            "--data-dir",
+            "/srv/gadgetron",
+            "--admin-email",
+            "operator@example.com",
+        ])
+        .expect("system init options must parse");
+        match cli.command {
+            Some(Commands::Init {
+                profile,
+                bind,
+                data_dir,
+                admin_email,
+                ..
+            }) => {
+                assert_eq!(profile, InitProfile::System);
+                assert_eq!(bind, "127.0.0.1:18080");
+                assert_eq!(data_dir, std::path::PathBuf::from("/srv/gadgetron"));
+                assert_eq!(admin_email, "operator@example.com");
+            }
+            _ => panic!("expected system Commands::Init"),
         }
     }
 
@@ -4289,7 +4905,16 @@ mod tests {
         fs::create_dir_all(&dir).expect("failed to create temp dir");
         let output = dir.join("gadgetron.toml");
 
-        cmd_init(&output, true).expect("cmd_init must succeed");
+        cmd_init(
+            &output,
+            true,
+            InitProfile::Development,
+            "127.0.0.1:8080",
+            std::path::Path::new("/var/lib/gadgetron"),
+            "admin@localhost",
+            "Gadgetron Administrator",
+        )
+        .expect("cmd_init must succeed");
 
         assert!(output.exists(), "gadgetron.toml must exist after init");
 
@@ -4320,6 +4945,63 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn system_init_renders_one_parseable_production_baseline() {
+        let content = render_system_config(
+            "127.0.0.1:18080",
+            std::path::Path::new("/srv/gadgetron"),
+            "operator@example.com",
+            "Primary Operator",
+        )
+        .expect("system config must render");
+
+        let config: AppConfig = toml::from_str(&content).expect("AppConfig must parse");
+        assert_eq!(config.server.bind, "127.0.0.1:18080");
+        assert_eq!(
+            config.web.bundles_dir.as_deref(),
+            Some("/srv/gadgetron/bundles")
+        );
+        assert_eq!(config.web.bundle_state_dir, "/srv/gadgetron/bundle-state");
+        let bootstrap = config
+            .auth
+            .bootstrap
+            .expect("bootstrap admin must be present");
+        assert_eq!(bootstrap.admin_email, "operator@example.com");
+        assert_eq!(bootstrap.admin_password_env, "GADGETRON_ADMIN_PW");
+        let knowledge =
+            gadgetron_knowledge::config::KnowledgeConfig::extract_from_toml_str(&content)
+                .expect("knowledge config must parse")
+                .expect("knowledge config must be present");
+        assert_eq!(
+            knowledge.wiki_path,
+            std::path::Path::new("/srv/gadgetron/wiki")
+        );
+        assert_eq!(
+            knowledge.vault_path.as_deref(),
+            Some(std::path::Path::new("/srv/gadgetron/vaults"))
+        );
+        assert!(!content.contains("GADGETRON_DATABASE_URL="));
+        assert!(!content.contains("GADGETRON_ADMIN_PW="));
+    }
+
+    #[test]
+    fn system_init_rejects_relative_state_and_invalid_bind() {
+        assert!(render_system_config(
+            "localhost:8080",
+            std::path::Path::new("/var/lib/gadgetron"),
+            "operator@example.com",
+            "Operator",
+        )
+        .is_err());
+        assert!(render_system_config(
+            "127.0.0.1:8080",
+            std::path::Path::new("relative"),
+            "operator@example.com",
+            "Operator",
+        )
+        .is_err());
+    }
+
     /// S7-2-T5: `gadgetron init` without `--yes` refuses to overwrite an existing file.
     ///
     /// When the file already exists and stdin is not a TTY (CI environment),
@@ -4345,7 +5027,16 @@ mod tests {
         // Call cmd_init without --yes. In CI stdin is not a TTY, so the overwrite
         // prompt receives no input → treated as "N" → file must remain unchanged.
         // We pipe in a no-op input by having no stdin hooked up (it will read "" → N).
-        cmd_init(&output, false).expect("cmd_init must not error even when refusing overwrite");
+        cmd_init(
+            &output,
+            false,
+            InitProfile::Development,
+            "127.0.0.1:8080",
+            std::path::Path::new("/var/lib/gadgetron"),
+            "admin@localhost",
+            "Gadgetron Administrator",
+        )
+        .expect("cmd_init must not error even when refusing overwrite");
 
         let after = fs::read_to_string(&output).expect("must still read file");
         assert_eq!(
@@ -4375,8 +5066,8 @@ bind = "127.0.0.1:8080"
         let registry = load_penny_registry_from_config(
             &config_path,
             &gadgetron_core::agent::AgentConfig::default(),
-            None, // no Postgres pool in unit-test path → ingestion writer skipped
             None, // no approval store in unit-test path → Ask tools disabled
+            None,
         )
         .expect("load should succeed");
         assert!(
@@ -4412,8 +5103,8 @@ wiki_max_page_bytes = 1048576
         let registry = load_penny_registry_from_config(
             &config_path,
             &gadgetron_core::agent::AgentConfig::default(),
-            None, // no Postgres pool in unit-test path → ingestion writer skipped
             None, // no approval store in unit-test path → Ask tools disabled
+            None,
         )
         .expect("load should succeed")
         .expect("knowledge config should build a Penny registry");
@@ -4468,30 +5159,25 @@ wiki_max_page_bytes = 1048576
     }
 
     #[test]
-    fn apply_agent_gadgets_env_override_updates_server_admin() {
+    fn apply_agent_gadgets_env_override_updates_bundle_namespace() {
         let mut cfg = gadgetron_core::agent::config::AgentConfig::default();
-        cfg.gadgets.write.server_admin = gadgetron_core::agent::config::GadgetMode::Ask;
+        cfg.gadgets.write.namespace_modes.insert(
+            "example-domain".into(),
+            gadgetron_core::agent::config::GadgetMode::Ask,
+        );
         let mut next = cfg.gadgets.clone();
-        next.write.server_admin = gadgetron_core::agent::config::GadgetMode::Auto;
+        next.write.namespace_modes.insert(
+            "example-domain".into(),
+            gadgetron_core::agent::config::GadgetMode::Auto,
+        );
         let raw = serde_json::to_string(&next).expect("serialize gadgets");
 
         apply_agent_gadgets_env_override(&mut cfg, Some(raw)).expect("apply override");
 
         assert_eq!(
-            cfg.gadgets.write.server_admin,
-            gadgetron_core::agent::config::GadgetMode::Auto
+            cfg.gadgets.write.namespace_mode("example-domain"),
+            Some(gadgetron_core::agent::config::GadgetMode::Auto)
         );
-    }
-
-    #[test]
-    fn log_analyzer_auto_scan_defaults_on_and_accepts_explicit_off() {
-        assert!(log_analyzer_auto_scan_enabled(None));
-        assert!(log_analyzer_auto_scan_enabled(Some("1")));
-        assert!(log_analyzer_auto_scan_enabled(Some("true")));
-        assert!(log_analyzer_auto_scan_enabled(Some("on")));
-        assert!(!log_analyzer_auto_scan_enabled(Some("0")));
-        assert!(!log_analyzer_auto_scan_enabled(Some("false")));
-        assert!(!log_analyzer_auto_scan_enabled(Some("off")));
     }
 
     #[test]
@@ -4712,18 +5398,27 @@ wiki_max_page_bytes = 1048576
 
         let workbench = build_workbench(
             Some(knowledge_service.clone()),
+            Some(Arc::new(
+                gadgetron_knowledge::vault::TenantVaultLayout::new(
+                    knowledge_cfg.effective_vault_path(),
+                ),
+            )),
             Some(candidate_coordinator.clone()),
             None,
             None,
             None,
             None,
             None,
+            None,
+            ".gadgetron/test-bundle-state".into(),
             Default::default(),
+            None,
             std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
             std::sync::Arc::new(
                 gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
             ),
             std::sync::Arc::new(gadgetron_core::agent::AgentConfig::default()),
+            None,
         );
         assert!(
             workbench.is_some(),
@@ -4834,12 +5529,17 @@ wiki_max_page_bytes = 1048576
             None,
             None,
             None,
+            None,
+            None,
+            ".gadgetron/test-bundle-state".into(),
             Default::default(),
+            None,
             std::sync::Arc::new(gadgetron_xaas::billing::BillingFailureCounter::new()),
             std::sync::Arc::new(
                 gadgetron_gateway::web::approval_store::InMemoryApprovalStore::new(),
             ),
             std::sync::Arc::new(gadgetron_core::agent::AgentConfig::default()),
+            None,
         );
         assert!(
             workbench.is_some(),

@@ -10,6 +10,7 @@
 #
 # Precedence: CLI flag > environment variable > this file > built-in
 # default. Secrets belong in `.env` (see `.env.template`), never here.
+# Full field reference: docs/manual/configuration.md.
 
 [server]
 # Bind address. Localhost-only by default for single-user demo.
@@ -58,11 +59,10 @@ type = "round_robin"
 # [agent.gadgets.write]
 # default_mode = "ask"
 # wiki_write = "auto"
-# # Host-mutating server-monitor tools: server.add/remove/bash/systemctl.
-# # Use "ask" for operator approval cards, "auto" for unattended admin flows,
-# # or "never" to hide these tools from Penny entirely.
+# # Server Administrator write Gadgets use policy and Review. This legacy
+# # namespace default remains only for configuration compatibility.
 # server_admin = "ask"
-# # Log UI write tools only mutate Gadgetron's findings DB.
+# # Log triage writes only mutate Server Administrator findings.
 # loganalysis_admin = "auto"
 #
 # [agent.gadgets.destructive]
@@ -115,18 +115,14 @@ admin_password_env = "GADGETRON_ADMIN_PW"
 # [web]
 # enabled = true
 # api_base_path = "/v1"
-# bundles_dir = "bundles"  # loads bundles/*/bundle.toml, including server-monitor actions
+# bundles_dir = ".gadgetron/bundles"  # signed package install root
 
-# --- Rate limiting / bundle overrides (optional) -------------------------
+# --- Rate limiting --------------------------------------------------------
 
 # [quota_rate_limit]
 # requests_per_minute = 600
 # burst = 60
 
-# [bundles.server-monitor]
-# # Per-bundle override: `false` keeps the bundle's plugs/gadgets from
-# # registering at all. Defaults to true.
-# enabled = true
-
-# Advanced sections not shown here: [[nodes]] / [[models]] for the local
-# inference scheduler, and [features].
+# Advanced sections not shown here ([[nodes]], [[models]] for the local
+# inference scheduler, [features]) are documented in
+# docs/manual/configuration.md.

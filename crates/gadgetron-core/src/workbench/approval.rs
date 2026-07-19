@@ -1,20 +1,9 @@
-//! Approval-flow types and store trait for workbench direct actions.
-//!
-//! Earlier builds returned `status: "pending_approval"` with a
-//! freshly-generated `approval_id` that had no persistence — the id
-//! was never stored, never looked up, never resolved. Destructive /
-//! approval-required actions were a stub.
-//!
-//! This module introduces the persistence seam so a real approval can
-//! be created at invocation time, looked up by id, and resolved
-//! (approved / denied). The in-memory implementation lives in
-//! `gadgetron-gateway::web::approval_store`; a Postgres impl will slot
-//! in later behind the same trait.
+//! Policy-bound Review request types and persistence seam.
 //!
 //! # Lifecycle
 //!
 //! ```text
-//!   invoke (requires_approval=true)
+//!   policy decision = Review
 //!     → ApprovalStore::create(request)
 //!         persists { id: Uuid, state: Pending, args, actor, ... }
 //!         returns id
@@ -23,9 +12,9 @@
 //!   POST /api/v1/web/workbench/approvals/:id/approve
 //!     → ApprovalStore::get(id)  (returns Pending record)
 //!     → ApprovalStore::mark_approved(id, by_user_id)
-//!     → action_service.resume(record)
-//!         dispatches the gadget with the persisted args
-//!         returns ok result (status=ok, payload, audit_event_id)
+//!     → WorkbenchAction: action_service.resume(record)
+//!     → WaitingCaller: bounded caller observes Approved and resumes
+//!       only after policy/input revalidation
 //!
 //!   POST /api/v1/web/workbench/approvals/:id/deny
 //!     → ApprovalStore::mark_denied(id, by_user_id, reason)
@@ -38,6 +27,22 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::knowledge::AuthenticatedContext;
+use crate::policy::PolicyIdentity;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalResumeStrategy {
+    #[default]
+    WorkbenchAction,
+    WaitingCaller,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalPolicyBinding {
+    pub policy: PolicyIdentity,
+    pub input_hash: String,
+    pub decision_event_id: Uuid,
+}
 
 /// One approval record. Persisted in an `ApprovalStore`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +71,13 @@ pub struct ApprovalRequest {
     pub resolved_by_user_id: Option<Uuid>,
     /// Operator-supplied reason (only set on deny, and optional).
     pub deny_reason: Option<String>,
+    /// Immutable policy/input identity that produced Review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_binding: Option<ApprovalPolicyBinding>,
+    /// Workbench approvals resume through the action service. Tool/background
+    /// callers wait on the same record and resume their own bounded task.
+    #[serde(default)]
+    pub resume_strategy: ApprovalResumeStrategy,
 }
 
 impl ApprovalRequest {
@@ -92,7 +104,19 @@ impl ApprovalRequest {
             resolved_at: None,
             resolved_by_user_id: None,
             deny_reason: None,
+            policy_binding: None,
+            resume_strategy: ApprovalResumeStrategy::WorkbenchAction,
         }
+    }
+
+    pub fn with_policy_binding(mut self, binding: ApprovalPolicyBinding) -> Self {
+        self.policy_binding = Some(binding);
+        self
+    }
+
+    pub fn with_resume_strategy(mut self, strategy: ApprovalResumeStrategy) -> Self {
+        self.resume_strategy = strategy;
+        self
     }
 }
 

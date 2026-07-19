@@ -5,12 +5,14 @@
 //!   GET  /activity                         → `list_workbench_activity`
 //!   GET  /requests/:request_id/evidence    → `get_workbench_request_evidence`
 //!   GET  /knowledge-status                 → `get_knowledge_status`
+//!   GET  /capabilities                     → `get_capability_projection`
 //!   GET  /views                            → `list_views`
 //!   GET  /views/:view_id/data              → `load_view_data`
 //!   GET  /actions                          → `list_actions`
 //!   POST /actions/:action_id               → `invoke_action`
 
 use std::{
+    io::Write,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,12 +26,14 @@ use axum::{
     Json, Router,
 };
 use gadgetron_core::{
-    error::GadgetronError,
+    agent::ConversationAgentProfile,
+    error::{DatabaseErrorKind, GadgetronError, PennyErrorKind},
+    policy::{PolicyDocument, PolicyInput},
     workbench::{
         InvokeWorkbenchActionRequest, InvokeWorkbenchActionResponse, WorkbenchActivityResponse,
-        WorkbenchBootstrapResponse, WorkbenchKnowledgeStatusResponse,
-        WorkbenchRegisteredActionsResponse, WorkbenchRegisteredViewsResponse,
-        WorkbenchRequestEvidenceResponse, WorkbenchViewData,
+        WorkbenchBootstrapResponse, WorkbenchCapabilityProjectionResponse,
+        WorkbenchKnowledgeStatusResponse, WorkbenchRegisteredActionsResponse,
+        WorkbenchRegisteredViewsResponse, WorkbenchRequestEvidenceResponse, WorkbenchViewData,
     },
 };
 use serde::Deserialize;
@@ -97,7 +101,7 @@ pub trait WorkbenchProjectionService: Send + Sync {
     /// scope-gated views per doc §2.4.1).
     async fn view_data(
         &self,
-        actor_scopes: &[gadgetron_core::context::Scope],
+        actor: &gadgetron_core::context::TenantContext,
         view_id: &str,
     ) -> Result<WorkbenchViewData, WorkbenchHttpError>;
 
@@ -107,6 +111,25 @@ pub trait WorkbenchProjectionService: Send + Sync {
         &self,
         actor_scopes: &[gadgetron_core::context::Scope],
     ) -> Result<WorkbenchRegisteredActionsResponse, WorkbenchHttpError>;
+
+    /// Actor-visible signed Bundle capability aggregate. Legacy projection
+    /// implementations return the stable empty Core-only response.
+    async fn capabilities(
+        &self,
+        _actor_scopes: &[gadgetron_core::context::Scope],
+    ) -> Result<WorkbenchCapabilityProjectionResponse, WorkbenchHttpError> {
+        Ok(WorkbenchCapabilityProjectionResponse::default())
+    }
+
+    async fn contribution_data(
+        &self,
+        _actor: &gadgetron_core::context::TenantContext,
+        contribution_id: &str,
+    ) -> Result<gadgetron_core::workbench::WorkbenchContributionData, WorkbenchHttpError> {
+        Err(WorkbenchHttpError::ContributionNotFound {
+            contribution_id: contribution_id.to_string(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +193,13 @@ pub struct GatewayWorkbenchService {
     /// service skips the persistence call in step 6 (falls back to
     /// bare `Uuid::new_v4()` so older tests keep passing).
     pub approval_store: Option<Arc<dyn gadgetron_core::workbench::ApprovalStore>>,
+    /// Shared R3.2b evaluator used by tool, action, Review and background paths.
+    /// Production PostgreSQL wiring always sets it; no-db/test fixtures may
+    /// retain the legacy compatibility gates with `None`.
+    pub policy_evaluator: Option<Arc<dyn gadgetron_core::policy::PolicyEvaluator>>,
+    /// Live catalog supplying Core-normalized policy metadata for every
+    /// in-process and signed Bundle Gadget.
+    pub gadget_catalog: Option<Arc<dyn gadgetron_core::agent::tools::GadgetCatalog>>,
     /// Shared `Arc<ArcSwap<CatalogSnapshot>>` — the same handle both
     /// `projection` and `actions` hold. Exposed here so
     /// `POST /api/v1/web/workbench/admin/reload-catalog` can atomically
@@ -178,16 +208,15 @@ pub struct GatewayWorkbenchService {
     /// production always sets it.
     pub descriptor_catalog: Option<Arc<arc_swap::ArcSwap<crate::web::catalog::CatalogSnapshot>>>,
     /// Optional file path the reload handler reads on every call.
-    /// When set, reload parses this TOML file and swaps in the
-    /// resulting catalog; when unset, reload falls back to
-    /// `DescriptorCatalog::seed_p2b()`. Cloned from
-    /// `WebConfig.catalog_path` at startup.
+    /// When set, reload parses this TOML file and adds it to the Core
+    /// catalog; when unset, reload uses the Core catalog alone. Cloned
+    /// from `WebConfig.catalog_path` at startup.
     pub catalog_path: Option<String>,
     /// Optional bundles directory for multi-bundle aggregation.
     /// When set, reload scans every `<dir>/<bundle>/bundle.toml` and
-    /// merges them into one catalog — winning over `catalog_path` if
-    /// both are configured. Cloned from `WebConfig.bundles_dir` at
-    /// startup.
+    /// merges them into one additive catalog. It selects the external
+    /// descriptor source ahead of `catalog_path`; Core descriptors remain
+    /// present. Cloned from `WebConfig.bundles_dir` at startup.
     pub bundles_dir: Option<String>,
     /// Bundle signing trust anchors. Cloned from
     /// `WebConfig.bundle_signing` at startup. Empty list +
@@ -195,6 +224,9 @@ pub struct GatewayWorkbenchService {
     /// behavior for deployments that haven't rotated to signed
     /// bundles yet.
     pub bundle_signing: gadgetron_core::config::BundleSigningConfig,
+    /// Generic external-runtime lifecycle manager. `None` on unsupported
+    /// platforms, in legacy tests, or when no bundles directory is configured.
+    pub runtime_manager: Option<Arc<crate::web::bundle_runtime::BundleRuntimeManager>>,
     /// Live mode matrix for `PATCH /workbench/agent/modes`. Seeded
     /// from the on-disk `[agent.gadgets]` at startup; the editor in
     /// the Side Panel swaps in a new `GadgetsConfig` on each save.
@@ -217,6 +249,9 @@ pub struct GatewayWorkbenchService {
     /// satisfied. The registry only reads `.gadgets` internally, so
     /// the other fields can be anything consistent with startup.
     pub agent_config_base: Option<Arc<gadgetron_core::agent::AgentConfig>>,
+    /// R2 tenant Domain Vault physical layout. `None` when `[knowledge]`
+    /// is disabled; DB-only/no-knowledge fixtures keep the endpoints unavailable.
+    pub vault_layout: Option<Arc<gadgetron_knowledge::vault::TenantVaultLayout>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +290,46 @@ pub enum WorkbenchHttpError {
     ApprovalAlreadyResolved { state: String },
     /// The actor's tenant differs from the approval's tenant.
     ApprovalForbidden,
+    /// The signed contribution is absent or not visible to this actor.
+    ContributionNotFound { contribution_id: String },
+    /// Optimistic Bundle control-plane revision/source digest changed.
+    BundleConflict { detail: String },
+    /// A signed Bundle control-plane operation reached a safe, actionable failure.
+    BundleOperationFailed { code: String, detail: String },
+    /// Knowledge Space/object is absent or deliberately hidden by tenant ACL.
+    KnowledgeNotFound,
+    /// Effective Space role is below the operation's requirement.
+    KnowledgeForbidden,
+    /// Optimistic revision or active-share uniqueness conflict.
+    KnowledgeConflict,
+    /// Client supplied an invalid Space/Vault/share contract value.
+    KnowledgeInvalidInput { detail: String },
+    /// Tenant has no policy revision or requested history row is absent.
+    PolicyNotFound,
+    /// Optimistic policy revision changed.
+    PolicyConflict { current_revision: i64 },
+    /// Client supplied an invalid policy document or preview input.
+    PolicyInvalidInput { detail: String },
+    /// Versioned policy denied the actual execution.
+    PolicyDenied { detail: String },
+    /// Policy storage/evaluator was unavailable on a protected path.
+    PolicyUnavailable { detail: String },
+    /// Approved request no longer matches its policy-bound input.
+    PolicyBindingMismatch,
+    /// Manager-owned records are absent or deliberately hidden by tenant scope.
+    ManagerNotFound,
+    /// Manager record lifecycle or optimistic revision changed.
+    ManagerConflict,
+    /// Client supplied an invalid oversight, directive, or webhook contract.
+    ManagerInvalidInput { detail: String },
+    /// A legacy API key without a real user cannot issue Manager decisions.
+    ManagerIdentityRequired,
+    /// Original source is retained but fetch/extraction could not complete.
+    KnowledgeSourceFailed {
+        source_id: uuid::Uuid,
+        code: String,
+        detail: String,
+    },
 }
 
 impl From<GadgetronError> for WorkbenchHttpError {
@@ -412,6 +487,164 @@ impl IntoResponse for WorkbenchHttpError {
                 });
                 (StatusCode::FORBIDDEN, Json(body)).into_response()
             }
+            WorkbenchHttpError::ContributionNotFound { contribution_id } => {
+                let body = json!({
+                    "error": {
+                        "message": format!(
+                            "Contribution {contribution_id:?} is unavailable or not visible to the current user. Refresh the shell or enable its Bundle."
+                        ),
+                        "type": "invalid_request_error",
+                        "code": "workbench_contribution_not_found",
+                    }
+                });
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
+            WorkbenchHttpError::BundleConflict { detail } => {
+                let body = json!({
+                    "error": {
+                        "message": detail,
+                        "type": "invalid_request_error",
+                        "code": "bundle_control_conflict",
+                    }
+                });
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            WorkbenchHttpError::BundleOperationFailed { code, detail } => {
+                let body = json!({
+                    "error": {
+                        "message": detail,
+                        "type": "invalid_request_error",
+                        "code": code,
+                    }
+                });
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            WorkbenchHttpError::KnowledgeNotFound => {
+                let body = json!({"error": {
+                    "message": "Knowledge resource not found or not visible to this actor.",
+                    "type": "invalid_request_error",
+                    "code": "knowledge_not_found"
+                }});
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
+            WorkbenchHttpError::KnowledgeForbidden => {
+                let body = json!({"error": {
+                    "message": "The actor does not have the required Knowledge Space role.",
+                    "type": "permission_error",
+                    "code": "knowledge_forbidden"
+                }});
+                (StatusCode::FORBIDDEN, Json(body)).into_response()
+            }
+            WorkbenchHttpError::KnowledgeConflict => {
+                let body = json!({"error": {
+                    "message": "Knowledge revision or active state changed. Refresh and retry.",
+                    "type": "invalid_request_error",
+                    "code": "knowledge_revision_conflict"
+                }});
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            WorkbenchHttpError::KnowledgeInvalidInput { detail } => {
+                let body = json!({"error": {
+                    "message": detail,
+                    "type": "invalid_request_error",
+                    "code": "knowledge_invalid_input"
+                }});
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            WorkbenchHttpError::PolicyNotFound => {
+                let body = json!({"error": {
+                    "message": "Policy revision was not found for this tenant.",
+                    "type": "invalid_request_error",
+                    "code": "policy_not_found"
+                }});
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
+            WorkbenchHttpError::PolicyConflict { current_revision } => {
+                let body = json!({"error": {
+                    "message": "Policy changed since it was loaded. Refresh and create a new revision.",
+                    "type": "invalid_request_error",
+                    "code": "policy_revision_conflict",
+                    "current_revision": current_revision
+                }});
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            WorkbenchHttpError::PolicyInvalidInput { detail } => {
+                let body = json!({"error": {
+                    "message": detail,
+                    "type": "invalid_request_error",
+                    "code": "policy_invalid_input"
+                }});
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            WorkbenchHttpError::PolicyDenied { detail } => {
+                let body = json!({"error": {
+                    "message": detail,
+                    "type": "permission_error",
+                    "code": "policy_denied"
+                }});
+                (StatusCode::FORBIDDEN, Json(body)).into_response()
+            }
+            WorkbenchHttpError::PolicyUnavailable { detail } => {
+                let body = json!({"error": {
+                    "message": detail,
+                    "type": "server_error",
+                    "code": "policy_unavailable"
+                }});
+                (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+            }
+            WorkbenchHttpError::PolicyBindingMismatch => {
+                let body = json!({"error": {
+                    "message": "Approved request no longer matches its policy-bound input.",
+                    "type": "permission_error",
+                    "code": "policy_binding_mismatch"
+                }});
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ManagerNotFound => {
+                let body = json!({"error": {
+                    "message": "Manager record was not found or is not visible to this tenant.",
+                    "type": "invalid_request_error",
+                    "code": "manager_record_not_found"
+                }});
+                (StatusCode::NOT_FOUND, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ManagerConflict => {
+                let body = json!({"error": {
+                    "message": "Manager record state or revision changed. Refresh before continuing.",
+                    "type": "invalid_request_error",
+                    "code": "manager_record_conflict"
+                }});
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ManagerInvalidInput { detail } => {
+                let body = json!({"error": {
+                    "message": detail,
+                    "type": "invalid_request_error",
+                    "code": "manager_invalid_input"
+                }});
+                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+            }
+            WorkbenchHttpError::ManagerIdentityRequired => {
+                let body = json!({"error": {
+                    "message": "Manager decisions require a signed-in user identity; rotate this legacy API key or use the web session.",
+                    "type": "permission_error",
+                    "code": "manager_identity_required"
+                }});
+                (StatusCode::FORBIDDEN, Json(body)).into_response()
+            }
+            WorkbenchHttpError::KnowledgeSourceFailed {
+                source_id,
+                code,
+                detail,
+            } => {
+                let body = json!({"error": {
+                    "message": detail,
+                    "type": "source_ingestion_error",
+                    "code": code,
+                    "source_id": source_id
+                }});
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
+            }
         }
     }
 }
@@ -500,7 +733,7 @@ pub async fn load_view_data(
     Path(view_id): Path<String>,
 ) -> Result<Json<WorkbenchViewData>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
-    let resp = svc.projection.view_data(&ctx.scopes, &view_id).await?;
+    let resp = svc.projection.view_data(&ctx, &view_id).await?;
     Ok(Json(resp))
 }
 
@@ -514,9 +747,30 @@ pub async fn list_actions(
     Ok(Json(resp))
 }
 
+/// `GET /capabilities` — one actor-filtered immutable Bundle capability snapshot.
+pub async fn get_capability_projection(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<WorkbenchCapabilityProjectionResponse>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    Ok(Json(svc.projection.capabilities(&ctx.scopes).await?))
+}
+
+pub async fn get_contribution_data(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Path(contribution_id): Path<String>,
+) -> Result<Json<gadgetron_core::workbench::WorkbenchContributionData>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    Ok(Json(
+        svc.projection
+            .contribution_data(&ctx, &contribution_id)
+            .await?,
+    ))
+}
+
 /// `GET /approvals/pending` — list pending approvals for the caller's
-/// tenant, newest first. Powers the Side Panel → Actions tab so
-/// operators can see and resolve the queue without walking chat.
+/// tenant, newest first. Powers Review Center → Exceptions.
 pub async fn list_pending_approvals(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
@@ -536,13 +790,11 @@ pub async fn list_pending_approvals(
     ))
 }
 
-/// `POST /approvals/:approval_id/approve` — resolve a `pending_approval`
-/// into an `ok` dispatch.
+/// `POST /approvals/:approval_id/approve` — resolve a pending Review.
 ///
 /// Looks up the approval record, marks it Approved on behalf of the
-/// calling actor, then hands it to `action_svc.resume_approval` which
-/// dispatches the stored gadget with the persisted args. Errors map
-/// to HTTP as follows:
+/// calling actor. Workbench actions resume here; bounded Tool/Bundle callers
+/// observe the Approved state and revalidate before their own dispatch.
 ///
 ///   - 404 when the id is unknown
 ///   - 409 when the approval has already been resolved
@@ -594,15 +846,29 @@ pub async fn approve_action(
     );
     let action_id = approved.action_id.clone();
     let approval_id = approved.id;
-    // Penny-created approvals carry an MCP tool name (e.g. "server.bash")
-    // as their `action_id` instead of a workbench descriptor id. For
-    // those, the dispatch happens elsewhere — the grandchild's
-    // `forward_tool_call` poll picks up the Approved state and runs
-    // the gadget — so `resume_approval` would (correctly) report
-    // `ActionNotFound`. Suppress that error and return an "ok" stub
-    // so the operator's ⚡ click in the Side Panel doesn't surface a
-    // bogus 404. Any other error from `resume_approval` is still
-    // propagated.
+    if approved.resume_strategy == gadgetron_core::workbench::ApprovalResumeStrategy::WaitingCaller
+    {
+        tracing::info!(
+            target: "workbench.approval",
+            %approval_id,
+            action_id = %action_id,
+            "approval released a bounded tool/background caller"
+        );
+        return Ok(Json(InvokeWorkbenchActionResponse {
+            result: gadgetron_core::workbench::WorkbenchActionResult {
+                status: "ok".into(),
+                approval_id: Some(approval_id),
+                activity_event_id: None,
+                audit_event_id: None,
+                refresh_view_ids: Vec::new(),
+                knowledge_candidates: Vec::new(),
+                payload: None,
+            },
+        }));
+    }
+    // Compatibility records created before resume_strategy was added may use
+    // a tool name rather than a Workbench descriptor id. Their external caller
+    // owns dispatch, so suppress only ActionNotFound for that legacy shape.
     match action_svc
         .resume_approval(&actor, &ctx.scopes, approved)
         .await
@@ -739,7 +1005,7 @@ pub async fn get_agent_modes(
 /// The new modes take effect on the NEXT Penny dispatch and NEXT
 /// Claude Code subprocess spawn — running subprocesses keep their
 /// `--allowed-tools` list. For Ask-flow verification this is the
-/// expected behavior: the next `server.bash` call lands on the
+/// expected behavior: the next approval-gated Bundle call lands on the
 /// approval card path.
 pub async fn patch_agent_modes(
     State(state): State<AppState>,
@@ -764,6 +1030,231 @@ pub async fn patch_agent_modes(
     Ok(Json(serde_json::json!({
         "gadgets": &body,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePolicyRevisionRequest {
+    pub expected_revision: i64,
+    pub document: PolicyDocument,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateLegacyPolicyRevisionRequest {
+    pub expected_revision: i64,
+    pub gadgets: gadgetron_core::agent::GadgetsConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreviewPolicyRequest {
+    #[serde(default)]
+    pub revision: Option<i64>,
+    pub input: PolicyInput,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PolicyDecisionQuery {
+    #[serde(default = "default_policy_decision_limit")]
+    pub limit: i64,
+}
+
+fn default_policy_decision_limit() -> i64 {
+    50
+}
+
+fn enforcement_coverage(state: &AppState) -> serde_json::Value {
+    let Some(service) = state.workbench.as_ref() else {
+        return json!({
+            "overall": "unavailable",
+            "tool_calls": "unavailable",
+            "background_jobs": "unavailable",
+            "bundle_gadgets": "unavailable",
+            "review_resume": "unavailable"
+        });
+    };
+    let common = service.policy_evaluator.is_some();
+    let catalog = service.gadget_catalog.is_some();
+    let tool_calls =
+        common && catalog && state.tool_catalog.is_some() && state.gadget_dispatcher.is_some();
+    let background_jobs = common;
+    let bundle_gadgets = common && catalog;
+    let review_resume = common && service.approval_store.is_some() && service.actions.is_some();
+    let status = |ready| if ready { "enforced" } else { "unavailable" };
+    json!({
+        "overall": status(tool_calls && background_jobs && bundle_gadgets && review_resume),
+        "tool_calls": status(tool_calls),
+        "background_jobs": status(background_jobs),
+        "bundle_gadgets": status(bundle_gadgets),
+        "review_resume": status(review_resume)
+    })
+}
+
+async fn ensure_active_policy(
+    state: &AppState,
+    ctx: &gadgetron_core::context::TenantContext,
+) -> Result<gadgetron_xaas::policy::PolicyRevision, WorkbenchHttpError> {
+    let service = require_workbench(state)?;
+    let modes = service.gadget_modes.as_ref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "policy compatibility source is not wired in this build".into(),
+        ))
+    })?;
+    let pool = require_pg_pool(state, "versioned policy")?;
+    let snapshot = modes.load_full();
+    gadgetron_xaas::policy::ensure_legacy_policy(pool, ctx.tenant_id, ctx.actor_user_id, &snapshot)
+        .await
+        .map_err(policy_store_error_to_http)
+}
+
+/// Return the tenant's active immutable policy revision. The first read
+/// performs the explicit Auto/Ask/Never compatibility migration once.
+pub async fn get_active_policy(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let revision = ensure_active_policy(&state, &ctx).await?;
+    Ok(Json(json!({
+        "policy": revision,
+        "enforcement_coverage": enforcement_coverage(&state)
+    })))
+}
+
+/// Publish a new typed policy document without mutating prior revisions.
+pub async fn create_policy_revision(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreatePolicyRevisionRequest>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let _ = ensure_active_policy(&state, &ctx).await?;
+    let pool = require_pg_pool(&state, "versioned policy")?;
+    let revision = gadgetron_xaas::policy::create_revision(
+        pool,
+        ctx.tenant_id,
+        ctx.actor_user_id,
+        body.expected_revision,
+        gadgetron_xaas::policy::PolicyRevisionSource::Manager,
+        &body.document,
+        None,
+    )
+    .await
+    .map_err(policy_store_error_to_http)?;
+    Ok(Json(json!({
+        "policy": revision,
+        "enforcement_coverage": enforcement_coverage(&state)
+    })))
+}
+
+/// Publish a compatibility revision from the complete legacy mode matrix.
+pub async fn create_legacy_policy_revision(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<CreateLegacyPolicyRevisionRequest>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let _ = ensure_active_policy(&state, &ctx).await?;
+    let pool = require_pg_pool(&state, "versioned policy")?;
+    let document = PolicyDocument::from_legacy_gadget_modes(&body.gadgets).map_err(|error| {
+        WorkbenchHttpError::PolicyInvalidInput {
+            detail: error.to_string(),
+        }
+    })?;
+    let revision = gadgetron_xaas::policy::create_revision(
+        pool,
+        ctx.tenant_id,
+        ctx.actor_user_id,
+        body.expected_revision,
+        gadgetron_xaas::policy::PolicyRevisionSource::Manager,
+        &document,
+        Some(&body.gadgets),
+    )
+    .await
+    .map_err(policy_store_error_to_http)?;
+    Ok(Json(json!({
+        "policy": revision,
+        "enforcement_coverage": enforcement_coverage(&state)
+    })))
+}
+
+/// Evaluate one normalized input without dispatching or writing an event.
+pub async fn preview_policy(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(body): Json<PreviewPolicyRequest>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let active = ensure_active_policy(&state, &ctx).await?;
+    let revision = if let Some(number) = body.revision {
+        gadgetron_xaas::policy::policy_revision(
+            require_pg_pool(&state, "versioned policy")?,
+            ctx.tenant_id,
+            active.identity.policy_id,
+            number,
+        )
+        .await
+        .map_err(policy_store_error_to_http)?
+    } else {
+        active
+    };
+    let trace = revision
+        .document
+        .evaluate(revision.identity, &body.input)
+        .map_err(|error| WorkbenchHttpError::PolicyInvalidInput {
+            detail: error.to_string(),
+        })?;
+    let trace_hash = trace
+        .digest()
+        .map_err(|error| WorkbenchHttpError::PolicyInvalidInput {
+            detail: error.to_string(),
+        })?;
+    Ok(Json(json!({
+        "trace": trace,
+        "trace_hash": trace_hash,
+        "enforcement_coverage": "preview_only"
+    })))
+}
+
+/// Read actual persisted decisions. Preview calls never appear here.
+pub async fn list_policy_decisions(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Query(query): Query<PolicyDecisionQuery>,
+) -> Result<Json<serde_json::Value>, WorkbenchHttpError> {
+    let decisions = gadgetron_xaas::policy::recent_decisions(
+        require_pg_pool(&state, "policy decisions")?,
+        ctx.tenant_id,
+        query.limit,
+    )
+    .await
+    .map_err(policy_store_error_to_http)?;
+    Ok(Json(json!({
+        "decisions": decisions,
+        "count": decisions.len()
+    })))
+}
+
+fn policy_store_error_to_http(
+    error: gadgetron_xaas::policy::PolicyStoreError,
+) -> WorkbenchHttpError {
+    match error {
+        gadgetron_xaas::policy::PolicyStoreError::NotFound => WorkbenchHttpError::PolicyNotFound,
+        gadgetron_xaas::policy::PolicyStoreError::RevisionConflict { current_revision } => {
+            WorkbenchHttpError::PolicyConflict { current_revision }
+        }
+        gadgetron_xaas::policy::PolicyStoreError::Policy(error) => {
+            WorkbenchHttpError::PolicyInvalidInput {
+                detail: error.to_string(),
+            }
+        }
+        error @ (gadgetron_xaas::policy::PolicyStoreError::TraceMismatch
+        | gadgetron_xaas::policy::PolicyStoreError::InvalidPersisted(_)) => {
+            WorkbenchHttpError::PolicyInvalidInput {
+                detail: error.to_string(),
+            }
+        }
+        gadgetron_xaas::policy::PolicyStoreError::Database(error) => {
+            WorkbenchHttpError::Core(GadgetronError::Database {
+                kind: DatabaseErrorKind::Other,
+                message: error.to_string(),
+            })
+        }
+    }
 }
 
 /// `GET /api/v1/web/workbench/admin/agent/brain` — return the current
@@ -814,9 +1305,43 @@ pub async fn patch_agent_brain_settings(
             "agent brain settings are not wired in this build".into(),
         ))
     })?;
-    let (body, runtime_auth_token) = normalize_agent_brain_settings_patch(body)?;
+    let (mut body, runtime_auth_token) = normalize_agent_brain_settings_patch(body)?;
     if let Some(token) = runtime_auth_token {
         std::env::set_var(&token.env_name, &token.value);
+    }
+    let pool = require_pg_pool(&state, "agent brain settings")?;
+    if body.llm_endpoint_id.is_some() {
+        let profile = canonicalize_registered_endpoint_profile(
+            pool,
+            ctx.tenant_id,
+            ConversationAgentProfile {
+                backend: body.backend,
+                llm_endpoint_id: body.llm_endpoint_id,
+                model: body.model.clone(),
+                effort: body.effort,
+                model_source: body.model_source,
+                local_base_url: body.local_base_url.clone(),
+                local_api_key_env: body.local_api_key_env.clone(),
+            },
+        )
+        .await
+        .map_err(WorkbenchHttpError::Core)?;
+        body.backend = profile.backend;
+        body.model = profile.model;
+        body.local_base_url = profile.local_base_url;
+        body.local_api_key_env = profile.local_api_key_env;
+        body.external_base_url = if body.backend == gadgetron_core::agent::AgentBackend::ClaudeCode
+        {
+            body.local_base_url.clone()
+        } else {
+            String::new()
+        };
+        body.external_auth_token_env =
+            if body.backend == gadgetron_core::agent::AgentBackend::ClaudeCode {
+                body.local_api_key_env.clone()
+            } else {
+                String::new()
+            };
     }
     let current_agent = brain.load_full();
     // Apply the high-level admin axes (agent/model_source/local_*/effort)
@@ -849,7 +1374,6 @@ pub async fn patch_agent_brain_settings(
             WorkbenchHttpError::Core(e)
         })?;
 
-    let pool = require_pg_pool(&state, "agent brain settings")?;
     let saved = gadgetron_xaas::agent_brain::upsert_agent_brain_settings(
         pool,
         ctx.tenant_id,
@@ -925,6 +1449,24 @@ pub struct AutoDetectLlmEndpointRequest {
     pub scheme: Option<String>,
     #[serde(default)]
     pub alias: Option<String>,
+    /// Optional model override. OpenAI endpoints otherwise use the first
+    /// discovered model; Anthropic gateways require an explicit model id.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Persisted credential reference. The value itself is write-only and
+    /// remains process-local.
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
+    #[serde(default)]
+    pub auth_token_value: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ProbeLlmEndpointRequest {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub auth_token_value: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -941,6 +1483,8 @@ pub struct DeleteLlmEndpointResponse {
 
 #[derive(Debug, serde::Serialize)]
 pub struct ProbeLlmEndpointResponse {
+    /// True only when the selected model produced the expected function/tool
+    /// call. Connection state remains available on `endpoint.health_status`.
     pub ok: bool,
     pub endpoint: gadgetron_xaas::llm_endpoints::LlmEndpointRow,
     pub models: Vec<String>,
@@ -958,10 +1502,27 @@ pub struct UseLlmEndpointResponse {
 #[derive(Debug, serde::Deserialize)]
 pub struct UseLlmEndpointRequest {
     #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
     pub external_auth_token_value: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct AvailableLlmEndpointModel {
+    pub endpoint_id: Uuid,
+    pub endpoint_name: String,
+    pub backend: &'static str,
+    pub protocol: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AvailableLlmEndpointModelsResponse {
+    pub models: Vec<AvailableLlmEndpointModel>,
+}
+
 const DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV: &str = "PENNY_CCR_AUTH_TOKEN";
+const DEFAULT_PENNY_OPENAI_AUTH_TOKEN_ENV: &str = "PENNY_LOCAL_LLM_API_KEY";
 
 #[derive(Debug, serde::Deserialize)]
 pub struct PatchAgentBrainSettingsRequest {
@@ -987,6 +1548,9 @@ fn normalize_agent_brain_settings_patch(
     WorkbenchHttpError,
 > {
     let mut settings = body.settings;
+    settings.effort = settings
+        .effort
+        .for_backend_model(settings.backend, &settings.model);
     settings.external_auth_token_env = settings.external_auth_token_env.trim().to_string();
     let token_value = normalize_optional_text(body.external_auth_token_value);
 
@@ -1047,8 +1611,88 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn resolve_endpoint_auth(
+    auth_token_env: Option<String>,
+    auth_token_value: Option<String>,
+    default_env: &str,
+) -> Result<(Option<String>, Option<String>), WorkbenchHttpError> {
+    let mut env_name = normalize_optional_text(auth_token_env);
+    let supplied = normalize_optional_text(auth_token_value);
+    if supplied.is_some() && env_name.is_none() {
+        env_name = Some(default_env.to_string());
+    }
+    validate_optional_env_name(env_name.as_deref())?;
+    if let Some(value) = supplied.as_deref() {
+        if value.contains('\0') {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "endpoint auth token must not contain NUL bytes".into(),
+            )));
+        }
+        if let Some(name) = env_name.as_deref() {
+            std::env::set_var(name, value);
+        }
+    }
+    let resolved = supplied.or_else(|| {
+        env_name
+            .as_deref()
+            .and_then(|name| std::env::var(name).ok())
+            .filter(|value| !value.trim().is_empty())
+    });
+    Ok((env_name, resolved))
+}
+
 fn endpoint_alias_or_host_port(alias: Option<String>, host: &str, port: u16) -> String {
     normalize_optional_text(alias).unwrap_or_else(|| format!("{}:{}", host.trim(), port))
+}
+
+fn validate_endpoint_base_url(value: &str) -> Result<String, WorkbenchHttpError> {
+    let parsed = reqwest::Url::parse(value.trim()).map_err(|_| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint URL must be a valid http:// or https:// URL".into(),
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint URL must contain only http(s) scheme, host, port, and optional /v1 path"
+                .into(),
+        )));
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if !matches!(path, "" | "/v1") {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint URL path must be empty or /v1".into(),
+        )));
+    }
+    if let Some(host) = parsed.host_str() {
+        let normalized = host.trim_matches(['[', ']']).to_ascii_lowercase();
+        if normalized == "169.254.169.254" || normalized == "metadata.google.internal" {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "cloud metadata endpoints are not valid LLM targets".into(),
+            )));
+        }
+        if let Ok(ip) = normalized.parse::<std::net::IpAddr>() {
+            let unsafe_address = match ip {
+                std::net::IpAddr::V4(ip) => {
+                    ip.is_link_local() || ip.is_unspecified() || ip.is_multicast()
+                }
+                std::net::IpAddr::V6(ip) => {
+                    ip.is_unicast_link_local() || ip.is_unspecified() || ip.is_multicast()
+                }
+            };
+            if unsafe_address {
+                return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                    "link-local, unspecified, and multicast LLM targets are blocked".into(),
+                )));
+            }
+        }
+    }
+    Ok(value.trim().trim_end_matches('/').to_string())
 }
 
 fn validate_llm_endpoint_request(
@@ -1068,17 +1712,15 @@ fn validate_llm_endpoint_request(
             "endpoint kind must be vllm, sglang, openai_compatible, anthropic_proxy, or ccr".into(),
         )));
     }
-    if !matches!(body.protocol.as_str(), "openai_chat" | "anthropic_messages") {
+    if !matches!(
+        body.protocol.as_str(),
+        "openai_chat" | "openai_responses" | "anthropic_messages"
+    ) {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "endpoint protocol must be openai_chat or anthropic_messages".into(),
+            "endpoint protocol must be openai_chat, openai_responses, or anthropic_messages".into(),
         )));
     }
-    let base_url = body.base_url.trim();
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "endpoint base_url must start with http:// or https://".into(),
-        )));
-    }
+    validate_endpoint_base_url(&body.base_url)?;
     if body
         .model_id
         .as_deref()
@@ -1113,12 +1755,7 @@ fn validate_ccr_bridge_request(body: &CreateCcrBridgeRequest) -> Result<(), Work
         )));
     }
     validate_llm_endpoint_target(body.target_kind.trim(), body.target_host_id)?;
-    let base_url = body.base_url.trim();
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "CCR bridge base_url must start with http:// or https://".into(),
-        )));
-    }
+    validate_endpoint_base_url(&body.base_url)?;
     if body.port == 0 {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(
             "CCR bridge port must be 1..=65535".into(),
@@ -1176,11 +1813,11 @@ fn validate_optional_env_name(value: Option<&str>) -> Result<(), WorkbenchHttpEr
     let Some(first) = chars.next() else {
         return Ok(());
     };
-    if !(first == '_' || first.is_ascii_alphabetic())
-        || chars.any(|c| !(c == '_' || c.is_ascii_alphanumeric()))
+    if !(first == '_' || first.is_ascii_uppercase())
+        || chars.any(|c| !(c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit()))
     {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "auth token env var name must look like an environment variable".into(),
+            "auth token env var name must match [A-Z_][A-Z0-9_]*".into(),
         )));
     }
     Ok(())
@@ -1219,7 +1856,27 @@ fn validate_autodetect_request(
             "endpoint alias must be at most 80 bytes".into(),
         )));
     }
-    Ok(format!("{scheme}://{host}:{}", body.port))
+    validate_optional_env_name(body.auth_token_env.as_deref())?;
+    if body
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|model| model.len() > 256)
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint model_id must be at most 256 bytes".into(),
+        )));
+    }
+    if body
+        .auth_token_value
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint auth token must not contain NUL bytes".into(),
+        )));
+    }
+    validate_endpoint_base_url(&format!("{scheme}://{host}:{}", body.port))
 }
 
 fn llm_endpoint_error_to_http(
@@ -1243,41 +1900,305 @@ fn openai_models_url(base_url: &str) -> String {
     }
 }
 
+fn openai_responses_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/responses")
+    } else {
+        format!("{base}/v1/responses")
+    }
+}
+
+fn anthropic_messages_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    }
+}
+
+fn codex_runtime_base_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        base.to_string()
+    } else {
+        format!("{base}/v1")
+    }
+}
+
 fn endpoint_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        // A first local-model request may include model cold-load plus CPU
+        // reasoning before it emits the required function_call. This route is
+        // Management-scoped and explicitly invoked, so allow a bounded probe
+        // window instead of misclassifying a slow Responses endpoint as
+        // unsupported after the generic 20-second HTTP timeout.
+        .timeout(Duration::from_secs(180))
+        // A registered URL is an SSRF-capable egress target. Never follow a
+        // target-controlled redirect to metadata or another network zone.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())
 }
 
-async fn probe_openai_base_url(base_url: &str) -> Result<(Vec<String>, i32, String), String> {
+fn with_openai_auth(
+    request: reqwest::RequestBuilder,
+    auth_token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match auth_token.filter(|value| !value.trim().is_empty()) {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
+fn with_anthropic_auth(
+    request: reqwest::RequestBuilder,
+    auth_token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match auth_token.filter(|value| !value.trim().is_empty()) {
+        Some(token) => request.bearer_auth(token).header("x-api-key", token),
+        None => request,
+    }
+}
+
+async fn response_json(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<serde_json::Value, String> {
+    const MAX_PROBE_BODY: usize = 1024 * 1024;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("read {operation} response: {error}"))?;
+    if bytes.len() > MAX_PROBE_BODY {
+        return Err(format!("{operation} response exceeded 1 MiB"));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {operation}: {error}"))
+}
+
+async fn probe_openai_base_url(
+    base_url: &str,
+    auth_token: Option<&str>,
+) -> Result<(Vec<String>, i32), String> {
     let client = endpoint_http_client()?;
     let started = Instant::now();
     let url = openai_models_url(base_url);
-    let res = client
-        .get(&url)
+    let res = with_openai_auth(client.get(&url), auth_token)
         .send()
         .await
         .map_err(|e| format!("GET {url}: {e}"))?;
     if !res.status().is_success() {
         return Err(format!("GET {url}: HTTP {}", res.status()));
     }
-    let body = res
-        .json::<OpenAiModelsResponse>()
-        .await
-        .map_err(|e| format!("parse /v1/models: {e}"))?;
-    let models = body.data.into_iter().map(|m| m.id).collect::<Vec<_>>();
+    let body: OpenAiModelsResponse =
+        serde_json::from_value(response_json(res, "/v1/models").await?)
+            .map_err(|error| format!("parse /v1/models model list: {error}"))?;
+    let mut models = body
+        .data
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|model| {
+            !model.is_empty()
+                && model.len() <= 256
+                && !model.chars().any(|c| matches!(c, '\0' | '\r' | '\n'))
+        })
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
     let elapsed = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
-    Ok((models, elapsed, "OpenAI /v1/models reachable".into()))
+    Ok((models, elapsed))
 }
 
-async fn probe_anthropic_base_url(base_url: &str) -> Result<(Vec<String>, i32, String), String> {
+#[derive(Debug)]
+enum ToolRouteProbe {
+    Passed { status: u16 },
+    Failed { status: Option<u16>, error: String },
+    Absent { status: u16 },
+}
+
+async fn probe_openai_responses_tool(
+    base_url: &str,
+    model_id: &str,
+    auth_token: Option<&str>,
+) -> ToolRouteProbe {
+    let client = match endpoint_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return ToolRouteProbe::Failed {
+                status: None,
+                error,
+            }
+        }
+    };
+    let url = openai_responses_url(base_url);
+    let body = json!({
+        "model": model_id,
+        "input": "You must call gadgetron_capability_probe exactly once.",
+        // Small reasoning models may spend several hundred tokens deciding
+        // how to honor a required tool call. Keep the probe bounded without
+        // truncating the function_call item itself.
+        "max_output_tokens": 1024,
+        "tools": [{
+            "type": "function",
+            "name": "gadgetron_capability_probe",
+            "description": "A no-op capability probe. Call it exactly once.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        }],
+        "tool_choice": "required"
+    });
+    let response = match with_openai_auth(client.post(&url), auth_token)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return ToolRouteProbe::Failed {
+                status: None,
+                error: format!("POST {url}: {error}"),
+            }
+        }
+    };
+    let status = response.status().as_u16();
+    if matches!(status, 404 | 405) {
+        return ToolRouteProbe::Absent { status };
+    }
+    if !response.status().is_success() {
+        return ToolRouteProbe::Failed {
+            status: Some(status),
+            error: format!("POST {url}: HTTP {status}"),
+        };
+    }
+    let payload = match response_json(response, "/v1/responses").await {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ToolRouteProbe::Failed {
+                status: Some(status),
+                error,
+            }
+        }
+    };
+    let passed = payload
+        .get("output")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
+                    && item.get("name").and_then(serde_json::Value::as_str)
+                        == Some("gadgetron_capability_probe")
+            })
+        });
+    if passed {
+        ToolRouteProbe::Passed { status }
+    } else {
+        ToolRouteProbe::Failed {
+            status: Some(status),
+            error: "Responses request succeeded but returned no gadgetron_capability_probe function_call"
+                .into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EndpointCapabilityProbe {
+    protocol: &'static str,
+    models: Vec<String>,
+    model_id: Option<String>,
+    latency_ms: i32,
+    runtime_compatibility: &'static str,
+    tool_status: &'static str,
+    tool_model_id: Option<String>,
+    tool_error: Option<String>,
+    details: serde_json::Value,
+    message: String,
+}
+
+impl EndpointCapabilityProbe {
+    fn ready(&self) -> bool {
+        self.tool_status == "passed"
+    }
+}
+
+async fn probe_openai_endpoint(
+    base_url: &str,
+    preferred_model: Option<&str>,
+    auth_token: Option<&str>,
+) -> Result<EndpointCapabilityProbe, String> {
+    let started = Instant::now();
+    let (models, models_latency_ms) = probe_openai_base_url(base_url, auth_token).await?;
+    let model_id = preferred_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| models.first().cloned());
+    let Some(model_id) = model_id else {
+        return Ok(EndpointCapabilityProbe {
+            protocol: "openai_chat",
+            models,
+            model_id: None,
+            latency_ms: models_latency_ms,
+            runtime_compatibility: "unverified",
+            tool_status: "untested",
+            tool_model_id: None,
+            tool_error: Some("No model id was returned; select a model and probe again".into()),
+            details: json!({"models_reachable": true, "responses_tool_call": null}),
+            message: "Connected to /v1/models, but no model is available for a tool smoke".into(),
+        });
+    };
+    let probe = probe_openai_responses_tool(base_url, &model_id, auth_token).await;
+    let latency_ms = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    match probe {
+        ToolRouteProbe::Passed { status } => Ok(EndpointCapabilityProbe {
+            protocol: "openai_responses",
+            models,
+            model_id: Some(model_id.clone()),
+            latency_ms,
+            runtime_compatibility: "codex_exec",
+            tool_status: "passed",
+            tool_model_id: Some(model_id),
+            tool_error: None,
+            details: json!({"models_reachable": true, "responses_status": status, "responses_tool_call": true}),
+            message: "Connected; OpenAI Responses function call passed; ready for Codex Exec".into(),
+        }),
+        ToolRouteProbe::Absent { status } => Ok(EndpointCapabilityProbe {
+            protocol: "openai_chat",
+            models,
+            model_id: Some(model_id.clone()),
+            latency_ms,
+            runtime_compatibility: "bridge_required",
+            tool_status: "unsupported",
+            tool_model_id: Some(model_id),
+            tool_error: Some(format!("Responses route absent (HTTP {status})")),
+            details: json!({"models_reachable": true, "responses_status": status, "responses_tool_call": false}),
+            message: "Connected, but this is Chat Completions-only; register and start an Anthropic bridge"
+                .into(),
+        }),
+        ToolRouteProbe::Failed { status, error } => Ok(EndpointCapabilityProbe {
+            protocol: if status.is_some() { "openai_responses" } else { "openai_chat" },
+            models,
+            model_id: Some(model_id.clone()),
+            latency_ms,
+            runtime_compatibility: if status.is_some() { "codex_exec" } else { "unverified" },
+            tool_status: "failed",
+            tool_model_id: Some(model_id),
+            tool_error: Some(error.clone()),
+            details: json!({"models_reachable": true, "responses_status": status, "responses_tool_call": false}),
+            message: format!("Connected, but Responses function-call smoke failed: {error}"),
+        }),
+    }
+}
+
+async fn probe_anthropic_health(base_url: &str, auth_token: Option<&str>) -> Result<i32, String> {
     let client = endpoint_http_client()?;
     let started = Instant::now();
-    let base = base_url.trim_end_matches('/');
+    let base = base_url.trim_end_matches('/').trim_end_matches("/v1");
     let url = format!("{base}/health");
-    let res = client
-        .get(&url)
+    let res = with_anthropic_auth(client.get(&url), auth_token)
         .send()
         .await
         .map_err(|e| format!("GET {url}: {e}"))?;
@@ -1285,20 +2206,137 @@ async fn probe_anthropic_base_url(base_url: &str) -> Result<(Vec<String>, i32, S
         return Err(format!("GET {url}: HTTP {}", res.status()));
     }
     let elapsed = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
-    Ok((
-        Vec::new(),
-        elapsed,
-        "Anthropic-compatible endpoint reachable".into(),
-    ))
+    Ok(elapsed)
 }
 
-async fn probe_endpoint(
-    endpoint: &gadgetron_xaas::llm_endpoints::LlmEndpointRow,
-) -> Result<(Vec<String>, i32, String), String> {
-    if endpoint.protocol == "openai_chat" {
-        return probe_openai_base_url(&endpoint.base_url).await;
+async fn probe_anthropic_endpoint(
+    base_url: &str,
+    preferred_model: Option<&str>,
+    auth_token: Option<&str>,
+) -> Result<EndpointCapabilityProbe, String> {
+    let started = Instant::now();
+    let Some(model_id) = preferred_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        let latency_ms = probe_anthropic_health(base_url, auth_token).await?;
+        return Ok(EndpointCapabilityProbe {
+            protocol: "anthropic_messages",
+            models: Vec::new(),
+            model_id: None,
+            latency_ms,
+            runtime_compatibility: "unverified",
+            tool_status: "untested",
+            tool_model_id: None,
+            tool_error: Some(
+                "Anthropic-compatible endpoints require a model id for tool smoke".into(),
+            ),
+            details: json!({"health_reachable": true, "messages_tool_use": null}),
+            message: "Connected to /health; enter a model id and probe to verify tool use".into(),
+        });
+    };
+    let client = endpoint_http_client()?;
+    let url = anthropic_messages_url(base_url);
+    let body = json!({
+        "model": model_id,
+        "max_tokens": 64,
+        "messages": [{
+            "role": "user",
+            "content": "Call gadgetron_capability_probe exactly once with nonce endpoint-smoke."
+        }],
+        "tools": [{
+            "name": "gadgetron_capability_probe",
+            "description": "A no-op capability probe. Call it exactly once with the supplied nonce.",
+            "input_schema": {
+                "type": "object",
+                "properties": { "nonce": { "type": "string" } },
+                "required": ["nonce"],
+                "additionalProperties": false
+            }
+        }],
+        "tool_choice": {"type": "tool", "name": "gadgetron_capability_probe"}
+    });
+    let response = with_anthropic_auth(client.post(&url), auth_token)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("POST {url}: {error}"))?;
+    let status = response.status().as_u16();
+    if matches!(status, 404 | 405) {
+        return Err(format!("POST {url}: HTTP {status} (Messages route absent)"));
     }
-    probe_anthropic_base_url(&endpoint.base_url).await
+    let latency_ms = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+    if !response.status().is_success() {
+        let error = format!("POST {url}: HTTP {status}");
+        return Ok(EndpointCapabilityProbe {
+            protocol: "anthropic_messages",
+            models: vec![model_id.clone()],
+            model_id: Some(model_id.clone()),
+            latency_ms,
+            runtime_compatibility: "claude_code",
+            tool_status: "failed",
+            tool_model_id: Some(model_id),
+            tool_error: Some(error.clone()),
+            details: json!({"messages_status": status, "messages_tool_use": false}),
+            message: format!("Messages route found, but tool-use smoke failed: {error}"),
+        });
+    }
+    let payload = response_json(response, "/v1/messages").await?;
+    let passed = payload
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                    && item.get("name").and_then(serde_json::Value::as_str)
+                        == Some("gadgetron_capability_probe")
+            })
+        });
+    let error = (!passed).then(|| {
+        "Messages request succeeded but returned no gadgetron_capability_probe tool_use".to_string()
+    });
+    Ok(EndpointCapabilityProbe {
+        protocol: "anthropic_messages",
+        models: vec![model_id.clone()],
+        model_id: Some(model_id.clone()),
+        latency_ms,
+        runtime_compatibility: "claude_code",
+        tool_status: if passed { "passed" } else { "failed" },
+        tool_model_id: Some(model_id),
+        tool_error: error.clone(),
+        details: json!({"messages_status": status, "messages_tool_use": passed}),
+        message: if passed {
+            "Connected; Anthropic Messages tool use passed; ready for Claude Code".into()
+        } else {
+            format!(
+                "Connected, but Messages tool-use smoke failed: {}",
+                error.unwrap_or_default()
+            )
+        },
+    })
+}
+
+async fn probe_endpoint_capabilities(
+    base_url: &str,
+    preferred_protocol: Option<&str>,
+    preferred_model: Option<&str>,
+    auth_token: Option<&str>,
+) -> Result<EndpointCapabilityProbe, String> {
+    if preferred_protocol == Some("anthropic_messages") {
+        return probe_anthropic_endpoint(base_url, preferred_model, auth_token).await;
+    }
+    match probe_openai_endpoint(base_url, preferred_model, auth_token).await {
+        Ok(probe) => Ok(probe),
+        Err(openai_error) => probe_anthropic_endpoint(base_url, preferred_model, auth_token)
+            .await
+            .map_err(|anthropic_error| {
+                format!(
+                    "OpenAI probe failed: {openai_error}; Anthropic probe failed: {anthropic_error}"
+                )
+            }),
+    }
 }
 
 pub async fn list_llm_endpoints_handler(
@@ -1314,6 +2352,105 @@ pub async fn list_llm_endpoints_handler(
         endpoints,
         returned,
     }))
+}
+
+/// Safe, non-secret projection used by the per-chat model selector. Only an
+/// endpoint/model pair with an actual tool-call pass is exposed.
+pub async fn list_available_llm_endpoint_models_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<AvailableLlmEndpointModelsResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "available LLM endpoint listing")?;
+    let endpoints = gadgetron_xaas::llm_endpoints::list_llm_endpoints(pool, ctx.tenant_id)
+        .await
+        .map_err(|error| llm_endpoint_error_to_http("list_llm_endpoints", error))?;
+    let models = endpoints
+        .into_iter()
+        .filter(|endpoint| endpoint.health_status == "ok" && endpoint.tool_status == "passed")
+        .filter_map(|endpoint| {
+            let backend = match endpoint.runtime_compatibility.as_str() {
+                "codex_exec" if endpoint.protocol == "openai_responses" => "codex_exec",
+                "claude_code" if endpoint.protocol == "anthropic_messages" => "claude_code",
+                _ => return None,
+            };
+            let model_id = endpoint.tool_model_id?;
+            Some(AvailableLlmEndpointModel {
+                endpoint_id: endpoint.id,
+                endpoint_name: endpoint.name,
+                backend,
+                protocol: endpoint.protocol,
+                model_id,
+            })
+        })
+        .collect();
+    Ok(Json(AvailableLlmEndpointModelsResponse { models }))
+}
+
+/// Resolve a client-selected registry id to the canonical execution snapshot.
+/// This is called by both profile PATCH and first-turn chat handling before
+/// any URL/env metadata is trusted or persisted.
+pub(crate) async fn canonicalize_registered_endpoint_profile(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    mut profile: ConversationAgentProfile,
+) -> Result<ConversationAgentProfile, GadgetronError> {
+    if profile.model_source != gadgetron_core::agent::ModelSource::Local {
+        return Ok(profile);
+    }
+    let Some(endpoint_id) = profile.llm_endpoint_id else {
+        // Legacy raw-config profiles remain valid only through the existing
+        // exact default/current fingerprint check. New UI selections always
+        // carry a registry id.
+        return Ok(profile);
+    };
+    let endpoint = gadgetron_xaas::llm_endpoints::get_llm_endpoint(pool, tenant_id, endpoint_id)
+        .await
+        .map_err(|error| GadgetronError::Config(format!("local endpoint lookup: {error}")))?;
+    if endpoint.health_status != "ok" || endpoint.tool_status != "passed" {
+        return Err(GadgetronError::Config(
+            "selected local endpoint is not Penny-ready; run its model tool probe first".into(),
+        ));
+    }
+    let expected_backend = match endpoint.runtime_compatibility.as_str() {
+        "codex_exec" if endpoint.protocol == "openai_responses" => {
+            gadgetron_core::agent::AgentBackend::CodexExec
+        }
+        "claude_code" if endpoint.protocol == "anthropic_messages" => {
+            gadgetron_core::agent::AgentBackend::ClaudeCode
+        }
+        "bridge_required" => {
+            return Err(GadgetronError::Config(
+                "selected endpoint is Chat Completions-only and requires a running bridge".into(),
+            ))
+        }
+        _ => {
+            return Err(GadgetronError::Config(
+                "selected endpoint has no supported Penny runtime adapter".into(),
+            ))
+        }
+    };
+    if profile.backend != expected_backend {
+        return Err(GadgetronError::Config(format!(
+            "selected endpoint requires {} runtime",
+            expected_backend.as_str()
+        )));
+    }
+    let verified_model = endpoint.tool_model_id.ok_or_else(|| {
+        GadgetronError::Config("selected endpoint has no tool-verified model id".into())
+    })?;
+    if !profile.model.trim().is_empty() && profile.model.trim() != verified_model {
+        return Err(GadgetronError::Config(
+            "selected model has not passed this endpoint's tool probe".into(),
+        ));
+    }
+    profile.model = verified_model;
+    profile.local_base_url = if expected_backend == gadgetron_core::agent::AgentBackend::CodexExec {
+        codex_runtime_base_url(&endpoint.base_url)
+    } else {
+        endpoint.base_url
+    };
+    profile.local_api_key_env = endpoint.auth_token_env.unwrap_or_default();
+    Ok(profile)
 }
 
 pub async fn create_llm_endpoint_handler(
@@ -1364,7 +2501,10 @@ pub async fn create_ccr_bridge_handler(
         gadgetron_xaas::llm_endpoints::get_llm_endpoint(pool, ctx.tenant_id, upstream_endpoint_id)
             .await
             .map_err(|e| llm_endpoint_error_to_http("get_llm_endpoint", e))?;
-    if upstream.protocol != "openai_chat" {
+    if !matches!(
+        upstream.protocol.as_str(),
+        "openai_chat" | "openai_responses"
+    ) {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(
             "CCR bridge upstream must be an OpenAI-compatible endpoint".into(),
         )));
@@ -1391,109 +2531,148 @@ pub async fn create_ccr_bridge_handler(
     Ok(Json(row))
 }
 
+async fn persist_endpoint_capability(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    endpoint_id: Uuid,
+    probe: &EndpointCapabilityProbe,
+) -> Result<gadgetron_xaas::llm_endpoints::LlmEndpointRow, WorkbenchHttpError> {
+    gadgetron_xaas::llm_endpoints::update_llm_endpoint_capability(
+        pool,
+        tenant_id,
+        endpoint_id,
+        gadgetron_xaas::llm_endpoints::LlmEndpointCapabilityUpdate {
+            protocol: probe.protocol,
+            model_id: probe.model_id.as_deref(),
+            discovered_models: &probe.models,
+            health_status: "ok",
+            last_error: None,
+            last_latency_ms: Some(probe.latency_ms),
+            runtime_compatibility: probe.runtime_compatibility,
+            tool_status: probe.tool_status,
+            tool_model_id: probe.tool_model_id.as_deref(),
+            last_tool_error: probe.tool_error.as_deref(),
+            capability_details: &probe.details,
+        },
+    )
+    .await
+    .map_err(|error| llm_endpoint_error_to_http("update_llm_endpoint_capability", error))
+}
+
+async fn persist_endpoint_probe_failure(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    endpoint_id: Uuid,
+    protocol: &str,
+    model_id: Option<&str>,
+    message: &str,
+) -> Result<gadgetron_xaas::llm_endpoints::LlmEndpointRow, WorkbenchHttpError> {
+    let details = json!({"probe_error": true});
+    gadgetron_xaas::llm_endpoints::update_llm_endpoint_capability(
+        pool,
+        tenant_id,
+        endpoint_id,
+        gadgetron_xaas::llm_endpoints::LlmEndpointCapabilityUpdate {
+            protocol,
+            model_id,
+            discovered_models: &[],
+            health_status: "error",
+            last_error: Some(message),
+            last_latency_ms: None,
+            runtime_compatibility: "unverified",
+            tool_status: "untested",
+            tool_model_id: None,
+            last_tool_error: None,
+            capability_details: &details,
+        },
+    )
+    .await
+    .map_err(|error| llm_endpoint_error_to_http("update_llm_endpoint_capability", error))
+}
+
 pub async fn autodetect_llm_endpoint_handler(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Json(body): Json<AutoDetectLlmEndpointRequest>,
 ) -> Result<Json<AutoDetectLlmEndpointResponse>, WorkbenchHttpError> {
     let base_url = validate_autodetect_request(&body)?;
-    let alias = endpoint_alias_or_host_port(body.alias, &body.host, body.port);
+    let alias = endpoint_alias_or_host_port(body.alias.clone(), &body.host, body.port);
+    let preferred_model = normalize_optional_text(body.model_id.clone());
+    let (auth_token_env, auth_token) = resolve_endpoint_auth(
+        body.auth_token_env.clone(),
+        body.auth_token_value.clone(),
+        DEFAULT_PENNY_OPENAI_AUTH_TOKEN_ENV,
+    )?;
     let pool = require_pg_pool(&state, "llm endpoint autodetect")?;
 
-    match probe_openai_base_url(&base_url).await {
-        Ok((models, latency_ms, message)) => {
-            let model_id = models.first().map(String::as_str);
+    match probe_endpoint_capabilities(
+        &base_url,
+        None,
+        preferred_model.as_deref(),
+        auth_token.as_deref(),
+    )
+    .await
+    {
+        Ok(probe) => {
+            let kind = if probe.protocol == "anthropic_messages" {
+                "anthropic_proxy"
+            } else {
+                "openai_compatible"
+            };
             let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
                 pool,
                 ctx.tenant_id,
-                &alias,
-                "vllm",
-                "openai_chat",
-                &base_url,
-                model_id,
+                gadgetron_xaas::llm_endpoints::LlmEndpointUpsert {
+                    name: &alias,
+                    kind,
+                    protocol: probe.protocol,
+                    base_url: &base_url,
+                    auth_token_env: auth_token_env.as_deref(),
+                    model_id: probe.model_id.as_deref(),
+                },
             )
             .await
             .map_err(|e| llm_endpoint_error_to_http("autodetect_llm_endpoint", e))?;
-            let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+            let endpoint =
+                persist_endpoint_capability(pool, ctx.tenant_id, endpoint.id, &probe).await?;
+            Ok(Json(AutoDetectLlmEndpointResponse {
+                ok: probe.ready(),
+                endpoint,
+                models: probe.models,
+                message: probe.message,
+            }))
+        }
+        Err(message) => {
+            let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
+                pool,
+                ctx.tenant_id,
+                gadgetron_xaas::llm_endpoints::LlmEndpointUpsert {
+                    name: &alias,
+                    kind: "openai_compatible",
+                    protocol: "openai_chat",
+                    base_url: &base_url,
+                    auth_token_env: auth_token_env.as_deref(),
+                    model_id: preferred_model.as_deref(),
+                },
+            )
+            .await
+            .map_err(|error| llm_endpoint_error_to_http("autodetect_llm_endpoint", error))?;
+            let endpoint = persist_endpoint_probe_failure(
                 pool,
                 ctx.tenant_id,
                 endpoint.id,
-                "ok",
-                None,
-                Some(latency_ms),
+                "openai_chat",
+                preferred_model.as_deref(),
+                &message,
             )
-            .await
-            .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+            .await?;
             Ok(Json(AutoDetectLlmEndpointResponse {
-                ok: true,
+                ok: false,
                 endpoint,
-                models,
+                models: Vec::new(),
                 message,
             }))
         }
-        Err(openai_error) => match probe_anthropic_base_url(&base_url).await {
-            Ok((models, latency_ms, message)) => {
-                let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
-                    pool,
-                    ctx.tenant_id,
-                    &alias,
-                    "ccr",
-                    "anthropic_messages",
-                    &base_url,
-                    None,
-                )
-                .await
-                .map_err(|e| llm_endpoint_error_to_http("autodetect_llm_endpoint", e))?;
-                let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
-                    pool,
-                    ctx.tenant_id,
-                    endpoint.id,
-                    "ok",
-                    None,
-                    Some(latency_ms),
-                )
-                .await
-                .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
-                Ok(Json(AutoDetectLlmEndpointResponse {
-                    ok: true,
-                    endpoint,
-                    models,
-                    message,
-                }))
-            }
-            Err(anthropic_error) => {
-                let message = format!(
-                    "OpenAI probe failed: {openai_error}; Anthropic health probe failed: {anthropic_error}"
-                );
-                let endpoint = gadgetron_xaas::llm_endpoints::upsert_llm_endpoint_by_name(
-                    pool,
-                    ctx.tenant_id,
-                    &alias,
-                    "vllm",
-                    "openai_chat",
-                    &base_url,
-                    None,
-                )
-                .await
-                .map_err(|e| llm_endpoint_error_to_http("autodetect_llm_endpoint", e))?;
-                let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
-                    pool,
-                    ctx.tenant_id,
-                    endpoint.id,
-                    "error",
-                    Some(&message),
-                    None,
-                )
-                .await
-                .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
-                Ok(Json(AutoDetectLlmEndpointResponse {
-                    ok: false,
-                    endpoint,
-                    models: Vec::new(),
-                    message,
-                }))
-            }
-        },
     }
 }
 
@@ -1516,6 +2695,7 @@ pub async fn probe_llm_endpoint_handler(
     State(state): State<AppState>,
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(endpoint_id): axum::extract::Path<uuid::Uuid>,
+    body: Option<Json<ProbeLlmEndpointRequest>>,
 ) -> Result<Json<ProbeLlmEndpointResponse>, WorkbenchHttpError> {
     let pool = require_pg_pool(&state, "llm endpoint probe")?;
     let endpoint =
@@ -1523,39 +2703,61 @@ pub async fn probe_llm_endpoint_handler(
             .await
             .map_err(|e| llm_endpoint_error_to_http("get_llm_endpoint", e))?;
 
-    match probe_endpoint(&endpoint).await {
-        Ok((models, latency_ms, message)) => {
-            let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
-                pool,
-                ctx.tenant_id,
-                endpoint_id,
-                "ok",
-                None,
-                Some(latency_ms),
-            )
-            .await
-            .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let preferred_model =
+        normalize_optional_text(body.model_id).or_else(|| endpoint.model_id.clone());
+    let default_auth_env = if endpoint.protocol == "anthropic_messages" {
+        DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV
+    } else {
+        DEFAULT_PENNY_OPENAI_AUTH_TOKEN_ENV
+    };
+    let (auth_token_env, auth_token) = resolve_endpoint_auth(
+        endpoint.auth_token_env.clone(),
+        body.auth_token_value,
+        default_auth_env,
+    )?;
+    if auth_token_env != endpoint.auth_token_env {
+        gadgetron_xaas::llm_endpoints::update_llm_endpoint_auth_env(
+            pool,
+            ctx.tenant_id,
+            endpoint_id,
+            auth_token_env.as_deref(),
+        )
+        .await
+        .map_err(|error| llm_endpoint_error_to_http("update_llm_endpoint_auth_env", error))?;
+    }
+
+    match probe_endpoint_capabilities(
+        &endpoint.base_url,
+        Some(&endpoint.protocol),
+        preferred_model.as_deref(),
+        auth_token.as_deref(),
+    )
+    .await
+    {
+        Ok(probe) => {
+            let next =
+                persist_endpoint_capability(pool, ctx.tenant_id, endpoint_id, &probe).await?;
             Ok(Json(ProbeLlmEndpointResponse {
-                ok: true,
-                endpoint,
-                models,
-                message,
+                ok: probe.ready(),
+                endpoint: next,
+                models: probe.models,
+                message: probe.message,
             }))
         }
         Err(message) => {
-            let endpoint = gadgetron_xaas::llm_endpoints::update_llm_endpoint_probe(
+            let next = persist_endpoint_probe_failure(
                 pool,
                 ctx.tenant_id,
                 endpoint_id,
-                "error",
-                Some(&message),
-                None,
+                &endpoint.protocol,
+                preferred_model.as_deref(),
+                &message,
             )
-            .await
-            .map_err(|e| llm_endpoint_error_to_http("update_llm_endpoint_probe", e))?;
+            .await?;
             Ok(Json(ProbeLlmEndpointResponse {
                 ok: false,
-                endpoint,
+                endpoint: next,
                 models: Vec::new(),
                 message,
             }))
@@ -1580,50 +2782,114 @@ pub async fn use_llm_endpoint_handler(
         gadgetron_xaas::llm_endpoints::get_llm_endpoint(pool, ctx.tenant_id, endpoint_id)
             .await
             .map_err(|e| llm_endpoint_error_to_http("get_llm_endpoint", e))?;
-    if endpoint.protocol != "anthropic_messages" {
+    if endpoint.runtime_compatibility == "bridge_required" {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "OpenAI-compatible endpoints need a CCR/Anthropic bridge before Penny can use them directly"
+            "This endpoint is Chat Completions-only. Register and start an Anthropic bridge, then run its tool probe before selecting it for Penny."
+                .into(),
+        )));
+    }
+    if endpoint.health_status != "ok" || endpoint.tool_status != "passed" {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint is connected but not Penny-ready; run a model tool probe and fix the reported error first"
                 .into(),
         )));
     }
 
-    let token_value =
-        body.and_then(|Json(body)| normalize_optional_text(body.external_auth_token_value));
-    let mut external_auth_token_env = endpoint
-        .auth_token_env
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .to_string();
-    if let Some(token_value) = token_value {
-        if token_value.contains('\0') {
-            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-                "endpoint auth token must not contain NUL bytes".into(),
-            )));
-        }
-        if external_auth_token_env.is_empty() {
-            external_auth_token_env = DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV.to_string();
-        }
-        if !is_valid_runtime_auth_env_name(&external_auth_token_env) {
-            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-                "endpoint auth token env must match [A-Z_][A-Z0-9_]*".into(),
-            )));
-        }
-        std::env::set_var(&external_auth_token_env, token_value);
+    let body = body
+        .map(|Json(body)| body)
+        .unwrap_or(UseLlmEndpointRequest {
+            model_id: None,
+            external_auth_token_value: None,
+        });
+    let selected_model = normalize_optional_text(body.model_id)
+        .or_else(|| endpoint.tool_model_id.clone())
+        .ok_or_else(|| {
+            WorkbenchHttpError::Core(GadgetronError::Config(
+                "endpoint has no tool-verified model id".into(),
+            ))
+        })?;
+    if endpoint.tool_model_id.as_deref() != Some(selected_model.as_str()) {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "selected model has not passed this endpoint's tool probe; probe that model first"
+                .into(),
+        )));
     }
+    let is_anthropic = endpoint.runtime_compatibility == "claude_code";
+    let expected_protocol = if is_anthropic {
+        "anthropic_messages"
+    } else {
+        "openai_responses"
+    };
+    if endpoint.protocol != expected_protocol
+        || !matches!(
+            endpoint.runtime_compatibility.as_str(),
+            "claude_code" | "codex_exec"
+        )
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "endpoint protocol and runtime compatibility do not form a supported Penny adapter"
+                .into(),
+        )));
+    }
+    let default_auth_env = if is_anthropic {
+        DEFAULT_PENNY_EXTERNAL_AUTH_TOKEN_ENV
+    } else {
+        DEFAULT_PENNY_OPENAI_AUTH_TOKEN_ENV
+    };
+    let (auth_token_env, _) = resolve_endpoint_auth(
+        endpoint.auth_token_env.clone(),
+        body.external_auth_token_value,
+        default_auth_env,
+    )?;
+    if auth_token_env != endpoint.auth_token_env {
+        gadgetron_xaas::llm_endpoints::update_llm_endpoint_auth_env(
+            pool,
+            ctx.tenant_id,
+            endpoint_id,
+            auth_token_env.as_deref(),
+        )
+        .await
+        .map_err(|error| llm_endpoint_error_to_http("update_llm_endpoint_auth_env", error))?;
+    }
+    let external_auth_token_env = auth_token_env.unwrap_or_default();
 
     let current_agent = brain.load_full();
+    let endpoint_backend = if is_anthropic {
+        gadgetron_core::agent::AgentBackend::ClaudeCode
+    } else {
+        gadgetron_core::agent::AgentBackend::CodexExec
+    };
     let request = gadgetron_core::agent::UpdateAgentBrainSettingsRequest {
-        mode: gadgetron_core::agent::BrainMode::ExternalProxy,
-        external_base_url: endpoint.base_url.clone(),
-        model: endpoint.model_id.clone().unwrap_or_default(),
-        external_auth_token_env: external_auth_token_env.clone(),
+        mode: if is_anthropic {
+            gadgetron_core::agent::BrainMode::ExternalProxy
+        } else {
+            gadgetron_core::agent::BrainMode::ClaudeMax
+        },
+        external_base_url: if is_anthropic {
+            endpoint.base_url.clone()
+        } else {
+            String::new()
+        },
+        model: selected_model.clone(),
+        external_auth_token_env: if is_anthropic {
+            external_auth_token_env.clone()
+        } else {
+            String::new()
+        },
         custom_model_option: endpoint.model_id.is_some(),
-        backend: gadgetron_core::agent::AgentBackend::ClaudeCode,
+        backend: endpoint_backend,
+        llm_endpoint_id: Some(endpoint.id),
         model_source: gadgetron_core::agent::ModelSource::Local,
-        local_base_url: endpoint.base_url.clone(),
+        local_base_url: if is_anthropic {
+            endpoint.base_url.clone()
+        } else {
+            codex_runtime_base_url(&endpoint.base_url)
+        },
         local_api_key_env: external_auth_token_env.clone(),
-        effort: current_agent.brain.effort,
+        effort: current_agent
+            .brain
+            .effort
+            .for_backend_model(endpoint_backend, &selected_model),
     };
     let next_agent = request.overlay_agent(&current_agent);
     next_agent
@@ -2040,6 +3306,137 @@ pub struct ListConversationsResponse {
     pub conversations: Vec<gadgetron_xaas::conversations::ConversationRow>,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ConversationAgentProfileResponse {
+    pub profile: ConversationAgentProfile,
+    /// False means this is only the current new-chat default projection. The
+    /// first PATCH or chat turn atomically pins the profile to the row.
+    pub pinned: bool,
+}
+
+fn default_conversation_profile(state: &AppState) -> ConversationAgentProfile {
+    let agent = state
+        .workbench
+        .as_ref()
+        .and_then(|service| service.agent_brain.as_ref())
+        .map(|brain| brain.load_full())
+        .unwrap_or_else(|| state.agent_config.clone());
+    ConversationAgentProfile::from_agent(&agent)
+}
+
+fn conversation_profile_error_to_http(
+    conversation_id: Uuid,
+    error: gadgetron_xaas::conversations::ConversationError,
+) -> WorkbenchHttpError {
+    use gadgetron_xaas::conversations::ConversationError;
+    match error {
+        ConversationError::NotFound | ConversationError::OwnershipMismatch => {
+            WorkbenchHttpError::Core(GadgetronError::Config("conversation not found".into()))
+        }
+        ConversationError::AgentBackendPinned { pinned, requested } => {
+            WorkbenchHttpError::Core(GadgetronError::Penny {
+                kind: PennyErrorKind::AgentBackendPinned {
+                    conversation_id: conversation_id.to_string(),
+                    pinned,
+                    requested,
+                },
+                message: "conversation agent runtime is already pinned".into(),
+            })
+        }
+        ConversationError::InvalidAgentProfile(reason) => {
+            WorkbenchHttpError::Core(GadgetronError::Config(reason))
+        }
+        ConversationError::Db(error) => WorkbenchHttpError::Core(GadgetronError::Database {
+            kind: DatabaseErrorKind::QueryFailed,
+            message: format!("conversation agent profile: {error}"),
+        }),
+    }
+}
+
+/// Read a conversation's stored runtime/model/effort profile. A freshly
+/// minted client-side conversation id has no row yet, so return the live
+/// new-chat default with `pinned=false` instead of forcing an eager INSERT.
+pub async fn get_conversation_agent_profile_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<Json<ConversationAgentProfileResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "conversation agent profile")?;
+    let user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+    let saved = gadgetron_xaas::conversations::get_conversation_agent_profile(
+        pool,
+        id,
+        ctx.tenant_id,
+        user_id,
+    )
+    .await
+    .map_err(|error| conversation_profile_error_to_http(id, error))?;
+    let pinned = saved.is_some();
+    Ok(Json(ConversationAgentProfileResponse {
+        profile: saved.unwrap_or_else(|| default_conversation_profile(&state)),
+        pinned,
+    }))
+}
+
+/// Save per-chat model/effort and atomically pin its backend. A cross-runtime
+/// PATCH returns HTTP 409; clients should offer to start a new conversation.
+pub async fn patch_conversation_agent_profile_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Json(profile): Json<ConversationAgentProfile>,
+) -> Result<Json<ConversationAgentProfileResponse>, WorkbenchHttpError> {
+    let pool = require_pg_pool(&state, "conversation agent profile")?;
+    let user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::Core(GadgetronError::TenantNotFound))?;
+
+    // Keep the job's effective profile immutable for its entire generation,
+    // even when a non-browser caller bypasses the disabled UI selector.
+    if let Some(job) = state.chat_jobs.active_for_conversation(id).await {
+        if job_visible_to(&job, &ctx) && !job.snapshot().await.is_finished {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Penny {
+                kind: PennyErrorKind::SessionConcurrent {
+                    conversation_id: id.to_string(),
+                },
+                message: "conversation already has an active generation".into(),
+            }));
+        }
+    }
+
+    let profile = canonicalize_registered_endpoint_profile(pool, ctx.tenant_id, profile)
+        .await
+        .map_err(WorkbenchHttpError::Core)?;
+    let current = gadgetron_xaas::conversations::get_conversation_agent_profile(
+        pool,
+        id,
+        ctx.tenant_id,
+        user_id,
+    )
+    .await
+    .map_err(|error| conversation_profile_error_to_http(id, error))?;
+    if profile.llm_endpoint_id.is_none() {
+        profile
+            .validate_client_selection(current.as_ref(), &default_conversation_profile(&state))
+            .map_err(|reason| WorkbenchHttpError::Core(GadgetronError::Config(reason)))?;
+    }
+    let saved = gadgetron_xaas::conversations::upsert_conversation_agent_profile(
+        pool,
+        id,
+        ctx.tenant_id,
+        user_id,
+        &profile,
+    )
+    .await
+    .map_err(|error| conversation_profile_error_to_http(id, error))?;
+    Ok(Json(ConversationAgentProfileResponse {
+        profile: saved,
+        pinned: true,
+    }))
+}
+
 /// `GET /api/v1/web/workbench/conversations` — list the calling user's
 /// non-deleted conversations, newest first. Tenant + user boundary
 /// enforced via the SQL WHERE clause.
@@ -2092,6 +3489,12 @@ pub async fn delete_conversation_handler(
             gadgetron_xaas::conversations::ConversationError::Db(e) => {
                 WorkbenchHttpError::Core(GadgetronError::Config(format!("delete: {e}")))
             }
+            gadgetron_xaas::conversations::ConversationError::AgentBackendPinned { .. }
+            | gadgetron_xaas::conversations::ConversationError::InvalidAgentProfile(_) => {
+                WorkbenchHttpError::Core(GadgetronError::Config(
+                    "conversation profile conflict".into(),
+                ))
+            }
         })?;
     Ok(Json(serde_json::json!({ "deleted": true, "id": id })))
 }
@@ -2136,9 +3539,10 @@ pub struct ConversationMessagesResponse {
 }
 
 /// `GET /api/v1/web/workbench/conversations/{id}/active-job` —
-/// return JSON metadata for the in-flight (or recently-completed)
-/// chat-completion job tied to this conversation, or 404 when no
-/// job is registered. The frontend polls this on chat mount to
+/// return JSON metadata for the in-flight or recently-completed
+/// chat-completion job tied to this conversation. PostgreSQL-backed
+/// deployments also return a recent terminal snapshot recovered after a
+/// process restart. The frontend polls this on chat mount to
 /// decide whether to attach to `/jobs/{job_id}/sync` and display the
 /// "생성 중" indicator.
 ///
@@ -2151,13 +3555,26 @@ pub async fn get_conversation_active_job_handler(
     axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<crate::chat_jobs::JobSnapshot>, WorkbenchHttpError> {
-    let Some(job) = state.chat_jobs.active_for_conversation(id).await else {
+    if let Some(job) = state.chat_jobs.active_for_conversation(id).await {
+        if !job_visible_to(&job, &ctx) {
+            return Err(WorkbenchHttpError::JobNotFound);
+        }
+        return Ok(Json(job.snapshot().await));
+    }
+    let Some(user_id) = ctx.actor_user_id else {
         return Err(WorkbenchHttpError::JobNotFound);
     };
-    if !job_visible_to(&job, &ctx) {
-        return Err(WorkbenchHttpError::JobNotFound);
-    }
-    Ok(Json(job.snapshot().await))
+    let snapshot = state
+        .chat_jobs
+        .latest_terminal_for_conversation(ctx.tenant_id, user_id, id)
+        .await
+        .map_err(|error| {
+            WorkbenchHttpError::Core(GadgetronError::Database {
+                kind: DatabaseErrorKind::QueryFailed,
+                message: format!("chat job lookup: {error}"),
+            })
+        })?;
+    snapshot.map(Json).ok_or(WorkbenchHttpError::JobNotFound)
 }
 
 /// `GET /api/v1/web/workbench/jobs/{job_id}/sync?since=N` —
@@ -2167,7 +3584,7 @@ pub async fn get_conversation_active_job_handler(
 /// `POST /v1/chat/completions` foreground client received — minus
 /// the leading `event: job` frame (the caller already knows the
 /// job id from the URL). When the producer marks the job
-/// Complete / Error, the stream terminates.
+/// Complete / Error / Cancelled, the stream terminates.
 ///
 /// Tenant + user boundary: same rule as `active-job` above. A
 /// cross-tenant lookup returns 404 so the existence of foreign
@@ -2553,6 +3970,12 @@ pub async fn rename_conversation_handler(
         }
         gadgetron_xaas::conversations::ConversationError::Db(e) => {
             WorkbenchHttpError::Core(GadgetronError::Config(format!("rename: {e}")))
+        }
+        gadgetron_xaas::conversations::ConversationError::AgentBackendPinned { .. }
+        | gadgetron_xaas::conversations::ConversationError::InvalidAgentProfile(_) => {
+            WorkbenchHttpError::Core(GadgetronError::Config(
+                "conversation profile conflict".into(),
+            ))
         }
     })?;
     Ok(Json(serde_json::json!({ "ok": true, "id": id })))
@@ -3346,6 +4769,11 @@ pub fn workbench_routes() -> Router<AppState> {
         )
         // descriptor catalog + knowledge status + view data
         .route("/knowledge-status", get(get_knowledge_status))
+        .route("/capabilities", get(get_capability_projection))
+        .route(
+            "/contributions/{contribution_id}/data",
+            get(get_contribution_data),
+        )
         .route("/views", get(list_views))
         .route("/views/{view_id}/data", get(load_view_data))
         .route("/actions", get(list_actions))
@@ -3377,6 +4805,15 @@ pub fn workbench_routes() -> Router<AppState> {
             "/admin/agent/brain",
             axum::routing::patch(patch_agent_brain_settings),
         )
+        // Tenant-scoped immutable policy model and read-only decision preview.
+        .route("/admin/policy", get(get_active_policy))
+        .route("/admin/policy/revisions", post(create_policy_revision))
+        .route(
+            "/admin/policy/legacy-revisions",
+            post(create_legacy_policy_revision),
+        )
+        .route("/admin/policy/preview", post(preview_policy))
+        .route("/admin/policy/decisions", get(list_policy_decisions))
         // LLM endpoint registry and Penny attachment.
         .route("/admin/llm/endpoints", get(list_llm_endpoints_handler))
         .route("/admin/llm/endpoints", post(create_llm_endpoint_handler))
@@ -3400,14 +4837,117 @@ pub fn workbench_routes() -> Router<AppState> {
             "/admin/llm/endpoints/{endpoint_id}/use",
             post(use_llm_endpoint_handler),
         )
+        // Safe endpoint/model projection for authenticated chat users.
+        .route(
+            "/llm/endpoints/available",
+            get(list_available_llm_endpoint_models_handler),
+        )
         // Live activity WebSocket feed.
         .route("/events/ws", get(events_ws_handler))
+        .merge(super::knowledge_spaces::routes())
+        .merge(super::knowledge_sources::routes())
+        .merge(super::knowledge_graph::routes())
+        .merge(super::knowledge_collections::routes())
+        .merge(super::knowledge_ontology::routes())
+        .merge(super::knowledge_jobs::routes())
+        .merge(super::autonomy::routes())
+        .merge(super::manager_oversight::routes())
         // Admin catalog hot-reload.
         .route("/admin/reload-catalog", post(reload_catalog_handler))
+        .route(
+            "/admin/knowledge/ai-roles",
+            get(get_core_knowledge_agent_roles_handler),
+        )
+        .route(
+            "/admin/knowledge/ai-roles/{role_id}",
+            axum::routing::put(put_core_knowledge_agent_role_handler)
+                .delete(delete_core_knowledge_agent_role_handler),
+        )
         // Bundle discovery.
         .route("/admin/bundles", get(list_bundles_handler))
-        // Bundle install.
-        .route("/admin/bundles", post(install_bundle_handler))
+        // Signed external-runtime lifecycle.
+        .route(
+            "/admin/bundles/runtime",
+            get(list_bundle_runtime_status_handler),
+        )
+        .route(
+            "/admin/bundles/dependency-plan",
+            get(get_bundle_dependency_plan_handler),
+        )
+        .route(
+            "/admin/bundle-sets/inspect",
+            post(inspect_bundle_set_handler),
+        )
+        .route("/admin/bundle-sets/apply", post(apply_bundle_set_handler))
+        .route(
+            "/admin/bundles/{bundle_id}/runtime",
+            get(get_bundle_runtime_status_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/enable",
+            post(enable_bundle_runtime_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/disable",
+            post(disable_bundle_runtime_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/job-recipes/{recipe_id}/start",
+            post(start_bundle_job_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/jobs/{job_id}",
+            get(poll_bundle_job_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/jobs/{job_id}/cancel",
+            post(cancel_bundle_job_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/permissions",
+            get(get_bundle_permission_grant_handler)
+                .put(grant_bundle_permissions_handler)
+                .delete(revoke_bundle_permissions_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/settings",
+            get(get_bundle_settings_handler).put(put_bundle_settings_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ai-roles",
+            get(get_bundle_knowledge_agent_roles_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ai-roles/{role_id}",
+            axum::routing::put(put_bundle_knowledge_agent_role_handler)
+                .delete(delete_bundle_knowledge_agent_role_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/export",
+            get(export_bundle_package_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ssh/targets",
+            get(list_bundle_ssh_targets_handler).post(bootstrap_bundle_ssh_target_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ssh/targets/{target_id}",
+            axum::routing::put(put_bundle_ssh_target_handler)
+                .delete(delete_bundle_ssh_target_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ssh/targets/{target_id}/setup",
+            post(reapply_bundle_ssh_target_setup_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ssh/secrets",
+            get(list_bundle_ssh_secrets_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/ssh/secrets/{secret_id}",
+            axum::routing::put(put_bundle_ssh_secret_handler)
+                .delete(delete_bundle_ssh_secret_handler),
+        )
         // Bundle uninstall.
         .route(
             "/admin/bundles/{bundle_id}",
@@ -3476,13 +5016,6 @@ pub fn workbench_routes() -> Router<AppState> {
         )
         // Admin audit_log query endpoint.
         .route("/admin/audit/log", get(list_audit_log_handler))
-        // §16 server-metrics timeseries — read-side surface. Tier
-        // selection auto / raw / 5s / 1m / 5m / 1h. Tenant-leading
-        // queries enforce isolation.
-        .route(
-            "/servers/{host_id}/metrics",
-            get(crate::web::server_metrics::list_server_metrics),
-        )
         // Per-user chat conversations (left-rail sidebar).
         .route("/conversations", get(list_conversations_handler))
         .route(
@@ -3492,6 +5025,11 @@ pub fn workbench_routes() -> Router<AppState> {
         .route(
             "/conversations/{id}/messages",
             get(get_conversation_messages_handler),
+        )
+        .route(
+            "/conversations/{id}/agent-profile",
+            get(get_conversation_agent_profile_handler)
+                .patch(patch_conversation_agent_profile_handler),
         )
         // Resumable-stream endpoints. `active-job` returns JSON
         // metadata (job_id, status, chunk_count). `jobs/{id}/sync`
@@ -3511,13 +5049,33 @@ pub fn workbench_routes() -> Router<AppState> {
         )
 }
 
+/// Signed package envelopes include base64 runtime bytes and therefore use a
+/// larger, still bounded body budget than ordinary Workbench JSON.
+pub fn bundle_source_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/bundles", post(install_bundle_handler))
+        .route(
+            "/admin/bundles/inspect",
+            post(inspect_bundle_source_handler),
+        )
+        .route(
+            "/admin/bundles/install",
+            post(install_bundle_source_handler),
+        )
+        .route(
+            "/admin/bundles/{bundle_id}/upgrade",
+            axum::routing::put(upgrade_bundle_source_handler),
+        )
+}
+
 // ---------------------------------------------------------------------------
 // POST/DELETE /api/v1/web/workbench/admin/bundles
 // ---------------------------------------------------------------------------
 
 /// Request body for `POST /admin/bundles`. Operator sends the full
 /// manifest text; handler validates + writes to disk.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallBundleRequest {
     /// Complete `bundle.toml` text. Must include a `[bundle]` table
     /// with a valid `id` (id drives the install directory name).
@@ -3530,6 +5088,81 @@ pub struct InstallBundleRequest {
     /// `web.bundle_signing.public_keys_hex`; any match accepts.
     #[serde(default)]
     pub signature_hex: Option<String>,
+    /// Optional versioned public SDK `package.toml`. The legacy catalog remains a
+    /// separate transitional file until the external runtime host consumes
+    /// this contract directly.
+    #[serde(default)]
+    pub package_toml: Option<String>,
+    /// Optional Ed25519 detached signature over `package_toml`. A package may
+    /// never reuse the catalog signature because each signed byte sequence is
+    /// independently auditable.
+    #[serde(default)]
+    pub package_signature_hex: Option<String>,
+    /// Optional base64-encoded runtime entry bytes. The signed package
+    /// manifest pins these bytes through `runtime.entry_sha256`; mismatches
+    /// are rejected before the install directory is created.
+    #[serde(default)]
+    pub runtime_artifact_base64: Option<String>,
+    /// Base64 package assets keyed by the exact relative paths declared by
+    /// domain schema, seed-asset and migration descriptors.
+    #[serde(default)]
+    pub package_assets_base64: std::collections::BTreeMap<String, String>,
+}
+
+/// Portable signed Bundle package source used by the commercial control plane.
+/// Inline envelopes are produced by a local `.gadgetron-bundle.json` file;
+/// URL sources are fetched by Core so Bundle runtimes never receive egress.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BundlePackageSource {
+    Inline { envelope: InstallBundleRequest },
+    Url { url: String },
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectBundleSourceRequest {
+    pub source: BundlePackageSource,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallBundleSourceRequest {
+    pub source: BundlePackageSource,
+    /// Digest returned by inspect. Apply is rejected when the exact portable
+    /// envelope bytes changed between the two operator actions.
+    pub expected_source_sha256: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BundleInstallInspection {
+    pub bundle_id: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_class: Option<gadgetron_bundle_sdk::BundleClass>,
+    pub source_sha256: String,
+    pub package_manifest_sha256: Option<String>,
+    pub contract: &'static str,
+    pub action_count: usize,
+    pub view_count: usize,
+    pub permission_ids: Vec<String>,
+    pub settings_declared: bool,
+    pub runtime_kind: Option<String>,
+    pub installable: bool,
+    pub upgradeable: bool,
+    pub warnings: Vec<String>,
+}
+
+struct ValidatedBundleInstall {
+    bundle: crate::web::catalog::BundleMetadata,
+    bundle_class: Option<gadgetron_bundle_sdk::BundleClass>,
+    package_manifest_sha256: Option<String>,
+    runtime_artifact: Option<(gadgetron_bundle_sdk::RelativePath, Vec<u8>)>,
+    package_assets: Vec<(gadgetron_bundle_sdk::RelativePath, Vec<u8>)>,
+    domain_schemas: Vec<gadgetron_bundle_sdk::DomainSchemaDescriptor>,
+    permission_ids: Vec<String>,
+    settings_declared: bool,
+    runtime_kind: Option<String>,
 }
 
 /// Response for `POST /admin/bundles`.
@@ -3539,9 +5172,29 @@ pub struct InstallBundleResponse {
     /// Installed bundle's id — matches the directory name under
     /// `bundles_dir`.
     pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_class: Option<gadgetron_bundle_sdk::BundleClass>,
     /// Absolute path of the written `bundle.toml` (operator can
     /// `cat` / `grep` this to verify).
     pub manifest_path: String,
+    /// Public package contract installed alongside the legacy catalog, when
+    /// supplied by the operator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_manifest_path: Option<String>,
+    /// SHA-256 over the exact validated `package.toml` bytes. The runtime
+    /// handshake must return this digest before Core can enable capabilities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_manifest_sha256: Option<String>,
+    /// Installed runtime entry when artifact bytes were supplied and matched
+    /// the signed package digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_artifact_path: Option<String>,
+    pub package_asset_count: usize,
+    /// `catalog_only` for legacy installs; `bundle_sdk_v1` when a validated
+    /// public package contract was installed.
+    pub contract: &'static str,
+    /// Runtime lifecycle is deliberately separate from metadata installation.
+    pub runtime_state: &'static str,
     /// Hint to the operator that the live catalog hasn't changed
     /// yet — trigger `POST /admin/reload-catalog` or `SIGHUP` to
     /// pick up the new bundle. Keeps install idempotent: installing
@@ -3555,6 +5208,8 @@ pub struct InstallBundleResponse {
 pub struct UninstallBundleResponse {
     pub uninstalled: bool,
     pub bundle_id: String,
+    pub runtime_disabled: bool,
+    pub state_preserved: bool,
     pub reload_hint: &'static str,
 }
 
@@ -3570,45 +5225,44 @@ pub struct UninstallBundleResponse {
 /// - Signature supplied but `public_keys_hex` empty → reject (no
 ///   trust anchors means we can't validate; better to fail loud
 ///   than silently accept unverified input).
-fn verify_bundle_signature(
+fn verify_detached_signature(
     cfg: &gadgetron_core::config::BundleSigningConfig,
-    req: &InstallBundleRequest,
+    artifact: &'static str,
+    message: &[u8],
+    signature_hex: Option<&str>,
 ) -> Result<(), WorkbenchHttpError> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-    let Some(sig_hex) = req.signature_hex.as_deref() else {
+    let Some(sig_hex) = signature_hex else {
         if cfg.require_signature {
-            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-                "bundle install: signature required but none supplied \
-                 (web.bundle_signing.require_signature = true)"
-                    .into(),
-            )));
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "signed artifact: {artifact} signature required but none supplied \
+                     (web.bundle_signing.require_signature = true)"
+            ))));
         }
         return Ok(());
     };
 
     let sig_bytes = hex::decode(sig_hex).map_err(|e| {
         WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "bundle install: signature is not valid hex: {e}",
+            "signed artifact: {artifact} signature is not valid hex: {e}",
         )))
     })?;
     let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
         WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "bundle install: signature must be 64 bytes (got {})",
+            "signed artifact: {artifact} signature must be 64 bytes (got {})",
             sig_bytes.len()
         )))
     })?;
     let signature = Signature::from_bytes(&sig_arr);
 
     if cfg.public_keys_hex.is_empty() {
-        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
-            "bundle install: signature supplied but no trust anchors \
-             configured (web.bundle_signing.public_keys_hex is empty)"
-                .into(),
-        )));
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "signed artifact: {artifact} signature supplied but no trust anchors \
+                 configured (web.bundle_signing.public_keys_hex is empty)"
+        ))));
     }
 
-    let message = req.bundle_toml.as_bytes();
     for (idx, pk_hex) in cfg.public_keys_hex.iter().enumerate() {
         let Ok(pk_bytes) = hex::decode(pk_hex) else {
             tracing::warn!(
@@ -3633,18 +5287,33 @@ fn verify_bundle_signature(
                 tracing::info!(
                     target: "workbench.admin",
                     key_index = idx,
-                    "bundle install: signature verified"
+                    artifact,
+                    "signed artifact: detached signature verified"
                 );
                 return Ok(());
             }
         }
     }
 
-    Err(WorkbenchHttpError::Core(GadgetronError::Config(
-        "bundle install: signature did not verify against any configured \
-         trust anchor (web.bundle_signing.public_keys_hex)"
-            .into(),
-    )))
+    Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+        "signed artifact: {artifact} signature did not verify against any configured \
+             trust anchor (web.bundle_signing.public_keys_hex)"
+    ))))
+}
+
+#[cfg(test)]
+pub(crate) fn verify_required_detached_signature(
+    cfg: &gadgetron_core::config::BundleSigningConfig,
+    artifact: &'static str,
+    message: &[u8],
+    signature_hex: &str,
+) -> Result<(), WorkbenchHttpError> {
+    if cfg.public_keys_hex.is_empty() {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle enable: {artifact} signature cannot be verified because no trust anchors are configured"
+        ))));
+    }
+    verify_detached_signature(cfg, artifact, message, Some(signature_hex))
 }
 
 /// Validate a bundle id against the reserved character set.
@@ -3654,20 +5323,1532 @@ fn verify_bundle_signature(
 /// the filesystem to prevent path traversal (`..`, slashes, null
 /// bytes) or platform-specific filename weirdness.
 fn validate_bundle_id(id: &str) -> Result<(), WorkbenchHttpError> {
-    if id.is_empty() || id.len() > 64 {
+    gadgetron_bundle_sdk::BundleId::parse_legacy(id)
+        .map(|_| ())
+        .map_err(|error| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle id validation failed: {error}"
+            )))
+        })
+}
+
+pub(crate) fn validate_package_contract(
+    package_toml: &str,
+    catalog_id: &str,
+    catalog_version: &str,
+) -> Result<gadgetron_bundle_host::ValidatedPackageContract, WorkbenchHttpError> {
+    let core_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: invalid Core build version: {error}"
+        )))
+    })?;
+    let contract =
+        gadgetron_bundle_host::ValidatedPackageContract::parse(package_toml, &core_version)
+            .map_err(|error| {
+                WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "bundle install: package.toml validation failed: {error}"
+                )))
+            })?;
+    let package = contract.manifest();
+
+    if package.bundle.id.as_str() != catalog_id {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "bundle id {id:?} must be 1-64 chars",
+            "bundle install: package.toml Bundle id {:?} does not exactly match catalog id {catalog_id:?}",
+            package.bundle.id.as_str()
         ))));
     }
-    for c in id.chars() {
-        let ok = c.is_ascii_alphanumeric() || c == '-' || c == '_';
-        if !ok {
-            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
-                "bundle id {id:?} contains invalid char {c:?}; allowed: [a-zA-Z0-9_-]",
-            ))));
+    let package_version = package.bundle.version.to_string();
+    if package_version != catalog_version {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: package.toml version {package_version:?} does not exactly match catalog version {catalog_version:?}"
+        ))));
+    }
+    Ok(contract)
+}
+
+// The request ceiling includes base64 expansion, signed manifests and bounded
+// assets. Keep it route-local so ordinary Workbench JSON retains Axum's smaller
+// default limit.
+pub(crate) const MAX_BUNDLE_SOURCE_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BUNDLE_RUNTIME_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BUNDLE_PACKAGE_ASSET_BYTES: usize = 512 * 1024;
+
+fn validate_runtime_artifact(
+    package: Option<&gadgetron_bundle_host::ValidatedPackageContract>,
+    encoded: Option<&str>,
+) -> Result<Option<(gadgetron_bundle_sdk::RelativePath, Vec<u8>)>, WorkbenchHttpError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let package = match (package, encoded) {
+        (None, None) => return Ok(None),
+        (None, Some(_)) => {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle install: runtime_artifact_base64 requires package_toml".into(),
+            )))
+        }
+        (Some(package), None)
+            if matches!(
+                package.manifest().runtime.kind,
+                gadgetron_bundle_sdk::RuntimeKind::Subprocess
+                    | gadgetron_bundle_sdk::RuntimeKind::Wasm
+            ) =>
+        {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle install: subprocess and Wasm packages require runtime_artifact_base64"
+                    .into(),
+            )))
+        }
+        (Some(_), None) => return Ok(None),
+        (Some(package), Some(_)) => package,
+    };
+    let encoded = encoded.expect("runtime artifact presence matched above");
+    match package.manifest().runtime.kind {
+        gadgetron_bundle_sdk::RuntimeKind::Subprocess | gadgetron_bundle_sdk::RuntimeKind::Wasm => {
+        }
+        _ => {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle install: runtime artifact bytes are supported only for subprocess or Wasm packages".into(),
+            )));
         }
     }
-    Ok(())
+    let bytes = STANDARD.decode(encoded).map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: runtime artifact is not valid base64: {error}"
+        )))
+    })?;
+    if bytes.is_empty() || bytes.len() > MAX_BUNDLE_RUNTIME_ARTIFACT_BYTES {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: runtime artifact must contain 1-{MAX_BUNDLE_RUNTIME_ARTIFACT_BYTES} bytes (got {})",
+            bytes.len()
+        ))));
+    }
+    let expected = package
+        .manifest()
+        .runtime
+        .entry_sha256
+        .as_deref()
+        .ok_or_else(|| {
+            WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle install: package runtime does not pin entry_sha256".into(),
+            ))
+        })?;
+    let actual = hex::encode(Sha256::digest(&bytes));
+    if actual != expected {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: runtime artifact digest mismatch (expected {expected}, got {actual})"
+        ))));
+    }
+    let relative = gadgetron_bundle_sdk::RelativePath::new(
+        package.manifest().runtime.entry.clone(),
+    )
+    .map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: invalid runtime entry path: {error}"
+        )))
+    })?;
+    Ok(Some((relative, bytes)))
+}
+
+fn validate_package_assets(
+    package: Option<&gadgetron_bundle_host::ValidatedPackageContract>,
+    encoded_assets: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<(gadgetron_bundle_sdk::RelativePath, Vec<u8>)>, WorkbenchHttpError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let Some(package) = package else {
+        if encoded_assets.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle install: package_assets_base64 requires package_toml".into(),
+        )));
+    };
+    let capabilities = &package.manifest().capabilities;
+    let mut expected = Vec::new();
+    expected.extend(
+        capabilities
+            .domain_schemas
+            .iter()
+            .map(|schema| (&schema.schema_path, schema.sha256.as_str())),
+    );
+    expected.extend(
+        capabilities
+            .seed_assets
+            .iter()
+            .map(|asset| (&asset.path, asset.sha256.as_str())),
+    );
+    expected.extend(
+        capabilities
+            .migrations
+            .iter()
+            .map(|migration| (&migration.path, migration.sha256.as_str())),
+    );
+    if expected.len() != encoded_assets.len()
+        || expected
+            .iter()
+            .any(|(path, _)| !encoded_assets.contains_key(path.as_str()))
+    {
+        let expected_paths: Vec<_> = expected.iter().map(|(path, _)| path.as_str()).collect();
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: package assets must exactly match declared hashed paths {expected_paths:?}"
+        ))));
+    }
+
+    let mut decoded = Vec::with_capacity(expected.len());
+    let mut total = 0_usize;
+    for (path, expected_digest) in expected {
+        let encoded = encoded_assets
+            .get(path.as_str())
+            .expect("declared package asset presence checked");
+        let bytes = STANDARD.decode(encoded).map_err(|error| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle install: package asset {:?} is not valid base64: {error}",
+                path.as_str()
+            )))
+        })?;
+        total = total.saturating_add(bytes.len());
+        if bytes.is_empty() || total > MAX_BUNDLE_PACKAGE_ASSET_BYTES {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle install: hashed package assets must contain 1-{MAX_BUNDLE_PACKAGE_ASSET_BYTES} total bytes"
+            ))));
+        }
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != expected_digest {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle install: package asset {:?} digest mismatch (expected {expected_digest}, got {actual})",
+                path.as_str()
+            ))));
+        }
+        if let Some(schema) = capabilities
+            .domain_schemas
+            .iter()
+            .find(|schema| schema.schema_path.as_str() == path.as_str())
+        {
+            gadgetron_bundle_sdk::DomainOntology::parse_json(&bytes, schema.version).map_err(
+                |error| {
+                    WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                        "bundle install: domain schema {:?} is invalid: {error}",
+                        schema.id.as_str()
+                    )))
+                },
+            )?;
+        }
+        decoded.push((path.clone(), bytes));
+    }
+    Ok(decoded)
+}
+
+fn write_install_file(path: &std::path::Path, bytes: &[u8], unix_mode: u32) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(unix_mode);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+pub(crate) fn require_runtime_manager(
+    state: &AppState,
+) -> Result<Arc<crate::web::bundle_runtime::BundleRuntimeManager>, WorkbenchHttpError> {
+    require_workbench(state)?
+        .runtime_manager
+        .clone()
+        .ok_or_else(|| {
+            WorkbenchHttpError::Core(GadgetronError::Config(
+                "external Bundle runtime manager is unavailable; configure [web] bundles_dir and use a supported Linux sandbox host".into(),
+            ))
+        })
+}
+
+pub async fn list_bundle_runtime_status_handler(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::web::bundle_runtime::BundleRuntimeStatus>>, WorkbenchHttpError> {
+    Ok(Json(require_runtime_manager(&state)?.list().await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleDependencyPlanQuery {
+    #[serde(default)]
+    pub change: Option<String>,
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+}
+
+pub async fn get_bundle_dependency_plan_handler(
+    State(state): State<AppState>,
+    Query(query): Query<BundleDependencyPlanQuery>,
+) -> Result<Json<gadgetron_bundle_sdk::BundleDependencyPlan>, WorkbenchHttpError> {
+    let change = match query.change.as_deref().unwrap_or("none") {
+        "none" if query.bundle_id.is_none() => gadgetron_bundle_sdk::BundleLifecycleChange::None,
+        "enable" | "disable" => {
+            let bundle_id = query.bundle_id.ok_or_else(|| {
+                WorkbenchHttpError::Core(GadgetronError::Config(
+                    "dependency preview requires bundle_id for enable or disable".into(),
+                ))
+            })?;
+            let bundle_id = gadgetron_bundle_sdk::BundleId::new(bundle_id).map_err(|error| {
+                WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "dependency preview Bundle id is invalid: {error}"
+                )))
+            })?;
+            if query.change.as_deref() == Some("enable") {
+                gadgetron_bundle_sdk::BundleLifecycleChange::Enable { bundle_id }
+            } else {
+                gadgetron_bundle_sdk::BundleLifecycleChange::Disable { bundle_id }
+            }
+        }
+        "none" => {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle_id is not accepted when change=none".into(),
+            )))
+        }
+        other => {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "unknown dependency preview change {other:?}; expected none, enable, or disable"
+            ))))
+        }
+    };
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .dependency_plan(change)
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectBundleSetRequest {
+    pub set_toml: String,
+    #[serde(default)]
+    pub signature_hex: Option<String>,
+}
+
+pub async fn inspect_bundle_set_handler(
+    State(state): State<AppState>,
+    Json(request): Json<InspectBundleSetRequest>,
+) -> Result<Json<gadgetron_bundle_sdk::BundleSetPlan>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    verify_detached_signature(
+        &svc.bundle_signing,
+        "Bundle Set",
+        request.set_toml.as_bytes(),
+        request.signature_hex.as_deref(),
+    )?;
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .inspect_bundle_set(&request.set_toml)
+            .await?,
+    ))
+}
+
+pub async fn apply_bundle_set_handler(
+    State(state): State<AppState>,
+    Json(request): Json<InspectBundleSetRequest>,
+) -> Result<Json<crate::web::bundle_runtime::BundleSetApplyOutcome>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    verify_detached_signature(
+        &svc.bundle_signing,
+        "Bundle Set",
+        request.set_toml.as_bytes(),
+        request.signature_hex.as_deref(),
+    )?;
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .apply_bundle_set(&request.set_toml)
+            .await?,
+    ))
+}
+
+pub async fn get_bundle_runtime_status_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<crate::web::bundle_runtime::BundleRuntimeStatus>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?.status(&bundle_id).await?,
+    ))
+}
+
+pub async fn enable_bundle_runtime_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<crate::web::bundle_runtime::BundleRuntimeStatus>, WorkbenchHttpError> {
+    let status = require_runtime_manager(&state)?.enable(&bundle_id).await?;
+    sync_bundle_vault_owner_state(
+        &state,
+        &ctx,
+        &bundle_id,
+        gadgetron_xaas::knowledge_spaces::VaultOwnerState::Enabled,
+    )
+    .await?;
+    Ok(Json(status))
+}
+
+pub async fn disable_bundle_runtime_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<crate::web::bundle_runtime::BundleRuntimeStatus>, WorkbenchHttpError> {
+    let status = require_runtime_manager(&state)?.disable(&bundle_id).await?;
+    sync_bundle_vault_owner_state(
+        &state,
+        &ctx,
+        &bundle_id,
+        gadgetron_xaas::knowledge_spaces::VaultOwnerState::OwnerUnavailable,
+    )
+    .await?;
+    Ok(Json(status))
+}
+
+async fn sync_bundle_vault_owner_state(
+    state: &AppState,
+    ctx: &gadgetron_core::context::TenantContext,
+    bundle_id: &str,
+    owner_state: gadgetron_xaas::knowledge_spaces::VaultOwnerState,
+) -> Result<(), WorkbenchHttpError> {
+    let Some(pool) = state.pg_pool.as_ref() else {
+        return Ok(());
+    };
+    gadgetron_xaas::knowledge_spaces::set_bundle_owner_state_system(
+        pool,
+        ctx.tenant_id,
+        bundle_id,
+        owner_state,
+    )
+    .await
+    .map(|_| ())
+    .map_err(Into::into)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartBundleJobRequest {
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelBundleJobRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn start_bundle_job_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Path((bundle_id, recipe_id)): Path<(String, String)>,
+    Json(request): Json<StartBundleJobRequest>,
+) -> Result<Json<gadgetron_bundle_sdk::JobAccepted>, WorkbenchHttpError> {
+    let context = gadgetron_bundle_sdk::InvocationContext::new(
+        ctx.tenant_id.to_string(),
+        ctx.actor_user_id.unwrap_or(ctx.api_key_id).to_string(),
+        ctx.request_id.to_string(),
+    )
+    .with_scopes(ctx.scopes.iter().map(ToString::to_string));
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .start_job(&bundle_id, &recipe_id, request.parameters, context)
+            .await?,
+    ))
+}
+
+pub async fn poll_bundle_job_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, job_id)): Path<(String, String)>,
+) -> Result<Json<gadgetron_bundle_sdk::JobStatusReport>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .poll_job(&bundle_id, &job_id)
+            .await?,
+    ))
+}
+
+pub async fn cancel_bundle_job_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, job_id)): Path<(String, String)>,
+    Json(request): Json<CancelBundleJobRequest>,
+) -> Result<Json<gadgetron_bundle_sdk::JobStatusReport>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .cancel_job(&bundle_id, &job_id, request.reason)
+            .await?,
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantBundlePermissionsRequest {
+    /// Optimistic-lock digest shown by install/runtime status. This prevents an
+    /// approval prepared for an older package from authorizing replacement bytes.
+    pub package_manifest_sha256: String,
+    /// Exact signed permission ids selected by the operator.
+    pub permission_ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RevokeBundlePermissionsResponse {
+    pub bundle_id: String,
+    pub revoked: bool,
+    pub runtime_disabled: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutBundleSettingsRequest {
+    #[serde(default)]
+    pub expected_revision: Option<String>,
+    pub values: serde_json::Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BundleKnowledgeAgentRoleView {
+    pub declaration: crate::web::bundle_runtime::BundleKnowledgeAgentRoleProjection,
+    pub override_profile:
+        Option<gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileOverride>,
+    pub effective: gadgetron_xaas::knowledge_agent_profiles::EffectiveKnowledgeRoleSelection,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BundleKnowledgeAgentRolesResponse {
+    pub bundle_id: String,
+    pub package_manifest_sha256: String,
+    pub global: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection,
+    pub roles: Vec<BundleKnowledgeAgentRoleView>,
+    pub collections: Vec<crate::web::bundle_runtime::BundleCollectionProfileProjection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutBundleKnowledgeAgentRoleRequest {
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
+    pub selection: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteBundleKnowledgeAgentRoleRequest {
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct CoreKnowledgeAgentRoleDescriptor {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+const CORE_KNOWLEDGE_AGENT_ROLES: [CoreKnowledgeAgentRoleDescriptor; 4] = [
+    CoreKnowledgeAgentRoleDescriptor {
+        id: "source_scout",
+        label: "Source Scout",
+        description: "Finds coverage gaps and proposes sources without collecting them.",
+    },
+    CoreKnowledgeAgentRoleDescriptor {
+        id: "researcher",
+        label: "Researcher",
+        description: "Builds cited dossiers and structured knowledge candidates.",
+    },
+    CoreKnowledgeAgentRoleDescriptor {
+        id: "gardener",
+        label: "Gardener / Distiller",
+        description: "Turns reviewed findings into clear, connected knowledge changes.",
+    },
+    CoreKnowledgeAgentRoleDescriptor {
+        id: "insight_synthesizer",
+        label: "Insight Synthesizer",
+        description: "Connects multiple sources with verified outcomes into reviewable insights.",
+    },
+];
+
+#[derive(Debug, serde::Serialize)]
+pub struct CoreKnowledgeAgentRoleView {
+    pub role: CoreKnowledgeAgentRoleDescriptor,
+    pub override_profile:
+        Option<gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileOverride>,
+    pub effective: gadgetron_xaas::knowledge_agent_profiles::EffectiveKnowledgeRoleSelection,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct CoreKnowledgeAgentRolesResponse {
+    pub global: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection,
+    pub roles: Vec<CoreKnowledgeAgentRoleView>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutCoreKnowledgeAgentRoleRequest {
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
+    pub selection: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteCoreKnowledgeAgentRoleRequest {
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DeleteBundleSshRecordResponse {
+    pub bundle_id: String,
+    pub id: String,
+    pub deleted: bool,
+}
+
+pub async fn get_bundle_permission_grant_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<Option<crate::web::bundle_grants::BundlePermissionGrant>>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?.permission_grant(&bundle_id)?,
+    ))
+}
+
+pub async fn grant_bundle_permissions_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    Json(request): Json<GrantBundlePermissionsRequest>,
+) -> Result<Json<crate::web::bundle_grants::BundlePermissionGrant>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .grant_permissions(
+                &bundle_id,
+                &request.package_manifest_sha256,
+                request.permission_ids,
+            )
+            .await?,
+    ))
+}
+
+pub async fn revoke_bundle_permissions_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<RevokeBundlePermissionsResponse>, WorkbenchHttpError> {
+    let manager = require_runtime_manager(&state)?;
+    let was_active = manager
+        .status(&bundle_id)
+        .await
+        .map(|status| {
+            matches!(
+                status.state,
+                crate::web::bundle_runtime::BundleRuntimeState::Enabled
+                    | crate::web::bundle_runtime::BundleRuntimeState::Probing
+            )
+        })
+        .unwrap_or(false);
+    let revoked = manager.revoke_permissions(&bundle_id).await?;
+    Ok(Json(RevokeBundlePermissionsResponse {
+        bundle_id,
+        revoked,
+        runtime_disabled: was_active,
+    }))
+}
+
+pub async fn get_bundle_settings_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+) -> Result<Json<crate::web::bundle_runtime::BundleSettingsProjection>, WorkbenchHttpError> {
+    Ok(Json(require_runtime_manager(&state)?.settings(&bundle_id)?))
+}
+
+pub async fn put_bundle_settings_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    Json(request): Json<PutBundleSettingsRequest>,
+) -> Result<Json<crate::web::bundle_runtime::BundleSettingsProjection>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .put_settings(
+                &bundle_id,
+                request.expected_revision.as_deref(),
+                request.values,
+            )
+            .await?,
+    ))
+}
+
+pub async fn get_bundle_knowledge_agent_roles_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<BundleKnowledgeAgentRolesResponse>, WorkbenchHttpError> {
+    Ok(Json(
+        bundle_knowledge_agent_roles_response(&state, &ctx, &bundle_id).await?,
+    ))
+}
+
+pub async fn get_core_knowledge_agent_roles_handler(
+    State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<CoreKnowledgeAgentRolesResponse>, WorkbenchHttpError> {
+    Ok(Json(
+        core_knowledge_agent_roles_response(&state, &ctx).await?,
+    ))
+}
+
+pub async fn put_core_knowledge_agent_role_handler(
+    State(state): State<AppState>,
+    Path(role_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(request): Json<PutCoreKnowledgeAgentRoleRequest>,
+) -> Result<Json<CoreKnowledgeAgentRolesResponse>, WorkbenchHttpError> {
+    require_core_knowledge_agent_role(&role_id)?;
+    let actor_user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::KnowledgeForbidden)?;
+    let pool = require_pg_pool(&state, "Awakening AI role settings")?;
+    let requested_effort = request.selection.effort;
+    let profile = canonicalize_registered_endpoint_profile(
+        pool,
+        ctx.tenant_id,
+        request.selection.into_profile(),
+    )
+    .await
+    .map_err(WorkbenchHttpError::Core)?;
+    if profile
+        .effort
+        .for_backend_model(profile.backend, &profile.model)
+        != requested_effort
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "selected effort is unavailable for this runtime and model".to_string(),
+        )));
+    }
+    let selection =
+        gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection::from_profile(&profile);
+    gadgetron_xaas::knowledge_agent_profiles::upsert_role_profile_override(
+        pool,
+        ctx.tenant_id,
+        actor_user_id,
+        gadgetron_xaas::knowledge_agent_profiles::UpsertKnowledgeRoleProfile {
+            scope: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileScope::Core,
+            bundle_id: None,
+            role_id: &role_id,
+            expected_revision: request.expected_revision,
+            selection: &selection,
+        },
+    )
+    .await
+    .map_err(knowledge_role_profile_error_to_http)?;
+    Ok(Json(
+        core_knowledge_agent_roles_response(&state, &ctx).await?,
+    ))
+}
+
+pub async fn delete_core_knowledge_agent_role_handler(
+    State(state): State<AppState>,
+    Path(role_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(request): Json<DeleteCoreKnowledgeAgentRoleRequest>,
+) -> Result<Json<CoreKnowledgeAgentRolesResponse>, WorkbenchHttpError> {
+    require_core_knowledge_agent_role(&role_id)?;
+    gadgetron_xaas::knowledge_agent_profiles::delete_role_profile_override(
+        require_pg_pool(&state, "Awakening AI role settings")?,
+        ctx.tenant_id,
+        gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileScope::Core,
+        None,
+        &role_id,
+        request.expected_revision,
+    )
+    .await
+    .map_err(knowledge_role_profile_error_to_http)?;
+    Ok(Json(
+        core_knowledge_agent_roles_response(&state, &ctx).await?,
+    ))
+}
+
+async fn core_knowledge_agent_roles_response(
+    state: &AppState,
+    ctx: &gadgetron_core::context::TenantContext,
+) -> Result<CoreKnowledgeAgentRolesResponse, WorkbenchHttpError> {
+    let global_profile = default_conversation_profile(state);
+    let global = gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection::from_profile(
+        &global_profile,
+    );
+    let pool = require_pg_pool(state, "Awakening AI role settings")?;
+    let mut roles = Vec::with_capacity(CORE_KNOWLEDGE_AGENT_ROLES.len());
+    for role in CORE_KNOWLEDGE_AGENT_ROLES {
+        let override_profile = gadgetron_xaas::knowledge_agent_profiles::get_role_profile_override(
+            pool,
+            ctx.tenant_id,
+            gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileScope::Core,
+            None,
+            role.id,
+        )
+        .await
+        .map_err(knowledge_role_profile_error_to_http)?;
+        let effective = gadgetron_xaas::knowledge_agent_profiles::resolve_role_profile(
+            pool,
+            ctx.tenant_id,
+            &global_profile,
+            role.id,
+            None,
+        )
+        .await
+        .map_err(knowledge_role_profile_error_to_http)?;
+        roles.push(CoreKnowledgeAgentRoleView {
+            role,
+            override_profile,
+            effective,
+        });
+    }
+    Ok(CoreKnowledgeAgentRolesResponse { global, roles })
+}
+
+fn require_core_knowledge_agent_role(
+    role_id: &str,
+) -> Result<CoreKnowledgeAgentRoleDescriptor, WorkbenchHttpError> {
+    CORE_KNOWLEDGE_AGENT_ROLES
+        .iter()
+        .copied()
+        .find(|role| role.id == role_id)
+        .ok_or_else(|| WorkbenchHttpError::KnowledgeInvalidInput {
+            detail: "Unknown Awakening AI role".to_string(),
+        })
+}
+
+pub async fn put_bundle_knowledge_agent_role_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, role_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(request): Json<PutBundleKnowledgeAgentRoleRequest>,
+) -> Result<Json<BundleKnowledgeAgentRolesResponse>, WorkbenchHttpError> {
+    let actor_user_id = ctx
+        .actor_user_id
+        .ok_or(WorkbenchHttpError::KnowledgeForbidden)?;
+    let projection = require_runtime_manager(&state)?.knowledge_profiles(&bundle_id)?;
+    if !projection
+        .roles
+        .iter()
+        .any(|role| role.role.id.as_str() == role_id)
+    {
+        return Err(WorkbenchHttpError::BundleOperationFailed {
+            code: "bundle_ai_role_not_declared".to_string(),
+            detail: "This Bundle does not declare the selected AI role".to_string(),
+        });
+    }
+    let pool = require_pg_pool(&state, "Bundle AI role settings")?;
+    let requested_effort = request.selection.effort;
+    let profile = canonicalize_registered_endpoint_profile(
+        pool,
+        ctx.tenant_id,
+        request.selection.into_profile(),
+    )
+    .await
+    .map_err(WorkbenchHttpError::Core)?;
+    if profile
+        .effort
+        .for_backend_model(profile.backend, &profile.model)
+        != requested_effort
+    {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+            "selected effort is unavailable for this runtime and model".to_string(),
+        )));
+    }
+    let selection =
+        gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection::from_profile(&profile);
+    gadgetron_xaas::knowledge_agent_profiles::upsert_role_profile_override(
+        pool,
+        ctx.tenant_id,
+        actor_user_id,
+        gadgetron_xaas::knowledge_agent_profiles::UpsertKnowledgeRoleProfile {
+            scope: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileScope::Bundle,
+            bundle_id: Some(&bundle_id),
+            role_id: &role_id,
+            expected_revision: request.expected_revision,
+            selection: &selection,
+        },
+    )
+    .await
+    .map_err(knowledge_role_profile_error_to_http)?;
+    Ok(Json(
+        bundle_knowledge_agent_roles_response(&state, &ctx, &bundle_id).await?,
+    ))
+}
+
+pub async fn delete_bundle_knowledge_agent_role_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, role_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(request): Json<DeleteBundleKnowledgeAgentRoleRequest>,
+) -> Result<Json<BundleKnowledgeAgentRolesResponse>, WorkbenchHttpError> {
+    require_runtime_manager(&state)?.knowledge_profiles(&bundle_id)?;
+    gadgetron_xaas::knowledge_agent_profiles::delete_role_profile_override(
+        require_pg_pool(&state, "Bundle AI role settings")?,
+        ctx.tenant_id,
+        gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileScope::Bundle,
+        Some(&bundle_id),
+        &role_id,
+        request.expected_revision,
+    )
+    .await
+    .map_err(knowledge_role_profile_error_to_http)?;
+    Ok(Json(
+        bundle_knowledge_agent_roles_response(&state, &ctx, &bundle_id).await?,
+    ))
+}
+
+async fn bundle_knowledge_agent_roles_response(
+    state: &AppState,
+    ctx: &gadgetron_core::context::TenantContext,
+    bundle_id: &str,
+) -> Result<BundleKnowledgeAgentRolesResponse, WorkbenchHttpError> {
+    let projection = require_runtime_manager(state)?.knowledge_profiles(bundle_id)?;
+    let global_profile = default_conversation_profile(state);
+    let global = gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleSelection::from_profile(
+        &global_profile,
+    );
+    let pool = require_pg_pool(state, "Bundle AI role settings")?;
+    let mut roles = Vec::with_capacity(projection.roles.len());
+    for declaration in projection.roles {
+        let role_id = declaration.role.id.as_str();
+        let core_role_id = declaration.role.core_role.as_str();
+        let override_profile = gadgetron_xaas::knowledge_agent_profiles::get_role_profile_override(
+            pool,
+            ctx.tenant_id,
+            gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileScope::Bundle,
+            Some(bundle_id),
+            role_id,
+        )
+        .await
+        .map_err(knowledge_role_profile_error_to_http)?;
+        let effective = gadgetron_xaas::knowledge_agent_profiles::resolve_role_profile(
+            pool,
+            ctx.tenant_id,
+            &global_profile,
+            core_role_id,
+            Some((bundle_id, role_id)),
+        )
+        .await
+        .map_err(knowledge_role_profile_error_to_http)?;
+        roles.push(BundleKnowledgeAgentRoleView {
+            declaration,
+            override_profile,
+            effective,
+        });
+    }
+    Ok(BundleKnowledgeAgentRolesResponse {
+        bundle_id: projection.bundle_id,
+        package_manifest_sha256: projection.package_manifest_sha256,
+        global,
+        roles,
+        collections: projection.collections,
+    })
+}
+
+fn knowledge_role_profile_error_to_http(
+    error: gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileError,
+) -> WorkbenchHttpError {
+    use gadgetron_xaas::knowledge_agent_profiles::KnowledgeRoleProfileError;
+    match error {
+        KnowledgeRoleProfileError::InvalidInput(detail)
+        | KnowledgeRoleProfileError::InvalidPersisted(detail) => {
+            WorkbenchHttpError::Core(GadgetronError::Config(detail))
+        }
+        KnowledgeRoleProfileError::Conflict => WorkbenchHttpError::BundleConflict {
+            detail: "AI role settings changed; refresh before saving".to_string(),
+        },
+        KnowledgeRoleProfileError::Database(error) => {
+            WorkbenchHttpError::Core(GadgetronError::Database {
+                kind: DatabaseErrorKind::QueryFailed,
+                message: format!("Knowledge AI role profile: {error}"),
+            })
+        }
+    }
+}
+
+pub async fn list_bundle_ssh_targets_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<crate::web::bundle_targets::BundleSshTargetList>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?.list_ssh_targets(ctx.tenant_id, &bundle_id)?,
+    ))
+}
+
+pub async fn bootstrap_bundle_ssh_target_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(mut request): Json<crate::web::bundle_targets::BootstrapBundleSshTargetRequest>,
+) -> Result<Json<crate::web::bundle_targets::BootstrapBundleSshTargetResponse>, WorkbenchHttpError>
+{
+    if let Some(user_id) = ctx.actor_user_id {
+        request.bind_registration_actor(user_id);
+    }
+    request.acting_space_id = match (state.pg_pool.as_ref(), ctx.actor_user_id) {
+        (Some(pool), Some(user_id)) => {
+            resolve_bootstrap_acting_space(pool, ctx.tenant_id, user_id, request.acting_space_id)
+                .await
+        }
+        _ => None,
+    };
+    let mut context = gadgetron_bundle_sdk::InvocationContext::new(
+        ctx.tenant_id.to_string(),
+        ctx.actor_user_id.unwrap_or(ctx.api_key_id).to_string(),
+        ctx.request_id.to_string(),
+    )
+    .with_scopes(ctx.scopes.iter().map(ToString::to_string));
+    if let Some(acting_space_id) = request.acting_space_id {
+        context = context.with_acting_space_id(acting_space_id.to_string());
+    }
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .bootstrap_ssh_target(ctx.tenant_id, &bundle_id, request, context)
+            .await?,
+    ))
+}
+
+async fn resolve_bootstrap_acting_space(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    requested_space_id: Option<Uuid>,
+) -> Option<Uuid> {
+    let effective_spaces = match gadgetron_xaas::knowledge_spaces::effective_spaces(
+        pool,
+        gadgetron_xaas::knowledge_spaces::SpaceActor { tenant_id, user_id },
+    )
+    .await
+    {
+        Ok(spaces) => spaces,
+        Err(error) => {
+            tracing::warn!(
+                target: "bundle_targets",
+                tenant_id = %tenant_id,
+                user_id = %user_id,
+                detail = %error,
+                "SSH target registration could not validate its operating Space"
+            );
+            return None;
+        }
+    };
+    let is_operating_space = |candidate: &&gadgetron_xaas::knowledge_spaces::EffectiveSpaceRow| {
+        candidate.space.status == "active"
+            && matches!(candidate.space.kind.as_str(), "project" | "team")
+            && candidate.effective_role != gadgetron_xaas::knowledge_spaces::SpaceRole::Viewer
+    };
+    if let Some(requested_space) = requested_space_id.and_then(|requested_space_id| {
+        effective_spaces
+            .iter()
+            .filter(is_operating_space)
+            .find(|candidate| candidate.space.id == requested_space_id)
+            .map(|candidate| candidate.space.id)
+    }) {
+        return Some(requested_space);
+    }
+    let default_space_id = match gadgetron_xaas::default_onboarding::ensure_default_team_onboarding(
+        pool, tenant_id, user_id,
+    )
+    .await
+    {
+        Ok(Some(topology)) => Some(topology.space_id),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                target: "bundle_targets",
+                tenant_id = %tenant_id,
+                user_id = %user_id,
+                detail = %error,
+                "SSH target registration could not resolve the actor's default Team Space"
+            );
+            None
+        }
+    };
+    default_space_id.or_else(|| {
+        effective_spaces
+            .iter()
+            .filter(is_operating_space)
+            .find(|candidate| candidate.space.kind == "team")
+            .map(|candidate| candidate.space.id)
+    })
+}
+
+pub async fn reapply_bundle_ssh_target_setup_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, target_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(request): Json<crate::web::bundle_targets::ReapplyBundleSshTargetSetupRequest>,
+) -> Result<Json<crate::web::bundle_targets::ReapplyBundleSshTargetSetupResponse>, WorkbenchHttpError>
+{
+    let context = gadgetron_bundle_sdk::InvocationContext::new(
+        ctx.tenant_id.to_string(),
+        ctx.actor_user_id.unwrap_or(ctx.api_key_id).to_string(),
+        ctx.request_id.to_string(),
+    )
+    .with_scopes(ctx.scopes.iter().map(ToString::to_string));
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .reapply_ssh_target_setup(ctx.tenant_id, &bundle_id, &target_id, request, context)
+            .await?,
+    ))
+}
+
+pub async fn put_bundle_ssh_target_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, target_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(mut request): Json<crate::web::bundle_targets::PutBundleSshTargetRequest>,
+) -> Result<Json<crate::web::bundle_targets::BundleSshTarget>, WorkbenchHttpError> {
+    if let Some(user_id) = ctx.actor_user_id {
+        request.bind_registration_actor(user_id);
+    }
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .put_ssh_target(ctx.tenant_id, &bundle_id, &target_id, request)
+            .await?,
+    ))
+}
+
+pub async fn delete_bundle_ssh_target_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, target_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<DeleteBundleSshRecordResponse>, WorkbenchHttpError> {
+    let context = gadgetron_bundle_sdk::InvocationContext::new(
+        ctx.tenant_id.to_string(),
+        ctx.actor_user_id.unwrap_or(ctx.api_key_id).to_string(),
+        ctx.request_id.to_string(),
+    )
+    .with_scopes(ctx.scopes.iter().map(ToString::to_string));
+    let deleted = require_runtime_manager(&state)?
+        .delete_ssh_target(ctx.tenant_id, &bundle_id, &target_id, context)
+        .await?;
+    Ok(Json(DeleteBundleSshRecordResponse {
+        bundle_id,
+        id: target_id,
+        deleted,
+    }))
+}
+
+pub async fn list_bundle_ssh_secrets_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<crate::web::bundle_targets::BundleSshSecretList>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?.list_ssh_secrets(ctx.tenant_id, &bundle_id)?,
+    ))
+}
+
+pub async fn put_bundle_ssh_secret_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, secret_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+    Json(request): Json<crate::web::bundle_targets::PutBundleSshSecretRequest>,
+) -> Result<Json<crate::web::bundle_targets::BundleSshSecretMetadata>, WorkbenchHttpError> {
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .put_ssh_secret(ctx.tenant_id, &bundle_id, &secret_id, request)
+            .await?,
+    ))
+}
+
+pub async fn delete_bundle_ssh_secret_handler(
+    State(state): State<AppState>,
+    Path((bundle_id, secret_id)): Path<(String, String)>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
+) -> Result<Json<DeleteBundleSshRecordResponse>, WorkbenchHttpError> {
+    let deleted = require_runtime_manager(&state)?
+        .delete_ssh_secret(ctx.tenant_id, &bundle_id, &secret_id)
+        .await?;
+    Ok(Json(DeleteBundleSshRecordResponse {
+        bundle_id,
+        id: secret_id,
+        deleted,
+    }))
+}
+
+fn validate_bundle_install(
+    svc: &GatewayWorkbenchService,
+    req: &InstallBundleRequest,
+) -> Result<(ValidatedBundleInstall, usize, usize), WorkbenchHttpError> {
+    verify_detached_signature(
+        &svc.bundle_signing,
+        "catalog",
+        req.bundle_toml.as_bytes(),
+        req.signature_hex.as_deref(),
+    )?;
+    match (
+        req.package_toml.as_deref(),
+        req.package_signature_hex.as_deref(),
+    ) {
+        (Some(package_toml), signature) => verify_detached_signature(
+            &svc.bundle_signing,
+            "package",
+            package_toml.as_bytes(),
+            signature,
+        )?,
+        (None, Some(_)) => {
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle install: package_signature_hex was supplied without package_toml".into(),
+            )));
+        }
+        (None, None) => {}
+    }
+
+    let file: crate::web::catalog::CatalogFile = toml::from_str(&req.bundle_toml).map_err(|e| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: TOML parse failed: {e}",
+        )))
+    })?;
+    let bundle = file.bundle.ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle install: manifest must declare a [bundle] table with id + version".into(),
+        ))
+    })?;
+    validate_bundle_id(&bundle.id)?;
+    let package = req
+        .package_toml
+        .as_deref()
+        .map(|source| validate_package_contract(source, &bundle.id, &bundle.version))
+        .transpose()?;
+    let package_manifest_sha256 = package
+        .as_ref()
+        .map(|contract| contract.manifest_sha256().to_string());
+    let runtime_artifact =
+        validate_runtime_artifact(package.as_ref(), req.runtime_artifact_base64.as_deref())?;
+    let package_assets = validate_package_assets(package.as_ref(), &req.package_assets_base64)?;
+    let domain_schemas = package
+        .as_ref()
+        .map(|contract| contract.manifest().capabilities.domain_schemas.clone())
+        .unwrap_or_default();
+    let permission_ids = package
+        .as_ref()
+        .map(|contract| {
+            contract
+                .manifest()
+                .permissions
+                .iter()
+                .map(|permission| permission.id.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let settings_declared = package
+        .as_ref()
+        .is_some_and(|contract| contract.manifest().capabilities.settings_schema.is_some());
+    let runtime_kind = package
+        .as_ref()
+        .map(|contract| format!("{:?}", contract.manifest().runtime.kind).to_lowercase());
+    let bundle_class = package
+        .as_ref()
+        .and_then(|contract| contract.manifest().bundle.class);
+    let action_count = file.actions.len();
+    let view_count = file.views.len();
+    Ok((
+        ValidatedBundleInstall {
+            bundle,
+            bundle_class,
+            package_manifest_sha256,
+            runtime_artifact,
+            package_assets,
+            domain_schemas,
+            permission_ids,
+            settings_declared,
+            runtime_kind,
+        },
+        action_count,
+        view_count,
+    ))
+}
+
+fn source_digest(envelope: &InstallBundleRequest) -> Result<String, WorkbenchHttpError> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(envelope).map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle source cannot be encoded: {error}"
+        )))
+    })?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+pub(super) fn ontology_registry_http_error(
+    error: gadgetron_knowledge::OntologyRegistryError,
+) -> WorkbenchHttpError {
+    match error {
+        error @ gadgetron_knowledge::OntologyRegistryError::RevisionConflict { .. } => {
+            WorkbenchHttpError::BundleConflict {
+                detail: format!("Bundle ontology registration conflict: {error}"),
+            }
+        }
+        gadgetron_knowledge::OntologyRegistryError::Database(error) => {
+            WorkbenchHttpError::Core(GadgetronError::Database {
+                kind: DatabaseErrorKind::QueryFailed,
+                message: format!("Bundle ontology registration failed: {error}"),
+            })
+        }
+        error => WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: ontology registration failed: {error}"
+        ))),
+    }
+}
+
+async fn resolve_bundle_source(
+    source: BundlePackageSource,
+) -> Result<InstallBundleRequest, WorkbenchHttpError> {
+    let url = match source {
+        BundlePackageSource::Inline { envelope } => return Ok(envelope),
+        BundlePackageSource::Url { url } => url,
+    };
+    let fetched = super::safe_fetch::fetch_public_https(
+        &url,
+        super::safe_fetch::SafeFetchPolicy {
+            max_bytes: MAX_BUNDLE_SOURCE_REQUEST_BYTES,
+            max_redirects: 0,
+            allowed_content_types: &["application/json", "application/vnd.gadgetron.bundle+json"],
+            allowed_domains: None,
+            timeout: std::time::Duration::from_secs(20),
+        },
+    )
+    .await
+    .map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle source fetch failed: {error}"
+        )))
+    })?;
+    serde_json::from_slice(&fetched.bytes).map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle source JSON is invalid: {error}"
+        )))
+    })
+}
+
+pub async fn inspect_bundle_source_handler(
+    State(state): State<AppState>,
+    Json(request): Json<InspectBundleSourceRequest>,
+) -> Result<Json<BundleInstallInspection>, WorkbenchHttpError> {
+    let svc = require_workbench(&state)?;
+    let envelope = resolve_bundle_source(request.source).await?;
+    let source_sha256 = source_digest(&envelope)?;
+    let (plan, action_count, view_count) = validate_bundle_install(&svc, &envelope)?;
+    let target_exists = svc
+        .bundles_dir
+        .as_deref()
+        .is_some_and(|dir| std::path::Path::new(dir).join(&plan.bundle.id).exists());
+    let warnings = if target_exists {
+        vec!["This Bundle is already installed; use upgrade when the version changes.".into()]
+    } else {
+        Vec::new()
+    };
+    Ok(Json(BundleInstallInspection {
+        bundle_id: plan.bundle.id,
+        version: plan.bundle.version,
+        bundle_class: plan.bundle_class,
+        source_sha256,
+        package_manifest_sha256: plan.package_manifest_sha256,
+        contract: if envelope.package_toml.is_some() {
+            "bundle_sdk_v1"
+        } else {
+            "catalog_only"
+        },
+        action_count,
+        view_count,
+        permission_ids: plan.permission_ids,
+        settings_declared: plan.settings_declared,
+        runtime_kind: plan.runtime_kind,
+        installable: !target_exists,
+        upgradeable: target_exists,
+        warnings,
+    }))
+}
+
+pub async fn install_bundle_source_handler(
+    State(state): State<AppState>,
+    Json(request): Json<InstallBundleSourceRequest>,
+) -> Result<Json<InstallBundleResponse>, WorkbenchHttpError> {
+    let envelope = resolve_bundle_source(request.source).await?;
+    let actual = source_digest(&envelope)?;
+    if actual != request.expected_source_sha256 {
+        return Err(WorkbenchHttpError::BundleConflict {
+            detail: "Bundle source changed after inspection; inspect it again before installing"
+                .into(),
+        });
+    }
+    install_bundle_handler(State(state), Json(envelope)).await
+}
+
+pub async fn upgrade_bundle_source_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+    Json(request): Json<InstallBundleSourceRequest>,
+) -> Result<Json<InstallBundleResponse>, WorkbenchHttpError> {
+    validate_bundle_id(&bundle_id)?;
+    let envelope = resolve_bundle_source(request.source).await?;
+    if source_digest(&envelope)? != request.expected_source_sha256 {
+        return Err(WorkbenchHttpError::BundleConflict {
+            detail: "Bundle source changed after inspection; inspect it again before upgrading"
+                .into(),
+        });
+    }
+    let svc = require_workbench(&state)?;
+    let (plan, _, _) = validate_bundle_install(&svc, &envelope)?;
+    if plan.bundle.id != bundle_id {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle upgrade id mismatch: route {bundle_id:?}, package {:?}",
+            plan.bundle.id
+        ))));
+    }
+    let root = std::path::Path::new(svc.bundles_dir.as_deref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle upgrade requires `[web] bundles_dir` to be configured".into(),
+        ))
+    })?);
+    let target = root.join(&bundle_id);
+    if !target.is_dir() {
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle upgrade: {bundle_id:?} is not installed"
+        ))));
+    }
+    if let Some(manager) = svc.runtime_manager.as_ref() {
+        manager.disable(&bundle_id).await?;
+    }
+    let backup = root.join(format!(".{bundle_id}.upgrade-backup-{}", Uuid::new_v4()));
+    std::fs::rename(&target, &backup).map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle upgrade: cannot stage rollback package: {error}"
+        )))
+    })?;
+    match install_bundle_handler(State(state), Json(envelope)).await {
+        Ok(response) => {
+            if let Err(error) = std::fs::remove_dir_all(&backup) {
+                tracing::warn!(bundle_id, %error, "bundle upgrade succeeded but backup cleanup failed");
+            }
+            Ok(response)
+        }
+        Err(error) => {
+            if target.exists() {
+                let _ = std::fs::remove_dir_all(&target);
+            }
+            if let Err(restore_error) = std::fs::rename(&backup, &target) {
+                return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "bundle upgrade failed and rollback could not be restored: {restore_error}; original error: {error:?}"
+                ))));
+            }
+            Err(error)
+        }
+    }
+}
+
+pub async fn export_bundle_package_handler(
+    State(state): State<AppState>,
+    Path(bundle_id): Path<String>,
+) -> Result<Response, WorkbenchHttpError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    validate_bundle_id(&bundle_id)?;
+    let svc = require_workbench(&state)?;
+    let root = std::path::Path::new(svc.bundles_dir.as_deref().ok_or_else(|| {
+        WorkbenchHttpError::Core(GadgetronError::Config(
+            "bundle export requires `[web] bundles_dir` to be configured".into(),
+        ))
+    })?);
+    let package_root = root.join(&bundle_id);
+    let read_text = |name: &str| -> Result<String, WorkbenchHttpError> {
+        std::fs::read_to_string(package_root.join(name)).map_err(|error| {
+            WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle export: cannot read {name}: {error}"
+            )))
+        })
+    };
+    let bundle_toml = read_text("bundle.toml")?;
+    let signature_hex = package_root
+        .join("catalog.sig")
+        .exists()
+        .then(|| read_text("catalog.sig"))
+        .transpose()?
+        .map(|value| value.trim().to_string());
+    let package_toml = package_root
+        .join("package.toml")
+        .exists()
+        .then(|| read_text("package.toml"))
+        .transpose()?;
+    let package_signature_hex = package_root
+        .join("package.sig")
+        .exists()
+        .then(|| read_text("package.sig"))
+        .transpose()?
+        .map(|value| value.trim().to_string());
+    let mut runtime_artifact_base64 = None;
+    let mut package_assets_base64 = std::collections::BTreeMap::new();
+    if let Some(source) = package_toml.as_deref() {
+        let catalog: crate::web::catalog::CatalogFile =
+            toml::from_str(&bundle_toml).map_err(|error| {
+                WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "bundle export: catalog is invalid: {error}"
+                )))
+            })?;
+        let metadata = catalog.bundle.ok_or_else(|| {
+            WorkbenchHttpError::Core(GadgetronError::Config(
+                "bundle export: catalog Bundle metadata is missing".into(),
+            ))
+        })?;
+        let contract = validate_package_contract(source, &metadata.id, &metadata.version)?;
+        let manifest = contract.manifest();
+        if matches!(
+            manifest.runtime.kind,
+            gadgetron_bundle_sdk::RuntimeKind::Subprocess | gadgetron_bundle_sdk::RuntimeKind::Wasm
+        ) {
+            let bytes =
+                std::fs::read(package_root.join(&manifest.runtime.entry)).map_err(|error| {
+                    WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                        "bundle export: cannot read runtime artifact: {error}"
+                    )))
+                })?;
+            runtime_artifact_base64 = Some(STANDARD.encode(bytes));
+        }
+        let paths = manifest
+            .capabilities
+            .domain_schemas
+            .iter()
+            .map(|item| &item.schema_path)
+            .chain(
+                manifest
+                    .capabilities
+                    .seed_assets
+                    .iter()
+                    .map(|item| &item.path),
+            )
+            .chain(
+                manifest
+                    .capabilities
+                    .migrations
+                    .iter()
+                    .map(|item| &item.path),
+            );
+        for path in paths {
+            let bytes = std::fs::read(package_root.join(path.as_str())).map_err(|error| {
+                WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "bundle export: cannot read asset {:?}: {error}",
+                    path.as_str()
+                )))
+            })?;
+            package_assets_base64.insert(path.as_str().to_string(), STANDARD.encode(bytes));
+        }
+    }
+    let envelope = InstallBundleRequest {
+        bundle_toml,
+        signature_hex,
+        package_toml,
+        package_signature_hex,
+        runtime_artifact_base64,
+        package_assets_base64,
+    };
+    let disposition = format!("attachment; filename=\"{bundle_id}.gadgetron-bundle.json\"");
+    Ok((
+        [(axum::http::header::CONTENT_DISPOSITION, disposition)],
+        Json(envelope),
+    )
+        .into_response())
 }
 
 /// `POST /api/v1/web/workbench/admin/bundles` — install a bundle by
@@ -3695,26 +6876,25 @@ pub async fn install_bundle_handler(
         ))
     })?;
 
-    // Signature verification runs BEFORE TOML parse so a
-    // signed-but-malformed file and an unsigned-but-malformed file
-    // aren't distinguishable via the error text (don't leak signer
-    // information to unauthenticated probing).
-    verify_bundle_signature(&svc.bundle_signing, &req)?;
-
-    // Parse + validate the manifest before touching the filesystem.
-    let file: crate::web::catalog::CatalogFile = toml::from_str(&req.bundle_toml).map_err(|e| {
-        WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "bundle install: TOML parse failed: {e}",
-        )))
-    })?;
-    let bundle_meta = file.bundle.as_ref().ok_or_else(|| {
-        WorkbenchHttpError::Core(GadgetronError::Config(
-            "bundle install: manifest must declare a [bundle] table with id + version".into(),
-        ))
-    })?;
-    validate_bundle_id(&bundle_meta.id)?;
+    let (plan, _, _) = validate_bundle_install(&svc, &req)?;
+    let bundle_meta = &plan.bundle;
+    let bundle_class = plan.bundle_class;
+    let package_manifest_sha256 = plan.package_manifest_sha256.clone();
+    let runtime_artifact = &plan.runtime_artifact;
+    let package_assets = &plan.package_assets;
+    let has_package = req.package_toml.is_some();
+    let ontology_pool = if plan.domain_schemas.is_empty() {
+        None
+    } else {
+        Some(require_pg_pool(&state, "Bundle ontology registration")?.clone())
+    };
 
     let dir = std::path::Path::new(dir_cfg);
+    std::fs::create_dir_all(dir).map_err(|error| {
+        WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: cannot create bundles directory {dir:?}: {error}"
+        )))
+    })?;
     let target_dir = dir.join(&bundle_meta.id);
     if target_dir.exists() {
         return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
@@ -3722,31 +6902,182 @@ pub async fn install_bundle_handler(
         ))));
     }
 
-    std::fs::create_dir_all(&target_dir).map_err(|e| {
+    let staging_dir = dir.join(format!(".{}.installing-{}", bundle_meta.id, Uuid::new_v4()));
+    std::fs::create_dir(&staging_dir).map_err(|e| {
         WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "bundle install: cannot create {target_dir:?}: {e}",
+            "bundle install: cannot create staging directory {staging_dir:?}: {e}",
         )))
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                    "bundle install: cannot secure staging directory: {error}"
+                )))
+            },
+        )?;
+    }
+
+    let install_result =
+        (|| -> std::io::Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)> {
+            let package_path = if has_package {
+                let path = staging_dir.join("package.toml");
+                write_install_file(
+                    &path,
+                    req.package_toml
+                        .as_deref()
+                        .expect("validated package source is present")
+                        .as_bytes(),
+                    0o400,
+                )?;
+                Some(path)
+            } else {
+                None
+            };
+            if let Some(signature) = req.signature_hex.as_deref() {
+                write_install_file(
+                    &staging_dir.join("catalog.sig"),
+                    signature.as_bytes(),
+                    0o400,
+                )?;
+            }
+            if let Some(signature) = req.package_signature_hex.as_deref() {
+                write_install_file(
+                    &staging_dir.join("package.sig"),
+                    signature.as_bytes(),
+                    0o400,
+                )?;
+            }
+            let runtime_path = if let Some((relative, bytes)) = runtime_artifact.as_ref() {
+                let path = staging_dir.join(relative.as_str());
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                write_install_file(&path, bytes, 0o500)?;
+                Some(path)
+            } else {
+                None
+            };
+            for (relative, bytes) in package_assets {
+                let path = staging_dir.join(relative.as_str());
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                write_install_file(&path, bytes, 0o400)?;
+            }
+            // Catalog is written last and hidden staging directories are excluded
+            // from reload, so no partial package can enter the live descriptor set.
+            write_install_file(
+                &staging_dir.join("bundle.toml"),
+                req.bundle_toml.as_bytes(),
+                0o400,
+            )?;
+            std::fs::File::open(&staging_dir)?.sync_all()?;
+            Ok((package_path, runtime_path))
+        })();
+    let (staged_package_path, staged_runtime_path) = match install_result {
+        Ok(paths) => paths,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+                "bundle install: cannot stage package: {error}"
+            ))));
+        }
+    };
+    if let Some(pool) = ontology_pool {
+        let schemas: Vec<_> = plan
+            .domain_schemas
+            .iter()
+            .map(|descriptor| {
+                let bytes = package_assets
+                    .iter()
+                    .find(|(path, _)| path == &descriptor.schema_path)
+                    .map(|(_, bytes)| bytes.as_slice())
+                    .expect("validated domain schema has matching package bytes");
+                gadgetron_knowledge::OntologySchemaRegistration { descriptor, bytes }
+            })
+            .collect();
+        let owner_bundle_id = gadgetron_bundle_sdk::BundleId::new(bundle_meta.id.clone())
+            .expect("validated SDK package has a canonical Bundle id");
+        let registry = gadgetron_knowledge::OntologyRegistry::new(pool);
+        let registration = gadgetron_knowledge::OntologyPackageRegistration {
+            owner_bundle_id: &owner_bundle_id,
+            package_version: &bundle_meta.version,
+            package_manifest_sha256: package_manifest_sha256
+                .as_deref()
+                .expect("domain schemas require a validated package manifest"),
+            schemas: &schemas,
+        };
+        if let Err(error) = registry.register_package(registration).await {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(ontology_registry_http_error(error));
+        }
+    }
+    if let Err(error) = std::fs::rename(&staging_dir, &target_dir) {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(WorkbenchHttpError::Core(GadgetronError::Config(format!(
+            "bundle install: atomic publish to {target_dir:?} failed: {error}"
+        ))));
+    }
+    if let Ok(parent) = std::fs::File::open(dir) {
+        let _ = parent.sync_all();
+    }
+    if let Some(manager) = svc.runtime_manager.as_ref() {
+        manager.refresh_installed_row_enrichments();
+    }
+
     let manifest_path = target_dir.join("bundle.toml");
-    std::fs::write(&manifest_path, &req.bundle_toml).map_err(|e| {
-        WorkbenchHttpError::Core(GadgetronError::Config(format!(
-            "bundle install: cannot write {manifest_path:?}: {e}",
-        )))
-    })?;
+    let package_manifest_path = staged_package_path.map(|path| {
+        target_dir.join(
+            path.file_name()
+                .expect("staged package manifest has a filename"),
+        )
+    });
+    let runtime_artifact_path = staged_runtime_path.map(|path| {
+        target_dir.join(
+            path.strip_prefix(&staging_dir)
+                .expect("staged runtime is inside staging directory"),
+        )
+    });
 
     tracing::info!(
         target: "workbench.admin",
         bundle_id = %bundle_meta.id,
         bundle_version = %bundle_meta.version,
         manifest_path = %manifest_path.display(),
-        "bundle installed (operator must reload to activate)"
+        package_manifest_path = ?package_manifest_path,
+        package_manifest_sha256 = ?package_manifest_sha256,
+        runtime_artifact_path = ?runtime_artifact_path,
+        package_asset_count = package_assets.len(),
+        contract = if has_package { "bundle_sdk_v1" } else { "catalog_only" },
+        "bundle installed (external runtime remains disabled until explicit enable)"
     );
 
     Ok(Json(InstallBundleResponse {
         installed: true,
         bundle_id: bundle_meta.id.clone(),
+        bundle_class,
         manifest_path: manifest_path.to_string_lossy().into_owned(),
-        reload_hint: "POST /api/v1/web/workbench/admin/reload-catalog or send SIGHUP to activate",
+        package_manifest_path: package_manifest_path
+            .map(|path| path.to_string_lossy().into_owned()),
+        package_manifest_sha256,
+        runtime_artifact_path: runtime_artifact_path
+            .map(|path| path.to_string_lossy().into_owned()),
+        package_asset_count: package_assets.len(),
+        contract: if has_package {
+            "bundle_sdk_v1"
+        } else {
+            "catalog_only"
+        },
+        runtime_state: if has_package {
+            "installed_not_enabled"
+        } else {
+            "not_applicable"
+        },
+        reload_hint: "reload publishes catalog metadata only; POST /admin/bundles/{id}/enable runs the signed sandbox health gate",
     }))
 }
 
@@ -3760,6 +7091,7 @@ pub async fn install_bundle_handler(
 /// - 404 `Config` when the bundle directory doesn't exist.
 pub async fn uninstall_bundle_handler(
     State(state): State<AppState>,
+    axum::Extension(ctx): axum::Extension<gadgetron_core::context::TenantContext>,
     Path(bundle_id): Path<String>,
 ) -> Result<Json<UninstallBundleResponse>, WorkbenchHttpError> {
     let svc = require_workbench(&state)?;
@@ -3778,11 +7110,33 @@ pub async fn uninstall_bundle_handler(
         ))));
     }
 
+    let runtime_disabled = if let Some(manager) = svc.runtime_manager.as_ref() {
+        if manager.status(&bundle_id).await.is_ok() {
+            manager.disable(&bundle_id).await?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    sync_bundle_vault_owner_state(
+        &state,
+        &ctx,
+        &bundle_id,
+        gadgetron_xaas::knowledge_spaces::VaultOwnerState::OwnerUnavailable,
+    )
+    .await?;
+
     std::fs::remove_dir_all(&target_dir).map_err(|e| {
         WorkbenchHttpError::Core(GadgetronError::Config(format!(
             "bundle uninstall: cannot remove {target_dir:?}: {e}",
         )))
     })?;
+    if let Some(manager) = svc.runtime_manager.as_ref() {
+        manager.refresh_installed_row_enrichments();
+    }
 
     tracing::info!(
         target: "workbench.admin",
@@ -3793,6 +7147,8 @@ pub async fn uninstall_bundle_handler(
     Ok(Json(UninstallBundleResponse {
         uninstalled: true,
         bundle_id,
+        runtime_disabled,
+        state_preserved: true,
         reload_hint: "POST /api/v1/web/workbench/admin/reload-catalog or send SIGHUP to activate",
     }))
 }
@@ -3810,6 +7166,10 @@ pub struct BundleDiscoveryEntry {
     /// marketplace operations need the id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<crate::web::catalog::BundleMetadata>,
+    /// Signed package product class. Missing means a legacy catalog or
+    /// manifest that must remain visibly unclassified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_class: Option<gadgetron_bundle_sdk::BundleClass>,
     /// Absolute path to the `bundle.toml` file on disk — useful for
     /// SRE runbooks that want to `cat`/`grep` the manifest directly.
     pub source_path: String,
@@ -3818,6 +7178,31 @@ pub struct BundleDiscoveryEntry {
     pub action_count: usize,
     /// Number of views the manifest ships.
     pub view_count: usize,
+    /// Signed package projection for control-plane actions. Legacy catalogs
+    /// remain visible but have no digest, permissions, settings or runtime.
+    pub contract: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provided_capabilities: Vec<gadgetron_bundle_sdk::ProvidedCapability>,
+    #[serde(
+        default,
+        skip_serializing_if = "gadgetron_bundle_sdk::BundleDependencies::is_empty"
+    )]
+    pub dependencies: gadgetron_bundle_sdk::BundleDependencies,
+    pub settings_declared: bool,
+    pub agent_role_count: usize,
+    pub target_profile_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::web::bundle_runtime::BundleRuntimeStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_grant: Option<crate::web::bundle_grants::BundlePermissionGrant>,
+    /// Bounded per-Bundle error. One broken package must not hide healthy
+    /// entries from the Manager.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Response shape for `GET /admin/bundles`.
@@ -3888,15 +7273,112 @@ pub async fn list_bundles_handler(
         if !manifest.exists() {
             continue;
         }
-        let c = crate::web::catalog::DescriptorCatalog::from_toml_file(&manifest)
-            .map_err(WorkbenchHttpError::Core)?;
+        let c = match crate::web::catalog::DescriptorCatalog::from_toml_file(&manifest) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                bundles.push(BundleDiscoveryEntry {
+                    bundle: None,
+                    bundle_class: None,
+                    source_path: manifest.to_string_lossy().into_owned(),
+                    action_count: 0,
+                    view_count: 0,
+                    contract: "invalid",
+                    package_manifest_sha256: None,
+                    permission_ids: Vec::new(),
+                    provided_capabilities: Vec::new(),
+                    dependencies: gadgetron_bundle_sdk::BundleDependencies::default(),
+                    settings_declared: false,
+                    agent_role_count: 0,
+                    target_profile_count: 0,
+                    runtime: None,
+                    permission_grant: None,
+                    detail: Some(format!("{error:?}").chars().take(2_048).collect()),
+                });
+                continue;
+            }
+        };
         use gadgetron_core::context::Scope;
         let all_scopes = [Scope::OpenAiCompat, Scope::Management, Scope::XaasAdmin];
+        let mut contract = "catalog_only";
+        let mut package_manifest_sha256 = None;
+        let mut bundle_class = None;
+        let mut permission_ids = Vec::new();
+        let mut provided_capabilities = Vec::new();
+        let mut dependencies = gadgetron_bundle_sdk::BundleDependencies::default();
+        let mut settings_declared = false;
+        let mut agent_role_count = 0;
+        let mut target_profile_count = 0;
+        let mut detail = None;
+        let package_path = sub.join("package.toml");
+        if package_path.exists() {
+            match std::fs::read_to_string(&package_path)
+                .map_err(|error| format!("cannot read package.toml: {error}"))
+                .and_then(|source| {
+                    let bundle = c.bundle().ok_or_else(|| {
+                        "package.toml requires catalog Bundle metadata".to_string()
+                    })?;
+                    validate_package_contract(&source, &bundle.id, &bundle.version)
+                        .map_err(|error| format!("{error:?}"))
+                }) {
+                Ok(package) => {
+                    contract = "bundle_sdk_v1";
+                    package_manifest_sha256 = Some(package.manifest_sha256().to_string());
+                    bundle_class = package.manifest().bundle.class;
+                    permission_ids = package
+                        .manifest()
+                        .permissions
+                        .iter()
+                        .map(|permission| permission.id.as_str().to_string())
+                        .collect();
+                    provided_capabilities = package.manifest().capabilities.provides.clone();
+                    dependencies = package.manifest().dependencies.clone();
+                    settings_declared = package.manifest().capabilities.settings_schema.is_some();
+                    agent_role_count = package.manifest().capabilities.agent_roles.len();
+                    target_profile_count = package.manifest().capabilities.target_profiles.len();
+                }
+                Err(error) => detail = Some(error.chars().take(2_048).collect()),
+            }
+        }
+        let runtime = if let (Some(_), Some(manager)) = (
+            package_manifest_sha256.as_ref(),
+            svc.runtime_manager.as_ref(),
+        ) {
+            match manager
+                .status(c.bundle().map(|bundle| bundle.id.as_str()).unwrap_or(""))
+                .await
+            {
+                Ok(status) => Some(status),
+                Err(error) => {
+                    if detail.is_none() {
+                        detail = Some(format!("{error:?}").chars().take(2_048).collect());
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let permission_grant = svc.runtime_manager.as_ref().and_then(|manager| {
+            c.bundle()
+                .and_then(|bundle| manager.permission_grant(&bundle.id).ok().flatten())
+        });
         bundles.push(BundleDiscoveryEntry {
             bundle: c.bundle().cloned(),
+            bundle_class,
             source_path: manifest.to_string_lossy().into_owned(),
             action_count: c.visible_actions(&all_scopes).len(),
             view_count: c.visible_views(&all_scopes).len(),
+            contract,
+            package_manifest_sha256,
+            permission_ids,
+            provided_capabilities,
+            dependencies,
+            settings_declared,
+            agent_role_count,
+            target_profile_count,
+            runtime,
+            permission_grant,
+            detail,
         });
     }
 
@@ -3950,26 +7432,16 @@ pub struct ReloadCatalogResponse {
 
 /// Atomically swap the in-memory `DescriptorCatalog` for a fresh one.
 ///
-/// Today the only source is the hand-coded
-/// `DescriptorCatalog::seed_p2b()` — so a "reload" produces an
-/// identical catalog. The value in the endpoint right now is proving
-/// the ArcSwap plumbing lands a fresh `Arc<DescriptorCatalog>`
-/// atomically while in-flight requests keep reading their snapshot.
-/// A future iteration swaps the source to a config-file watcher.
+/// Core descriptors are always present. Descriptors loaded from
+/// `bundles_dir` or `catalog_path` are validated, merged with Core, and then
+/// published through one ArcSwap so requests see a consistent catalog and
+/// validator set.
 ///
 /// Requires scope: **Management** (like `/nodes`, `/models/deploy`, etc).
 ///
 /// Returns 503 `{error: {code: "catalog_unwired", message: "..."}}` when
 /// no workbench is configured (rare — only headless test builds).
 ///
-/// **Known limitation:** schema validators on
-/// `InProcessWorkbenchActionService` are pre-compiled at service
-/// construction time and are NOT rebuilt by this endpoint. Because
-/// the current source (`seed_p2b`) produces identical schemas,
-/// validators remain correct. When a file-based source is added
-/// with potentially changed schemas, validator rebuild must land
-/// with it — either by rebuilding the whole action service on swap,
-/// or by moving validators into the ArcSwap alongside the catalog.
 pub async fn reload_catalog_handler(
     State(state): State<AppState>,
 ) -> Result<Json<ReloadCatalogResponse>, WorkbenchHttpError> {
@@ -3993,23 +7465,32 @@ pub fn perform_catalog_reload(
         ))
     })?;
 
-    // Source precedence: `bundles_dir` wins over `catalog_path` wins
-    // over the hardcoded
-    // `seed_p2b()` fallback. Parse / IO failures surface as 500
-    // with the error message — the old snapshot stays live so a
-    // bad edit can't take the workbench down.
+    // Select one external descriptor source, then add it to the Core seed.
+    // Parse, collision, and IO failures leave the old snapshot live.
     let bundles_dir_cfg = svc.bundles_dir.as_deref();
     let catalog_path_cfg = svc.catalog_path.as_deref();
     let (fresh_catalog, source_label, source_path) = if let Some(dir) = bundles_dir_cfg {
         let path = std::path::Path::new(dir);
         match crate::web::catalog::DescriptorCatalog::from_bundle_dir(path) {
-            Ok(c) => (c, "bundles_dir", Some(dir.to_string())),
+            Ok(c) => (
+                c.with_core_seed(true).map_err(WorkbenchHttpError::Core)?,
+                "bundles_dir",
+                Some(dir.to_string()),
+            ),
             Err(e) => return Err(WorkbenchHttpError::Core(e)),
         }
     } else if let Some(p) = catalog_path_cfg {
         let path = std::path::Path::new(p);
         match crate::web::catalog::DescriptorCatalog::from_toml_file(path) {
-            Ok(c) => (c, "config_file", Some(p.to_string())),
+            Ok(c) => {
+                let allow_direct_actions = c.allow_direct_actions();
+                (
+                    c.with_core_seed(allow_direct_actions)
+                        .map_err(WorkbenchHttpError::Core)?,
+                    "config_file",
+                    Some(p.to_string()),
+                )
+            }
             Err(e) => return Err(WorkbenchHttpError::Core(e)),
         }
     } else {
@@ -4229,7 +7710,53 @@ mod tests_bundle_signing {
         InstallBundleRequest {
             bundle_toml: body.to_string(),
             signature_hex: sig.map(hex::encode),
+            package_toml: None,
+            package_signature_hex: None,
+            runtime_artifact_base64: None,
+            package_assets_base64: std::collections::BTreeMap::new(),
         }
+    }
+
+    fn verify_req(
+        cfg: &gadgetron_core::config::BundleSigningConfig,
+        req: &InstallBundleRequest,
+    ) -> Result<(), WorkbenchHttpError> {
+        verify_detached_signature(
+            cfg,
+            "catalog",
+            req.bundle_toml.as_bytes(),
+            req.signature_hex.as_deref(),
+        )
+    }
+
+    fn package_toml(id: &str, version: &str) -> String {
+        format!(
+            r#"
+manifest_version = 1
+
+[bundle]
+id = "{id}"
+version = "{version}"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.5.0, <1.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/runtime"
+entry_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[runtime.limits]
+memory_mb = 256
+open_files = 64
+cpu_seconds = 60
+"#
+        )
     }
 
     #[test]
@@ -4238,7 +7765,7 @@ mod tests_bundle_signing {
             public_keys_hex: vec![],
             require_signature: false,
         };
-        verify_bundle_signature(&cfg, &make_req("[bundle]\nid=\"x\"\nversion=\"1\"", None))
+        verify_req(&cfg, &make_req("[bundle]\nid=\"x\"\nversion=\"1\"", None))
             .expect("unsigned install is allowed when not required");
     }
 
@@ -4248,7 +7775,7 @@ mod tests_bundle_signing {
             public_keys_hex: vec![],
             require_signature: true,
         };
-        let err = verify_bundle_signature(&cfg, &make_req("x", None))
+        let err = verify_req(&cfg, &make_req("x", None))
             .expect_err("require_signature=true must reject unsigned");
         assert!(format!("{:?}", err).contains("signature required"));
     }
@@ -4263,7 +7790,7 @@ mod tests_bundle_signing {
             public_keys_hex: vec![hex::encode(vk.to_bytes())],
             require_signature: true,
         };
-        verify_bundle_signature(&cfg, &make_req(body, Some(&sig.to_bytes())))
+        verify_req(&cfg, &make_req(body, Some(&sig.to_bytes())))
             .expect("valid signature must pass");
     }
 
@@ -4276,7 +7803,7 @@ mod tests_bundle_signing {
             public_keys_hex: vec![hex::encode(vk.to_bytes())],
             require_signature: true,
         };
-        let err = verify_bundle_signature(&cfg, &make_req("tampered", Some(&sig.to_bytes())))
+        let err = verify_req(&cfg, &make_req("tampered", Some(&sig.to_bytes())))
             .expect_err("tampered body must reject");
         assert!(format!("{:?}", err).contains("did not verify"));
     }
@@ -4291,7 +7818,7 @@ mod tests_bundle_signing {
             public_keys_hex: vec![hex::encode(sk.verifying_key().to_bytes())],
             require_signature: true,
         };
-        let err = verify_bundle_signature(&cfg, &make_req(body, Some(&sig.to_bytes())))
+        let err = verify_req(&cfg, &make_req(body, Some(&sig.to_bytes())))
             .expect_err("unknown key must reject");
         assert!(format!("{:?}", err).contains("did not verify"));
     }
@@ -4305,9 +7832,134 @@ mod tests_bundle_signing {
             public_keys_hex: vec![],
             require_signature: false,
         };
-        let err = verify_bundle_signature(&cfg, &make_req(body, Some(&sig.to_bytes())))
+        let err = verify_req(&cfg, &make_req(body, Some(&sig.to_bytes())))
             .expect_err("signature with no trust anchors must reject");
         assert!(format!("{:?}", err).contains("no trust anchors"));
+    }
+
+    #[test]
+    fn package_contract_must_match_catalog_identity_and_version() {
+        validate_package_contract(
+            &package_toml("server-administrator", "1.0.0"),
+            "server-administrator",
+            "1.0.0",
+        )
+        .expect("matching versioned SDK package is accepted");
+
+        let id_error = validate_package_contract(
+            &package_toml("restaurant-research", "1.0.0"),
+            "server-administrator",
+            "1.0.0",
+        )
+        .expect_err("package and catalog ids must match");
+        assert!(format!("{id_error:?}").contains("does not exactly match catalog id"));
+
+        let version_error = validate_package_contract(
+            &package_toml("server-administrator", "1.0.1"),
+            "server-administrator",
+            "1.0.0",
+        )
+        .expect_err("package and catalog versions must match");
+        assert!(format!("{version_error:?}").contains("does not exactly match catalog version"));
+    }
+
+    #[test]
+    fn signature_policy_applies_to_package_as_a_separate_artifact() {
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![],
+            require_signature: true,
+        };
+        let package = package_toml("server-administrator", "1.0.0");
+        let error = verify_detached_signature(&cfg, "package", package.as_bytes(), None)
+            .expect_err("required package signature cannot be inherited from catalog");
+        assert!(format!("{error:?}").contains("package signature required"));
+    }
+
+    #[test]
+    fn runtime_artifact_must_match_the_signed_package_digest() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use sha2::{Digest, Sha256};
+
+        let bytes = b"#!/bin/true\n";
+        let digest = hex::encode(Sha256::digest(bytes));
+        let source = package_toml("artifact-test", "0.1.0").replace(&"a".repeat(64), &digest);
+        let contract = validate_package_contract(&source, "artifact-test", "0.1.0").unwrap();
+        let encoded = STANDARD.encode(bytes);
+        let (path, decoded) = validate_runtime_artifact(Some(&contract), Some(&encoded))
+            .unwrap()
+            .expect("artifact is present");
+        assert_eq!(path.as_str(), "bin/runtime");
+        assert_eq!(decoded, bytes);
+
+        let mismatch = STANDARD.encode(b"tampered");
+        let error = validate_runtime_artifact(Some(&contract), Some(&mismatch)).unwrap_err();
+        assert!(format!("{error:?}").contains("digest mismatch"));
+        let error = validate_runtime_artifact(Some(&contract), None).unwrap_err();
+        assert!(format!("{error:?}").contains("require runtime_artifact_base64"));
+        assert!(validate_runtime_artifact(None, Some(&encoded)).is_err());
+
+        let oversized = STANDARD.encode(vec![0_u8; MAX_BUNDLE_RUNTIME_ARTIFACT_BYTES + 1]);
+        let error = validate_runtime_artifact(Some(&contract), Some(&oversized)).unwrap_err();
+        assert!(format!("{error:?}").contains(&MAX_BUNDLE_RUNTIME_ARTIFACT_BYTES.to_string()));
+    }
+
+    #[test]
+    fn package_assets_must_exactly_match_declared_paths_and_digests() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use sha2::{Digest, Sha256};
+
+        let bytes = br#"{"properties":{"entities":{"const":["Place"]},"relations":{"const":["applies_to"]}}}"#;
+        let digest = hex::encode(Sha256::digest(bytes));
+        let source = format!(
+            "{}\n[[capabilities.domain_schemas]]\nid = \"asset-test-schema\"\nversion = 1\nschema_path = \"schema/domain.json\"\nsha256 = \"{digest}\"\n",
+            package_toml("asset-test", "0.1.0")
+        );
+        let contract = validate_package_contract(&source, "asset-test", "0.1.0").unwrap();
+        let mut assets = std::collections::BTreeMap::new();
+        assets.insert("schema/domain.json".into(), STANDARD.encode(bytes));
+
+        let decoded = validate_package_assets(Some(&contract), &assets).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0.as_str(), "schema/domain.json");
+        assert_eq!(decoded[0].1, bytes);
+
+        let missing = std::collections::BTreeMap::new();
+        assert!(validate_package_assets(Some(&contract), &missing).is_err());
+        assets.insert("schema/domain.json".into(), STANDARD.encode(b"tampered"));
+        let error = validate_package_assets(Some(&contract), &assets).unwrap_err();
+        assert!(format!("{error:?}").contains("digest mismatch"));
+        assert!(validate_package_assets(None, &assets).is_err());
+    }
+
+    #[test]
+    fn package_install_rejects_digest_correct_invalid_domain_ontology() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use sha2::{Digest, Sha256};
+
+        let bytes = br#"{"format_version":2,"types":[{"id":"Place","label":"Place","family":"entity"}],"relations":[]}"#;
+        let digest = hex::encode(Sha256::digest(bytes));
+        let source = format!(
+            "{}\n[[capabilities.domain_schemas]]\nid = \"invalid-domain\"\nversion = 1\nschema_path = \"schema/domain.json\"\nsha256 = \"{digest}\"\n",
+            package_toml("invalid-domain", "0.1.0")
+        );
+        let contract = validate_package_contract(&source, "invalid-domain", "0.1.0").unwrap();
+        let mut assets = std::collections::BTreeMap::new();
+        assets.insert("schema/domain.json".into(), STANDARD.encode(bytes));
+
+        let error = validate_package_assets(Some(&contract), &assets)
+            .expect_err("unsupported ontology format must fail before install");
+        assert!(format!("{error:?}").contains("domain_schema.format_version"));
+    }
+
+    #[test]
+    fn runtime_enable_requires_trust_even_when_legacy_install_does_not() {
+        let cfg = gadgetron_core::config::BundleSigningConfig {
+            public_keys_hex: vec![],
+            require_signature: false,
+        };
+        let error =
+            verify_required_detached_signature(&cfg, "package", b"package", "00").unwrap_err();
+        assert!(format!("{error:?}").contains("no trust anchors"));
     }
 }
 
@@ -4376,14 +8028,18 @@ mod tests {
                 projection,
                 actions: None,
                 approval_store: None,
+                policy_evaluator: None,
+                gadget_catalog: None,
                 descriptor_catalog: None,
                 catalog_path: None,
                 bundles_dir: None,
                 bundle_signing: Default::default(),
+                runtime_manager: None,
                 gadget_modes: None,
                 gadget_mode_reconfigurer: None,
                 agent_brain: None,
                 agent_config_base: None,
+                vault_layout: None,
             })),
             penny_shared_surface: None,
             penny_assembler: None,
@@ -4511,6 +8167,64 @@ mod tests {
     }
 
     #[test]
+    fn patch_agent_brain_settings_normalizes_codex_max_to_xhigh() {
+        let body: PatchAgentBrainSettingsRequest = serde_json::from_value(serde_json::json!({
+            "mode": "claude_max",
+            "backend": "codex_exec",
+            "model": "gpt-5.5",
+            "model_source": "default",
+            "effort": "max"
+        }))
+        .expect("codex settings patch");
+
+        let (settings, _) =
+            normalize_agent_brain_settings_patch(body).expect("codex patch is valid");
+        assert_eq!(settings.effort, gadgetron_core::agent::AgentEffort::Xhigh);
+    }
+
+    #[test]
+    fn patch_agent_brain_settings_preserves_gpt_5_6_max() {
+        let body: PatchAgentBrainSettingsRequest = serde_json::from_value(serde_json::json!({
+            "mode": "claude_max",
+            "backend": "codex_exec",
+            "model": "gpt-5.6-sol",
+            "model_source": "default",
+            "effort": "max"
+        }))
+        .expect("GPT-5.6 settings patch");
+
+        let (settings, _) =
+            normalize_agent_brain_settings_patch(body).expect("GPT-5.6 patch is valid");
+        assert_eq!(settings.effort, gadgetron_core::agent::AgentEffort::Max);
+    }
+
+    #[test]
+    fn patch_agent_brain_settings_applies_ultra_capability_ceiling() {
+        let supported: PatchAgentBrainSettingsRequest = serde_json::from_value(serde_json::json!({
+            "mode": "claude_max",
+            "backend": "codex_exec",
+            "model": "gpt-5.6-terra",
+            "model_source": "default",
+            "effort": "ultra"
+        }))
+        .expect("GPT-5.6 Terra settings patch");
+        let (supported, _) =
+            normalize_agent_brain_settings_patch(supported).expect("Ultra patch is valid");
+        assert_eq!(supported.effort, gadgetron_core::agent::AgentEffort::Ultra);
+
+        let luna: PatchAgentBrainSettingsRequest = serde_json::from_value(serde_json::json!({
+            "mode": "claude_max",
+            "backend": "codex_exec",
+            "model": "gpt-5.6-luna",
+            "model_source": "default",
+            "effort": "ultra"
+        }))
+        .expect("GPT-5.6 Luna settings patch");
+        let (luna, _) = normalize_agent_brain_settings_patch(luna).expect("Luna patch is valid");
+        assert_eq!(luna.effort, gadgetron_core::agent::AgentEffort::Max);
+    }
+
+    #[test]
     fn use_llm_endpoint_request_accepts_write_only_token_value() {
         let body: UseLlmEndpointRequest = serde_json::from_value(serde_json::json!({
             "external_auth_token_value": "test-secret-token"
@@ -4579,6 +8293,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::seed_p2b().into_snapshot(),
             )),
+            dynamic_workbench: None,
         });
         let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
 
@@ -4661,6 +8376,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::seed_p2b().into_snapshot(),
             )),
+            dynamic_workbench: None,
         });
         let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
 
@@ -4701,6 +8417,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::seed_p2b().into_snapshot(),
             )),
+            dynamic_workbench: None,
         });
         let state = make_state_with_workbench(vec![Scope::OpenAiCompat], projection);
 
@@ -4740,6 +8457,53 @@ mod tests {
             "OpenAiCompat key must reach workbench bootstrap"
         );
 
+        // Atomic Bundle discovery is part of the same OpenAiCompat surface.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/web/workbench/capabilities")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let projection: WorkbenchCapabilityProjectionResponse =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(projection.revision, "0".repeat(64));
+        assert!(projection.bundles.is_empty());
+        assert!(projection.ui_contributions.is_empty());
+
+        // Contribution data shares the authenticated/scope-filtered surface;
+        // Core-only returns a non-leaking 404 rather than exposing a route gap.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/web/workbench/contributions/hidden.widget/data")
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Bundle jobs are Manager operations even though their eventual
+        // workspace projections are visible through OpenAiCompat.
+        let req = Request::builder()
+            .method("POST")
+            .uri(
+                "/api/v1/web/workbench/admin/bundles/server-administrator/job-recipes/server-duty-cycle/start",
+            )
+            .header("authorization", format!("Bearer {VALID_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"parameters":{"target_id":"edge-one"}}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Bundle job start must require Management scope"
+        );
+
         // Management route: OpenAiCompat key → 403.
         let req = Request::builder()
             .method("GET")
@@ -4767,6 +8531,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::empty().into_snapshot(),
             )),
+            dynamic_workbench: None,
         };
         let resp = proj.bootstrap().await.unwrap();
         assert!(resp.active_plugs.is_empty());
@@ -4774,6 +8539,30 @@ mod tests {
             .degraded_reasons
             .iter()
             .any(|r| r.contains("knowledge service not wired")),);
+    }
+
+    #[tokio::test]
+    async fn core_workbench_router_does_not_expose_domain_metrics_routes() {
+        let projection = Arc::new(InProcessWorkbenchProjection {
+            knowledge: None,
+            gateway_version: "0.1.0",
+            descriptor_catalog: Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty().into_snapshot(),
+            )),
+            dynamic_workbench: None,
+        });
+        let state = make_state_with_workbench(vec![Scope::Management], projection);
+        let app = workbench_routes().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/servers/example-id/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     // ---------------------------------------------------------------
@@ -4889,6 +8678,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::empty().into_snapshot(),
             )),
+            dynamic_workbench: None,
         };
         let resp = proj.bootstrap().await.unwrap();
         assert_eq!(resp.active_plugs.len(), 2);
@@ -4906,6 +8696,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::empty().into_snapshot(),
             )),
+            dynamic_workbench: None,
         };
         let resp = proj.activity(50).await.unwrap();
         assert!(resp.entries.is_empty());
@@ -4943,6 +8734,7 @@ mod tests {
             descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 DescriptorCatalog::empty().into_snapshot(),
             )),
+            dynamic_workbench: None,
         };
         let id = Uuid::new_v4();
         let err = proj.request_evidence(id).await.unwrap_err();
@@ -5061,5 +8853,436 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["type"], "permission_error");
         assert!(!value["error"]["code"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn responses_probe_url_normalizes_v1_once() {
+        assert_eq!(
+            openai_responses_url("http://127.0.0.1:8000"),
+            "http://127.0.0.1:8000/v1/responses"
+        );
+        assert_eq!(
+            openai_responses_url("http://127.0.0.1:8000/v1/"),
+            "http://127.0.0.1:8000/v1/responses"
+        );
+    }
+
+    #[test]
+    fn endpoint_request_accepts_openai_responses_protocol() {
+        let body = CreateLlmEndpointRequest {
+            name: "local-responses".into(),
+            kind: "openai_compatible".into(),
+            protocol: "openai_responses".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            target_kind: None,
+            target_host_id: None,
+            upstream_endpoint_id: None,
+            listen_port: None,
+            auth_token_env: None,
+            model_id: Some("local-model".into()),
+        };
+        assert!(validate_llm_endpoint_request(&body).is_ok());
+    }
+
+    async fn spawn_probe_server(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe server");
+        let address = listener.local_addr().expect("probe address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve probe fixture");
+        });
+        (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn responses_probe_requires_an_actual_function_call() {
+        let app = axum::Router::new()
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async {
+                    Json(json!({"data": [{"id": "local-tool-model"}]}))
+                }),
+            )
+            .route(
+                "/v1/responses",
+                axum::routing::post(|Json(body): Json<serde_json::Value>| async move {
+                    assert_eq!(body["max_output_tokens"], 1024);
+                    assert_eq!(body["tool_choice"], "required");
+                    assert_eq!(body["tools"][0]["parameters"]["properties"], json!({}));
+                    assert!(body["tools"][0].get("strict").is_none());
+                    Json(json!({
+                        "output": [{
+                            "type": "function_call",
+                            "name": "gadgetron_capability_probe",
+                            "arguments": "{\"nonce\":\"endpoint-smoke\"}"
+                        }]
+                    }))
+                }),
+            );
+        let (base_url, server) = spawn_probe_server(app).await;
+
+        let probe = probe_openai_endpoint(&base_url, None, None)
+            .await
+            .expect("probe succeeds");
+        assert!(probe.ready());
+        assert_eq!(probe.protocol, "openai_responses");
+        assert_eq!(probe.runtime_compatibility, "codex_exec");
+        assert_eq!(probe.tool_model_id.as_deref(), Some("local-tool-model"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn models_without_responses_is_bridge_required_not_tool_ready() {
+        let app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async { Json(json!({"data": [{"id": "chat-only-model"}]})) }),
+        );
+        let (base_url, server) = spawn_probe_server(app).await;
+
+        let probe = probe_openai_endpoint(&base_url, None, None)
+            .await
+            .expect("models route is connected");
+        assert!(!probe.ready());
+        assert_eq!(probe.protocol, "openai_chat");
+        assert_eq!(probe.runtime_compatibility, "bridge_required");
+        assert_eq!(probe.tool_status, "unsupported");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anthropic_probe_requires_an_actual_tool_use_block() {
+        let app = axum::Router::new().route(
+            "/v1/messages",
+            axum::routing::post(|| async {
+                Json(json!({
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_probe",
+                        "name": "gadgetron_capability_probe",
+                        "input": {"nonce": "endpoint-smoke"}
+                    }],
+                    "stop_reason": "tool_use"
+                }))
+            }),
+        );
+        let (base_url, server) = spawn_probe_server(app).await;
+
+        let probe = probe_anthropic_endpoint(&base_url, Some("bridge-model"), None)
+            .await
+            .expect("messages probe succeeds");
+        assert!(probe.ready());
+        assert_eq!(probe.protocol, "anthropic_messages");
+        assert_eq!(probe.runtime_compatibility, "claude_code");
+        server.abort();
+    }
+
+    #[test]
+    fn endpoint_url_validation_blocks_metadata_and_redirect_paths() {
+        assert!(validate_endpoint_base_url("http://169.254.169.254").is_err());
+        assert!(validate_endpoint_base_url("http://127.0.0.1:8000/v1").is_ok());
+        assert!(validate_endpoint_base_url("http://127.0.0.1:8000/redirect").is_err());
+    }
+
+    #[test]
+    fn portable_bundle_source_digest_is_stable_and_content_bound() {
+        let mut envelope = InstallBundleRequest {
+            bundle_toml: "[bundle]\nid='sample'\nversion='1.0.0'\n".into(),
+            signature_hex: Some("aa".repeat(64)),
+            package_toml: None,
+            package_signature_hex: None,
+            runtime_artifact_base64: None,
+            package_assets_base64: Default::default(),
+        };
+        let before = source_digest(&envelope).unwrap();
+        assert_eq!(before, source_digest(&envelope).unwrap());
+        envelope.bundle_toml.push('\n');
+        assert_ne!(before, source_digest(&envelope).unwrap());
+    }
+
+    #[tokio::test]
+    async fn bundle_install_registers_signed_domain_ontology_before_publish() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use gadgetron_testing::harness::pg::PgHarness;
+        use sha2::{Digest, Sha256};
+
+        let admin_url = std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("GADGETRON_DATABASE_URL"))
+            .unwrap_or_else(|_| "postgresql://localhost:5432/postgres".to_string());
+        let Ok(admin) = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        else {
+            eprintln!("skipping ontology install test: PostgreSQL unavailable");
+            return;
+        };
+        let vector: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT default_version FROM pg_available_extensions WHERE name = 'vector'",
+        )
+        .fetch_optional(&admin)
+        .await;
+        admin.close().await;
+        if !matches!(vector, Ok(Some(_))) {
+            eprintln!("skipping ontology install test: pgvector unavailable");
+            return;
+        }
+
+        let harness = PgHarness::new().await;
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'ontology-http-test')")
+            .bind(tenant_id)
+            .execute(harness.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, display_name, role, password_hash) \
+             VALUES ($1, $2, 'ontology-http@test.invalid', 'Ontology Admin', 'admin', 'test')",
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .execute(harness.pool())
+        .await
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let projection = Arc::new(InProcessWorkbenchProjection {
+            knowledge: None,
+            gateway_version: "0.0.0-test",
+            descriptor_catalog: Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty().into_snapshot(),
+            )),
+            dynamic_workbench: None,
+        });
+        let mut state = make_state_with_workbench(vec![Scope::Management], projection);
+        state.pg_pool = Some(harness.pool().clone());
+        Arc::get_mut(state.workbench.as_mut().unwrap())
+            .expect("test owns the workbench service")
+            .bundles_dir = Some(root.path().to_string_lossy().into_owned());
+
+        let bytes = br#"{"properties":{"entities":{"const":["Place"]},"relations":{"const":["applies_to"]}}}"#;
+        let digest = hex::encode(Sha256::digest(bytes));
+        let package = format!(
+            r#"manifest_version = 1
+
+[bundle]
+id = "ontology-install-test"
+version = "0.1.0"
+publisher = "example.publisher"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.5.0, <1.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "container"
+transport = "json_rpc_stdio"
+entry = "unused"
+
+[runtime.limits]
+memory_mb = 64
+open_files = 32
+cpu_seconds = 10
+
+[[capabilities.domain_schemas]]
+id = "installation-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "{digest}"
+"#
+        );
+        let request = InstallBundleRequest {
+            bundle_toml: "[bundle]\nid = \"ontology-install-test\"\nversion = \"0.1.0\"\n".into(),
+            signature_hex: None,
+            package_toml: Some(package),
+            package_signature_hex: None,
+            runtime_artifact_base64: None,
+            package_assets_base64: std::collections::BTreeMap::from([(
+                "schema/domain.json".into(),
+                STANDARD.encode(bytes),
+            )]),
+        };
+
+        let Json(response) = install_bundle_handler(State(state.clone()), Json(request))
+            .await
+            .expect("validated ontology package installs");
+        assert!(response.installed);
+        assert!(root
+            .path()
+            .join("ontology-install-test/schema/domain.json")
+            .is_file());
+        let registered: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_ontology_revisions")
+                .fetch_one(harness.pool())
+                .await
+                .unwrap();
+        assert_eq!(registered, 1);
+
+        let context = test_ctx(tenant_id, Some(user_id));
+        let Json(registry) = crate::web::knowledge_ontology::list_registry_handler(
+            State(state.clone()),
+            axum::Extension(context.clone()),
+        )
+        .await
+        .expect("tenant admin can inspect registered ontologies");
+        assert_eq!(registry.returned, 1);
+        assert_eq!(registry.revisions[0].activation_revision, None);
+        let revision_id = registry.revisions[0].revision.id;
+        let Json(activation) = crate::web::knowledge_ontology::activate_handler(
+            State(state),
+            axum::Extension(context),
+            Path(revision_id),
+            Json(crate::web::knowledge_ontology::ActivationRequest {
+                expected_activation_revision: 0,
+                reason: "Activate the reviewed ontology".into(),
+            }),
+        )
+        .await
+        .expect("tenant activation is an explicit HTTP operation");
+        assert_eq!(activation.event.activation_revision, 1);
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn bootstrap_http_context_pins_an_operating_space_and_promotes_personal_to_team() {
+        use gadgetron_testing::harness::pg::PgHarness;
+        use gadgetron_xaas::knowledge_spaces::{self as spaces, CreateProject, SpaceActor};
+
+        let admin_url = std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("GADGETRON_DATABASE_URL"))
+            .unwrap_or_else(|_| "postgresql://localhost:5432/postgres".to_string());
+        let Ok(admin) = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        else {
+            eprintln!("skipping SSH bootstrap Space test: PostgreSQL unavailable");
+            return;
+        };
+        admin.close().await;
+
+        let harness = PgHarness::new().await;
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'bootstrap-space-fixture')")
+            .bind(tenant_id)
+            .execute(harness.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, display_name, role, password_hash) \
+             VALUES ($1, $2, $3, 'Bootstrap operator', 'admin', 'test')",
+        )
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(format!("bootstrap-{user_id}@example.test"))
+        .execute(harness.pool())
+        .await
+        .unwrap();
+        let actor = SpaceActor { tenant_id, user_id };
+        let personal = spaces::ensure_personal_space(harness.pool(), actor, "Personal")
+            .await
+            .unwrap();
+        let project = spaces::create_project(
+            harness.pool(),
+            actor,
+            CreateProject {
+                slug: "bootstrap-project".into(),
+                title: "Bootstrap project".into(),
+                goal: "Register project infrastructure".into(),
+                policy: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+
+        let projection = Arc::new(InProcessWorkbenchProjection {
+            knowledge: None,
+            gateway_version: "0.0.0-test",
+            descriptor_catalog: Arc::new(arc_swap::ArcSwap::from_pointee(
+                DescriptorCatalog::empty().into_snapshot(),
+            )),
+            dynamic_workbench: None,
+        });
+        let mut state = make_state_with_workbench(vec![Scope::Management], projection);
+        state.pg_pool = Some(harness.pool().clone());
+        let app = Router::new()
+            .route(
+                "/admin/bundles/{bundle_id}/ssh/targets",
+                post(bootstrap_bundle_ssh_target_handler),
+            )
+            .with_state(state)
+            .layer(axum::Extension(test_ctx(tenant_id, Some(user_id))));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/bundles/server-administrator/ssh/targets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "address": "192.0.2.10",
+                            "username": "operator",
+                            "password": "one-shot-test-password",
+                            "acting_space_id": personal.id,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let selected_project = resolve_bootstrap_acting_space(
+            harness.pool(),
+            tenant_id,
+            user_id,
+            Some(project.space.id),
+        )
+        .await;
+        assert_eq!(selected_project, Some(project.space.id));
+
+        let promoted =
+            resolve_bootstrap_acting_space(harness.pool(), tenant_id, user_id, Some(personal.id))
+                .await
+                .expect("Personal registration context is promoted to the default Team");
+        let default_team: (String, String) = sqlx::query_as(
+            "SELECT kind, title FROM knowledge_spaces WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(promoted)
+        .fetch_one(harness.pool())
+        .await
+        .unwrap();
+        assert_eq!(default_team, ("team".into(), "Operations".into()));
+        assert_eq!(
+            resolve_bootstrap_acting_space(harness.pool(), tenant_id, user_id, None).await,
+            Some(promoted)
+        );
+        harness.cleanup().await;
+    }
+
+    #[test]
+    fn bundle_url_fetch_allows_only_public_unicast_addresses() {
+        use super::super::safe_fetch::is_public_unicast;
+        assert!(is_public_unicast("8.8.8.8".parse().unwrap()));
+        for blocked in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "224.0.0.1",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:127.0.0.1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_public_unicast(blocked.parse().unwrap()), "{blocked}");
+        }
     }
 }

@@ -1,0 +1,633 @@
+manifest_version = 3
+
+[bundle]
+id = "social-media-intelligence"
+version = "0.1.0"
+class = "intelligence"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.7.21, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/social-media-intelligence"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 192
+open_files = 48
+cpu_seconds = 30
+
+[[permissions]]
+id = "social-read"
+kind = "database"
+description = "Read tenant-scoped Social Media Intelligence records"
+resources = ["postgres:table:social_posts", "postgres:table:social_conversations", "postgres:table:social_signals", "postgres:table:social_briefings", "postgres:table:social_response_drafts"]
+
+[[permissions]]
+id = "social-write"
+kind = "database"
+description = "Write tenant-scoped Social Media Intelligence records through Core-compiled mutations"
+resources = ["postgres:table:social_posts", "postgres:table:social_conversations", "postgres:table:social_signals", "postgres:table:social_briefings", "postgres:table:social_response_drafts"]
+
+[[permissions]]
+id = "social-purge"
+kind = "database"
+description = "Remove Source-derived social records after Manager approval"
+resources = ["postgres:table:social_posts", "postgres:table:social_conversations", "postgres:table:social_signals", "postgres:table:social_briefings", "postgres:table:social_response_drafts"]
+
+[[permissions]]
+id = "social-collections"
+kind = "knowledge_collection"
+description = "Manage only Social watchlists through the Core collection authority"
+resources = ["knowledge:collection"]
+
+[capabilities]
+gadget_namespaces = ["social"]
+
+[[capabilities.provides]]
+id = "gadgetron.intelligence.social-context"
+version = "1.0.0"
+description = "Cited public conversation, signal, briefing, and response-draft context through the Core knowledge exchange"
+
+[[capabilities.domain_schemas]]
+id = "social-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "208ded12b0cea67c2a89791080feb0378298eac5e02e919fda7126140bd1e1a1"
+
+[[capabilities.gadgets]]
+name = "social.watchlist-list"
+description = "List Social watchlists and their public provider collection state"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.watchlist-collect"
+description = "Collect the approved public provider query for this watchlist now"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { collection_id = { type = "string", format = "uuid", title = "Watchlist" }, expected_revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["collection_id", "expected_revision"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.post-list"
+description = "List purgeable public post snapshots"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.post-upsert"
+description = "Persist an idempotent Source-revision-pinned public post snapshot"
+tier = "write"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, provider = { type = "string", enum = ["bluesky"] }, external_uri = { type = "string", pattern = "^at://", maxLength = 2000 }, cid = { type = "string", minLength = 1, maxLength = 200 }, author_handle = { type = "string", minLength = 3, maxLength = 253 }, text_excerpt = { type = "string", minLength = 1, maxLength = 1000 }, language = { type = "string", minLength = 2, maxLength = 35 }, reply_to_uri = { type = "string", pattern = "^at://", maxLength = 2000 }, quote_uri = { type = "string", pattern = "^at://", maxLength = 2000 }, state = { type = "string", enum = ["current", "edited", "deleted", "moderated"] }, engagement = { type = "object" }, moderation_labels = { type = "array" }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, fetched_at = { type = "string", format = "date-time" }, content_hash = { type = "string", pattern = "^[0-9a-f]{64}$" } }, required = ["topic_id", "provider", "external_uri", "cid", "author_handle", "text_excerpt", "state", "engagement", "source_id", "source_revision", "fetched_at", "content_hash"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.jobs]]
+id = "social-watchlist-scouting"
+role = "source_scout"
+triggers = ["on_demand"]
+gadget_allowlist = ["social.watchlist-list"]
+budget = { max_gadget_calls = 4, max_wall_seconds = 120 }
+
+[[capabilities.jobs]]
+id = "social-conversation-research"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = ["social.watchlist-list", "social.post-list", "social.post-upsert", "social.conversation-list", "social.conversation-upsert"]
+budget = { max_gadget_calls = 32, max_wall_seconds = 300 }
+
+[[capabilities.jobs]]
+id = "social-signal-distillation"
+role = "gardener"
+triggers = ["on_demand"]
+gadget_allowlist = ["social.post-list", "social.conversation-list", "social.signal-list", "social.signal-upsert", "social.briefing-list", "social.briefing-upsert", "social.signal-graph"]
+budget = { max_gadget_calls = 32, max_wall_seconds = 300 }
+
+[[capabilities.jobs]]
+id = "social-response-assistance"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = ["social.briefing-list", "social.response-draft-list", "social.response-draft-upsert", "social.response-draft-handoff"]
+budget = { max_gadget_calls = 12, max_wall_seconds = 180 }
+
+[[capabilities.collection_profiles]]
+id = "social-bluesky-watchlist"
+label = "Bluesky watchlist"
+description = "Collect bounded public Bluesky search results through Core without granting Bundle network access"
+connector = "core-social-api"
+source_classes = ["social"]
+allowlisted_domains = ["api.bsky.app"]
+extractor_hints = ["post", "thread", "moderation", "revision"]
+freshness_seconds = 900
+schedule = "*/15 * * * *"
+budget = { max_sources = 5, max_bytes = 8388608, max_wall_seconds = 180 }
+recipe_asset = "social-source-collection"
+
+[[capabilities.collection_profiles.query_providers]]
+id = "bluesky-search"
+label = "Bluesky keyword"
+description = "Official public AppView search for a bounded keyword or phrase"
+source_class = "social"
+query_label = "Keyword or phrase"
+query_placeholder = "Linux server monitoring"
+scope_label = "Sort"
+scope_placeholder = "latest"
+default_scope = "latest"
+supports_tags = true
+supports_language = true
+requires_configuration = false
+max_window_days = 90
+
+[[capabilities.collection_profiles.query_providers]]
+id = "bluesky-author"
+label = "Bluesky account"
+description = "Official public AppView search restricted to one handle or DID"
+source_class = "social"
+query_label = "Handle or DID"
+query_placeholder = "example.bsky.social"
+scope_label = "Sort"
+scope_placeholder = "latest"
+default_scope = "latest"
+supports_tags = true
+supports_language = true
+requires_configuration = false
+max_window_days = 90
+
+[[capabilities.agent_roles]]
+id = "social-watchlist-scout"
+label = "Social watchlist scout"
+description = "Finds bounded public Bluesky coverage for Manager-defined watchlists"
+core_role = "source_scout"
+job = "social-watchlist-scouting"
+recipe_asset = "social-source-collection"
+collection_profile = "social-bluesky-watchlist"
+prompt_contract_revision = "social-watchlist-scout-v1"
+
+[[capabilities.agent_roles]]
+id = "social-researcher"
+label = "Social conversation researcher"
+description = "Separates public conversation observations, corrections, reach, and uncertainty"
+core_role = "researcher"
+job = "social-conversation-research"
+recipe_asset = "social-conversation-research"
+collection_profile = "social-bluesky-watchlist"
+followup_role = "social-distiller"
+prompt_contract_revision = "social-conversation-research-v2"
+
+[[capabilities.agent_roles]]
+id = "social-distiller"
+label = "Social signal distiller"
+description = "Connects cited public posts into signals, briefings, and reviewed Knowledge proposals"
+core_role = "gardener"
+job = "social-signal-distillation"
+recipe_asset = "social-signal-distillation"
+collection_profile = "social-bluesky-watchlist"
+prompt_contract_revision = "social-signal-distillation-v3"
+
+[[capabilities.agent_roles]]
+id = "social-response-assistant"
+label = "Social response assistant"
+description = "Prepares cited human-review drafts without social publication authority"
+core_role = "researcher"
+job = "social-response-assistance"
+recipe_asset = "social-response-assistance"
+prompt_contract_revision = "social-response-assistance-v2"
+
+[[capabilities.workspaces]]
+id = "watchlists"
+label = "Social watchlists"
+renderer = "table"
+data_capability = "social.watchlist-list"
+collection_profile = "social-bluesky-watchlist"
+action_gadgets = ["social.watchlist-collect", "social.source-purge"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "conversations"
+label = "Social conversations"
+renderer = "cards"
+data_capability = "social.conversation-list"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "signals"
+label = "Social signals"
+renderer = "cards"
+data_capability = "social.signal-list"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "briefings"
+label = "Social briefings"
+renderer = "cards"
+data_capability = "social.briefing-list"
+action_gadgets = ["social.subject-context"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "response-drafts"
+label = "Response drafts"
+renderer = "cards"
+data_capability = "social.response-draft-list"
+action_gadgets = ["social.response-draft-handoff"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "social-graph"
+label = "Social graph"
+renderer = "graph"
+data_capability = "social.signal-graph"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.gadgets]]
+name = "social.briefing-list"
+description = "List human-readable Social briefings"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.briefing-upsert"
+description = "Create or revise a cited Social briefing"
+tier = "write"
+input_schema = { type = "object", properties = { briefing_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, topic_id = { type = "string", format = "uuid" }, title = { type = "string", minLength = 1, maxLength = 300 }, key_changes = { type = "string", minLength = 1, maxLength = 6000 }, why_it_matters = { type = "string", minLength = 1, maxLength = 4000 }, open_questions = { type = "string", maxLength = 4000 }, status = { type = "string", enum = ["current", "aging", "stale", "conflicted"] }, window_start = { type = "string", format = "date-time" }, window_end = { type = "string", format = "date-time" }, citations = { type = "array", minItems = 1, items = { type = "object", properties = { signal_id = { type = "string", format = "uuid", description = "Internal signal_id returned by social.signal-upsert" }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, stance = { type = "string", enum = ["supports", "contradicts", "context"] }, title = { type = "string", minLength = 1, maxLength = 300 }, locator = { type = "string", minLength = 1, maxLength = 2000 } }, required = ["signal_id", "source_id", "source_revision", "stance", "title", "locator"], additionalProperties = false } } }, required = ["topic_id", "title", "key_changes", "why_it_matters", "open_questions", "status", "window_start", "window_end", "citations"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "social.response-draft-list"
+description = "List cited response drafts without granting publication authority"
+tier = "read"
+input_schema = { type = "object", properties = { briefing_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.response-draft-upsert"
+description = "Create or revise a cited provider-compatible response draft"
+tier = "write"
+input_schema = { type = "object", properties = { draft_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, briefing_id = { type = "string", format = "uuid" }, provider = { type = "string", enum = ["bluesky"] }, target_account = { type = "string", minLength = 3, maxLength = 253 }, audience = { type = "string", minLength = 1, maxLength = 500 }, objective = { type = "string", minLength = 1, maxLength = 1000 }, body = { type = "string", minLength = 1, maxLength = 300 }, impact_preview = { type = "string", minLength = 1, maxLength = 2000 }, risk_notes = { type = "string", minLength = 1, maxLength = 2000 }, status = { type = "string", enum = ["draft", "reviewed", "handed_off", "withdrawn"] }, citations = { type = "array" } }, required = ["briefing_id", "provider", "target_account", "audience", "objective", "body", "impact_preview", "risk_notes", "status", "citations"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "social.response-draft-handoff"
+description = "Read an exact draft revision for human review with publishing explicitly disabled"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { draft_id = { type = "string", format = "uuid", title = "Response draft" }, revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["draft_id", "revision"], additionalProperties = false }
+output_schema = { type = "object", properties = { draft_id = { type = "string" }, draft_revision = { type = "integer" }, body = { type = "string" }, publish_allowed = { type = "boolean" } }, required = ["draft_id", "draft_revision", "body", "publish_allowed"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "social.source-purge"
+description = "Remove Source-derived Social records before the matching Core Source hard purge"
+tier = "destructive"
+input_schema = { type = "object", properties = { source_id = { type = "string", format = "uuid", title = "Purgeable Source" } }, required = ["source_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { source_id = { type = "string" }, posts_deleted = { type = "integer" }, core_source_purge_required = { type = "boolean" } }, required = ["source_id", "posts_deleted", "core_source_purge_required"] }
+[capabilities.gadgets.effect]
+risk = "high"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "social.signal-graph"
+description = "View public posts, conversations, signals, briefings, and drafts as one evidence graph"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { nodes = { type = "array" }, edges = { type = "array" } }, required = ["nodes", "edges"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.subject-context"
+description = "Build bounded Penny context for one cited Social briefing"
+tier = "read"
+input_schema = { type = "object", properties = { briefing_id = { type = "string", format = "uuid" } }, required = ["briefing_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.dashboard-summary"
+description = "Summarize current conversations, evidence state, and response drafts"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.conversation-list"
+description = "List public conversations grouped for human review"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.conversation-upsert"
+description = "Create or revise a cited public conversation summary"
+tier = "write"
+input_schema = { type = "object", properties = { conversation_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, topic_id = { type = "string", format = "uuid" }, title = { type = "string", minLength = 1, maxLength = 300 }, summary = { type = "string", minLength = 1, maxLength = 4000 }, origin_uri = { type = "string", pattern = "^at://", maxLength = 2000 }, post_count = { type = "integer", minimum = 1, maximum = 10000 }, status = { type = "string", enum = ["current", "aging", "stale", "conflicted"] }, first_seen_at = { type = "string", format = "date-time" }, last_seen_at = { type = "string", format = "date-time" }, source_ids = { type = "array" } }, required = ["topic_id", "title", "summary", "origin_uri", "post_count", "status", "first_seen_at", "last_seen_at", "source_ids"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "social.signal-list"
+description = "List observed, corroborated, contradicted, and speculative social signals"
+tier = "read"
+input_schema = { type = "object", properties = { conversation_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "social.signal-upsert"
+description = "Create or revise a bounded evidence-linked social signal"
+tier = "write"
+input_schema = { type = "object", properties = { signal_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, conversation_id = { type = "string", format = "uuid" }, kind = { type = "string", enum = ["claim", "trend", "audience", "question", "correction"] }, statement = { type = "string", minLength = 1, maxLength = 2000 }, confidence_basis = { type = "string", minLength = 1, maxLength = 2000 }, status = { type = "string", enum = ["observed", "speculative", "corroborated", "contradicted"] }, supporting_posts = { type = "array", items = { type = "string", format = "uuid", description = "Internal post_id returned by social.post-list, not an at:// URI" } }, contradicting_posts = { type = "array", items = { type = "string", format = "uuid", description = "Internal post_id returned by social.post-list, not an at:// URI" } }, window_start = { type = "string", format = "date-time" }, window_end = { type = "string", format = "date-time" } }, required = ["conversation_id", "kind", "statement", "confidence_basis", "status", "supporting_posts", "contradicting_posts", "window_start", "window_end"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.ui_contributions]]
+id = "social-watchlists-main"
+kind = "workspace"
+label = "Social watchlists"
+placement = "main"
+order_hint = 210
+icon = "search"
+required_scopes = ["management"]
+empty_state = "No Social watchlists yet"
+error_state = "Social watchlists are unavailable"
+workspace = "watchlists"
+
+[[capabilities.ui_contributions]]
+id = "social-watchlists-navigation"
+kind = "navigation"
+label = "Social watchlists"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 210
+icon = "search"
+required_scopes = ["management"]
+empty_state = "Social Media Intelligence is not enabled"
+error_state = "Social watchlist navigation is unavailable"
+workspace = "watchlists"
+
+[[capabilities.ui_contributions]]
+id = "social-conversations-main"
+kind = "workspace"
+label = "Social conversations"
+placement = "main"
+order_hint = 220
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No cited Social conversations yet"
+error_state = "Social conversations are unavailable"
+workspace = "conversations"
+
+[[capabilities.ui_contributions]]
+id = "social-conversations-navigation"
+kind = "navigation"
+label = "Social conversations"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 220
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No cited Social conversations yet"
+error_state = "Social conversation navigation is unavailable"
+workspace = "conversations"
+
+[[capabilities.ui_contributions]]
+id = "social-signals-main"
+kind = "workspace"
+label = "Social signals"
+placement = "main"
+order_hint = 230
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "No cited Social signals yet"
+error_state = "Social signals are unavailable"
+workspace = "signals"
+
+[[capabilities.ui_contributions]]
+id = "social-signals-navigation"
+kind = "navigation"
+label = "Social signals"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 230
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "No cited Social signals yet"
+error_state = "Social signal navigation is unavailable"
+workspace = "signals"
+
+[[capabilities.ui_contributions]]
+id = "social-briefings-main"
+kind = "workspace"
+label = "Social briefings"
+placement = "main"
+order_hint = 240
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No Social briefings yet"
+error_state = "Social briefings are unavailable"
+workspace = "briefings"
+
+[[capabilities.ui_contributions]]
+id = "social-briefings-navigation"
+kind = "navigation"
+label = "Social briefings"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 240
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No Social briefings yet"
+error_state = "Social briefing navigation is unavailable"
+workspace = "briefings"
+
+[[capabilities.ui_contributions]]
+id = "social-drafts-main"
+kind = "workspace"
+label = "Response drafts"
+placement = "main"
+order_hint = 250
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No response drafts yet"
+error_state = "Social response drafts are unavailable"
+workspace = "response-drafts"
+
+[[capabilities.ui_contributions]]
+id = "social-drafts-navigation"
+kind = "navigation"
+label = "Response drafts"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 250
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No response drafts yet"
+error_state = "Response draft navigation is unavailable"
+workspace = "response-drafts"
+
+[[capabilities.ui_contributions]]
+id = "social-graph-main"
+kind = "workspace"
+label = "Social graph"
+placement = "main"
+order_hint = 260
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No connected Social evidence yet"
+error_state = "Social graph is unavailable"
+workspace = "social-graph"
+
+[[capabilities.ui_contributions]]
+id = "social-graph-navigation"
+kind = "navigation"
+label = "Social graph"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 260
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No connected Social evidence yet"
+error_state = "Social graph navigation is unavailable"
+workspace = "social-graph"
+
+[[capabilities.ui_contributions]]
+id = "social-dashboard"
+kind = "dashboard_widget"
+label = "Social intelligence"
+placement = "dashboard"
+order_hint = 180
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No Social intelligence yet"
+error_state = "Social intelligence summary is unavailable"
+gadget = "social.dashboard-summary"
+renderer = "dashboard"
+refresh_seconds = 60
+
+[[capabilities.ui_contributions]]
+id = "social-subject"
+kind = "subject_context"
+label = "Social briefing"
+placement = "penny_context"
+order_hint = 180
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "Social briefing context is unavailable"
+error_state = "Social briefing context could not be created"
+gadget = "social.subject-context"
+
+[[capabilities.seed_assets]]
+id = "social-source-collection"
+path = "recipes/source-collection.json"
+media_type = "application/json"
+sha256 = "b8648fd17123fd5a1cb9ff716428dfe8d629b326b7783151c13d0442100b0375"
+
+[[capabilities.seed_assets]]
+id = "social-conversation-research"
+path = "recipes/conversation-research.json"
+media_type = "application/json"
+sha256 = "87cac0b2401022fb7924bd97ef6acea53ac2c8c93579f436fa3633e1440783f6"
+
+[[capabilities.seed_assets]]
+id = "social-signal-distillation"
+path = "recipes/signal-distillation.json"
+media_type = "application/json"
+sha256 = "c63927805a04e39e2fe30f06be117bd4aa77e752b2a18470bdb338b284635a98"
+
+[[capabilities.seed_assets]]
+id = "social-response-assistance"
+path = "recipes/response-assistance.json"
+media_type = "application/json"
+sha256 = "7974ed1d0c39c3c51f1a6caa05329ca248448e9b14f7289af7d1dc1e50ccf824"
+
+[[capabilities.migrations]]
+id = "social-media-base"
+revision = 20260714000001
+kind = "schema"
+path = "migrations/20260714000001_social_media_base.sql"
+sha256 = "14b4f7d2c9528c0fcd7e8cac47c142213579d78c813b4c0ce375d69c1d0601ca"

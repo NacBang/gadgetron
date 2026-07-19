@@ -73,6 +73,7 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
         descriptor_catalog: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
             DescriptorCatalog::seed_p2b().into_snapshot(),
         )),
+        dynamic_workbench: None,
     });
     AppState {
         key_validator: Arc::new(MockKeyValidator::new(scopes)),
@@ -87,14 +88,18 @@ fn make_state(scopes: Vec<Scope>) -> AppState {
             projection,
             actions: None,
             approval_store: None,
+            policy_evaluator: None,
+            gadget_catalog: None,
             descriptor_catalog: None,
             catalog_path: None,
             bundles_dir: None,
             bundle_signing: Default::default(),
+            runtime_manager: None,
             gadget_modes: None,
             gadget_mode_reconfigurer: None,
             agent_brain: None,
             agent_config_base: None,
+            vault_layout: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,

@@ -107,6 +107,10 @@ pub fn parse_conversation_id(raw: &str) -> (&str, &str) {
 /// Per-conversation bookkeeping. Cloning is `Arc`-cheap.
 #[derive(Debug)]
 pub struct SessionEntry {
+    /// Agent runtime chosen when this in-memory conversation entry was first
+    /// created. It never changes; cross-runtime continuation must use a new
+    /// conversation id.
+    pub backend: AgentBackend,
     /// Gadgetron-local UUID used by backends that accept a caller-supplied
     /// native session id. Today that is Claude Code's `--session-id` /
     /// `--resume` value, and it also feeds the legacy audit field name.
@@ -126,9 +130,10 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
-    fn with_uuid(uuid: Uuid) -> Self {
+    fn with_uuid(uuid: Uuid, backend: AgentBackend) -> Self {
         let now = Instant::now();
         Self {
+            backend,
             claude_session_uuid: uuid,
             backend_session_ids: std::sync::Mutex::new(HashMap::new()),
             created_at: now,
@@ -143,7 +148,7 @@ impl SessionEntry {
         backend: AgentBackend,
         backend_session_id: Option<String>,
     ) -> Self {
-        let entry = Self::with_uuid(uuid);
+        let entry = Self::with_uuid(uuid, backend);
         if let Some(session_id) = backend_session_id {
             entry.set_backend_session_id(backend, session_id);
         }
@@ -197,6 +202,12 @@ pub struct SessionStore {
     entries: DashMap<ConversationId, Arc<SessionEntry>>,
     ttl: Duration,
     max_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBackendMismatch {
+    pub pinned: AgentBackend,
+    pub requested: AgentBackend,
 }
 
 impl SessionStore {
@@ -284,8 +295,10 @@ impl SessionStore {
             .value()
             .clone();
 
-        if let Some(session_id) = backend_session_id.clone() {
-            entry.set_backend_session_id(backend, session_id);
+        if entry.backend == backend {
+            if let Some(session_id) = backend_session_id.clone() {
+                entry.set_backend_session_id(backend, session_id);
+            }
         }
 
         if inserted && self.entries.len() > self.max_entries {
@@ -294,6 +307,27 @@ impl SessionStore {
 
         let first_turn = inserted && backend_session_id.is_none();
         (entry, first_turn)
+    }
+
+    /// Runtime-pinned variant used by the production session driver.
+    /// Atomic insertion still happens in `get_or_create_with_backend_session`;
+    /// checking the immutable entry field afterwards handles the race where
+    /// two different runtimes attempt the very first turn concurrently.
+    pub fn get_or_create_pinned(
+        &self,
+        id: ConversationId,
+        backend: AgentBackend,
+        backend_session_id: Option<String>,
+    ) -> Result<(Arc<SessionEntry>, bool), SessionBackendMismatch> {
+        let (entry, first_turn) =
+            self.get_or_create_with_backend_session(id, backend, backend_session_id);
+        if entry.backend != backend {
+            return Err(SessionBackendMismatch {
+                pinned: entry.backend,
+                requested: backend,
+            });
+        }
+        Ok((entry, first_turn))
     }
 
     /// Bump `last_used` + `turn_count` for the entry keyed by `id`.
@@ -430,6 +464,22 @@ mod tests {
 
         assert!(!first);
         assert_eq!(entry.claude_session_uuid, session_uuid);
+    }
+
+    #[test]
+    fn pinned_conversation_rejects_a_different_agent_runtime() {
+        let store = SessionStore::new(60, 10);
+        let (_, first) = store
+            .get_or_create_pinned("c1".to_string(), AgentBackend::ClaudeCode, None)
+            .unwrap();
+        assert!(first);
+
+        let mismatch = store
+            .get_or_create_pinned("c1".to_string(), AgentBackend::CodexExec, None)
+            .expect_err("one conversation cannot switch runtimes");
+        assert_eq!(mismatch.pinned, AgentBackend::ClaudeCode);
+        assert_eq!(mismatch.requested, AgentBackend::CodexExec);
+        assert!(store.get("c1").unwrap().codex_session_id().is_none());
     }
 
     #[test]

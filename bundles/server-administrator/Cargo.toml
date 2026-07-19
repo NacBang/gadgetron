@@ -1,0 +1,28 @@
+[package]
+name = "gadgetron-bundle-server-administrator"
+version = "0.4.27"
+edition = "2021"
+license-file = "../../LICENSE"
+repository = "https://github.com/NacBang/gadgetron"
+rust-version = "1.80"
+description = "External Server Administrator Bundle migration runtime"
+
+[[bin]]
+name = "server-administrator"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true }
+gadgetron-bundle-sdk = { path = "../../crates/gadgetron-bundle-sdk" }
+gadgetron-bundle-runtime = { path = "../../crates/gadgetron-bundle-runtime" }
+hex = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt", "sync", "time"] }
+uuid = { workspace = true, features = ["serde", "v5"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }

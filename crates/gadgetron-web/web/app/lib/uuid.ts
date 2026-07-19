@@ -3,7 +3,7 @@
 // addresses like `10.100.1.5:18080`, where `crypto.randomUUID` is
 // undefined — calling it crashes with `TypeError: crypto.randomUUID is
 // not a function`. Observed on plain-HTTP LAN deployments serving
-// `/web/wiki`.
+// `/web/knowledge`.
 //
 // Fall back to a v4-shaped string assembled from `Math.random()`. Not
 // cryptographically strong — we only need uniqueness within a single

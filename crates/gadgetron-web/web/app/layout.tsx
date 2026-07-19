@@ -27,7 +27,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="ko" className="dark font-sans">
+    <html lang="en" className="dark font-sans">
       <head>
         <meta name="gadgetron-api-base" content="/v1" />
       </head>

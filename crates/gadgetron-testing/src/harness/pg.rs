@@ -25,6 +25,7 @@ pub struct PgHarness {
 impl PgHarness {
     fn admin_url() -> String {
         std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("GADGETRON_DATABASE_URL"))
             .unwrap_or_else(|_| "postgresql://localhost:5432/postgres".to_string())
     }
 

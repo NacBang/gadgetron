@@ -1,0 +1,15 @@
+{
+  "revision": "social-signal-distillation-v3",
+  "objective": "Persist cited social signals and one human-readable briefing, then propose one reviewed Knowledge note.",
+  "inputs": ["core_collection_binding", "posts", "conversations", "signals", "contradictions"],
+  "domain_outputs": ["signals", "briefing"],
+  "core_review_output": ["create_note_candidate", "typed_cross_bundle_relations", "citations"],
+  "rules": [
+    "List the bound watchlist's conversations and existing signals before writing.",
+    "A signal states its observation window and confidence basis; popularity alone cannot make it corroborated.",
+    "Persist supporting and contradicting post ids separately using only the internal UUID post_id values returned by social.post-list; never pass an at:// URI as a post id.",
+    "Every briefing citation must include the exact internal signal_id returned by social.signal-upsert together with its pinned Source id and revision so the graph can connect the briefing to its evidence path.",
+    "Complete social.signal-upsert and social.briefing-upsert before returning the common Gardener create_note proposal.",
+    "Cross-Bundle relevance is a reviewed Shared Knowledge Mesh proposal; never write another Bundle's table."
+  ]
+}

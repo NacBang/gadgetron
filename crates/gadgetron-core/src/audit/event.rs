@@ -34,8 +34,8 @@ use std::sync::Arc;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GadgetAuditEvent {
-    /// One Gadget invocation finished (success OR error). Emitted from
-    /// the Penny stream on a `ToolUse` / `ToolResult` boundary.
+    /// One Gadget invocation finished (success OR error). Emitted only
+    /// after a runtime result is correlated with its tool request.
     GadgetCallCompleted {
         /// The Gadget name as seen by the `GadgetRegistry` — e.g.
         /// `"wiki.write"`, `"web.search"`.
@@ -56,10 +56,9 @@ pub enum GadgetAuditEvent {
         category: String,
         /// Success vs Error outcome.
         outcome: GadgetCallOutcome,
-        /// Wall-clock milliseconds between the `ToolUse` event and
-        /// its matching `ToolResult` event. Currently a best-effort
-        /// number — precise `id`-based correlation will land with the
-        /// fake-claude infrastructure.
+        /// Wall-clock milliseconds between the runtime's tool request and
+        /// matching result. Backends without separate boundary timestamps
+        /// may report zero.
         elapsed_ms: u64,
         /// Gadgetron-side conversation identifier, populated when
         /// `ChatRequest.conversation_id.is_some()`.

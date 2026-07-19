@@ -339,6 +339,7 @@ mod tests {
     fn test_config(root: PathBuf) -> KnowledgeConfig {
         KnowledgeConfig {
             wiki_path: root,
+            vault_path: None,
             wiki_autocommit: true,
             wiki_git_author: Some("Test <test@example.local>".to_string()),
             wiki_max_page_bytes: 1024 * 1024,

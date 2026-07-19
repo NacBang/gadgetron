@@ -1,11 +1,10 @@
-//! Bundle size budget: the embedded `WEB_DIST` total must stay under 4 MB.
+//! Bundle size budget: the embedded `WEB_DIST` total must stay under 8 MiB.
 //!
 //! When `WEB_DIST` contains only the fallback `index.html` it is well
-//! under budget. The budget gates regression — if shiki grammar set
-//! changes or Next.js bundle grows past 4 MB total, this test fails
-//! with the exact byte count.
+//! under budget. The normal budget includes the offline Korean variable-font
+//! subsets; font or Next.js growth beyond this ceiling requires explicit review.
 
-const BUDGET_BYTES: u64 = 4 * 1024 * 1024; // 4 MB
+const BUDGET_BYTES: u64 = 8 * 1024 * 1024;
 
 #[test]
 fn web_dist_total_bytes_under_budget() {
@@ -23,7 +22,7 @@ fn web_dist_total_bytes_under_budget() {
     assert!(
         total <= BUDGET_BYTES,
         "WEB_DIST total is {total} bytes, exceeds {BUDGET_BYTES} budget. \
-         Did shiki grammar set change?"
+         Did the self-hosted fonts or Next.js chunks grow?"
     );
 }
 

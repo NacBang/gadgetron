@@ -13,7 +13,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -36,23 +35,37 @@ import { SlashAutocomplete } from "../components/slash-autocomplete";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
+import { ChatAttachmentTray } from "../components/chat/chat-attachment-tray";
 import { authHeaders, useAuth } from "../lib/auth-context";
 import { WikiPagesProvider } from "../lib/wiki-link";
-import { MonitoringGrid } from "../components/copilot/monitoring-grid";
-import { ResizeHandle } from "../components/shell/resize-handle";
-import {
-  clampCopilotChatRatio,
-  useWorkbenchPrefs,
-} from "../components/shell/use-workbench-prefs";
 import {
   ACTIVE_CONVERSATION_EVENT,
   getActiveConversationId,
+  setActiveConversationId,
 } from "../lib/conversation-id";
 import {
   useWorkbenchSubject,
   withSubjectContext,
 } from "../lib/workbench-subject-context";
 import { getApiBase } from "../lib/workbench-client";
+import { toast } from "sonner";
+import { useConfirm } from "../components/ui/confirm";
+import { safeRandomUUID } from "../lib/uuid";
+import { cancelActiveConversationJob } from "../lib/chat-resume";
+import {
+  AGENT_MODEL_OPTIONS,
+  agentEffortOptions,
+  cacheConversationAgentProfile,
+  getConversationAgentProfile,
+  listAvailableLlmEndpointModels,
+  modelOptionKey,
+  normalizeAgentEffort,
+  updateConversationAgentProfile,
+  type AgentEffort,
+  type AvailableLlmEndpointModel,
+  type ConversationAgentProfile,
+} from "../lib/agent-profile";
+import { useI18n } from "../lib/i18n";
 
 // ---------------------------------------------------------------------------
 // /web — Chat page. Runs inside `(shell)/layout.tsx`, which owns the
@@ -90,7 +103,7 @@ interface PennyBrainSettings {
   agent?: "claude_code" | "codex_exec";
   model_source?: "default" | "local";
   local_base_url?: string;
-  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  effort?: "auto" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 }
 
 function endpointHost(baseUrl: string | undefined): string {
@@ -140,22 +153,27 @@ function pennyBackendSummary(settings: PennyBrainSettings): string {
 }
 
 function usePennyBackendSummary(enabled: boolean): string | null {
-  const { apiKey, identity } = useAuth();
+  const { apiKey } = useAuth();
   const [summary, setSummary] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!enabled || (!apiKey && identity?.role !== "admin")) return;
+    if (!enabled) return;
     let cancelled = false;
     const load = async () => {
+      const conversationId = getActiveConversationId();
+      if (!conversationId) return;
       try {
-        const res = await fetch(`${getApiBase()}/workbench/admin/agent/brain`, {
+        const res = await fetch(
+          `${getApiBase()}/workbench/conversations/${encodeURIComponent(conversationId)}/agent-profile`,
+          {
           credentials: "include",
           headers: authHeaders(apiKey),
           cache: "no-store",
-        });
+          },
+        );
         if (!res.ok || cancelled) return;
-        const body = (await res.json()) as PennyBrainSettings;
-        if (!cancelled) setSummary(pennyBackendSummary(body));
+        const body = (await res.json()) as { profile: PennyBrainSettings };
+        if (!cancelled) setSummary(pennyBackendSummary(body.profile));
       } catch {
         // Runtime details are supplemental; keep the running badge visible.
       }
@@ -164,12 +182,14 @@ function usePennyBackendSummary(enabled: boolean): string | null {
     return () => {
       cancelled = true;
     };
-  }, [apiKey, enabled, identity?.role]);
+  }, [apiKey, enabled]);
 
   return summary;
 }
 
 function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
+  const { labels } = useI18n();
+  const copy = labels.chat;
   return (
     <div className="space-y-2">
       {blocks.map((b, i) => {
@@ -190,7 +210,7 @@ function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
               className="rounded border border-zinc-800 bg-zinc-950/50 px-2 py-1 text-[12px] text-zinc-400"
             >
               <summary className="cursor-pointer select-none text-[11px] text-zinc-500">
-                🧠 reasoning
+                🧠 {copy.reasoning.history}
               </summary>
               <div className="mt-2 whitespace-pre-wrap font-mono text-[11px]">
                 {b.text}
@@ -202,9 +222,9 @@ function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
           return (
             <details
               key={i}
-              className="rounded border border-blue-900/50 bg-blue-950/20 px-2 py-1 text-[12px] text-blue-200"
+              className="rounded border border-[var(--line)] bg-[var(--surface-2)] px-2 py-1 text-[12px] text-[var(--ink-2)]"
             >
-              <summary className="cursor-pointer select-none text-[11px] text-blue-300">
+              <summary className="cursor-pointer select-none text-[11px] text-[var(--copper-hi)]">
                 🔧 {b.name}
               </summary>
               <pre className="mt-2 overflow-x-auto rounded bg-zinc-950 p-2 text-[11px] text-zinc-300">
@@ -221,7 +241,7 @@ function PastBlocks({ blocks }: { blocks: HistoryBlock[] }) {
               className="rounded border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-[12px] text-zinc-300"
             >
               <summary className="cursor-pointer select-none text-[11px] text-zinc-500">
-                📦 tool result {shortId && `· ${shortId}`}
+                📦 {copy.tool.historyResult} {shortId && `· ${shortId}`}
               </summary>
               <pre className="mt-2 max-h-64 overflow-auto rounded bg-zinc-950 p-2 text-[11px] text-zinc-300">
                 {b.content}
@@ -356,14 +376,16 @@ function coalesce(past: HistoryMsg[]): RenderGroup[] {
 function PastMessages({ history }: { history: ActiveHistoryState }) {
   const { past, err } = history;
   const { identity } = useAuth();
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   const groups = useMemo(() => coalesce(past), [past]);
   if (groups.length === 0) return null;
   const userLabel =
-    identity?.display_name || identity?.email?.split("@")[0] || "You";
+    identity?.display_name || identity?.email?.split("@")[0] || copy.you;
   return (
     <div className="mb-2 space-y-3" data-testid="past-messages">
       <div className="text-center text-[10px] uppercase tracking-wider text-zinc-700">
-        Past conversation
+        {copy.pastConversation}
       </div>
       {err && (
         <div className="rounded border border-red-900/40 bg-red-950/20 px-3 py-1 text-[11px] text-red-400">
@@ -443,21 +465,23 @@ function PastMessages({ history }: { history: ActiveHistoryState }) {
  * immediately read "here's when that conversation happened".
  */
 function HistoryDivider({ lastTs }: { lastTs: string | null }) {
+  const { locale } = useI18n();
   const label = useMemo(() => {
     if (!lastTs) return null;
     const d = new Date(lastTs);
     if (Number.isNaN(d.getTime())) return null;
-    const date = d.toLocaleDateString(undefined, {
+    const browserLocale = locale === "ko" ? "ko-KR" : "en-US";
+    const date = d.toLocaleDateString(browserLocale, {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
     });
-    const time = d.toLocaleTimeString(undefined, {
+    const time = d.toLocaleTimeString(browserLocale, {
       hour: "2-digit",
       minute: "2-digit",
     });
     return `${date} ${time}`;
-  }, [lastTs]);
+  }, [lastTs, locale]);
   if (!label) return null;
   return (
     <div
@@ -472,6 +496,8 @@ function HistoryDivider({ lastTs }: { lastTs: string | null }) {
 }
 
 function ActiveConversationBanner() {
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   // Shows the current conversation's title above the thread so
   // switching chats feels tangible. When the row is brand-new (title
   // still "New chat") we suppress the banner so the first turn isn't
@@ -532,7 +558,7 @@ function ActiveConversationBanner() {
       data-testid="active-conversation-banner"
     >
       <div className="mx-auto flex w-full max-w-[min(1400px,92vw)] items-center gap-2 text-[11px]">
-        <span className="text-zinc-500">Conversation:</span>
+        <span className="text-zinc-500">{copy.conversation}</span>
         <span className="truncate text-zinc-200" title={title}>
           {title}
         </span>
@@ -543,14 +569,16 @@ function ActiveConversationBanner() {
 
 function ActiveSubjectBanner() {
   const { subject, clearActiveSubject } = useWorkbenchSubject();
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   if (!subject) return null;
   return (
     <div
-      className="shrink-0 border-b border-zinc-800 bg-blue-950/20 px-4 py-2"
+      className="shrink-0 border-b border-[var(--line)] bg-[var(--surface)] px-4 py-2"
       data-testid="active-subject-banner"
     >
       <div className="mx-auto flex w-full max-w-[min(1400px,92vw)] items-center gap-2 text-[11px]">
-        <span className="shrink-0 text-blue-300">Talking about</span>
+        <span className="shrink-0 text-[var(--copper-hi)]">{copy.talkingAbout}</span>
         <span className="min-w-0 flex-1 truncate text-zinc-100" title={subject.title}>
           {subject.title}
           {subject.subtitle && (
@@ -560,9 +588,9 @@ function ActiveSubjectBanner() {
         {subject.href && (
           <a
             href={subject.href}
-            className="shrink-0 rounded border border-blue-800/60 px-1.5 py-0.5 text-[10px] text-blue-200 hover:border-blue-600 hover:text-blue-100"
+            className="shrink-0 rounded border border-[var(--copper)] px-1.5 py-0.5 text-[10px] text-[var(--copper-hi)] hover:text-[var(--ink)]"
           >
-            View source
+            {copy.viewSource}
           </a>
         )}
         {/* Dismiss = forget the pinned subject for this conversation.
@@ -573,8 +601,8 @@ function ActiveSubjectBanner() {
           type="button"
           onClick={clearActiveSubject}
           data-testid="active-subject-clear"
-          title="Dismiss subject — the conversation transcript is kept"
-          aria-label="Dismiss subject"
+          title={copy.dismissSubjectTitle}
+          aria-label={copy.dismissSubjectLabel}
           className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
         >
           ✕
@@ -587,68 +615,32 @@ function ActiveSubjectBanner() {
 export default function Home() {
   const [slashHelpOpen, setSlashHelpOpen] = useState(false);
   const history = useActiveHistory();
-  // Monitoring split — the merged successor of the /web/copilot route
-  // (ISSUE 47): same chat thread, optional live MonitoringGrid on the
-  // right, toggled from the chat header and persisted in prefs.
-  const [prefs, updatePrefs] = useWorkbenchPrefs();
-  const monitoringOpen = prefs.chatMonitoringOpen;
-  const ratio = clampCopilotChatRatio(prefs.copilotChatRatio);
-  const splitRef = useRef<HTMLDivElement | null>(null);
-  const onResizeSplit = useCallback(
-    (deltaPx: number) => {
-      const containerWidth = splitRef.current?.clientWidth ?? 1;
-      if (containerWidth <= 0) return;
-      updatePrefs({
-        copilotChatRatio: clampCopilotChatRatio(
-          ratio + deltaPx / containerWidth,
-        ),
-      });
-    },
-    [ratio, updatePrefs],
-  );
 
   return (
-    // WikiPagesProvider feeds MarkdownText so wiki citations in Penny's
+    // WikiPagesProvider feeds MarkdownText so knowledge citations in Penny's
     // answers (footnote definitions naming a page in inline code)
-    // linkify to /web/wiki?page=… (ISSUE 44).
+    // linkify to /web/knowledge?q=… (ISSUE 44).
     <WikiPagesProvider>
       <div
-        ref={splitRef}
         className="flex flex-1 overflow-hidden"
         data-testid="chat-split"
       >
         <div
-          // `.copilot-pane` activates the globals.css override that
-          // collapses the thread's max-width to the half-pane width.
-          className={`flex min-w-0 flex-col overflow-hidden ${
-            monitoringOpen ? "copilot-pane" : "flex-1"
-          }`}
-          style={monitoringOpen ? { width: `${ratio * 100}%` } : undefined}
+          className="flex min-w-0 flex-1 flex-col overflow-hidden"
           data-testid="chat-pane"
         >
           <SlashHelpDialog
             open={slashHelpOpen}
             onOpenChange={setSlashHelpOpen}
           />
-          <ChatHeader
-            monitoringOpen={monitoringOpen}
-            onToggleMonitoring={() =>
-              updatePrefs({ chatMonitoringOpen: !monitoringOpen })
-            }
-          />
+          <ChatHeader />
 
       <ThreadPrimitive.Root className="flex flex-1 flex-col overflow-hidden">
         <ActiveConversationBanner />
         <ActiveSubjectBanner />
         <div className="relative flex flex-1 flex-col overflow-hidden">
           <ThreadPrimitive.Viewport className="penny-scroll flex-1 overflow-y-auto">
-            {/* `chat-thread-column` is a named class so the
-             * `/web/copilot` split layout can constrain the inner
-             * width to its 50%-pane via a global override (defined in
-             * `app/globals.css`). On `/web` the default Tailwind
-             * arbitrary class wins; in copilot `.copilot-pane
-             * .chat-thread-column` collapses the max-width to 100%
-             * of the half-pane. */}
+            {/* Named for stable chat typography and responsive styling. */}
             <div className="chat-thread-column mx-auto w-full max-w-[min(1400px,92vw)] px-4 py-6">
               <PastMessages history={history} />
               <HistoryAwareEmpty past={history.past}>
@@ -673,22 +665,6 @@ export default function Home() {
         </div>
       </ThreadPrimitive.Root>
         </div>
-        {monitoringOpen && (
-          <>
-            <ResizeHandle
-              orientation="vertical"
-              ariaLabel="Resize chat / monitoring split"
-              onResize={onResizeSplit}
-            />
-            <div
-              className="flex min-w-0 flex-col overflow-hidden"
-              style={{ width: `${(1 - ratio) * 100}%` }}
-              data-testid="chat-monitoring-pane"
-            >
-              <MonitoringGrid />
-            </div>
-          </>
-        )}
       </div>
     </WikiPagesProvider>
   );
@@ -699,17 +675,19 @@ export default function Home() {
 function ActiveTaskIndicator() {
   const isRunning = useThread((s) => s.isRunning);
   const backendSummary = usePennyBackendSummary(isRunning);
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   if (!isRunning) return null;
   return (
     <span
-      className="flex min-w-0 items-center gap-1 rounded border border-blue-900/50 bg-blue-900/20 px-1.5 py-0.5 font-mono text-[10px] text-blue-400 motion-safe:animate-in motion-safe:fade-in duration-200"
+      className="flex min-w-0 items-center gap-1 rounded border border-[var(--copper)] bg-[var(--surface-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--copper-hi)] motion-safe:animate-in motion-safe:fade-in duration-200"
       data-testid="active-task-indicator"
-      title={backendSummary ? `Penny backend: ${backendSummary}` : undefined}
+      title={backendSummary ? copy.backend(backendSummary) : undefined}
     >
-      <span className="size-1.5 rounded-full bg-blue-400 motion-safe:animate-pulse" />
-      <span className="shrink-0">running</span>
+      <span className="size-1.5 rounded-full bg-[var(--copper)] motion-safe:animate-pulse" />
+      <span className="shrink-0">{copy.running}</span>
       {backendSummary && (
-        <span className="min-w-0 max-w-[min(36vw,22rem)] truncate text-blue-300/80">
+        <span className="min-w-0 max-w-[min(36vw,22rem)] truncate text-[var(--ink-2)]">
           · {backendSummary}
         </span>
       )}
@@ -717,13 +695,273 @@ function ActiveTaskIndicator() {
   );
 }
 
-function ChatHeader({
-  monitoringOpen,
-  onToggleMonitoring,
-}: {
-  monitoringOpen: boolean;
-  onToggleMonitoring: () => void;
-}) {
+function ConversationModelControls() {
+  const { apiKey } = useAuth();
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
+  const confirm = useConfirm();
+  const isRunning = useThread((state) => state.isRunning);
+  const [conversationId, setConversationId] = useState<string | null>(() =>
+    getActiveConversationId(),
+  );
+  const [profile, setProfile] = useState<ConversationAgentProfile | null>(null);
+  const [pinned, setPinned] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [editingCustomModel, setEditingCustomModel] = useState(false);
+  const [customModelDraft, setCustomModelDraft] = useState("");
+  const [localModels, setLocalModels] = useState<AvailableLlmEndpointModel[]>([]);
+
+  const load = useCallback(async () => {
+    const id = getActiveConversationId();
+    setConversationId(id);
+    if (!id) {
+      setProfile(null);
+      setPinned(false);
+      return;
+    }
+    try {
+      const result = await getConversationAgentProfile(apiKey, id);
+      setProfile(result.profile);
+      setCustomModelDraft(result.profile.model);
+      setEditingCustomModel(modelOptionKey(result.profile) === "custom");
+      setPinned(result.pinned);
+      cacheConversationAgentProfile(id, result.profile);
+    } catch (error) {
+      toast.error((error as Error).message);
+    }
+  }, [apiKey]);
+
+  useEffect(() => {
+    void load();
+    const onConversation = () => void load();
+    window.addEventListener(ACTIVE_CONVERSATION_EVENT, onConversation);
+    return () =>
+      window.removeEventListener(ACTIVE_CONVERSATION_EVENT, onConversation);
+  }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listAvailableLlmEndpointModels(apiKey)
+      .then((models) => {
+        if (!cancelled) setLocalModels(models ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setLocalModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey]);
+
+  // A first turn pins a formerly-default projection. Refresh when a job
+  // crosses either running edge so the lock state is current.
+  useEffect(() => {
+    if (isRunning) return;
+    void load();
+  }, [isRunning, load]);
+
+  const saveHere = useCallback(
+    async (next: ConversationAgentProfile) => {
+      if (!conversationId) return;
+      const previous = profile;
+      setProfile(next);
+      cacheConversationAgentProfile(conversationId, next);
+      setBusy(true);
+      try {
+        const saved = await updateConversationAgentProfile(
+          apiKey,
+          conversationId,
+          next,
+        );
+        setProfile(saved.profile);
+        setCustomModelDraft(saved.profile.model);
+        setPinned(saved.pinned);
+        cacheConversationAgentProfile(conversationId, saved.profile);
+      } catch (error) {
+        if (previous) {
+          setProfile(previous);
+          cacheConversationAgentProfile(conversationId, previous);
+        }
+        toast.error((error as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [apiKey, conversationId, profile],
+  );
+
+  const chooseModel = useCallback(
+    async (key: string) => {
+      if (!profile || key === "custom") return;
+      const preset = AGENT_MODEL_OPTIONS.find((item) => item.key === key);
+      const local = key.startsWith("local:")
+        ? localModels.find((item) => `local:${item.endpoint_id}` === key)
+        : undefined;
+      if (!preset && !local) return;
+      const option = preset ?? {
+        backend: local!.backend,
+        model: local!.model_id,
+      };
+      setEditingCustomModel(false);
+      setCustomModelDraft(option.model);
+      const next: ConversationAgentProfile = {
+        ...profile,
+        backend: option.backend,
+        model: option.model,
+        effort: normalizeAgentEffort(option.backend, option.model, profile.effort),
+        model_source: local ? "local" : "default",
+        llm_endpoint_id: local?.endpoint_id ?? null,
+        local_base_url: "",
+        local_api_key_env: "",
+      };
+      if (pinned && option.backend !== profile.backend) {
+        const accepted = await confirm({
+          title: copy.startRuntimeTitle,
+          description: copy.startRuntimeDescription,
+          confirmLabel: copy.startNewChat,
+        });
+        if (!accepted) return;
+        const newConversationId = safeRandomUUID();
+        setBusy(true);
+        try {
+          const saved = await updateConversationAgentProfile(
+            apiKey,
+            newConversationId,
+            next,
+          );
+          cacheConversationAgentProfile(newConversationId, saved.profile);
+          setActiveConversationId(newConversationId);
+        } catch (error) {
+          toast.error((error as Error).message);
+        } finally {
+          setBusy(false);
+        }
+        return;
+      }
+      await saveHere(next);
+    },
+    [apiKey, confirm, copy.startNewChat, copy.startRuntimeDescription, copy.startRuntimeTitle, localModels, pinned, profile, saveHere],
+  );
+
+  const chooseEffort = useCallback(
+    async (effort: AgentEffort) => {
+      if (!profile) return;
+      await saveHere({ ...profile, effort });
+    },
+    [profile, saveHere],
+  );
+
+  if (!profile) return null;
+  const selectedModel = modelOptionKey(profile);
+  const customLabel = `${profile.backend === "codex_exec" ? "Codex" : "Claude"} · ${profile.model || "default"}`;
+  const disabled = busy || isRunning;
+  return (
+    <div className="flex items-center gap-1.5" data-testid="conversation-agent-profile">
+      <select
+        aria-label={copy.conversationModel}
+        value={selectedModel}
+        disabled={disabled}
+        onChange={(event) => void chooseModel(event.target.value)}
+        className="h-6 max-w-[13rem] rounded border border-zinc-800 bg-zinc-950 px-1.5 font-mono text-[10px] text-zinc-300 disabled:opacity-50"
+        title={
+          isRunning
+            ? copy.modelLocked
+            : pinned
+              ? copy.runtimePinned
+              : copy.modelForChat
+        }
+      >
+        {selectedModel === "custom" && (
+          <option value="custom">{customLabel}</option>
+        )}
+        <optgroup label={copy.claudeRuntime}>
+          {AGENT_MODEL_OPTIONS.filter((item) => item.backend === "claude_code").map(
+            (item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ),
+          )}
+        </optgroup>
+        <optgroup label={copy.codexRuntime}>
+          {AGENT_MODEL_OPTIONS.filter((item) => item.backend === "codex_exec").map(
+            (item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ),
+          )}
+        </optgroup>
+        {(localModels ?? []).length > 0 && (
+          <optgroup label={copy.verifiedLocalModels}>
+            {(localModels ?? []).map((item) => (
+              <option
+                key={`${item.endpoint_id}:${item.model_id}`}
+                value={`local:${item.endpoint_id}`}
+              >
+                {item.endpoint_name} · {item.model_id} · {item.backend === "codex_exec" ? "Codex" : "Claude"}
+              </option>
+            ))}
+          </optgroup>
+        )}
+      </select>
+      {!profile.llm_endpoint_id && (editingCustomModel || selectedModel === "custom") ? (
+        <input
+          aria-label={copy.customModelId}
+          value={customModelDraft}
+          disabled={disabled}
+          onChange={(event) => setCustomModelDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const model = customModelDraft.trim();
+            if (model && model !== profile.model) void saveHere({ ...profile, model });
+          }}
+          onBlur={() => {
+            const model = customModelDraft.trim();
+            if (model && model !== profile.model) void saveHere({ ...profile, model });
+          }}
+          placeholder={copy.modelIdPlaceholder}
+          className="h-6 w-28 rounded border border-zinc-800 bg-zinc-950 px-1.5 font-mono text-[10px] text-zinc-300 disabled:opacity-50"
+        />
+      ) : !profile.llm_endpoint_id ? (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => {
+            setCustomModelDraft(profile.model);
+            setEditingCustomModel(true);
+          }}
+          className="h-6 rounded border border-zinc-800 px-1.5 font-mono text-[9px] text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+          title={copy.customModelTitle}
+        >
+          {copy.custom}
+        </button>
+      ) : null}
+      <select
+        aria-label={copy.conversationEffort}
+        value={profile.effort}
+        disabled={disabled}
+        onChange={(event) => void chooseEffort(event.target.value as AgentEffort)}
+        className="h-6 rounded border border-zinc-800 bg-zinc-950 px-1.5 font-mono text-[10px] text-zinc-300 disabled:opacity-50"
+        title={copy.effortTitle}
+      >
+        {agentEffortOptions(profile.backend, profile.model).map((effort) => (
+          <option key={effort} value={effort}>
+            {copy.effort} · {effort === "auto" ? copy.auto : effort}
+          </option>
+        ))}
+      </select>
+      {pinned && (
+        <span className="font-mono text-[9px] text-zinc-600" title={copy.pinnedTitle}>
+          {copy.pinned}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ChatHeader() {
   return (
     <header
       className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4"
@@ -733,25 +971,8 @@ function ChatHeader({
         <span className="text-xs font-medium text-zinc-300">Penny</span>
       </div>
       <div className="flex items-center gap-1.5">
+        <ConversationModelControls />
         <ActiveTaskIndicator />
-        <button
-          type="button"
-          data-testid="chat-monitoring-toggle"
-          aria-pressed={monitoringOpen}
-          onClick={onToggleMonitoring}
-          title={
-            monitoringOpen
-              ? "Close the monitoring panel"
-              : "Open the monitoring panel — live host grid beside the chat"
-          }
-          className={`rounded border px-2 py-0.5 text-[11px] transition-colors ${
-            monitoringOpen
-              ? "border-blue-700 bg-blue-950/40 text-blue-300"
-              : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
-          }`}
-        >
-          Monitoring
-        </button>
       </div>
     </header>
   );
@@ -762,33 +983,7 @@ function ChatHeader({
 // prompts forever. Ordered roughly by category (knowledge / operator /
 // self-discovery / fleet ops) so a random 3-slice usually covers a
 // mix. Add more lines here — they'll join the rotation automatically.
-const SUGGESTION_POOL = [
-  // Knowledge / wiki
-  "매니코어소프트가 어떤 회사인지 조사해서 위키에 정리해줘",
-  "위키에 저장된 페이지 전체 목록을 보여줘",
-  "GPU 벤치마크 결과를 요약해서 `perf/gpu-bench` 페이지로 정리해줘",
-  "회의록 양식을 `meta/meeting-template` 에 작성해줘",
-  "최근에 작성된 위키 페이지 3개를 요약해줘",
-  // Operator / runbook
-  "운영자가 참고할 troubleshooting 런북을 알려줘",
-  "NCCL 에러가 났을 때 확인 순서를 정리해줘",
-  "오늘자 incident 포스트모템 템플릿을 만들어줘",
-  "`runbooks/` 밑에 새 리커버리 절차를 초안으로 써줘",
-  // Self-discovery
-  "현재 내가 쓸 수 있는 MCP 도구들을 카테고리별로 보여줘",
-  "이 워크스페이스에서 Penny 가 할 수 있는 일 5가지 알려줘",
-  "`/web/servers` 에 어떤 호스트가 등록돼 있어?",
-  // Fleet ops
-  "등록된 호스트의 GPU 온도를 한 번에 확인해줘",
-  "지난 5분 동안 CPU 가 가장 높았던 서버는?",
-  "디스크 사용률 80% 넘는 호스트가 있는지 점검해줘",
-  "각 서버의 uptime 을 비교해서 표로 보여줘",
-  // Conversation starters
-  "지금 gadgetron 클러스터 상태를 한 문장으로 요약해줘",
-  "어제 이후 바뀐 wiki 페이지가 있어?",
-  "내가 해볼 만한 다음 작업 3개 추천해줘",
-  "`/web/dashboard` 수치 중 주목할 만한 게 있나?",
-];
+const SUGGESTION_POOL_SIZE = 15;
 
 const ROTATE_COUNT = 3;
 const ROTATE_INTERVAL_MS = 8_000;
@@ -805,17 +1000,38 @@ function shuffle<T>(arr: readonly T[]): T[] {
 /** Yield a new 3-slice each tick. Avoids replaying the previous slice
  * verbatim so the rotation always feels fresh. */
 function useRotatingSuggestions(): string[] {
-  const [slice, setSlice] = useState<string[]>(() =>
-    shuffle(SUGGESTION_POOL).slice(0, ROTATE_COUNT),
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
+  const pool = [
+    copy.suggestionCompany,
+    copy.suggestionWikiList,
+    copy.suggestionGpuSummary,
+    copy.suggestionMeetingTemplate,
+    copy.suggestionRecentPages,
+    copy.suggestionTroubleshooting,
+    copy.suggestionNccl,
+    copy.suggestionPostmortem,
+    copy.suggestionRecovery,
+    copy.suggestionTools,
+    copy.suggestionPennyCapabilities,
+    copy.suggestionCluster,
+    copy.suggestionWikiChanges,
+    copy.suggestionNextTasks,
+    copy.suggestionDashboard,
+  ];
+  const [slice, setSlice] = useState<number[]>(() =>
+    shuffle(Array.from({ length: SUGGESTION_POOL_SIZE }, (_, index) => index)).slice(0, ROTATE_COUNT),
   );
   useEffect(() => {
     const id = window.setInterval(() => {
       setSlice((prev) => {
         // Find a new slice that differs from the current one by at
         // least one entry — defensive against the pool being smaller
-        // than the slice (can happen if someone trims SUGGESTION_POOL).
+        // than the slice.
         for (let attempt = 0; attempt < 5; attempt++) {
-          const candidate = shuffle(SUGGESTION_POOL).slice(0, ROTATE_COUNT);
+          const candidate = shuffle(
+            Array.from({ length: SUGGESTION_POOL_SIZE }, (_, index) => index),
+          ).slice(0, ROTATE_COUNT);
           if (candidate.some((s, i) => prev[i] !== s)) {
             return candidate;
           }
@@ -825,24 +1041,22 @@ function useRotatingSuggestions(): string[] {
     }, ROTATE_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, []);
-  return slice;
+  return slice.map((index) => pool[index]);
 }
 
 // Shown instead of the generic rotation when the conversation is
 // pinned to a subject ("Talking about …", ISSUE 53). Each pick goes out
 // through withSubjectContext, so the structured context rides along
 // even when the seeded auto-send lost its race.
-const SUBJECT_SUGGESTIONS = [
-  "이 주제의 원인을 분석해줘",
-  "영향 범위와 위험도를 평가해줘",
-  "해결 절차를 단계별로 정리해줘",
-];
-
 function EmptyState() {
   const composer = useComposerRuntime();
   const { subject } = useWorkbenchSubject();
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   const rotating = useRotatingSuggestions();
-  const suggestions = subject ? SUBJECT_SUGGESTIONS : rotating;
+  const suggestions = subject
+    ? [copy.subjectCause, copy.subjectImpact, copy.subjectResolution]
+    : rotating;
 
   const pick = useCallback(
     (text: string) => {
@@ -862,7 +1076,7 @@ function EmptyState() {
           className="max-w-md truncate text-sm font-medium text-zinc-300"
           title={subject?.title}
         >
-          {subject ? `Ask about "${subject.title}"` : "Ready"}
+          {subject ? copy.askAbout(subject.title) : copy.ready}
         </h1>
       </div>
       <div className="flex w-full flex-col gap-1.5">
@@ -881,6 +1095,8 @@ function EmptyState() {
 }
 
 function JumpToLatest() {
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   // Only render when the user has scrolled away from the bottom.
   // At the bottom the button is redundant noise — it was visible on
   // every turn even when a new delta had already snapped the viewport
@@ -893,11 +1109,11 @@ function JumpToLatest() {
     <ThreadPrimitive.ScrollToBottom asChild>
       <button
         type="button"
-        aria-label="Jump to latest message"
-        className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/60 bg-background/85 px-3 py-1.5 text-xs font-medium text-foreground/90 shadow-lg backdrop-blur transition-all hover:bg-background hover:text-foreground motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 duration-200"
+        aria-label={copy.jumpLatest}
+        className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 duration-200"
       >
         <ChevronDown className="size-3.5" />
-        Latest
+        {copy.latest}
       </button>
     </ThreadPrimitive.ScrollToBottom>
   );
@@ -911,24 +1127,25 @@ function JumpToLatest() {
  */
 function BottomTypingIndicator() {
   const isRunning = useThread((s) => s.isRunning);
+  const { labels } = useI18n();
   if (!isRunning) return null;
   return (
     <div
       className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center motion-safe:animate-in motion-safe:fade-in duration-200"
       aria-live="polite"
-      aria-label="Penny is composing"
+      aria-label={labels.chat.page.composing}
       data-testid="bottom-typing-indicator"
     >
-      <span className="flex items-center gap-1.5 rounded-full border border-zinc-800/80 bg-zinc-950/80 px-3 py-1.5 shadow-lg backdrop-blur">
+      <span className="flex items-center gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5">
         <span
-          className="size-1.5 rounded-full bg-blue-400/80 motion-safe:animate-pulse"
+          className="size-1.5 rounded-full bg-[var(--copper)] motion-safe:animate-pulse"
           style={{ animationDelay: "-0.3s" }}
         />
         <span
-          className="size-1.5 rounded-full bg-blue-400/80 motion-safe:animate-pulse"
+          className="size-1.5 rounded-full bg-[var(--copper)] motion-safe:animate-pulse"
           style={{ animationDelay: "-0.15s" }}
         />
-        <span className="size-1.5 rounded-full bg-blue-400/80 motion-safe:animate-pulse" />
+        <span className="size-1.5 rounded-full bg-[var(--copper)] motion-safe:animate-pulse" />
       </span>
     </div>
   );
@@ -945,6 +1162,7 @@ function extractMessageText(content: unknown): string {
 
 function CopyMessageButton() {
   const content = useMessage((s) => s.content);
+  const { labels } = useI18n();
   const [copied, setCopied] = useState(false);
   const onCopy = async () => {
     const text = extractMessageText(content);
@@ -960,9 +1178,9 @@ function CopyMessageButton() {
   return (
     <button
       type="button"
-      aria-label="Copy message"
+      aria-label={labels.chat.page.copyMessage}
       onClick={onCopy}
-      className="absolute right-2 top-2 flex size-7 items-center justify-center rounded-md border border-border/40 bg-background/80 text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground group-hover:opacity-100"
+      className="absolute right-2 top-2 flex size-7 items-center justify-center rounded border border-[var(--line)] bg-[var(--surface)] text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
     >
       {copied ? (
         <CheckIcon className="size-3.5 text-emerald-400" />
@@ -975,13 +1193,14 @@ function CopyMessageButton() {
 
 function UserMessage() {
   const { identity } = useAuth();
+  const { labels } = useI18n();
   const label =
-    identity?.display_name || identity?.email?.split("@")[0] || "You";
+    identity?.display_name || identity?.email?.split("@")[0] || labels.chat.page.you;
   return (
     <div className="group mb-6 flex items-start justify-end gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300">
       <div className="flex max-w-[85%] flex-col items-end gap-1">
         <span className="text-xs text-muted-foreground">{label}</span>
-        <Card className="relative bg-primary text-primary-foreground shadow-sm">
+        <Card className="relative bg-primary text-primary-foreground">
           <CardContent className="px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">
             <MessagePrimitive.Parts />
           </CardContent>
@@ -1013,7 +1232,10 @@ function UserMessage() {
 
 function AssistantMessage() {
   return (
-    <div className="group mb-6 flex items-start gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300">
+    <div
+      className="group mb-6 flex items-start gap-3 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 duration-300"
+      data-testid="penny-assistant-message"
+    >
       <Avatar className="size-7 shrink-0">
         {/* Drop a real Penny portrait into
          * `crates/gadgetron-web/web/public/brand/penny.png` (or .svg)
@@ -1050,31 +1272,33 @@ function AssistantMessage() {
 
 function AssistantStatusBadge() {
   const status = useMessage((s) => s.status);
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   if (!status || status.type !== "incomplete") return null;
   const reason = status.reason;
   const labelMap: Record<string, { text: string; tint: string }> = {
     cancelled: {
-      text: "Stopped",
+      text: copy.stopped,
       tint: "text-amber-300/90 border-amber-400/30 bg-amber-400/10",
     },
     length: {
-      text: "Length limit",
-      tint: "text-sky-300/90 border-sky-400/30 bg-sky-400/10",
+      text: copy.lengthLimit,
+      tint: "text-[var(--warn)] border-[var(--warn)] bg-[var(--surface-2)]",
     },
     "content-filter": {
-      text: "Filtered",
+      text: copy.filtered,
       tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
     },
     "tool-calls": {
-      text: "Tool pending",
-      tint: "text-blue-300/90 border-blue-400/30 bg-blue-400/10",
+      text: copy.toolPending,
+      tint: "text-[var(--copper-hi)] border-[var(--copper)] bg-[var(--surface-2)]",
     },
     error: {
-      text: "Error",
+      text: copy.error,
       tint: "text-red-300/90 border-red-400/30 bg-red-400/10",
     },
     other: {
-      text: "Interrupted",
+      text: copy.interrupted,
       tint: "text-muted-foreground border-border/60 bg-muted/40",
     },
   };
@@ -1092,9 +1316,21 @@ function AssistantStatusBadge() {
 function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   const composer = useComposerRuntime();
   const isRunning = useThread((s) => s.isRunning);
+  const { labels } = useI18n();
+  const copy = labels.chat.page;
   // First-message detector for guaranteed subject delivery (ISSUE 53).
   const messageCount = useThread((s) => s.messages.length);
-  const { refreshSubject } = useWorkbenchSubject();
+  const { activeConversationId, refreshSubject } = useWorkbenchSubject();
+
+  const handleStop = useCallback(() => {
+    const conversationId = getActiveConversationId();
+    if (!conversationId) return;
+    void cancelActiveConversationJob(conversationId).catch(() => {
+      toast.error(copy.stopFailed, {
+        description: copy.stopFailedDescription,
+      });
+    });
+  }, [copy.stopFailed, copy.stopFailedDescription]);
 
   // Preserve the in-progress draft across chat switches / reloads.
   // Keyed by active conversation id so each chat gets its own pending
@@ -1111,7 +1347,7 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
       composer.setText(saved);
     }
     // Deep-link entry point: when another page (e.g. the Logs tab
-    // "💬 Penny와 상의" button) minted this conversation + seeded a
+    // Ask Penny button) minted this conversation + seeded a
     // draft AND set the pending_submit flag, auto-fire the send so
     // the operator doesn't have to hit Enter again. Clear both
     // markers so a reload doesn't re-submit forever.
@@ -1166,8 +1402,8 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
     // Guaranteed subject delivery (ISSUE 53): on the FIRST message of a
     // conversation pinned to a subject, prepend the structured context.
     // The seeded auto-send can silently lose its race with the runtime
-    // spinning up after a full-page navigation — without this, "이
-    // 버그에 대해서 알려줘" reaches Penny with no idea what "이 버그" is.
+    // spinning up after a full-page navigation — without this, a vague
+    // question about "this bug" reaches Penny without the pinned subject.
     // Visible on purpose: the transcript should show what Penny saw.
     if (messageCount === 0) {
       const next = withSubjectContext(text);
@@ -1186,37 +1422,41 @@ function Composer({ onOpenHelp }: { onOpenHelp: () => void }) {
   return (
     <ComposerPrimitive.Root
       onSubmit={handleSubmit}
-      className="relative flex items-end gap-2 rounded border border-zinc-700 bg-zinc-900 p-2 transition-colors focus-within:border-zinc-600 focus-within:bg-zinc-900"
+      className="relative flex flex-col rounded border border-zinc-700 bg-zinc-900 p-2 transition-colors focus-within:border-zinc-600 focus-within:bg-zinc-900"
     >
+      <ChatAttachmentTray conversationId={activeConversationId ?? getActiveConversationId()} />
       <SlashAutocomplete onLocalExecute={executeLocalCommand} />
-      <ComposerPrimitive.Input
-        placeholder="Ask Penny"
-        rows={1}
-        autoFocus
-        className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
-      />
-      {isRunning ? (
-        <ComposerPrimitive.Cancel asChild>
-          <Button
-            size="icon"
-            variant="destructive"
-            className="size-8 shrink-0"
-            aria-label="Stop generation"
-          >
-            <Square className="size-3.5 fill-current" />
-          </Button>
-        </ComposerPrimitive.Cancel>
-      ) : (
-        <ComposerPrimitive.Send asChild>
-          <Button
-            size="icon"
-            className="size-8 shrink-0 bg-blue-600 text-white hover:bg-blue-500"
-            aria-label="Send"
-          >
-            <SendHorizonal className="size-4" />
-          </Button>
-        </ComposerPrimitive.Send>
-      )}
+      <div className="flex items-end gap-2">
+        <ComposerPrimitive.Input
+          placeholder={copy.askPenny}
+          rows={1}
+          autoFocus
+          className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
+        />
+        {isRunning ? (
+          <ComposerPrimitive.Cancel asChild>
+            <Button
+              size="icon"
+              variant="destructive"
+              className="size-8 shrink-0"
+              aria-label={copy.stopGeneration}
+              onClick={handleStop}
+            >
+              <Square className="size-3.5 fill-current" />
+            </Button>
+          </ComposerPrimitive.Cancel>
+        ) : (
+          <ComposerPrimitive.Send asChild>
+            <Button
+              size="icon"
+              className="size-8 shrink-0 bg-[var(--copper)] text-[var(--bg)] hover:bg-[var(--copper-hi)]"
+              aria-label={copy.send}
+            >
+              <SendHorizonal className="size-4" />
+            </Button>
+          </ComposerPrimitive.Send>
+        )}
+      </div>
     </ComposerPrimitive.Root>
   );
 }

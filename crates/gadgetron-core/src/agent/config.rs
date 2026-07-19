@@ -5,6 +5,8 @@
 //! [`EnvResolver`] exists so tests can inject a fake environment for V11
 //! without mutating process-global state.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GadgetronError, Result};
@@ -91,6 +93,14 @@ impl AgentBackend {
         match self {
             Self::ClaudeCode => "claude_code",
             Self::CodexExec => "codex_exec",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "claude_code" => Some(Self::ClaudeCode),
+            "codex_exec" => Some(Self::CodexExec),
+            _ => None,
         }
     }
 }
@@ -255,14 +265,20 @@ pub struct AgentConfig {
     #[serde(default, alias = "runtime")]
     pub backend: AgentBackend,
 
+    /// Tenant-scoped registry identity for a DB-selected local endpoint.
+    /// The subprocess still consumes the snapshotted URL/env fields; this id
+    /// links defaults and conversations back to the probed capability record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_endpoint_id: Option<uuid::Uuid>,
+
     /// Optional executable override for the selected backend. Normal installs
     /// omit this field: Claude Code resolves to `"claude"` and Codex resolves
     /// to `"codex"`. Set it only for an absolute path or wrapper script.
     #[serde(default = "default_agent_binary")]
     pub binary: String,
 
-    /// Minimum acceptable Claude Code version.
-    /// Server startup fails if `claude --version` reports less than this.
+    /// Minimum Claude Code version supported by this configuration contract.
+    /// Older CLIs fail closed when the required command flags are unavailable.
     #[serde(default = "default_claude_code_min_version")]
     pub claude_code_min_version: String,
 
@@ -334,7 +350,7 @@ fn default_agent_binary() -> String {
     String::new()
 }
 fn default_claude_code_min_version() -> String {
-    "2.1.104".to_string()
+    "2.1.206".to_string()
 }
 fn default_request_timeout_secs() -> u64 {
     300
@@ -459,6 +475,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             backend: AgentBackend::default(),
+            llm_endpoint_id: None,
             binary: default_agent_binary(),
             claude_code_min_version: default_claude_code_min_version(),
             request_timeout_secs: default_request_timeout_secs(),
@@ -508,6 +525,19 @@ impl AgentConfig {
                 "agent.max_concurrent_subprocesses must be in [1, 32]; got {}",
                 self.max_concurrent_subprocesses
             )));
+        }
+        let uses_local_model = match self.backend {
+            AgentBackend::ClaudeCode => matches!(self.brain.mode, BrainMode::ExternalProxy),
+            AgentBackend::CodexExec => matches!(
+                self.codex.auth_mode,
+                CodexAuthMode::OpenAiCompatibleProviderEnv
+            ),
+        };
+        if uses_local_model && self.brain.model.trim().eq_ignore_ascii_case(AUTO_MODEL_ID) {
+            return Err(GadgetronError::Config(
+                "agent.brain.model=auto is only available for built-in Claude/Codex catalogs; select an explicit local model id"
+                    .into(),
+            ));
         }
         self.gadgets.validate()?;
         match self.backend {
@@ -597,11 +627,6 @@ impl AgentConfig {
                 "agent.codex.api_key_env must not be empty".to_string(),
             ));
         }
-        if self.codex.compatible_api_key_env.trim().is_empty() {
-            return Err(GadgetronError::Config(
-                "agent.codex.compatible_api_key_env must not be empty".to_string(),
-            ));
-        }
         if self.codex.compatible_base_url_env.trim().is_empty() {
             return Err(GadgetronError::Config(
                 "agent.codex.compatible_base_url_env must not be empty".to_string(),
@@ -620,14 +645,15 @@ impl AgentConfig {
                 }
             }
             CodexAuthMode::OpenAiCompatibleProviderEnv => {
-                let key = env
-                    .get(&self.codex.compatible_api_key_env)
-                    .unwrap_or_default();
-                if key.trim().is_empty() {
-                    return Err(GadgetronError::Config(format!(
-                        "agent.codex.auth_mode=open_ai_compatible_provider_env requires env var {}",
-                        self.codex.compatible_api_key_env
-                    )));
+                let key_env = self.codex.compatible_api_key_env.trim();
+                if !key_env.is_empty() {
+                    let key = env.get(key_env).unwrap_or_default();
+                    if key.trim().is_empty() {
+                        return Err(GadgetronError::Config(format!(
+                            "agent.codex.auth_mode=open_ai_compatible_provider_env requires env var {}",
+                            self.codex.compatible_api_key_env
+                        )));
+                    }
                 }
                 let base_ref = self.codex.compatible_base_url_env.trim();
                 let base_url = if is_http_url(base_ref) {
@@ -653,51 +679,19 @@ impl AgentConfig {
         Ok(())
     }
 
-    /// Emit startup-time warnings for configuration values that are
-    /// accepted but have no runtime effect in the current build.
-    ///
-    /// In particular, any T2 subcategory set to `Ask` mode is logged
-    /// because the approval flow is deferred to a later release.
-    /// Operators see the warning on `gadgetron serve` startup and can
-    /// flip the relevant field to `Auto` or `Never` to silence it.
-    ///
-    /// Called by `AppConfig::load` after validation succeeds. Returns
-    /// the number of warnings emitted so tests can assert the count.
-    pub fn warn_unusable_modes_in_p2a(&self) -> usize {
-        let w = &self.gadgets.write;
-        let fields: &[(&str, &GadgetMode)] = &[
-            ("default_mode", &w.default_mode),
-            ("wiki_write", &w.wiki_write),
-            ("infra_write", &w.infra_write),
-            ("scheduler_write", &w.scheduler_write),
-            ("provider_mutate", &w.provider_mutate),
-        ];
-
-        let mut count = 0usize;
-        for (name, mode) in fields {
-            if matches!(mode, GadgetMode::Ask) {
-                tracing::warn!(
-                    target: "agent_config",
-                    field = %format!("agent.gadgets.write.{name}"),
-                    "ask mode has no effect in this build — approval flow is deferred to a later release. Set to 'auto' or 'never' to silence this warning."
-                );
-                count += 1;
-            }
-        }
-
-        // `brain.mode = gadgetron_local` fails validation anyway
-        // (`validate_with_env` returns the Path-1 rejection) but emit a
-        // warning here for grep-discoverable messaging.
+    /// Emit warnings for accepted agent settings that still have no runtime
+    /// implementation. Ask-mode Gadgets are intentionally absent here: the
+    /// parent callback and ApprovalStore paths now implement that lifecycle.
+    pub fn warn_unusable_agent_settings(&self) -> usize {
         if matches!(self.brain.mode, BrainMode::GadgetronLocal) {
             tracing::warn!(
                 target: "agent_config",
                 field = "agent.brain.mode",
                 "brain.mode=gadgetron_local is not functional in this build — the shim is deferred. AgentConfig::validate rejects this mode at startup."
             );
-            count += 1;
+            return 1;
         }
-
-        count
+        0
     }
 }
 
@@ -772,48 +766,413 @@ impl Default for BrainConfig {
     }
 }
 
+pub const AUTO_MODEL_ID: &str = "auto";
+
+/// Coarse task difficulty used by the local Auto router. It is deliberately
+/// deterministic: routing must not add a hidden LLM call, cost, or failure
+/// path before the user's actual turn starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTaskComplexity {
+    Simple,
+    Standard,
+    Complex,
+    Deep,
+    Maximum,
+}
+
+impl AgentTaskComplexity {
+    fn effort(self) -> AgentEffort {
+        match self {
+            Self::Simple => AgentEffort::Low,
+            Self::Standard => AgentEffort::Medium,
+            Self::Complex => AgentEffort::High,
+            Self::Deep => AgentEffort::Xhigh,
+            Self::Maximum => AgentEffort::Max,
+        }
+    }
+}
+
+/// Classify the latest user instruction for Auto model/effort routing.
+///
+/// The signals intentionally describe work shape rather than a specific
+/// language: input size/structure, code, implementation/debugging, systems or
+/// security analysis, and explicit requests for exhaustive long-horizon work.
+/// This is an initial transparent router; production telemetry can replace its
+/// weights without changing the persisted `auto` profile contract.
+pub fn classify_agent_task(prompt: &str) -> AgentTaskComplexity {
+    let normalized = prompt.to_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| normalized.contains(needle));
+    let mut score = 0_u8;
+    let char_count = prompt.chars().count();
+
+    if char_count > 240 {
+        score = score.saturating_add(1);
+    }
+    if char_count > 900 {
+        score = score.saturating_add(1);
+    }
+    if normalized.contains("```")
+        || normalized.contains("stack trace")
+        || normalized.contains("traceback")
+        || normalized.contains("compiler error")
+        || normalized.contains("컴파일 오류")
+    {
+        score = score.saturating_add(1);
+    }
+
+    let structured_lines = prompt
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.starts_with("- ")
+                || line.starts_with("* ")
+                || line
+                    .split_once('.')
+                    .is_some_and(|(prefix, _)| prefix.chars().all(|c| c.is_ascii_digit()))
+        })
+        .count();
+    if structured_lines >= 3 {
+        score = score.saturating_add(1);
+    }
+
+    if contains_any(&[
+        "implement",
+        "implementation",
+        "refactor",
+        "debug",
+        "fix ",
+        "test",
+        "investigate",
+        "analyze",
+        "design",
+        "구현",
+        "리팩터",
+        "디버그",
+        "수정",
+        "버그",
+        "테스트",
+        "조사",
+        "분석",
+        "설계",
+    ]) {
+        score = score.saturating_add(1);
+    }
+
+    if contains_any(&[
+        "architecture",
+        "race condition",
+        "root cause",
+        "security",
+        "vulnerability",
+        "performance",
+        "migration",
+        "distributed",
+        "production incident",
+        "아키텍처",
+        "레이스 컨디션",
+        "근본 원인",
+        "보안",
+        "취약점",
+        "성능",
+        "마이그레이션",
+        "분산",
+        "운영 장애",
+    ]) {
+        score = score.saturating_add(2);
+    }
+
+    if contains_any(&[
+        "end-to-end",
+        "exhaustive",
+        "thorough",
+        "deep research",
+        "all models",
+        "do not stop",
+        "long-horizon",
+        "전체 경로",
+        "끝까지",
+        "꼼꼼",
+        "철저",
+        "모든 모델",
+        "심층 조사",
+        "장기 작업",
+    ]) {
+        score = score.saturating_add(3);
+    }
+
+    match score {
+        0 => AgentTaskComplexity::Simple,
+        1..=2 => AgentTaskComplexity::Standard,
+        3..=4 => AgentTaskComplexity::Complex,
+        5..=6 => AgentTaskComplexity::Deep,
+        _ => AgentTaskComplexity::Maximum,
+    }
+}
+
 /// Reasoning effort level surfaced to both subprocess agent backends.
 ///
 /// Maps to:
 ///   * Claude Code: `--effort low|medium|high|xhigh|max` (all 5 supported).
-///   * Codex      : `-c model_reasoning_effort="low|medium|high|xhigh"`.
-///     Codex has no `max` tier, so `Max` falls back to `xhigh` in the
-///     spawn helper. UI surfaces a warning on that path so the operator
-///     knows the request was downgraded.
+///   * Codex      : `-c model_reasoning_effort="…"`; GPT-5.6 Sol/Terra
+///     support `ultra`, Luna tops out at `max`, and GPT-5.5 and older
+///     catalog models top out at `xhigh`.
 ///
 /// Default is `Max` to mirror the user expectation that "Claude / Codex
 /// mode" with no further tuning runs at the most thorough setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentEffort {
+    Auto,
     Low,
     Medium,
     High,
     Xhigh,
     #[default]
     Max,
+    Ultra,
 }
 
 impl AgentEffort {
-    /// Wire value for the Claude `--effort` CLI flag.
-    pub fn as_claude_cli_value(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
-    /// Wire value for the Codex `model_reasoning_effort` config key.
-    /// Codex has no `max` tier, so it collapses into `xhigh`.
-    pub fn as_codex_config_value(&self) -> &'static str {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            "ultra" => Some(Self::Ultra),
+            _ => None,
+        }
+    }
+
+    /// Return the closest effort tier the selected runtime/model can
+    /// represent. An empty Codex model means the account default; preserve
+    /// `max` because the current default catalog model is GPT-5.6.
+    pub fn for_backend_model(self, backend: AgentBackend, model: &str) -> Self {
+        if matches!(self, Self::Auto) {
+            return self;
+        }
+        let model = model.trim();
+        let codex_supports_max = model.is_empty()
+            || model.eq_ignore_ascii_case(AUTO_MODEL_ID)
+            || model == "gpt-5.6"
+            || model.starts_with("gpt-5.6-");
+        let codex_supports_ultra = model.eq_ignore_ascii_case(AUTO_MODEL_ID)
+            || model.eq_ignore_ascii_case("gpt-5.6-sol")
+            || model.eq_ignore_ascii_case("gpt-5.6-terra");
+        match (backend, self) {
+            (_, Self::Auto) => Self::Auto,
+            (AgentBackend::ClaudeCode, Self::Ultra) => Self::Max,
+            (AgentBackend::CodexExec, Self::Ultra) if codex_supports_ultra => Self::Ultra,
+            (AgentBackend::CodexExec, Self::Ultra) if codex_supports_max => Self::Max,
+            (AgentBackend::CodexExec, Self::Ultra) => Self::Xhigh,
+            (AgentBackend::CodexExec, Self::Max) if !codex_supports_max => Self::Xhigh,
+            _ => self,
+        }
+    }
+
+    /// Wire value for the Claude `--effort` CLI flag.
+    pub fn as_claude_cli_value(&self) -> &'static str {
         match self {
+            // Auto is resolved before command construction. Medium is a
+            // defensive wire fallback for stateless/legacy callers.
+            Self::Auto => "medium",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
-            Self::Xhigh | Self::Max => "xhigh",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            // Claude does not advertise Ultra. Normal callers clamp through
+            // `for_backend_model`; keep this defensive mapping safe.
+            Self::Ultra => "max",
+        }
+    }
+
+    /// Wire value for the Codex `model_reasoning_effort` config key. Callers
+    /// normalize against the selected model before rendering this value.
+    pub fn as_codex_config_value(&self) -> &'static str {
+        match self {
+            // Auto is resolved before command construction. Medium is a
+            // defensive wire fallback for stateless/legacy callers.
+            Self::Auto => "medium",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+}
+
+/// Durable execution profile owned by one Gadgetron conversation.
+///
+/// Global `AgentConfig` remains the source for operational policy (binary,
+/// sandbox, MCP registry, timeouts). This snapshot owns only the axes users
+/// may choose per chat. The backend is pinned on the first turn; model and
+/// effort may change for later turns within that backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationAgentProfile {
+    pub backend: AgentBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_endpoint_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub model: String,
+    pub effort: AgentEffort,
+    #[serde(default)]
+    pub model_source: ModelSource,
+    #[serde(default)]
+    pub local_base_url: String,
+    #[serde(default)]
+    pub local_api_key_env: String,
+}
+
+impl ConversationAgentProfile {
+    /// Snapshot the user-selectable axes from the live global config. This is
+    /// used exactly once when a conversation has no profile yet.
+    pub fn from_agent(agent: &AgentConfig) -> Self {
+        let projected =
+            AgentBrainSettings::from_agent(agent, AgentBrainSettingsSource::ConfigFile, None, None);
+        let effort = projected
+            .effort
+            .for_backend_model(projected.backend, &projected.model);
+        Self {
+            backend: projected.backend,
+            llm_endpoint_id: projected.llm_endpoint_id,
+            model: projected.model,
+            effort,
+            model_source: projected.model_source,
+            local_base_url: projected.local_base_url,
+            local_api_key_env: projected.local_api_key_env,
+        }
+    }
+
+    /// Overlay this conversation snapshot onto global runtime policy.
+    pub fn overlay_agent(&self, base: &AgentConfig) -> AgentConfig {
+        UpdateAgentBrainSettingsRequest {
+            mode: base.brain.mode,
+            external_base_url: base.brain.external_base_url.clone(),
+            model: self.model.clone(),
+            external_auth_token_env: base.brain.external_auth_token_env.clone(),
+            custom_model_option: matches!(self.model_source, ModelSource::Local)
+                && !self.model.trim().is_empty(),
+            backend: self.backend,
+            llm_endpoint_id: self.llm_endpoint_id,
+            model_source: self.model_source,
+            local_base_url: self.local_base_url.clone(),
+            local_api_key_env: self.local_api_key_env.clone(),
+            effort: self.effort.for_backend_model(self.backend, &self.model),
+        }
+        .overlay_agent(base)
+    }
+
+    /// Resolve any Auto axes for one concrete turn while preserving the
+    /// conversation's pinned backend. The returned profile is suitable for a
+    /// job snapshot and subprocess command; `self` remains the durable user
+    /// selection stored in the conversation row.
+    pub fn resolve_auto(&self, latest_user_instruction: &str) -> Self {
+        let complexity = classify_agent_task(latest_user_instruction);
+        let mut resolved = self.clone();
+
+        if matches!(resolved.model_source, ModelSource::Default)
+            && resolved.model.trim().eq_ignore_ascii_case(AUTO_MODEL_ID)
+        {
+            resolved.model = match resolved.backend {
+                AgentBackend::ClaudeCode => match complexity {
+                    AgentTaskComplexity::Simple => "claude-fable-5",
+                    AgentTaskComplexity::Standard => "claude-sonnet-5",
+                    AgentTaskComplexity::Complex
+                    | AgentTaskComplexity::Deep
+                    | AgentTaskComplexity::Maximum => "claude-opus-4-8",
+                },
+                AgentBackend::CodexExec => {
+                    if matches!(resolved.effort, AgentEffort::Max | AgentEffort::Ultra) {
+                        // An explicit max/ultra effort constrains Auto to a
+                        // model that can represent it, even for a short prompt.
+                        "gpt-5.6-sol"
+                    } else {
+                        match complexity {
+                            AgentTaskComplexity::Simple => "gpt-5.6-luna",
+                            AgentTaskComplexity::Standard => "gpt-5.5",
+                            AgentTaskComplexity::Complex
+                            | AgentTaskComplexity::Deep
+                            | AgentTaskComplexity::Maximum => "gpt-5.6-sol",
+                        }
+                    }
+                }
+            }
+            .to_string();
+        }
+
+        let requested_effort = if matches!(resolved.effort, AgentEffort::Auto) {
+            complexity.effort()
+        } else {
+            resolved.effort
+        };
+        resolved.effort = requested_effort.for_backend_model(resolved.backend, &resolved.model);
+        resolved
+    }
+
+    /// Validate the execution endpoint portion of a client-selected profile.
+    ///
+    /// Model and effort are intentionally user-selectable. Local URLs and
+    /// credential env names are operational/admin policy: a chat may only
+    /// reuse the currently pinned local endpoint or the live new-chat default.
+    /// This prevents a regular chat caller from combining an arbitrary URL
+    /// with the name of a sensitive server environment variable.
+    pub fn validate_client_selection(
+        &self,
+        current: Option<&Self>,
+        new_chat_default: &Self,
+    ) -> std::result::Result<(), String> {
+        if matches!(self.model_source, ModelSource::Local)
+            && self.model.trim().eq_ignore_ascii_case(AUTO_MODEL_ID)
+        {
+            return Err(
+                "Auto model is only available for built-in Claude/Codex catalogs; select an explicit local model id"
+                    .into(),
+            );
+        }
+        if matches!(self.model_source, ModelSource::Default) {
+            if self.llm_endpoint_id.is_none()
+                && self.local_base_url.trim().is_empty()
+                && self.local_api_key_env.trim().is_empty()
+            {
+                return Ok(());
+            }
+            return Err(
+                "default model source must not carry local endpoint or credential metadata".into(),
+            );
+        }
+
+        let is_approved = |approved: &Self| {
+            matches!(approved.model_source, ModelSource::Local)
+                && approved.backend == self.backend
+                && approved.llm_endpoint_id == self.llm_endpoint_id
+                && approved.local_base_url.trim_end_matches('/')
+                    == self.local_base_url.trim_end_matches('/')
+                && approved.local_api_key_env.trim() == self.local_api_key_env.trim()
+        };
+        if current.is_some_and(is_approved) || is_approved(new_chat_default) {
+            Ok(())
+        } else {
+            Err(
+                "local endpoint must match the administrator-approved new-chat default or this chat's existing endpoint"
+                    .into(),
+            )
         }
     }
 }
@@ -883,6 +1242,10 @@ pub struct AgentBrainSettings {
     /// Agent backend — Claude Code vs Codex.
     #[serde(default, alias = "agent")]
     pub backend: AgentBackend,
+    /// Registry identity for the selected local endpoint, when the setting
+    /// originated from the control plane rather than legacy raw config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_endpoint_id: Option<uuid::Uuid>,
     /// Whether the agent uses its built-in default model or a local
     /// OpenAI-compatible LLM endpoint.
     #[serde(default)]
@@ -919,6 +1282,7 @@ impl AgentBrainSettings {
             updated_by,
             source,
             backend: AgentBackend::default(),
+            llm_endpoint_id: None,
             model_source: ModelSource::default(),
             local_base_url: String::new(),
             local_api_key_env: String::new(),
@@ -964,6 +1328,7 @@ impl AgentBrainSettings {
             updated_by,
             source,
             backend: agent.backend,
+            llm_endpoint_id: agent.llm_endpoint_id,
             model_source,
             local_base_url,
             local_api_key_env,
@@ -990,6 +1355,8 @@ pub struct UpdateAgentBrainSettingsRequest {
     // legacy JSON field name `agent` is accepted as an alias.
     #[serde(default, alias = "agent")]
     pub backend: AgentBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_endpoint_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub model_source: ModelSource,
     #[serde(default)]
@@ -1038,7 +1405,12 @@ impl UpdateAgentBrainSettingsRequest {
             next.binary.clear();
         }
         next.backend = self.backend;
-        next.brain.effort = self.effort;
+        next.llm_endpoint_id = if matches!(self.model_source, ModelSource::Local) {
+            self.llm_endpoint_id
+        } else {
+            None
+        };
+        next.brain.effort = self.effort.for_backend_model(self.backend, &self.model);
         next.brain.model = self.model.clone();
         next.brain.custom_model_option = self.custom_model_option;
 
@@ -1054,9 +1426,15 @@ impl UpdateAgentBrainSettingsRequest {
                 next.brain.external_auth_token_env = self.local_api_key_env.clone();
             }
             (AgentBackend::CodexExec, ModelSource::Default) => {
+                next.brain.mode = BrainMode::ClaudeMax;
+                next.brain.external_base_url.clear();
+                next.brain.external_auth_token_env.clear();
                 next.codex.auth_mode = CodexAuthMode::ChatGptLogin;
             }
             (AgentBackend::CodexExec, ModelSource::Local) => {
+                next.brain.mode = BrainMode::ClaudeMax;
+                next.brain.external_base_url.clear();
+                next.brain.external_auth_token_env.clear();
                 next.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
                 next.codex.compatible_base_url_env = self.local_base_url.clone();
                 next.codex.compatible_api_key_env = self.local_api_key_env.clone();
@@ -1374,22 +1752,17 @@ pub struct WriteGadgetsConfig {
     #[serde(default)]
     pub provider_mutate: GadgetMode,
 
-    /// server-monitor bundle write tools (`server.add`, `server.remove`).
-    /// Defaults to `Auto` so the demo "register a host" flow works out
-    /// of the box; operators wanting an approval card before a new
-    /// host lands in the inventory can set this to `Ask` (deferred) or
-    /// `Never` (disable completely).
-    #[serde(default = "default_server_admin_mode")]
-    pub server_admin: GadgetMode,
+    /// Operator overrides for installable Bundle Gadget namespaces.
+    /// Unknown namespaces inherit `default_mode`; Bundle policy hints
+    /// never override this Core-owned decision.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub namespace_modes: BTreeMap<String, GadgetMode>,
 
-    /// log-analyzer bundle write tools (`loganalysis.dismiss`,
-    /// `loganalysis.set_interval`, `loganalysis.comment_*`). These
-    /// touch the findings DB only — they do NOT mutate the host —
-    /// so they default to `Auto` to keep the Logs UI's 감추기 /
-    /// interval-slider one-click. Operators can flip to `Ask` if
-    /// they want approval cards on Logs-tab edits.
-    #[serde(default = "default_loganalysis_admin_mode")]
-    pub loganalysis_admin: GadgetMode,
+    /// Backward-compatible capture for pre-1.0 flattened `*_admin` or
+    /// `*_write` keys. Kept generic so Core does not retain any domain
+    /// identifier. New configuration must use `namespace_modes`.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub legacy_namespace_modes: BTreeMap<String, GadgetMode>,
 }
 
 fn default_write_mode() -> GadgetMode {
@@ -1400,24 +1773,6 @@ fn default_write_mode() -> GadgetMode {
 fn default_wiki_write_mode() -> GadgetMode {
     GadgetMode::Auto
 }
-/// server-monitor mutating gadgets default to `Ask`. Penny needs explicit
-/// operator approval before a `server.bash` / `server.systemctl` /
-/// `server.add` call leaves the gateway. The Side Panel → Actions tab
-/// surfaces pending approvals; resolution flips this from a no-op into
-/// a real dispatch. Operators who want hands-off automation can pin
-/// `server_admin = "auto"` in `gadgetron.toml`.
-fn default_server_admin_mode() -> GadgetMode {
-    GadgetMode::Ask
-}
-/// log-analyzer write Gadgets only touch the findings DB (dismiss /
-/// set_interval / comment_*) — never the host. Defaulting to `Auto`
-/// keeps the Logs page UI snappy (one-click 감추기) while the
-/// host-mutating server.bash / systemctl path stays gated under
-/// `server_admin`.
-fn default_loganalysis_admin_mode() -> GadgetMode {
-    GadgetMode::Auto
-}
-
 impl Default for WriteGadgetsConfig {
     fn default() -> Self {
         Self {
@@ -1426,17 +1781,56 @@ impl Default for WriteGadgetsConfig {
             infra_write: GadgetMode::Ask,
             scheduler_write: GadgetMode::Ask,
             provider_mutate: GadgetMode::Ask,
-            server_admin: default_server_admin_mode(),
-            loganalysis_admin: default_loganalysis_admin_mode(),
+            namespace_modes: BTreeMap::new(),
+            legacy_namespace_modes: BTreeMap::new(),
         }
     }
 }
 
 impl WriteGadgetsConfig {
     pub fn validate(&self) -> Result<()> {
-        // V2/V3 — serde already enforces the enum. Nothing further to check here.
+        for namespace in self.namespace_modes.keys() {
+            validate_gadget_namespace(namespace, "agent.gadgets.write.namespace_modes")?;
+        }
+        for key in self.legacy_namespace_modes.keys() {
+            let namespace = key
+                .strip_suffix("_admin")
+                .or_else(|| key.strip_suffix("_write"))
+                .unwrap_or(key);
+            validate_gadget_namespace(namespace, "agent.gadgets.write legacy override")?;
+        }
         Ok(())
     }
+
+    /// Resolve an installable Bundle namespace without knowing its domain.
+    pub fn namespace_mode(&self, namespace: &str) -> Option<GadgetMode> {
+        self.namespace_modes.get(namespace).copied().or_else(|| {
+            [
+                namespace.to_string(),
+                format!("{namespace}_admin"),
+                format!("{namespace}_write"),
+            ]
+            .iter()
+            .find_map(|key| self.legacy_namespace_modes.get(key).copied())
+        })
+    }
+}
+
+fn validate_gadget_namespace(namespace: &str, field: &str) -> Result<()> {
+    let valid = !namespace.is_empty()
+        && namespace.len() <= 64
+        && !namespace.starts_with('-')
+        && !namespace.ends_with('-')
+        && !namespace.contains("--")
+        && namespace
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if !valid {
+        return Err(GadgetronError::Config(format!(
+            "{field} key {namespace:?} must be lowercase kebab-case (1-64 chars)"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1769,6 +2163,7 @@ mod config_tests {
         base.local_model = "vllm/llama".into();
         base.shim.max_recursion_depth = 3;
         let patch = UpdateAgentBrainSettingsRequest {
+            llm_endpoint_id: None,
             mode: BrainMode::ExternalProxy,
             external_base_url: "http://127.0.0.1:3456".into(),
             model: "openai/local-model".into(),
@@ -1797,6 +2192,7 @@ mod config_tests {
     fn update_agent_brain_settings_overlay_agent_preserves_model_fields() {
         let base = AgentConfig::default();
         let patch = UpdateAgentBrainSettingsRequest {
+            llm_endpoint_id: None,
             mode: BrainMode::ClaudeMax,
             external_base_url: String::new(),
             model: "gpt-5.5".into(),
@@ -1869,26 +2265,61 @@ mod config_tests {
         assert_eq!(cfg.max_concurrent_subprocesses, 4);
     }
 
-    // ---- warn_unusable_modes_in_p2a ----
-
     #[test]
-    fn warn_unusable_modes_counts_ask_fields() {
-        // Default config has wiki_write=Auto but default_mode/infra_write/
-        // scheduler_write/provider_mutate = Ask.
-        let cfg = AgentConfig::default();
-        let count = cfg.warn_unusable_modes_in_p2a();
-        // 4 Ask fields: default_mode + infra_write + scheduler_write + provider_mutate.
-        assert_eq!(count, 4);
+    fn bundle_namespace_modes_are_domain_neutral_and_legacy_compatible() {
+        let current: WriteGadgetsConfig = toml::from_str(
+            r#"
+default_mode = "ask"
+
+[namespace_modes]
+example-domain = "auto"
+"#,
+        )
+        .expect("current namespace policy parses");
+        assert_eq!(
+            current.namespace_mode("example-domain"),
+            Some(GadgetMode::Auto)
+        );
+
+        let legacy: WriteGadgetsConfig = toml::from_str(
+            r#"
+default_mode = "ask"
+example-domain_admin = "never"
+"#,
+        )
+        .expect("generic pre-1.0 *_admin policy parses");
+        assert_eq!(
+            legacy.namespace_mode("example-domain"),
+            Some(GadgetMode::Never)
+        );
+        legacy.validate().expect("legacy namespace is valid");
     }
 
     #[test]
-    fn warn_unusable_modes_zero_when_all_auto_or_never() {
+    fn bundle_namespace_modes_reject_noncanonical_keys() {
+        let mut config = WriteGadgetsConfig::default();
+        config
+            .namespace_modes
+            .insert("Invalid_Namespace".into(), GadgetMode::Auto);
+        assert!(config.validate().is_err());
+    }
+
+    // ---- warn_unusable_agent_settings ----
+
+    #[test]
+    fn ask_modes_are_implemented_and_do_not_warn() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.warn_unusable_agent_settings(), 0);
+    }
+
+    #[test]
+    fn usable_gadget_mode_combinations_do_not_warn() {
         let mut cfg = AgentConfig::default();
         cfg.gadgets.write.default_mode = GadgetMode::Auto;
         cfg.gadgets.write.infra_write = GadgetMode::Never;
         cfg.gadgets.write.scheduler_write = GadgetMode::Auto;
         cfg.gadgets.write.provider_mutate = GadgetMode::Never;
-        assert_eq!(cfg.warn_unusable_modes_in_p2a(), 0);
+        assert_eq!(cfg.warn_unusable_agent_settings(), 0);
     }
 
     #[test]
@@ -2112,5 +2543,236 @@ mod config_tests {
 
         let env = FakeEnv::new().with("LOCAL_LLM_API_KEY", "sk-local");
         assert!(cfg.validate_with_env(&empty_providers(), &env).is_ok());
+    }
+
+    #[test]
+    fn codex_compatible_provider_accepts_authless_literal_responses_endpoint() {
+        let mut cfg = AgentConfig::default();
+        cfg.backend = AgentBackend::CodexExec;
+        cfg.codex.auth_mode = CodexAuthMode::OpenAiCompatibleProviderEnv;
+        cfg.codex.compatible_api_key_env.clear();
+        cfg.codex.compatible_base_url_env = "http://127.0.0.1:8000/v1".into();
+
+        assert!(cfg
+            .validate_with_env(&empty_providers(), &empty_env())
+            .is_ok());
+    }
+
+    #[test]
+    fn conversation_profile_overlays_only_per_chat_execution_axes() {
+        let base = AgentConfig::default();
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: "gpt-5.5".into(),
+            effort: AgentEffort::High,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+
+        let effective = profile.overlay_agent(&base);
+
+        assert_eq!(effective.backend, AgentBackend::CodexExec);
+        assert_eq!(effective.brain.model, "gpt-5.5");
+        assert_eq!(effective.brain.effort, AgentEffort::High);
+        assert_eq!(effective.request_timeout_secs, base.request_timeout_secs);
+        assert_eq!(
+            serde_json::to_value(&effective.gadgets).unwrap(),
+            serde_json::to_value(&base.gadgets).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_profile_normalizes_max_effort_to_xhigh() {
+        let mut base = AgentConfig::default();
+        base.backend = AgentBackend::CodexExec;
+        base.brain.model = "gpt-5.5".into();
+        base.brain.effort = AgentEffort::Max;
+
+        let profile = ConversationAgentProfile::from_agent(&base);
+        assert_eq!(profile.effort, AgentEffort::Xhigh);
+        assert_eq!(
+            profile.overlay_agent(&base).brain.effort,
+            AgentEffort::Xhigh
+        );
+    }
+
+    #[test]
+    fn gpt_5_6_profile_preserves_max_effort() {
+        let mut base = AgentConfig::default();
+        base.backend = AgentBackend::CodexExec;
+        base.brain.model = "gpt-5.6-sol".into();
+        base.brain.effort = AgentEffort::Max;
+
+        let profile = ConversationAgentProfile::from_agent(&base);
+        assert_eq!(profile.effort, AgentEffort::Max);
+        assert_eq!(profile.effort.as_codex_config_value(), "max");
+        assert_eq!(profile.overlay_agent(&base).brain.effort, AgentEffort::Max);
+    }
+
+    #[test]
+    fn ultra_effort_clamps_to_each_runtime_model_capability() {
+        assert_eq!(
+            AgentEffort::Ultra.for_backend_model(AgentBackend::CodexExec, "gpt-5.6-sol"),
+            AgentEffort::Ultra
+        );
+        assert_eq!(
+            AgentEffort::Ultra.for_backend_model(AgentBackend::CodexExec, "gpt-5.6-terra"),
+            AgentEffort::Ultra
+        );
+        assert_eq!(
+            AgentEffort::Ultra.for_backend_model(AgentBackend::CodexExec, "gpt-5.6-luna"),
+            AgentEffort::Max
+        );
+        assert_eq!(
+            AgentEffort::Ultra.for_backend_model(AgentBackend::CodexExec, "gpt-5.5"),
+            AgentEffort::Xhigh
+        );
+        assert_eq!(
+            AgentEffort::Ultra.for_backend_model(AgentBackend::ClaudeCode, "claude-sonnet-5"),
+            AgentEffort::Max
+        );
+    }
+
+    #[test]
+    fn auto_profile_resolves_simple_and_complex_turns_without_switching_runtime() {
+        let claude = ConversationAgentProfile {
+            backend: AgentBackend::ClaudeCode,
+            llm_endpoint_id: None,
+            model: AUTO_MODEL_ID.into(),
+            effort: AgentEffort::Auto,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+        let simple = claude.resolve_auto("안녕하세요");
+        assert_eq!(simple.backend, AgentBackend::ClaudeCode);
+        assert_eq!(simple.model, "claude-fable-5");
+        assert_eq!(simple.effort, AgentEffort::Low);
+
+        let complex = claude.resolve_auto(
+            "인증 레이스 컨디션의 근본 원인을 조사하고 아키텍처를 설계한 뒤 구현, 데이터 마이그레이션, 보안 검토, end-to-end 테스트까지 꼼꼼하게 완료해줘. \
+             각 단계의 회귀 위험과 롤백 경로도 포함하고 모든 관련 모듈을 끝까지 검증해줘.\n\
+             1. 재현 조건을 고정해줘.\n2. 변경을 구현해줘.\n3. 전체 경로를 검증해줘.",
+        );
+        assert_eq!(complex.backend, AgentBackend::ClaudeCode);
+        assert_eq!(complex.model, "claude-opus-4-8");
+        assert_eq!(complex.effort, AgentEffort::Max);
+    }
+
+    #[test]
+    fn codex_auto_uses_current_vendor_models_without_migrating_saved_profiles() {
+        let auto = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: AUTO_MODEL_ID.into(),
+            effort: AgentEffort::Auto,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+        let simple = auto.resolve_auto("짧게 설명해줘");
+        assert_eq!(simple.model, "gpt-5.6-luna");
+        assert_eq!(simple.effort, AgentEffort::Low);
+
+        let mut saved = auto;
+        saved.model = "gpt-5.4-mini".into();
+        let unchanged = saved.resolve_auto("짧게 설명해줘");
+        assert_eq!(unchanged.model, "gpt-5.4-mini");
+        assert_eq!(unchanged.effort, AgentEffort::Low);
+    }
+
+    #[test]
+    fn auto_effort_clamps_to_manual_codex_model_capability() {
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: "gpt-5.5".into(),
+            effort: AgentEffort::Auto,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+        let resolved = profile.resolve_auto(
+            "보안 취약점의 근본 원인을 심층 조사하고 모든 모델과 end-to-end 경로를 철저하게 검증해줘",
+        );
+        assert_eq!(resolved.model, "gpt-5.5");
+        assert_eq!(resolved.effort, AgentEffort::Xhigh);
+    }
+
+    #[test]
+    fn explicit_max_constrains_codex_auto_to_a_max_capable_model() {
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: AUTO_MODEL_ID.into(),
+            effort: AgentEffort::Max,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+        let resolved = profile.resolve_auto("짧게 설명해줘");
+        assert_eq!(resolved.model, "gpt-5.6-sol");
+        assert_eq!(resolved.effort, AgentEffort::Max);
+    }
+
+    #[test]
+    fn explicit_ultra_constrains_codex_auto_to_an_ultra_capable_model() {
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: AUTO_MODEL_ID.into(),
+            effort: AgentEffort::Ultra,
+            model_source: ModelSource::Default,
+            local_base_url: String::new(),
+            local_api_key_env: String::new(),
+        };
+        let resolved = profile.resolve_auto("짧게 설명해줘");
+        assert_eq!(resolved.model, "gpt-5.6-sol");
+        assert_eq!(resolved.effort, AgentEffort::Ultra);
+    }
+
+    #[test]
+    fn client_profile_cannot_select_an_unapproved_local_endpoint() {
+        let approved = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: "approved-model".into(),
+            effort: AgentEffort::High,
+            model_source: ModelSource::Local,
+            local_base_url: "http://127.0.0.1:8000/v1".into(),
+            local_api_key_env: "LOCAL_LLM_KEY".into(),
+        };
+        let mut requested = approved.clone();
+        requested.model = "another-model".into();
+        assert!(requested.validate_client_selection(None, &approved).is_ok());
+
+        requested.local_base_url = "https://attacker.example/v1".into();
+        requested.local_api_key_env = "GADGETRON_GOOGLE_CLIENT_SECRET".into();
+        assert!(requested
+            .validate_client_selection(None, &approved)
+            .is_err());
+    }
+
+    #[test]
+    fn default_profile_rejects_hidden_local_endpoint_metadata() {
+        let approved = ConversationAgentProfile::from_agent(&AgentConfig::default());
+        let mut requested = approved.clone();
+        requested.local_api_key_env = "SENSITIVE_ENV".into();
+        assert!(requested
+            .validate_client_selection(None, &approved)
+            .is_err());
+    }
+
+    #[test]
+    fn local_profile_rejects_auto_model_id() {
+        let mut requested = ConversationAgentProfile::from_agent(&AgentConfig::default());
+        requested.model_source = ModelSource::Local;
+        requested.model = AUTO_MODEL_ID.into();
+        requested.local_base_url = "http://127.0.0.1:8000/v1".into();
+        assert!(requested
+            .validate_client_selection(None, &requested)
+            .is_err());
     }
 }
