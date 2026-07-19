@@ -43,6 +43,15 @@ describe("StatusStrip", () => {
     expect(screen.queryByTestId("health-indicator")).toBeNull();
   });
 
+  it("shows the English/Korean selector in the right-side status controls", () => {
+    global.fetch = vi.fn().mockReturnValue(new Promise(() => {}));
+    render(<StatusStrip />);
+    const toggle = screen.getByTestId("locale-toggle");
+    expect(toggle).toHaveAccessibleName("Language");
+    expect(screen.getByRole("button", { name: "Eng" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Kor" })).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("keeps healthy state visually quiet on 200 with no degraded_reasons", async () => {
     mockFetch(200, { degraded_reasons: [] });
     render(<StatusStrip />);

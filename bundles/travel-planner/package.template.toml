@@ -1,0 +1,583 @@
+manifest_version = 3
+
+[bundle]
+id = "travel-planner"
+version = "0.2.0"
+class = "operational"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.7.16, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[[dependencies.optional]]
+capability = "gadgetron.intelligence.restaurant-context"
+version = "^1.0"
+feature = "restaurant-assisted-planning"
+reason = "Fresh cited restaurant context improves itinerary choices without owning Travel state"
+
+[[dependencies.optional]]
+capability = "gadgetron.intelligence.travel-context"
+version = "^1.0"
+feature = "destination-research"
+reason = "Cited destination and advisory research improves Trip decisions without owning Travel state"
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/travel-planner"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 192
+open_files = 48
+cpu_seconds = 30
+
+[[permissions]]
+id = "travel-read"
+kind = "database"
+description = "Read tenant-scoped Travel Planner records"
+resources = ["postgres:table:travel_trips", "postgres:table:travel_itinerary_items", "postgres:table:travel_constraints", "postgres:table:travel_budget_items", "postgres:table:travel_disruptions", "postgres:table:travel_replans", "postgres:table:travel_operation_outcomes"]
+
+[[permissions]]
+id = "travel-write"
+kind = "database"
+description = "Write tenant-scoped Travel Planner records through Core-compiled mutations"
+resources = ["postgres:table:travel_trips", "postgres:table:travel_itinerary_items", "postgres:table:travel_constraints", "postgres:table:travel_budget_items", "postgres:table:travel_disruptions", "postgres:table:travel_replans", "postgres:table:travel_operation_outcomes"]
+
+[[permissions]]
+id = "travel-knowledge-read"
+kind = "knowledge_read"
+description = "Read actor-visible, revision-pinned Core knowledge context"
+resources = ["knowledge:context"]
+
+[[permissions]]
+id = "travel-knowledge-feedback"
+kind = "knowledge_feedback"
+description = "Return verified Travel outcomes to the Core experience lifecycle"
+resources = ["knowledge:feedback"]
+
+[capabilities]
+gadget_namespaces = ["travel"]
+
+[[capabilities.provides]]
+id = "gadgetron.operation.travel-planning"
+version = "1.0.0"
+description = "Revisioned trip, itinerary, disruption re-plan and outcome capabilities"
+
+[[capabilities.gadgets]]
+name = "travel.trip-list"
+description = "List tenant-scoped Trips in deterministic date order"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 500 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.trip-get"
+description = "Read one Trip by stable id"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" } }, required = ["trip_id"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.trip-upsert"
+description = "Create a Trip or replace its current revision"
+tier = "write"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, title = { type = "string", minLength = 1, maxLength = 200 }, origin = { type = "string", minLength = 1, maxLength = 200 }, start_date = { type = "string", format = "date" }, end_date = { type = "string", format = "date" }, timezone = { type = "string", minLength = 1, maxLength = 64 }, traveler_count = { type = "integer", minimum = 1, maximum = 100 }, status = { type = "string", enum = ["draft", "planned", "active", "completed", "cancelled"] }, currency = { type = "string", pattern = "^[A-Z]{3}$" }, budget_amount_minor = { type = "integer", minimum = 0 }, notes = { type = "string", maxLength = 4096 } }, required = ["title", "origin", "start_date", "end_date", "timezone", "traveler_count", "status", "currency", "budget_amount_minor"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.trip-delete"
+description = "Delete one exact Trip revision and its Travel-owned children"
+tier = "write"
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid", title = "Trip ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["id", "revision"], additionalProperties = false }
+output_schema = { type = "object", properties = { id = { type = "string" }, deleted = { type = "boolean" } }, required = ["id", "deleted"] }
+
+[capabilities.gadgets.effect]
+risk = "high"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.itinerary-list"
+description = "List itinerary items across Trips or for one Trip"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.itinerary-item-upsert"
+description = "Create an itinerary item or replace its current revision"
+tier = "write"
+input_schema = { type = "object", properties = { item_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, trip_id = { type = "string", format = "uuid" }, title = { type = "string", minLength = 1, maxLength = 200 }, kind = { type = "string", enum = ["transport", "lodging", "activity", "meal", "buffer", "other"] }, starts_at = { type = "string", format = "date-time" }, ends_at = { type = "string", format = "date-time" }, timezone = { type = "string", minLength = 1, maxLength = 64 }, place = { type = "string", minLength = 1, maxLength = 300 }, status = { type = "string", enum = ["proposed", "planned", "confirmed", "completed", "cancelled"] }, notes = { type = "string", maxLength = 4096 } }, required = ["trip_id", "title", "kind", "starts_at", "ends_at", "timezone", "place", "status"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.itinerary-item-delete"
+description = "Delete one exact itinerary item revision"
+tier = "write"
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid", title = "Itinerary item ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["id", "revision"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.constraint-list"
+description = "List hard and soft Trip constraints"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500 } }, additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.constraint-upsert"
+description = "Create a Trip constraint or replace its current revision"
+tier = "write"
+input_schema = { type = "object", properties = { constraint_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, trip_id = { type = "string", format = "uuid" }, strength = { type = "string", enum = ["hard", "soft"] }, scope = { type = "string", minLength = 1, maxLength = 100 }, rule_text = { type = "string", minLength = 1, maxLength = 1000 }, provenance = { type = "string", maxLength = 1000 }, conflict_status = { type = "string", enum = ["clear", "potential", "violated", "resolved"] } }, required = ["trip_id", "strength", "scope", "rule_text", "conflict_status"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.constraint-delete"
+description = "Delete one exact Trip constraint revision"
+tier = "write"
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid", title = "Constraint ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["id", "revision"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.budget-summary"
+description = "Summarize quoted and actual budget items without currency conversion"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500 } }, additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.budget-item-upsert"
+description = "Create a budget item or replace its current revision"
+tier = "write"
+input_schema = { type = "object", properties = { budget_item_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, trip_id = { type = "string", format = "uuid" }, category = { type = "string", enum = ["transport", "lodging", "food", "activity", "fees", "other"] }, label = { type = "string", minLength = 1, maxLength = 200 }, quoted_amount_minor = { type = "integer", minimum = 0 }, actual_amount_minor = { type = "integer", minimum = 0 }, currency = { type = "string", pattern = "^[A-Z]{3}$" }, observed_at = { type = "string", format = "date-time" } }, required = ["trip_id", "category", "label", "quoted_amount_minor", "currency", "observed_at"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.budget-item-delete"
+description = "Delete one exact budget item revision"
+tier = "write"
+input_schema = { type = "object", properties = { id = { type = "string", format = "uuid", title = "Budget item ID" }, revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["id", "revision"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.plan-summary"
+description = "Summarize upcoming Trips and itinerary attention for Dashboard"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.export"
+description = "Export one pinned Trip revision as Markdown, canonical JSON or iCalendar"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" }, format = { type = "string", enum = ["markdown", "json", "ical"] } }, required = ["trip_id", "format"], additionalProperties = false }
+output_schema = { type = "object", properties = { format = { type = "string" }, filename = { type = "string" }, media_type = { type = "string" }, trip_revision = { type = "integer" }, content = { type = "string" } }, required = ["format", "filename", "media_type", "trip_revision", "content"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.knowledge-context"
+description = "Find cited knowledge relevant to one exact Trip revision"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid", title = "Trip" }, trip_revision = { type = "integer", minimum = 1, title = "Trip revision" }, question = { type = "string", minLength = 2, maxLength = 2048, title = "What should Penny investigate?" } }, required = ["trip_id", "trip_revision", "question"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.restaurant-attach"
+description = "Add a Restaurant recommendation to this itinerary"
+tier = "write"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid", title = "Trip" }, trip_revision = { type = "integer", minimum = 1, title = "Trip revision used for context" }, starts_at = { type = "string", format = "date-time", title = "Starts at" }, ends_at = { type = "string", format = "date-time", title = "Ends at" }, timezone = { type = "string", minLength = 1, maxLength = 64, title = "Timezone" }, recommendation_id = { type = "string", format = "uuid", title = "Restaurant recommendation" }, recommendation_revision = { type = "integer", minimum = 1, title = "Recommendation revision" }, branch_id = { type = "string", format = "uuid", title = "Restaurant branch" }, title = { type = "string", minLength = 1, maxLength = 200, title = "Restaurant" }, place = { type = "string", minLength = 1, maxLength = 300, title = "Place" }, reason = { type = "string", minLength = 1, maxLength = 1000, title = "Why" }, freshness = { type = "string", enum = ["current", "aging", "stale", "conflicted"], title = "Evidence freshness" }, supporting_source_id = { type = "string", format = "uuid", title = "Supporting source" }, supporting_source_revision = { type = "integer", minimum = 1, title = "Supporting revision" }, contradicting_source_id = { type = "string", format = "uuid", title = "Contradicting source" }, contradicting_source_revision = { type = "integer", minimum = 1, title = "Contradicting revision" }, context_query_id = { type = "string", minLength = 1, maxLength = 256, title = "Knowledge query" }, context_revision = { type = "string", minLength = 1, maxLength = 256, title = "Knowledge context revision" }, used_citation_id = { type = "string", minLength = 1, maxLength = 256, title = "Used citation" }, used_source_revision = { type = "string", minLength = 1, maxLength = 256, title = "Used source revision" } }, required = ["trip_id", "starts_at", "ends_at", "timezone", "recommendation_id", "recommendation_revision", "branch_id", "title", "place", "reason", "freshness", "supporting_source_id", "supporting_source_revision"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.restaurant-bridge-list"
+description = "Show Restaurant recommendations in this itinerary"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500 } }, additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.disruption-record"
+description = "Record a travel disruption"
+tier = "write"
+input_schema = { type = "object", properties = { trip_id = { type = "string", title = "Trip", format = "uuid" }, affected_item_id = { type = "string", title = "Affected itinerary item", format = "uuid" }, kind = { type = "string", title = "Disruption", enum = ["delay", "cancellation", "closure", "advisory", "availability", "other"] }, severity = { type = "string", title = "Impact level", enum = ["low", "medium", "high", "critical"] }, summary = { type = "string", title = "What changed", minLength = 1, maxLength = 500 }, impact = { type = "string", title = "Effect on the plan", minLength = 1, maxLength = 1000 }, source_ref = { type = "string", title = "Evidence", minLength = 1, maxLength = 1000 }, observed_at = { type = "string", title = "Observed at", format = "date-time" } }, required = ["trip_id", "kind", "severity", "summary", "impact", "source_ref", "observed_at"], additionalProperties = false }
+output_schema = { type = "object", properties = { disruption_id = { type = "string" }, state = { type = "string" }, revision = { type = "integer" } }, required = ["disruption_id", "state", "revision"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "travel.monitor-plan"
+description = "Show disruptions that need a plan decision"
+tier = "read"
+input_schema = { type = "object", properties = { trip_id = { type = "string", title = "Trip", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "travel.propose-replan"
+description = "Prepare a revised itinerary"
+tier = "write"
+input_schema = { type = "object", properties = { disruption_id = { type = "string", title = "Disruption", format = "uuid" }, item_id = { type = "string", title = "Itinerary item", format = "uuid" }, expected_item_revision = { type = "integer", title = "Current item revision", minimum = 1 }, reason = { type = "string", title = "Why this change", minLength = 1, maxLength = 1000 }, evidence_ref = { type = "string", title = "Evidence", minLength = 1, maxLength = 1000 }, title = { type = "string", title = "Updated title", minLength = 1, maxLength = 200 }, starts_at = { type = "string", title = "New start", format = "date-time" }, ends_at = { type = "string", title = "New end", format = "date-time" }, timezone = { type = "string", title = "Timezone", minLength = 1, maxLength = 64 }, place = { type = "string", title = "Place", minLength = 1, maxLength = 300 }, status = { type = "string", title = "Plan status", enum = ["proposed", "planned", "confirmed", "completed", "cancelled"] }, cost_change_minor = { type = "integer", title = "Cost change (minor units)" }, booking_impact = { type = "string", title = "Booking impact", enum = ["none", "manual_change", "cancellation"] } }, required = ["disruption_id", "item_id", "expected_item_revision", "reason", "evidence_ref", "title", "starts_at", "ends_at", "timezone", "place", "status", "cost_change_minor", "booking_impact"], additionalProperties = false }
+output_schema = { type = "object", properties = { proposal_id = { type = "string" }, status = { type = "string" }, title = { type = "string" }, issue = { type = "string" }, action = { type = "string" }, before = { type = "object" }, after = { type = "object" }, rollback_available = { type = "boolean" } }, required = ["proposal_id", "status", "title", "issue", "action", "before", "after", "rollback_available"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = true
+requires_evidence = true
+rollback_gadget = "travel.rollback-replan"
+
+[[capabilities.gadgets]]
+name = "travel.apply-replan"
+description = "Apply and verify the revised itinerary"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { proposal_id = { type = "string", title = "Re-plan", format = "uuid" } }, required = ["proposal_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { status = { type = "string", enum = ["applied", "safe_stopped"] }, title = { type = "string" }, issue = { type = "string" }, action = { type = "string" }, before = { type = "object" }, after = { type = "object" }, attempts = { type = "integer" }, rollback_available = { type = "boolean" }, operation_id = { type = "string" } }, required = ["status", "title", "issue", "action", "before", "after", "attempts", "rollback_available", "operation_id"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "travel.operation-outcomes-list"
+rollback_gadget = "travel.rollback-replan"
+
+[[capabilities.gadgets]]
+name = "travel.rollback-replan"
+description = "Restore the previous itinerary"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { proposal_id = { type = "string", title = "Re-plan", format = "uuid" }, operation_id = { type = "string", title = "Applied operation", format = "uuid" } }, required = ["proposal_id", "operation_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { status = { type = "string", enum = ["rolled_back", "safe_stopped"] }, title = { type = "string" }, issue = { type = "string" }, action = { type = "string" }, before = { type = "object" }, after = { type = "object" }, attempts = { type = "integer" }, rollback_available = { type = "boolean" }, operation_id = { type = "string" } }, required = ["status", "title", "issue", "action", "before", "after", "attempts", "rollback_available", "operation_id"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "travel.operation-outcomes-list"
+
+[[capabilities.gadgets]]
+name = "travel.operation-outcomes-list"
+description = "Show recent verified travel plan changes"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.workspaces]]
+id = "trips"
+label = "Trips"
+renderer = "cards"
+data_capability = "travel.trip-list"
+action_gadgets = ["travel.trip-upsert", "travel.trip-delete", "travel.constraint-upsert", "travel.constraint-delete", "travel.budget-item-upsert", "travel.budget-item-delete", "travel.export", "travel.knowledge-context"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "itinerary"
+label = "Itinerary"
+renderer = "timeline"
+data_capability = "travel.itinerary-list"
+action_gadgets = ["travel.itinerary-item-upsert", "travel.itinerary-item-delete", "travel.restaurant-attach", "travel.restaurant-bridge-list"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "disruptions"
+label = "Travel changes"
+renderer = "cards"
+data_capability = "travel.monitor-plan"
+action_gadgets = ["travel.disruption-record", "travel.propose-replan", "travel.apply-replan", "travel.rollback-replan"]
+required_scopes = ["management"]
+
+[[capabilities.ui_contributions]]
+id = "trips-main"
+kind = "workspace"
+label = "Trips"
+placement = "main"
+order_hint = 200
+icon = "calendar"
+required_scopes = ["management"]
+empty_state = "No trips yet"
+error_state = "Travel plans are unavailable"
+workspace = "trips"
+
+[[capabilities.ui_contributions]]
+id = "trips-navigation"
+kind = "navigation"
+label = "Trips"
+placement = "primary_navigation"
+navigation_section = "planning"
+order_hint = 200
+icon = "calendar"
+required_scopes = ["management"]
+empty_state = "The Trips workspace is not enabled"
+error_state = "Trips navigation is unavailable"
+workspace = "trips"
+
+[[capabilities.ui_contributions]]
+id = "itinerary-main"
+kind = "workspace"
+label = "Itinerary"
+placement = "main"
+order_hint = 210
+icon = "timeline"
+required_scopes = ["management"]
+empty_state = "No itinerary items yet"
+error_state = "The itinerary is unavailable"
+workspace = "itinerary"
+
+[[capabilities.ui_contributions]]
+id = "itinerary-navigation"
+kind = "navigation"
+label = "Itinerary"
+placement = "primary_navigation"
+navigation_section = "planning"
+order_hint = 210
+icon = "timeline"
+required_scopes = ["management"]
+empty_state = "The Itinerary workspace is not enabled"
+error_state = "Itinerary navigation is unavailable"
+workspace = "itinerary"
+
+[[capabilities.ui_contributions]]
+id = "travel-dashboard"
+kind = "dashboard_widget"
+label = "Travel plans"
+placement = "dashboard"
+order_hint = 200
+icon = "calendar"
+required_scopes = ["management"]
+empty_state = "No upcoming trips"
+error_state = "Travel plan summary is unavailable"
+gadget = "travel.plan-summary"
+renderer = "dashboard"
+refresh_seconds = 60
+
+[[capabilities.ui_contributions]]
+id = "disruptions-main"
+kind = "workspace"
+label = "Travel changes"
+placement = "main"
+order_hint = 220
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No travel changes need attention"
+error_state = "Travel changes are unavailable"
+workspace = "disruptions"
+
+[[capabilities.ui_contributions]]
+id = "disruptions-navigation"
+kind = "navigation"
+label = "Travel changes"
+placement = "primary_navigation"
+navigation_section = "planning"
+order_hint = 220
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "The Travel changes workspace is not enabled"
+error_state = "Travel changes navigation is unavailable"
+workspace = "disruptions"
+
+[[capabilities.ui_contributions]]
+id = "travel-apply-result"
+kind = "tool_result"
+label = "Updated travel plan"
+placement = "tool_result"
+order_hint = 220
+icon = "timeline"
+required_scopes = ["management"]
+empty_state = "No travel plan result was returned"
+error_state = "Travel plan result is unavailable"
+gadget = "travel.apply-replan"
+renderer = "operation"
+
+[[capabilities.ui_contributions]]
+id = "travel-rollback-result"
+kind = "tool_result"
+label = "Restored travel plan"
+placement = "tool_result"
+order_hint = 221
+icon = "timeline"
+required_scopes = ["management"]
+empty_state = "No travel rollback result was returned"
+error_state = "Travel rollback result is unavailable"
+gadget = "travel.rollback-replan"
+renderer = "operation"
+
+[[capabilities.ui_contributions]]
+id = "travel-replan-review"
+kind = "review_presentation"
+label = "Travel plan change"
+placement = "review"
+order_hint = 220
+icon = "review"
+required_scopes = ["management"]
+empty_state = "No travel plan change is pending"
+error_state = "Travel plan review is unavailable"
+gadget = "travel.apply-replan"
+renderer = "operation"
+
+[[capabilities.ui_contributions]]
+id = "trip-tool-result"
+kind = "tool_result"
+label = "Trip"
+placement = "tool_result"
+order_hint = 200
+icon = "calendar"
+required_scopes = ["management"]
+empty_state = "The Trip was not found"
+error_state = "The Trip result is unavailable"
+gadget = "travel.trip-get"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "itinerary-tool-result"
+kind = "tool_result"
+label = "Itinerary"
+placement = "tool_result"
+order_hint = 210
+icon = "timeline"
+required_scopes = ["management"]
+empty_state = "No itinerary items were returned"
+error_state = "The itinerary result is unavailable"
+gadget = "travel.itinerary-list"
+renderer = "timeline"
+
+[[capabilities.migrations]]
+id = "travel-base"
+revision = 20260711000001
+kind = "schema"
+path = "migrations/20260711000001_travel_base.sql"
+sha256 = "46cf1816a93d52d4b3d33f5aca6390ac20d1957fbfdc0f5d3be47704fc9845e9"
+
+[[capabilities.migrations]]
+id = "travel-restaurant-bridge"
+revision = 20260712000002
+kind = "schema"
+path = "migrations/20260712000002_restaurant_bridge.sql"
+sha256 = "4db931560c2322732d7ae2cc5c9026717166280b59ee98678a65924fd63c58b3"
+
+[[capabilities.migrations]]
+id = "travel-disruption-replan"
+revision = 20260712000004
+kind = "schema"
+path = "migrations/20260712000004_disruption_replan.sql"
+sha256 = "3fc68130ff5a17b5ef7c9545baecfaaa1bac4352d0c57c756ff059892b68a2c6"

@@ -8,7 +8,9 @@
 //! agent backends.
 
 use chrono::{DateTime, Utc};
-use gadgetron_core::agent::AgentBackend;
+use gadgetron_core::agent::{
+    AgentBackend, AgentEffort, ConversationAgentProfile, ModelSource, AUTO_MODEL_ID,
+};
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -20,6 +22,13 @@ pub struct ConversationRow {
     pub user_id: Uuid,
     pub claude_session_uuid: Option<Uuid>,
     pub title: String,
+    pub agent_backend: Option<String>,
+    pub agent_endpoint_id: Option<Uuid>,
+    pub agent_model: String,
+    pub agent_effort: Option<String>,
+    pub agent_model_source: Option<String>,
+    pub agent_local_base_url: String,
+    pub agent_local_api_key_env: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -42,6 +51,100 @@ pub enum ConversationError {
     /// turns into another principal's conversation — refuse loudly.
     #[error("conversation owned by a different principal")]
     OwnershipMismatch,
+    #[error("conversation runtime is pinned to {pinned}; requested {requested}")]
+    AgentBackendPinned { pinned: String, requested: String },
+    #[error("invalid conversation agent profile: {0}")]
+    InvalidAgentProfile(String),
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ConversationAgentProfileDbRow {
+    agent_backend: String,
+    agent_endpoint_id: Option<Uuid>,
+    agent_model: String,
+    agent_effort: String,
+    agent_model_source: String,
+    agent_local_base_url: String,
+    agent_local_api_key_env: String,
+}
+
+fn model_source_as_str(source: ModelSource) -> &'static str {
+    match source {
+        ModelSource::Default => "default",
+        ModelSource::Local => "local",
+    }
+}
+
+fn profile_from_db(
+    row: ConversationAgentProfileDbRow,
+) -> Result<ConversationAgentProfile, ConversationError> {
+    let backend = AgentBackend::parse(&row.agent_backend).ok_or_else(|| {
+        ConversationError::InvalidAgentProfile(format!("unknown backend {:?}", row.agent_backend))
+    })?;
+    let effort = AgentEffort::parse(&row.agent_effort).ok_or_else(|| {
+        ConversationError::InvalidAgentProfile(format!("unknown effort {:?}", row.agent_effort))
+    })?;
+    let model_source = match row.agent_model_source.as_str() {
+        "default" => ModelSource::Default,
+        "local" => ModelSource::Local,
+        other => {
+            return Err(ConversationError::InvalidAgentProfile(format!(
+                "unknown model source {other:?}"
+            )))
+        }
+    };
+    let effort = effort.for_backend_model(backend, &row.agent_model);
+    Ok(ConversationAgentProfile {
+        backend,
+        llm_endpoint_id: row.agent_endpoint_id,
+        model: row.agent_model,
+        effort,
+        model_source,
+        local_base_url: row.agent_local_base_url,
+        local_api_key_env: row.agent_local_api_key_env,
+    })
+}
+
+fn validate_agent_profile(profile: &ConversationAgentProfile) -> Result<(), ConversationError> {
+    let model = profile.model.trim();
+    let has_control_line = |value: &str| value.chars().any(|c| matches!(c, '\0' | '\r' | '\n'));
+    if model.len() > 256 || model.starts_with('-') || has_control_line(model) {
+        return Err(ConversationError::InvalidAgentProfile(
+            "model must be at most 256 bytes and contain no leading dash or control lines".into(),
+        ));
+    }
+    if profile.local_base_url.len() > 2048 || has_control_line(&profile.local_base_url) {
+        return Err(ConversationError::InvalidAgentProfile(
+            "local base URL must be at most 2048 bytes and contain no control lines".into(),
+        ));
+    }
+    if profile.local_api_key_env.len() > 128 || has_control_line(&profile.local_api_key_env) {
+        return Err(ConversationError::InvalidAgentProfile(
+            "local API key env must be at most 128 bytes and contain no control lines".into(),
+        ));
+    }
+    if matches!(profile.model_source, ModelSource::Local)
+        && !(profile.local_base_url.starts_with("http://")
+            || profile.local_base_url.starts_with("https://"))
+    {
+        return Err(ConversationError::InvalidAgentProfile(
+            "local model source requires an http:// or https:// base URL".into(),
+        ));
+    }
+    if matches!(profile.model_source, ModelSource::Local)
+        && model.eq_ignore_ascii_case(AUTO_MODEL_ID)
+    {
+        return Err(ConversationError::InvalidAgentProfile(
+            "Auto model is only available for built-in Claude/Codex catalogs; select an explicit local model id"
+                .into(),
+        ));
+    }
+    if matches!(profile.model_source, ModelSource::Default) && profile.llm_endpoint_id.is_some() {
+        return Err(ConversationError::InvalidAgentProfile(
+            "default model source must not reference a local endpoint".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Insert a new conversation row. The caller supplies the id (so the
@@ -67,6 +170,36 @@ pub async fn create_conversation(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Ensure a client-minted conversation id belongs to the requesting actor.
+///
+/// Attachment intake can happen before the first chat turn, so it needs the
+/// same first-writer-wins ownership boundary as `upsert_turn` without
+/// incrementing the turn counter or fabricating transcript content.
+pub async fn ensure_conversation_owner(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ConversationError> {
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        r#"INSERT INTO conversations (id, tenant_id, user_id, title)
+           VALUES ($1, $2, $3, 'New chat')
+           ON CONFLICT (id) DO UPDATE SET updated_at = conversations.updated_at
+           WHERE conversations.tenant_id = $2 AND conversations.user_id = $3
+             AND conversations.deleted_at IS NULL
+           RETURNING tenant_id, user_id"#,
+    )
+    .bind(conversation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some((row_tenant, row_user)) if row_tenant == tenant_id && row_user == user_id => Ok(()),
+        _ => Err(ConversationError::OwnershipMismatch),
+    }
 }
 
 /// Called on every chat turn. Ensures a row exists for this
@@ -171,6 +304,136 @@ pub async fn list_messages(
     Ok(rows)
 }
 
+/// Load the durable Penny execution profile for a conversation.
+///
+/// `None` means the conversation exists but has not started/pinned a runtime
+/// yet. The scoped variant additionally enforces the sidebar owner boundary.
+pub async fn get_conversation_agent_profile(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<ConversationAgentProfile>, ConversationError> {
+    let row = sqlx::query_as::<_, ConversationAgentProfileDbRow>(
+        "SELECT agent_backend, agent_endpoint_id, agent_model, agent_effort, agent_model_source, \
+                agent_local_base_url, agent_local_api_key_env \
+         FROM conversations \
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3 \
+           AND deleted_at IS NULL AND agent_backend IS NOT NULL",
+    )
+    .bind(conversation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(profile_from_db).transpose()
+}
+
+/// Internal runtime lookup after the gateway has already enforced ownership.
+/// This is used by Penny's durable session adapter, which receives only the
+/// namespaced conversation id and intentionally does not carry HTTP identity.
+pub async fn get_conversation_agent_profile_unscoped(
+    pool: &PgPool,
+    conversation_id: Uuid,
+) -> Result<Option<ConversationAgentProfile>, ConversationError> {
+    let row = sqlx::query_as::<_, ConversationAgentProfileDbRow>(
+        "SELECT agent_backend, agent_endpoint_id, agent_model, agent_effort, agent_model_source, \
+                agent_local_base_url, agent_local_api_key_env \
+         FROM conversations \
+         WHERE id = $1 AND deleted_at IS NULL AND agent_backend IS NOT NULL",
+    )
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(profile_from_db).transpose()
+}
+
+/// Atomically create/pin or update a conversation's Penny profile.
+///
+/// The backend is compare-and-set: NULL may become the requested backend,
+/// the same backend may update model/effort, and a different backend is a
+/// conflict. The row lock keeps simultaneous first-turn requests from both
+/// believing they won the runtime pin.
+pub async fn upsert_conversation_agent_profile(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    profile: &ConversationAgentProfile,
+) -> Result<ConversationAgentProfile, ConversationError> {
+    validate_agent_profile(profile)?;
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO conversations (id, tenant_id, user_id, title) \
+         VALUES ($1, $2, $3, 'New chat') \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(conversation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let owner: Option<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT tenant_id, user_id, agent_backend \
+         FROM conversations \
+         WHERE id = $1 AND deleted_at IS NULL \
+         FOR UPDATE",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((row_tenant, row_user, pinned_backend)) = owner else {
+        return Err(ConversationError::NotFound);
+    };
+    if row_tenant != tenant_id || row_user != user_id {
+        return Err(ConversationError::OwnershipMismatch);
+    }
+    if let Some(pinned) = pinned_backend.as_deref() {
+        if pinned != profile.backend.as_str() {
+            return Err(ConversationError::AgentBackendPinned {
+                pinned: pinned.to_string(),
+                requested: profile.backend.as_str().to_string(),
+            });
+        }
+    }
+
+    let row = sqlx::query_as::<_, ConversationAgentProfileDbRow>(
+        "UPDATE conversations SET \
+            agent_backend = COALESCE(agent_backend, $4), \
+            agent_endpoint_id = $5, \
+            agent_model = $6, \
+            agent_effort = $7, \
+            agent_model_source = $8, \
+            agent_local_base_url = $9, \
+            agent_local_api_key_env = $10, \
+            updated_at = now() \
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3 \
+         RETURNING agent_backend, agent_endpoint_id, agent_model, agent_effort, agent_model_source, \
+                   agent_local_base_url, agent_local_api_key_env",
+    )
+    .bind(conversation_id)
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(profile.backend.as_str())
+    .bind(profile.llm_endpoint_id)
+    .bind(profile.model.trim())
+    .bind(
+        profile
+            .effort
+            .for_backend_model(profile.backend, &profile.model)
+            .as_str(),
+    )
+    .bind(model_source_as_str(profile.model_source))
+    .bind(profile.local_base_url.trim_end_matches('/'))
+    .bind(profile.local_api_key_env.trim())
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    profile_from_db(row)
+}
+
 /// Load the durable backend-native session id for a Gadgetron conversation.
 pub async fn get_agent_backend_session_id(
     pool: &PgPool,
@@ -262,7 +525,10 @@ pub async fn list_conversations_for_user(
     limit: i64,
 ) -> Result<Vec<ConversationRow>, ConversationError> {
     let rows: Vec<ConversationRow> = sqlx::query_as(
-        "SELECT id, tenant_id, user_id, claude_session_uuid, title, created_at, updated_at \
+        "SELECT id, tenant_id, user_id, claude_session_uuid, title, \
+                agent_backend, agent_endpoint_id, agent_model, agent_effort, agent_model_source, \
+                agent_local_base_url, agent_local_api_key_env, \
+                created_at, updated_at \
          FROM conversations \
          WHERE tenant_id = $1 AND user_id = $2 AND deleted_at IS NULL \
          ORDER BY updated_at DESC \
@@ -364,5 +630,33 @@ mod tests {
     #[test]
     fn summary_takes_first_line_only() {
         assert_eq!(summarize_message("hello\nworld"), "hello");
+    }
+
+    #[test]
+    fn agent_profile_accepts_authless_local_responses_endpoint() {
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: "local-model".into(),
+            effort: AgentEffort::High,
+            model_source: ModelSource::Local,
+            local_base_url: "http://10.0.0.8:8000/v1".into(),
+            local_api_key_env: String::new(),
+        };
+        assert!(validate_agent_profile(&profile).is_ok());
+    }
+
+    #[test]
+    fn agent_profile_rejects_local_source_without_http_endpoint() {
+        let profile = ConversationAgentProfile {
+            backend: AgentBackend::CodexExec,
+            llm_endpoint_id: None,
+            model: "local-model".into(),
+            effort: AgentEffort::High,
+            model_source: ModelSource::Local,
+            local_base_url: "10.0.0.8:8000".into(),
+            local_api_key_env: String::new(),
+        };
+        assert!(validate_agent_profile(&profile).is_err());
     }
 }

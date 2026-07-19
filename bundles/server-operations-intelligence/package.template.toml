@@ -1,0 +1,264 @@
+manifest_version = 3
+
+[bundle]
+id = "server-operations-intelligence"
+version = "0.1.2"
+class = "intelligence"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.7.16, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/server-operations-intelligence"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 64
+open_files = 24
+cpu_seconds = 10
+
+[[permissions]]
+id = "server-intelligence-read"
+kind = "database"
+description = "Read operational log finding revisions and attached intelligence results"
+resources = ["postgres:table:log_findings", "postgres:table:server_log_finding_enrichments", "postgres:table:server_incidents", "postgres:table:server_incident_enrichments"]
+
+[[permissions]]
+id = "server-intelligence-write"
+kind = "database"
+description = "Attach revision-pinned enrichment results owned by Server Operations Intelligence"
+resources = ["postgres:table:server_log_finding_enrichments", "postgres:table:server_incident_enrichments"]
+
+[capabilities]
+gadget_namespaces = ["serverintelligence"]
+
+[[capabilities.provides]]
+id = "gadgetron.intelligence.server-operations-context"
+version = "1.0.0"
+description = "Cited server operations research through the Core knowledge exchange"
+
+[[capabilities.domain_schemas]]
+id = "server-operations-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "30c575a05ebb8a3f1eaebe687c630854d4e11dd203b651755655ea124a3c6a8d"
+
+[[capabilities.gadgets]]
+name = "serverintelligence.finding-enrich-attach"
+description = "Attach one canonical AI enrichment to an unchanged operational log finding revision"
+tier = "write"
+input_schema = { type = "object", properties = { job_id = { type = "string", format = "uuid" }, subject_id = { type = "string", format = "uuid" }, subject_revision = { type = "string", pattern = "^[0-9a-f]{64}$" }, event = { type = "object", properties = { subject = { type = "object", properties = { id = { type = "string", format = "uuid" }, host_id = { type = "string", format = "uuid" }, source = { type = "string" }, severity = { type = "string" }, category = { type = "string" }, summary = { type = "string" }, cause = { type = "string" }, solution = { type = "string" }, excerpt = { type = "string" }, count = { type = "integer", minimum = 1 }, classified_by = { type = "string" }, fingerprint = { type = "string" } }, required = ["id", "host_id", "source", "severity", "category", "summary", "cause", "solution", "excerpt", "count", "classified_by", "fingerprint"], additionalProperties = false } }, required = ["subject"], additionalProperties = false }, result = { type = "object" } }, required = ["job_id", "subject_id", "subject_revision", "event", "result"], additionalProperties = false }
+output_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" }, subject_revision = { type = "string", pattern = "^[0-9a-f]{64}$" }, result_hash = { type = "string", pattern = "^[0-9a-f]{64}$" } }, required = ["finding_id", "subject_revision", "result_hash"], additionalProperties = false }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "serverintelligence.incident-enrich-attach"
+description = "Attach one cited AI summary to an unchanged Server incident revision"
+tier = "write"
+input_schema = { type = "object", additionalProperties = false, properties = { job_id = { type = "string", format = "uuid" }, subject_id = { type = "string", format = "uuid" }, subject_revision = { type = "string", pattern = "^[0-9a-f]{64}$" }, event = { type = "object", additionalProperties = false, properties = { subject = { type = "object", additionalProperties = false, properties = { id = { type = "string", format = "uuid" }, database_revision = { type = "string", format = "uuid" }, status = { type = "string", enum = ["active", "closed"] }, severity = { type = "string" }, summary = { type = "string", minLength = 1, maxLength = 4096 }, rule = { type = "string" }, impact = { type = "string" }, first_response = { type = "string" }, evidence = { type = "array", maxItems = 5, items = { type = "object", additionalProperties = false, properties = { reference = { type = "string", pattern = "^log-evidence-[0-9a-f]{12}$" }, kind = { type = "string" }, summary = { type = "string" }, excerpt = {}, source = {}, category = {}, severity = {}, occurrences = { type = "integer", minimum = 1 }, first_observed_at = {}, last_observed_at = {}, classifier = { type = "string" }, cause = {}, solution = {} }, required = ["reference", "kind", "summary", "excerpt", "source", "category", "severity", "occurrences", "first_observed_at", "last_observed_at", "classifier", "cause", "solution"] } } }, required = ["id", "database_revision", "status", "severity", "summary", "rule", "impact", "first_response", "evidence"] } }, required = ["subject"] }, result = { type = "object", additionalProperties = false, properties = { summary = { type = "string", minLength = 1, maxLength = 4000 }, citations = { type = "array", minItems = 1, maxItems = 10, items = { type = "object", additionalProperties = false, properties = { evidence_ref = { type = "string", pattern = "^log-evidence-[0-9a-f]{12}$" }, reason = { type = "string", minLength = 1, maxLength = 1000 } }, required = ["evidence_ref", "reason"] } } }, required = ["summary", "citations"] } }, required = ["job_id", "subject_id", "subject_revision", "event", "result"] }
+output_schema = { type = "object", additionalProperties = false, properties = { incident_id = { type = "string", format = "uuid" }, subject_revision = { type = "string", pattern = "^[0-9a-f]{64}$" }, result_hash = { type = "string", pattern = "^[0-9a-f]{64}$" } }, required = ["incident_id", "subject_revision", "result_hash"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "serverintelligence.incident-enrichments-batch"
+description = "Read actor-scoped ready incident enrichment payloads for one visible workspace batch"
+tier = "read"
+input_schema = { type = "object", additionalProperties = false, properties = { subjects = { type = "array", maxItems = 200, items = { type = "object", additionalProperties = false, properties = { id = { type = "string" }, revision = { type = "string" } }, required = ["id", "revision"] } } }, required = ["subjects"] }
+output_schema = { type = "object", additionalProperties = false, properties = { subjects = { type = "array", maxItems = 200, items = { type = "object", additionalProperties = false, properties = { id = { type = "string" }, revision = { type = "string" }, status = { type = "string", enum = ["ready"] }, data = { type = "object" } }, required = ["id", "revision", "status", "data"] } } }, required = ["subjects"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.jobs]]
+id = "server-incident-research"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 180 }
+
+[[capabilities.jobs]]
+id = "server-runbook-gardening"
+role = "gardener"
+triggers = ["on_demand"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 180 }
+
+[[capabilities.jobs]]
+id = "server-insight-synthesis"
+role = "insight_synthesizer"
+triggers = ["on_demand"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 180 }
+
+[[capabilities.jobs]]
+id = "server-log-finding-enrichment"
+role = "researcher"
+triggers = ["event"]
+goal = "Add bounded AI context to a new rule-classified log finding while preserving its original evidence and guidance"
+event_kinds = ["server-log-finding-created"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 120 }
+
+[[capabilities.jobs]]
+id = "server-incident-enrichment"
+role = "researcher"
+triggers = ["event"]
+goal = "Add a bounded cited AI summary to one revision-pinned Server incident without replacing rule evidence"
+event_kinds = ["server-incident-updated"]
+gadget_allowlist = []
+budget = { max_gadget_calls = 1, max_wall_seconds = 120 }
+
+[[capabilities.collection_profiles]]
+id = "server-operations-sources"
+label = "Server operations sources"
+description = "Collect bounded vendor, project, community and postmortem sources through Core"
+connector = "core-source-fetch"
+source_classes = ["official", "community", "postmortem"]
+allowlisted_domains = ["docs.nvidia.com", "docs.kernel.org", "access.redhat.com", "ubuntu.com", "serverfault.com"]
+extractor_hints = ["article", "advisory", "runbook", "discussion"]
+freshness_seconds = 604800
+schedule = "0 5 * * *"
+budget = { max_sources = 20, max_bytes = 12582912, max_wall_seconds = 180 }
+recipe_asset = "server-source-collection"
+
+[[capabilities.agent_roles]]
+id = "server-incident-researcher"
+label = "Incident researcher"
+description = "Researches vendor and community evidence for a revision-pinned server finding"
+core_role = "researcher"
+job = "server-incident-research"
+recipe_asset = "server-incident-research"
+collection_profile = "server-operations-sources"
+prompt_contract_revision = "server-incident-research-v1"
+followup_role = "server-runbook-gardener"
+
+[[capabilities.agent_roles]]
+id = "server-runbook-gardener"
+label = "Runbook gardener"
+description = "Turns reviewed incident candidates and outcomes into bounded server lessons"
+core_role = "gardener"
+job = "server-runbook-gardening"
+recipe_asset = "server-runbook-gardening"
+prompt_contract_revision = "server-runbook-gardening-v1"
+
+[[capabilities.agent_roles]]
+id = "server-insight-synthesizer"
+label = "Server insight synthesizer"
+description = "Synthesizes cross-source server insights only when verified outcomes support them"
+core_role = "insight_synthesizer"
+job = "server-insight-synthesis"
+recipe_asset = "server-insight-synthesis"
+prompt_contract_revision = "server-insight-synthesis-v1"
+
+[[capabilities.agent_roles]]
+id = "server-log-finding-enricher"
+label = "Log finding enricher"
+description = "Adds non-blocking context to a revision-pinned rule finding without replacing its evidence"
+core_role = "researcher"
+job = "server-log-finding-enrichment"
+recipe_asset = "server-log-finding-enrichment"
+prompt_contract_revision = "server-log-finding-enrichment-v1"
+
+[[capabilities.agent_roles]]
+id = "server-incident-enricher"
+label = "Incident enricher"
+description = "Adds cited non-blocking context to a revision-pinned Server incident"
+core_role = "researcher"
+job = "server-incident-enrichment"
+recipe_asset = "server-incident-enrichment"
+prompt_contract_revision = "server-incident-enrichment-v1"
+
+[[capabilities.event_jobs]]
+id = "server-log-finding-enrichment"
+event_kind = "server-log-finding-created"
+subject_owner_bundle = "server-administrator"
+subject_kind = "log-finding"
+agent_role = "server-log-finding-enricher"
+input_schema = { type = "object", properties = { subject = { type = "object", properties = { id = { type = "string", format = "uuid" }, host_id = { type = "string", format = "uuid" }, source = { type = "string" }, severity = { type = "string" }, category = { type = "string" }, summary = { type = "string" }, cause = { type = "string" }, solution = { type = "string" }, excerpt = { type = "string" }, count = { type = "integer", minimum = 1 }, classified_by = { type = "string" }, fingerprint = { type = "string" } }, required = ["id", "host_id", "source", "severity", "category", "summary", "cause", "solution", "excerpt", "count", "classified_by", "fingerprint"], additionalProperties = false } }, required = ["subject"], additionalProperties = false }
+result_gadget = "serverintelligence.finding-enrich-attach"
+
+[[capabilities.event_jobs]]
+id = "server-incident-enrichment"
+event_kind = "server-incident-updated"
+subject_owner_bundle = "server-administrator"
+subject_kind = "server-incident"
+agent_role = "server-incident-enricher"
+input_schema = { type = "object", additionalProperties = false, properties = { subject = { type = "object", additionalProperties = false, properties = { id = { type = "string", format = "uuid" }, database_revision = { type = "string", format = "uuid" }, status = { type = "string", enum = ["active", "closed"] }, severity = { type = "string" }, summary = { type = "string", minLength = 1, maxLength = 4096 }, rule = { type = "string" }, impact = { type = "string" }, first_response = { type = "string" }, evidence = { type = "array", maxItems = 5, items = { type = "object", additionalProperties = false, properties = { reference = { type = "string", pattern = "^log-evidence-[0-9a-f]{12}$" }, kind = { type = "string" }, summary = { type = "string" }, excerpt = {}, source = {}, category = {}, severity = {}, occurrences = { type = "integer", minimum = 1 }, first_observed_at = {}, last_observed_at = {}, classifier = { type = "string" }, cause = {}, solution = {} }, required = ["reference", "kind", "summary", "excerpt", "source", "category", "severity", "occurrences", "first_observed_at", "last_observed_at", "classifier", "cause", "solution"] } } }, required = ["id", "database_revision", "status", "severity", "summary", "rule", "impact", "first_response", "evidence"] } }, required = ["subject"] }
+result_gadget = "serverintelligence.incident-enrich-attach"
+
+[[capabilities.row_enrichments]]
+id = "server-incident-enrichment"
+target_bundle = "server-administrator"
+target_workspace = "alerts"
+target_data_capability = "server.incidents-list"
+subject_kind = "server-incident"
+row_join_key_field = "incident_id"
+row_revision_field = "revision"
+read_gadget = "serverintelligence.incident-enrichments-batch"
+event_job = "server-incident-enrichment"
+
+[[capabilities.seed_assets]]
+id = "server-source-collection"
+path = "recipes/source-collection.json"
+media_type = "application/json"
+sha256 = "e2c72f2f1f45cd0dacd8c75fd36c2f63a9fe74eb4574950fd30d16a8b354d0c3"
+
+[[capabilities.seed_assets]]
+id = "server-incident-research"
+path = "recipes/incident-research.json"
+media_type = "application/json"
+sha256 = "d8b0efbdfa4d25d515fbdf39c22d35b569725acad7f896ce30a1ef8a3fffe31e"
+
+[[capabilities.seed_assets]]
+id = "server-runbook-gardening"
+path = "recipes/runbook-gardening.json"
+media_type = "application/json"
+sha256 = "7c9ca03c0f3ae99c0f8730c17cb6a52c2de36eba43102c7f9c9a4d5d2794b08d"
+
+[[capabilities.seed_assets]]
+id = "server-insight-synthesis"
+path = "recipes/insight-synthesis.json"
+media_type = "application/json"
+sha256 = "61c80fa6ab77efc833f6f75bd25009b49d7d81571d9440a60f504bb56ba73e8c"
+
+[[capabilities.seed_assets]]
+id = "server-log-finding-enrichment"
+path = "recipes/finding-enrichment.json"
+media_type = "application/json"
+sha256 = "d58ec84dffe8d0b8e6ad68a42d9b5eecda700963fc7a42224ee8aa65802e7412"
+
+[[capabilities.seed_assets]]
+id = "server-incident-enrichment"
+path = "recipes/incident-enrichment.json"
+media_type = "application/json"
+sha256 = "58bc5482ce4cbad1bfaf3ef536e3b387cc534c21336be401717d13174a36943c"
+
+[[capabilities.migrations]]
+id = "server-log-finding-enrichment"
+revision = 20260717000001
+kind = "schema"
+path = "migrations/20260717000001_log_finding_enrichment.sql"
+sha256 = "cc8100fd1d8a32cf6eb476035adcadd1cb38d057593c55ad77d1ae1ded6c9ea2"
+
+[[capabilities.migrations]]
+id = "server-incident-enrichment"
+revision = 20260717000002
+kind = "schema"
+path = "migrations/20260717000002_incident_enrichment.sql"
+sha256 = "cb678ddd72678eab5539de1c67fbd298f5cbd6a63028d7050b45fed7fbd5520e"

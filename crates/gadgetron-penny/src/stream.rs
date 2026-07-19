@@ -988,6 +988,7 @@ mod tests {
             stream: true,
             stop: None,
             conversation_id: None,
+            audit_context: None,
         }
     }
 

@@ -66,7 +66,7 @@ vi.mock("../../app/components/shell/status-strip", () => ({
 // `evidence-pane-expand-btn` testid the reopen test asserts on.
 vi.mock("../../app/components/shell/evidence-pane", () => ({
   EvidencePane: ({ open = false }: { open?: boolean }) => (
-    <div data-testid={open ? "evidence-pane" : "evidence-pane-collapsed"}>
+    <div id={open ? "evidence-pane" : undefined} data-testid={open ? "evidence-pane" : "evidence-pane-collapsed"}>
       {!open && (
         <button type="button" data-testid="evidence-pane-expand-btn" />
       )}
@@ -79,6 +79,14 @@ vi.mock("../../app/components/shell/failure-panel", () => ({
   FailurePanel: () => <div data-testid="failure-panel" />,
 }));
 
+vi.mock("../../app/components/chat/penny-companion", () => ({
+  PennyCompanion: () => <div data-testid="penny-companion-stub" />,
+}));
+
+vi.mock("../../app/components/shell/command-palette", () => ({
+  CommandPalette: () => <div data-testid="command-palette-stub" />,
+}));
+
 // LeftRail pulls in a heavier graph than WorkbenchShell tests need.
 // Stub it with a minimal shape that exposes the testids tests assert
 // on. The `collapsed` / `forcedCollapsed` props mirror production so
@@ -89,18 +97,21 @@ vi.mock("../../app/components/shell/left-rail", () => ({
     forcedCollapsed = false,
     width = 240,
     onCollapse,
+    showCollapseControl = true,
   }: {
     collapsed?: boolean;
     forcedCollapsed?: boolean;
     width?: number;
     onCollapse?: (v: boolean) => void;
+    showCollapseControl?: boolean;
   }) => (
     <aside
+      id="left-rail"
       data-testid="left-rail"
       className={collapsed ? "w-12" : "w-60"}
       style={{ width: collapsed ? "48px" : `${width}px` }}
     >
-      <button
+      {showCollapseControl && <button
         type="button"
         data-testid="left-rail-collapse-btn"
         disabled={forcedCollapsed}
@@ -112,18 +123,15 @@ vi.mock("../../app/components/shell/left-rail", () => ({
         onClick={() => {
           if (!forcedCollapsed) onCollapse?.(!collapsed);
         }}
-      />
+      />}
       <a href="/web" data-testid="nav-tab-chat" aria-current="page">
         Chat
       </a>
-      <a href="/web/wiki" data-testid="nav-tab-wiki">
+      <a href="/web/knowledge" data-testid="nav-tab-wiki">
         Knowledge
       </a>
       <a href="/web/dashboard" data-testid="nav-tab-dashboard">
         Dashboard
-      </a>
-      <a href="/web/servers" data-testid="nav-tab-servers">
-        Servers
       </a>
     </aside>
   ),
@@ -229,7 +237,7 @@ describe("WorkbenchShell", () => {
       "/web",
     );
     expect(screen.getByTestId("nav-tab-wiki").getAttribute("href")).toBe(
-      "/web/wiki",
+      "/web/knowledge",
     );
     expect(screen.getByTestId("nav-tab-wiki").textContent).toContain(
       "Knowledge",
@@ -237,9 +245,7 @@ describe("WorkbenchShell", () => {
     expect(screen.getByTestId("nav-tab-dashboard").getAttribute("href")).toBe(
       "/web/dashboard",
     );
-    expect(screen.getByTestId("nav-tab-servers").getAttribute("href")).toBe(
-      "/web/servers",
-    );
+    expect(screen.queryByTestId("nav-tab-servers")).toBeNull();
   });
 
   it("marks the active nav link as the current page", () => {
@@ -287,6 +293,82 @@ describe("WorkbenchShell", () => {
     const rail = screen.getByTestId("left-rail");
     expect(rail.className).toContain("w-12");
     expect(screen.queryByTestId("evidence-pane-collapsed")).toBeNull();
+    expect(screen.getByTestId("responsive-shell-toolbar")).toBeTruthy();
+  });
+
+  it("opens the Inspector drawer on a narrow desktop", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 900,
+      writable: true,
+      configurable: true,
+    });
+
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open inspector" }));
+    expect(await screen.findByTestId("inspector-drawer")).toBeTruthy();
+    expect(screen.getByTestId("evidence-pane")).toBeTruthy();
+  });
+
+  it("replaces the fixed rail with a focus-returning drawer on mobile", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 390,
+      writable: true,
+      configurable: true,
+    });
+
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(screen.queryByTestId("left-rail")).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Open navigation" });
+    fireEvent.click(trigger);
+    expect(await screen.findByTestId("navigation-drawer")).toBeTruthy();
+    expect(screen.getByTestId("left-rail")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close navigation" }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByTestId("navigation-drawer")).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("exposes splitter value semantics and Home/End sizing", async () => {
+    render(
+      <WorkbenchShell>
+        <div>chat</div>
+      </WorkbenchShell>,
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    const splitter = screen.getByRole("separator", {
+      name: "Resize navigation rail",
+    });
+    expect(splitter.getAttribute("aria-controls")).toBe("left-rail");
+    expect(splitter.getAttribute("aria-valuemin")).toBe("200");
+    expect(splitter.getAttribute("aria-valuemax")).toBe("360");
+    expect(splitter.getAttribute("aria-valuenow")).toBe("240");
+    fireEvent.keyDown(splitter, { key: "End" });
+
+    const stored = JSON.parse(
+      localStorageMock.getItem("gadgetron.workbench.prefs") ?? "{}",
+    ) as { leftRailWidth?: number };
+    expect(stored.leftRailWidth).toBe(360);
   });
 
   it("does not persist a collapsed preference while forced collapsed", async () => {

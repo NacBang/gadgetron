@@ -1,96 +1,109 @@
-//! `IngestPipeline` — the RAW → wiki orchestration path.
+//! Source-Ledger-backed RAW import orchestration for `wiki.import`.
 //!
-//! # Why a separate struct (vs a free function)
-//!
-//! The pipeline owns its dependencies (`KnowledgeService`, future blob store,
-//! future enrichment client). Holding them on `Self` lets the `wiki.import`
-//! Gadget call `pipeline.import(...)` without re-threading three `Arc`s per
-//! call. A free function would work today but is guaranteed to grow state
-//! (blob store, enricher) — starting with the struct keeps the call
-//! surface stable.
-//!
-//! # Invariants (see module-level doc in `mod.rs`)
-//!
-//! - `KnowledgeService::write` is the canonical write path. No backdoor.
-//! - `content_hash` is `sha256("sha256:" + hex(bytes))` — opaque to downstream
-//!   pipelines, consumed only as a frontmatter string.
-//! - Frontmatter is composed BEFORE the service write, then prepended to the
-//!   extracted markdown body. The llm-wiki store will parse it back on read.
+//! New imports never write the legacy single-user wiki. They preserve the
+//! agent-facing base64 Markdown/plain signature while storing original bytes,
+//! Source/attempt rows, and a source-linked note in the authenticated user's
+//! Personal Space `core` Vault. Existing `imports/*.md` remain readable
+//! through the legacy knowledge service but are not rewritten.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-use chrono::{SecondsFormat, Utc};
-use gadgetron_core::bundle::PlugId;
-use gadgetron_core::error::GadgetronError;
-use gadgetron_core::ingest::{ExtractHints, Extractor};
-use gadgetron_core::knowledge::{AuthenticatedContext, KnowledgePutRequest};
+use gadgetron_core::{
+    bundle::PlugId,
+    error::{GadgetronError, KnowledgeErrorKind},
+    ingest::{BlobMetadata, BlobStore, ExtractHints, Extractor},
+};
+use gadgetron_xaas::{
+    knowledge_sources::{self as sources, AttachSourceBlob, CreateSource, SourceAttempt},
+    knowledge_spaces::{self as spaces, EnsureVault, KnowledgeSpaceError, SpaceActor},
+};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+use uuid::Uuid;
 
-use crate::ingest::title::{resolve_target_path, resolve_title};
-use crate::service::KnowledgeService;
+use crate::{
+    ingest::title::resolve_title,
+    source::{serialize_obsidian_note, FilesystemBlobStore},
+    vault::{note_relative_path, validate_note_relative_path, TenantVaultLayout, VaultLayoutError},
+};
 
-/// Pipeline entry point. Cheap to clone (holds `Arc`s). One instance per
-/// `KnowledgeGadgetProvider` / CLI / web handler is the expected model.
+const SOURCE_LEDGER_PLUG: &str = "source-ledger";
+
+/// Source-backed import coordinator. `backend = None` is the deliberate
+/// no-DB/CLI fail-closed configuration.
 pub struct IngestPipeline {
-    service: Arc<KnowledgeService>,
+    backend: Option<SourceImportBackend>,
+}
+
+#[derive(Clone)]
+struct SourceImportBackend {
+    pool: PgPool,
+    vault_layout: TenantVaultLayout,
 }
 
 impl std::fmt::Debug for IngestPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IngestPipeline")
-            .field("canonical_plug", self.service.canonical_plug())
+            .field("source_ledger_available", &self.backend.is_some())
             .finish()
     }
 }
 
 impl IngestPipeline {
-    /// Build a pipeline bound to one `KnowledgeService`. The extractor is
-    /// caller-chosen per-import (via the `import` method) so the same
-    /// pipeline can serve markdown, PDF, HTML, etc. without refit.
-    pub fn new(service: Arc<KnowledgeService>) -> Self {
-        Self { service }
+    pub fn source_ledger(pool: PgPool, vault_root: impl Into<PathBuf>) -> Self {
+        Self {
+            backend: Some(SourceImportBackend {
+                pool,
+                vault_layout: TenantVaultLayout::new(vault_root),
+            }),
+        }
     }
 
-    /// Expose the underlying `KnowledgeService` — needed by the gadget
-    /// layer when surfacing list/search/get alongside import.
-    pub fn service(&self) -> &Arc<KnowledgeService> {
-        &self.service
+    pub const fn unavailable() -> Self {
+        Self { backend: None }
     }
 
-    /// Execute one end-to-end import.
-    ///
-    /// Steps per design 11 §4.4:
-    ///
-    /// 1. extract
-    /// 2. resolve title
-    /// 3. resolve target path
-    /// 4. build markdown body (extractor output is treated as markdown)
-    /// 5. prepend frontmatter
-    /// 6. delegate to `KnowledgeService::write`
-    /// 7. hash the original bytes for citation
-    ///
-    /// The `extractor` is passed by value (`Arc`) so the caller can pick
-    /// an appropriate impl per content-type without the pipeline carrying
-    /// a registry.
+    pub const fn is_available(&self) -> bool {
+        self.backend.is_some()
+    }
+
     #[tracing::instrument(
         level = "info",
-        name = "knowledge.import",
+        name = "knowledge.import.source_ledger",
         skip(self, actor, request, extractor),
         fields(
+            tenant_id = %actor.tenant_id,
+            user_id = %actor.user_id,
             content_type = %request.content_type,
             byte_size = request.bytes.len(),
         )
     )]
     pub async fn import(
         &self,
-        actor: &AuthenticatedContext,
+        actor: SpaceActor,
         request: ImportRequest,
         extractor: Arc<dyn Extractor>,
     ) -> Result<ImportReceipt, GadgetronError> {
-        // Step 1: extract. Propagate extractor errors as
-        // `GadgetronError::Config` since extractor plumbing is an operator
-        // concern — the wire error code (`extract_*`) is available via
-        // `.code()` for richer surfacing later.
+        let backend = self.backend.as_ref().ok_or_else(|| {
+            backend_error("wiki.import requires PostgreSQL Source Ledger configuration")
+        })?;
+
+        let space = spaces::ensure_personal_space(&backend.pool, actor, "Personal")
+            .await
+            .map_err(registry_error)?;
+        let vault = spaces::ensure_vault(
+            &backend.pool,
+            actor,
+            space.id,
+            EnsureVault {
+                home_bundle_id: "core".to_string(),
+                knowledge_schema_id: "core.knowledge".to_string(),
+                schema_version: 1,
+            },
+        )
+        .await
+        .map_err(registry_error)?;
+
         let extracted = extractor
             .extract(
                 &request.bytes,
@@ -98,99 +111,197 @@ impl IngestPipeline {
                 &ExtractHints::default(),
             )
             .await
-            .map_err(|e| {
-                GadgetronError::Config(format!(
-                    "extractor {:?} failed ({}): {e}",
+            .map_err(|error| {
+                invalid_error(format!(
+                    "extractor {:?} failed ({}): {error}",
                     extractor.name(),
-                    e.code()
+                    error.code()
                 ))
             })?;
-
-        // Step 2: title resolution. Explicit hint > first heading > "imported".
         let title = resolve_title(
             request.title_hint.as_deref(),
             &extracted.structure,
-            "imported",
+            "Imported source",
         );
 
-        // Step 3: target-path resolution. `overwrite = true` is honored
-        // by the store when the path collides; the pipeline does NOT
-        // decide supersession — that is future work.
-        let target_path = resolve_target_path(request.target_path.as_deref(), &title);
+        let requested_object_id = Uuid::new_v4();
+        let path = request
+            .target_path
+            .clone()
+            .unwrap_or_else(|| note_relative_path(&title, requested_object_id));
+        validate_note_relative_path(&path).map_err(vault_error)?;
+        let existing = sources::source_object_at_path(&backend.pool, actor, vault.id, &path)
+            .await
+            .map_err(registry_error)?;
+        if existing.is_some() && !request.overwrite {
+            return Err(invalid_error(format!(
+                "source note path {path:?} already exists; set overwrite=true to replace it"
+            )));
+        }
+        let object_id = existing
+            .as_ref()
+            .map_or(requested_object_id, |object| object.id);
+        let original_name = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("import.md")
+            .to_string();
 
-        // Step 7 (early, for frontmatter): hash the original bytes.
-        // Conceptually step 7 per the docstring above but we need the
-        // string before step 5.
-        let content_hash = sha256_hex_prefixed(&request.bytes);
+        let source = sources::create_pending_source(
+            &backend.pool,
+            actor,
+            CreateSource {
+                vault_id: vault.id,
+                conversation_id: None,
+                source_kind: "upload".to_string(),
+                title: title.clone(),
+                original_name: original_name.clone(),
+                requested_uri: None,
+            },
+        )
+        .await
+        .map_err(registry_error)?;
 
-        // Step 4+5: frontmatter + body. The frontmatter uses TOML per the
-        // existing `wiki::frontmatter` format so the llm-wiki store can
-        // parse it back without a new parser.
-        let frontmatter = compose_frontmatter(&FrontmatterInput {
-            source_content_type: &request.content_type,
-            source_bytes_hash: &content_hash,
-            imported_by: "penny", // placeholder; identity will arrive later
-            source_uri: request.source_uri.as_deref(),
-            title: Some(&title),
-        });
-        let markdown = format!("{frontmatter}{body}", body = extracted.plain_text);
-
-        // Step 6: delegate to KnowledgeService.
-        // The pipeline MUST NOT write directly to `LlmWikiStore`. If this
-        // line regresses to `self.store.put(...)` the whole knowledge plane
-        // cutover is undone.
-        let receipt = self
-            .service
-            .write(
-                actor,
-                KnowledgePutRequest {
-                    path: target_path,
-                    markdown,
-                    create_only: !request.overwrite,
-                    overwrite: request.overwrite,
-                    // Ingest pipeline (RAW import) has no candidate provenance.
-                    provenance: Default::default(),
+        let store = FilesystemBlobStore::new(backend.pool.clone(), backend.vault_layout.root());
+        let blob = store
+            .put(
+                &request.bytes,
+                &BlobMetadata {
+                    tenant_id: actor.tenant_id.to_string(),
+                    content_type: request.content_type.clone(),
+                    filename: original_name,
+                    byte_size: request.bytes.len() as u64,
+                    imported_by: actor.user_id.to_string(),
                 },
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                if error.code() == "blob_too_large" {
+                    invalid_error(error.to_string())
+                } else {
+                    backend_error(error.to_string())
+                }
+            })?;
+        let source = sources::attach_source_blob(
+            &backend.pool,
+            actor,
+            source.id,
+            source.revision,
+            AttachSourceBlob {
+                blob_id: blob.id.0,
+                content_type: request.content_type.clone(),
+                byte_size: request.bytes.len() as i64,
+                content_hash: blob.content_hash.clone(),
+                final_uri: request.source_uri.clone(),
+            },
+        )
+        .await
+        .map_err(registry_error)?;
+        sources::record_attempt(
+            &backend.pool,
+            actor.tenant_id,
+            attempt(
+                &source,
+                "upload",
+                "succeeded",
+                request.source_uri.clone(),
+                &request.content_type,
+                request.bytes.len(),
+                &blob.content_hash,
+            ),
+        )
+        .await
+        .map_err(registry_error)?;
 
+        let note = build_source_note(SourceNoteInput {
+            object_id,
+            source_id: source.id,
+            space_id: space.id,
+            title: &title,
+            content_type: &request.content_type,
+            content_hash: &blob.content_hash,
+            source_uri: request.source_uri.as_deref(),
+            created_at: source.created_at,
+            extracted,
+        })?;
+        let note_hash = hex::encode(Sha256::digest(note.as_bytes()));
+        let object = sources::bind_source_object(
+            &backend.pool,
+            actor,
+            source.id,
+            object_id,
+            &path,
+            &note_hash,
+            request.overwrite,
+        )
+        .await
+        .map_err(registry_error)?;
+
+        let repository = backend
+            .vault_layout
+            .open_or_init(actor.tenant_id)
+            .map_err(vault_error)?;
+        repository
+            .ensure_domain(space.id, "core")
+            .map_err(vault_error)?;
+        let note_state = repository
+            .write_note(
+                space.id,
+                "core",
+                &path,
+                note.as_bytes(),
+                "vault: import source into Personal Space",
+            )
+            .map_err(vault_error)?;
+
+        let source =
+            sources::complete_source(&backend.pool, actor, source.id, source.revision, object.id)
+                .await
+                .map_err(registry_error)?;
+        sources::record_attempt(
+            &backend.pool,
+            actor.tenant_id,
+            attempt(
+                &source,
+                "extract",
+                "succeeded",
+                request.source_uri,
+                &request.content_type,
+                request.bytes.len(),
+                &blob.content_hash,
+            ),
+        )
+        .await
+        .map_err(registry_error)?;
+
+        let _ = request.auto_enrich;
         Ok(ImportReceipt {
-            path: receipt.path,
-            canonical_plug: receipt.canonical_plug,
-            revision: receipt.revision,
+            path,
+            canonical_plug: PlugId::new(SOURCE_LEDGER_PLUG)
+                .expect("source-ledger is a valid static Plug id"),
+            revision: note_state.git_revision,
             byte_size: request.bytes.len() as u64,
-            content_hash,
-            derived_failures: receipt.derived_failures,
+            content_hash: blob.content_hash,
+            derived_failures: Vec::new(),
+            source_id: source.id,
+            object_id: object.id,
+            object_revision: object.revision,
+            blob_existed: blob.existed,
         })
     }
 }
 
-/// Caller input to [`IngestPipeline::import`].
-///
-/// Field docstrings mirror [`gadgetron_core::ingest::ImportOpts`] but this
-/// struct additionally carries the bytes + content-type for a one-shot
-/// import. The MCP tool schema (`wiki.import`) deserializes directly into
-/// this shape (minus `bytes`, which arrives base64-encoded).
 #[derive(Debug, Clone)]
 pub struct ImportRequest {
     pub bytes: Vec<u8>,
     pub content_type: String,
     pub target_path: Option<String>,
     pub title_hint: Option<String>,
-    /// Caller may set `true` but the pipeline ignores it — it always
-    /// treats auto-enrichment as off. Enrichment plumbing is future
-    /// work alongside the Penny RAG system prompt.
     pub auto_enrich: bool,
     pub overwrite: bool,
     pub source_uri: Option<String>,
 }
 
-/// Receipt returned by [`IngestPipeline::import`].
-///
-/// `byte_size` / `content_hash` are the citation anchors — surfaced in
-/// frontmatter and echoed here so the caller (Penny / CLI / web UI) can
-/// show a confirmation without re-reading the page. `derived_failures`
-/// mirrors the `KnowledgeWriteReceipt` field.
 #[derive(Debug, Clone)]
 pub struct ImportReceipt {
     pub path: String,
@@ -199,430 +310,152 @@ pub struct ImportReceipt {
     pub byte_size: u64,
     pub content_hash: String,
     pub derived_failures: Vec<PlugId>,
+    pub source_id: Uuid,
+    pub object_id: Uuid,
+    pub object_revision: i64,
+    pub blob_existed: bool,
 }
 
-struct FrontmatterInput<'a> {
-    source_content_type: &'a str,
-    source_bytes_hash: &'a str,
-    imported_by: &'a str,
+struct SourceNoteInput<'a> {
+    object_id: Uuid,
+    source_id: Uuid,
+    space_id: Uuid,
+    title: &'a str,
+    content_type: &'a str,
+    content_hash: &'a str,
     source_uri: Option<&'a str>,
-    title: Option<&'a str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    extracted: gadgetron_core::ingest::ExtractedDocument,
 }
 
-/// Emit the ingest frontmatter block per design 11 §5.2. Returns a string
-/// that, when prepended to the extracted markdown body, yields a complete
-/// wiki page parseable by `wiki::frontmatter::parse_page`.
-///
-/// Format:
-///
-/// ```text
-/// ---
-/// source = "imported"
-/// source_content_type = "..."
-/// source_bytes_hash = "sha256:..."
-/// source_imported_at = "2026-04-18T10:24:00Z"
-/// imported_by = "..."
-/// title = "..."             (optional)
-/// source_uri = "..."        (optional)
-/// ---
-/// <body>
-/// ```
-fn compose_frontmatter(input: &FrontmatterInput<'_>) -> String {
-    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    let mut out = String::with_capacity(256);
-    out.push_str("---\n");
-    out.push_str("source = \"imported\"\n");
-    out.push_str(&format!(
-        "source_content_type = \"{}\"\n",
-        toml_escape(input.source_content_type)
-    ));
-    out.push_str(&format!(
-        "source_bytes_hash = \"{}\"\n",
-        toml_escape(input.source_bytes_hash)
-    ));
-    out.push_str(&format!("source_imported_at = \"{now}\"\n"));
-    out.push_str(&format!(
-        "imported_by = \"{}\"\n",
-        toml_escape(input.imported_by)
-    ));
-    if let Some(t) = input.title {
-        out.push_str(&format!("title = \"{}\"\n", toml_escape(t)));
+fn build_source_note(input: SourceNoteInput<'_>) -> Result<String, GadgetronError> {
+    let mut properties = BTreeMap::new();
+    properties.insert("id".into(), serde_json::json!(input.object_id));
+    properties.insert("title".into(), serde_json::json!(input.title));
+    properties.insert("kind".into(), serde_json::json!("note"));
+    properties.insert("status".into(), serde_json::json!("draft"));
+    properties.insert("space_id".into(), serde_json::json!(input.space_id));
+    properties.insert("home_bundle_id".into(), serde_json::json!("core"));
+    properties.insert("source_ids".into(), serde_json::json!([input.source_id]));
+    properties.insert(
+        "source_hashes".into(),
+        serde_json::json!([input.content_hash]),
+    );
+    properties.insert(
+        "source_content_type".into(),
+        serde_json::json!(input.content_type),
+    );
+    properties.insert("source_retention".into(), serde_json::json!("versioned"));
+    properties.insert(
+        "created".into(),
+        serde_json::json!(input.created_at.to_rfc3339()),
+    );
+    properties.insert(
+        "updated".into(),
+        serde_json::json!(input.created_at.to_rfc3339()),
+    );
+    if input.extracted.source_metadata.is_object() {
+        properties.insert("extraction".into(), input.extracted.source_metadata);
     }
-    if let Some(uri) = input.source_uri {
-        out.push_str(&format!("source_uri = \"{}\"\n", toml_escape(uri)));
+    if let Some(source_uri) = input.source_uri {
+        properties.insert("source_uri".into(), serde_json::json!(source_uri));
     }
-    out.push_str("---\n");
-    out
+    if !input.extracted.warnings.is_empty() {
+        properties.insert(
+            "extraction_warnings".into(),
+            serde_json::json!(input
+                .extracted
+                .warnings
+                .iter()
+                .map(|warning| &warning.message)
+                .collect::<Vec<_>>()),
+        );
+    }
+    let body = if input
+        .extracted
+        .plain_text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim_start().starts_with("# "))
+    {
+        input.extracted.plain_text
+    } else {
+        format!("# {}\n\n{}", input.title, input.extracted.plain_text)
+    };
+    serialize_obsidian_note(&properties, &body)
+        .map_err(|error| invalid_error(format!("source note serialization failed: {error}")))
 }
 
-/// Minimal TOML basic-string escape. Enough for the fields we emit in
-/// frontmatter (MIME types, UUIDs, RFC3339 timestamps, kebab-case
-/// identifiers); does NOT attempt full TOML spec compliance — the
-/// `wiki::frontmatter` parser reads back what we write. If a caller
-/// sneaks a control character in, they'll trip the TOML parser loudly.
-fn toml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
+fn attempt(
+    source: &sources::KnowledgeSourceRow,
+    phase: &str,
+    outcome: &str,
+    final_uri: Option<String>,
+    content_type: &str,
+    byte_size: usize,
+    content_hash: &str,
+) -> SourceAttempt {
+    SourceAttempt {
+        source_id: source.id,
+        attempt_no: source.attempt_count,
+        phase: phase.to_string(),
+        outcome: outcome.to_string(),
+        final_uri,
+        http_status: None,
+        content_type: Some(content_type.to_string()),
+        byte_size: Some(byte_size as i64),
+        content_hash: Some(content_hash.to_string()),
+        failure_code: None,
+        failure_detail: None,
+    }
+}
+
+fn registry_error(error: KnowledgeSpaceError) -> GadgetronError {
+    match error {
+        KnowledgeSpaceError::InvalidInput(detail) => invalid_error(detail),
+        KnowledgeSpaceError::Conflict => invalid_error("source note path already exists"),
+        KnowledgeSpaceError::RevisionConflict => {
+            invalid_error("source revision changed; refresh and retry")
         }
+        KnowledgeSpaceError::NotFound | KnowledgeSpaceError::Forbidden => {
+            invalid_error("wiki.import requires an active authenticated tenant user")
+        }
+        KnowledgeSpaceError::Database(error) => backend_error(error.to_string()),
     }
-    out
 }
 
-fn sha256_hex_prefixed(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!("sha256:{}", hex::encode(digest))
+fn vault_error(error: VaultLayoutError) -> GadgetronError {
+    match error {
+        VaultLayoutError::InvalidNotePath(_) => invalid_error(error.to_string()),
+        other => backend_error(other.to_string()),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn invalid_error(reason: impl Into<String>) -> GadgetronError {
+    let reason = reason.into();
+    GadgetronError::Knowledge {
+        kind: KnowledgeErrorKind::InvalidQuery {
+            reason: reason.clone(),
+        },
+        message: reason,
+    }
+}
+
+fn backend_error(message: impl Into<String>) -> GadgetronError {
+    GadgetronError::Knowledge {
+        kind: KnowledgeErrorKind::BackendUnavailable {
+            plug: SOURCE_LEDGER_PLUG.to_string(),
+        },
+        message: message.into(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::WikiConfig;
-    use crate::llm_wiki::LlmWikiStore;
-    use crate::service::KnowledgeServiceBuilder;
-    use crate::wiki::Wiki;
-    use async_trait::async_trait;
-    use gadgetron_core::ingest::{ExtractError, ExtractedDocument, StructureHint};
-    use tempfile::TempDir;
 
-    /// Minimal extractor that returns what it's told to. Used to exercise
-    /// title-fallback branches without baking in MarkdownExtractor
-    /// coupling.
-    #[derive(Debug)]
-    struct CannedExtractor {
-        plain_text: String,
-        structure: Vec<StructureHint>,
-    }
-
-    #[async_trait]
-    impl Extractor for CannedExtractor {
-        fn name(&self) -> &str {
-            "canned-test-extractor"
-        }
-        fn supported_content_types(&self) -> &[&str] {
-            &["text/markdown"]
-        }
-        async fn extract(
-            &self,
-            _bytes: &[u8],
-            _content_type: &str,
-            _hints: &ExtractHints,
-        ) -> Result<ExtractedDocument, ExtractError> {
-            Ok(ExtractedDocument {
-                plain_text: self.plain_text.clone(),
-                structure: self.structure.clone(),
-                source_metadata: serde_json::Value::Null,
-                warnings: Vec::new(),
-            })
-        }
-    }
-
-    fn fresh_pipeline() -> (TempDir, Arc<IngestPipeline>) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = WikiConfig {
-            root: dir.path().join("wiki"),
-            autocommit: true,
-            git_author_name: "Test".into(),
-            git_author_email: "t@test.local".into(),
-            max_page_bytes: 1024 * 1024,
-        };
-        let wiki = Arc::new(Wiki::open(cfg).unwrap());
-        let store = Arc::new(LlmWikiStore::new(wiki).unwrap());
-        let svc = KnowledgeServiceBuilder::new()
-            .canonical_store(store)
-            .build()
-            .unwrap();
-        (dir, Arc::new(IngestPipeline::new(svc)))
-    }
-
-    #[tokio::test]
-    async fn ingest_pipeline_imports_markdown_into_canonical_store() {
-        // End-to-end happy path: canned extractor returns "# Hello\nBody",
-        // pipeline writes the page via the service, and the returned
-        // receipt reports the canonical plug id.
-        let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext::system();
-        let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
-            plain_text: "# Hello\n\nBody".into(),
-            structure: vec![StructureHint::Heading {
-                level: 1,
-                byte_offset: 0,
-                text: "Hello".into(),
-            }],
-        });
-
-        let receipt = pipeline
-            .import(
-                &actor,
-                ImportRequest {
-                    bytes: b"# Hello\n\nBody".to_vec(),
-                    content_type: "text/markdown".into(),
-                    target_path: None,
-                    title_hint: None,
-                    auto_enrich: false,
-                    overwrite: false,
-                    source_uri: None,
-                },
-                extractor,
-            )
-            .await
-            .expect("import must succeed");
-
-        assert_eq!(receipt.path, "imports/hello");
-        assert_eq!(receipt.canonical_plug.as_str(), "llm-wiki");
-        assert!(!receipt.content_hash.is_empty());
-        assert!(receipt.content_hash.starts_with("sha256:"));
-        assert_eq!(receipt.byte_size, 13);
-    }
-
-    #[tokio::test]
-    async fn ingest_pipeline_uses_title_hint_when_provided() {
-        // Explicit `title_hint` wins over the first-heading fallback —
-        // regression guard for the precedence order in `resolve_title`.
-        let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext::system();
-        let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
-            plain_text: "# Heading\n".into(),
-            structure: vec![StructureHint::Heading {
-                level: 1,
-                byte_offset: 0,
-                text: "Heading".into(),
-            }],
-        });
-
-        let receipt = pipeline
-            .import(
-                &actor,
-                ImportRequest {
-                    bytes: b"# Heading\n".to_vec(),
-                    content_type: "text/markdown".into(),
-                    target_path: None,
-                    title_hint: Some("Custom Title".into()),
-                    auto_enrich: false,
-                    overwrite: false,
-                    source_uri: None,
-                },
-                extractor,
-            )
-            .await
-            .expect("import");
-        assert_eq!(receipt.path, "imports/custom-title");
-    }
-
-    #[tokio::test]
-    async fn ingest_pipeline_falls_back_to_first_heading() {
-        // No title_hint → resolver pulls "Doc Heading" from the
-        // StructureHint array and kebabs it into the path.
-        let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext::system();
-        let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
-            plain_text: "# Doc Heading\n\n## Sub".into(),
-            structure: vec![
-                StructureHint::Heading {
-                    level: 1,
-                    byte_offset: 0,
-                    text: "Doc Heading".into(),
-                },
-                StructureHint::Heading {
-                    level: 2,
-                    byte_offset: 20,
-                    text: "Sub".into(),
-                },
-            ],
-        });
-
-        let receipt = pipeline
-            .import(
-                &actor,
-                ImportRequest {
-                    bytes: b"# Doc Heading\n\n## Sub".to_vec(),
-                    content_type: "text/markdown".into(),
-                    target_path: None,
-                    title_hint: None,
-                    auto_enrich: false,
-                    overwrite: false,
-                    source_uri: None,
-                },
-                extractor,
-            )
-            .await
-            .expect("import");
-        assert_eq!(receipt.path, "imports/doc-heading");
-    }
-
-    #[tokio::test]
-    async fn ingest_pipeline_composes_frontmatter_with_source_fields() {
-        // Frontmatter must carry `source = "imported"` + content-type +
-        // hash. Read the page back through the service and inspect.
-        let (_dir, pipeline) = fresh_pipeline();
-        let actor = AuthenticatedContext::system();
-        let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
-            plain_text: "# Hello\n".into(),
-            structure: vec![StructureHint::Heading {
-                level: 1,
-                byte_offset: 0,
-                text: "Hello".into(),
-            }],
-        });
-
-        let receipt = pipeline
-            .import(
-                &actor,
-                ImportRequest {
-                    bytes: b"# Hello\n".to_vec(),
-                    content_type: "text/markdown".into(),
-                    target_path: Some("notes/custom".into()),
-                    title_hint: None,
-                    auto_enrich: false,
-                    overwrite: false,
-                    source_uri: Some("https://example.com/post".into()),
-                },
-                extractor,
-            )
-            .await
-            .expect("import");
-
-        let svc = pipeline.service();
-        let doc = svc
-            .get(&actor, &receipt.path)
-            .await
-            .expect("get")
-            .expect("page exists");
-        let fm = doc.frontmatter.as_object().expect("frontmatter is object");
-        assert_eq!(fm.get("source").and_then(|v| v.as_str()), Some("imported"));
-        // `source_content_type`, `source_bytes_hash`, etc. aren't on the
-        // strongly-typed `WikiFrontmatter` struct (they land under
-        // `extra` — `parse_page` flattens them). Verify by round-tripping
-        // through `extra`.
-        let extra = fm.get("extra");
-        let combined = match extra {
-            Some(v) if v.is_object() => v.clone(),
-            _ => serde_json::Value::Object(fm.clone()),
-        };
-        let obj = combined.as_object().unwrap();
-        // Accept either top-level or extra-nested shape depending on
-        // how serde serializes the flattened HashMap.
-        let hash = obj
-            .get("source_bytes_hash")
-            .or_else(|| fm.get("source_bytes_hash"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert!(
-            hash.starts_with("sha256:"),
-            "frontmatter should carry source_bytes_hash; got {fm:?}"
-        );
-
-        // Source URI must be present.
-        let uri = obj
-            .get("source_uri")
-            .or_else(|| fm.get("source_uri"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(uri, "https://example.com/post");
-    }
-
-    #[tokio::test]
-    async fn ingest_pipeline_propagates_derived_failures() {
-        // When the canonical store write succeeds but a derived index
-        // fails, `ImportReceipt::derived_failures` must surface the
-        // failing plug. Uses `FakeFailingIndex` inline so the test is
-        // self-contained.
-        use async_trait::async_trait;
-        use gadgetron_core::error::KnowledgeErrorKind;
-        use gadgetron_core::knowledge::{
-            KnowledgeChangeEvent, KnowledgeHit, KnowledgeIndex, KnowledgeQuery, KnowledgeQueryMode,
-        };
-
-        #[derive(Debug)]
-        struct FailingIdx {
-            plug_id: PlugId,
-        }
-        #[async_trait]
-        impl KnowledgeIndex for FailingIdx {
-            fn plug_id(&self) -> &PlugId {
-                &self.plug_id
-            }
-            fn mode(&self) -> KnowledgeQueryMode {
-                KnowledgeQueryMode::Keyword
-            }
-            async fn search(
-                &self,
-                _: &AuthenticatedContext,
-                _q: &KnowledgeQuery,
-            ) -> Result<Vec<KnowledgeHit>, GadgetronError> {
-                Ok(Vec::new())
-            }
-            async fn reset(&self) -> Result<(), GadgetronError> {
-                Ok(())
-            }
-            async fn apply(
-                &self,
-                _: &AuthenticatedContext,
-                _event: KnowledgeChangeEvent,
-            ) -> Result<(), GadgetronError> {
-                Err(GadgetronError::Knowledge {
-                    kind: KnowledgeErrorKind::BackendUnavailable {
-                        plug: "flaky-derived".into(),
-                    },
-                    message: "simulated".into(),
-                })
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = WikiConfig {
-            root: dir.path().join("wiki"),
-            autocommit: true,
-            git_author_name: "Test".into(),
-            git_author_email: "t@test.local".into(),
-            max_page_bytes: 1024 * 1024,
-        };
-        let wiki = Arc::new(Wiki::open(cfg).unwrap());
-        let store = Arc::new(LlmWikiStore::new(wiki).unwrap());
-        let failing = Arc::new(FailingIdx {
-            plug_id: PlugId::new("flaky-derived").unwrap(),
-        });
-        let svc = KnowledgeServiceBuilder::new()
-            .canonical_store(store)
-            .add_index(failing)
-            .build()
-            .unwrap();
-        let pipeline = Arc::new(IngestPipeline::new(svc));
-        let extractor: Arc<dyn Extractor> = Arc::new(CannedExtractor {
-            plain_text: "# X".into(),
-            structure: vec![StructureHint::Heading {
-                level: 1,
-                byte_offset: 0,
-                text: "X".into(),
-            }],
-        });
-        let receipt = pipeline
-            .import(
-                &AuthenticatedContext::system(),
-                ImportRequest {
-                    bytes: b"# X".to_vec(),
-                    content_type: "text/markdown".into(),
-                    target_path: None,
-                    title_hint: None,
-                    auto_enrich: false,
-                    overwrite: false,
-                    source_uri: None,
-                },
-                extractor,
-            )
-            .await
-            .expect("store write still succeeds under StoreOnly");
-        assert_eq!(receipt.derived_failures.len(), 1);
-        assert_eq!(receipt.derived_failures[0].as_str(), "flaky-derived");
+    #[test]
+    fn unavailable_pipeline_is_explicit() {
+        assert!(!IngestPipeline::unavailable().is_available());
     }
 }

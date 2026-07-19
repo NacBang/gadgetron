@@ -1,0 +1,8 @@
+[bundle]
+id = "travel-planner"
+version = "0.2.0"
+required_scope = "management"
+
+# Product surfaces are published only from the signed package after health,
+# permission and migration gates succeed.
+allow_direct_actions = false

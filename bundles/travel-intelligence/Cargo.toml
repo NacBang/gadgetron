@@ -1,0 +1,22 @@
+[package]
+name = "gadgetron-bundle-travel-intelligence"
+version = "0.1.0"
+edition = "2021"
+license-file = "../../LICENSE"
+repository = "https://github.com/NacBang/gadgetron"
+rust-version = "1.80"
+description = "Independent Travel Intelligence Bundle"
+
+[[bin]]
+name = "travel-intelligence"
+path = "src/main.rs"
+
+[dependencies]
+gadgetron-bundle-runtime = { path = "../../crates/gadgetron-bundle-runtime" }
+gadgetron-bundle-sdk = { path = "../../crates/gadgetron-bundle-sdk" }
+semver = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "macros", "rt"] }
+
+[dev-dependencies]
+hex = { workspace = true }
+sha2 = "0.11"

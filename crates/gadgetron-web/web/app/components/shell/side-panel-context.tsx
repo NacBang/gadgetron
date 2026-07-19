@@ -2,8 +2,6 @@
 
 import { MessageSquareText } from "lucide-react";
 import { useWorkbenchSubject } from "../../lib/workbench-subject-context";
-import { useEvidence } from "../../lib/evidence-context";
-import { ServerContextCardStack } from "./server-context-cards";
 
 function statusClass(status?: string): string {
   switch (status) {
@@ -14,7 +12,7 @@ function statusClass(status?: string): string {
     case "ok":
       return "border-emerald-800 bg-emerald-950/30 text-emerald-200";
     case "pending":
-      return "border-blue-800 bg-blue-950/30 text-blue-200";
+      return "border-[var(--copper)] bg-[var(--surface-2)] text-[var(--copper-hi)]";
     default:
       return "border-zinc-800 bg-zinc-900 text-zinc-300";
   }
@@ -22,11 +20,8 @@ function statusClass(status?: string): string {
 
 export function ContextTab() {
   const { subject } = useWorkbenchSubject();
-  const { serverContext } = useEvidence();
-  const hasSubject = subject != null;
-  const hasServerContext = serverContext.length > 0;
 
-  if (!hasSubject && !hasServerContext) {
+  if (!subject) {
     return (
       <div
         className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center"
@@ -34,55 +29,30 @@ export function ContextTab() {
       >
         <MessageSquareText className="size-4 text-zinc-700" aria-hidden />
         <p className="text-xs font-medium text-zinc-400">No active context</p>
-        <p className="text-[11px] leading-relaxed text-zinc-600">
+        <p className="text-xs leading-relaxed text-zinc-600">
           Start a Penny discussion from a bundle to keep its source details here.
         </p>
       </div>
     );
   }
 
-  // No bundle subject but Penny is touching servers — show only the
-  // server stack at the top of the pane and skip the workbench-
-  // subject scaffolding so the operator isn't reading two empty
-  // section headers.
-  if (!hasSubject && hasServerContext) {
-    return (
-      <div
-        className="flex-1 overflow-y-auto px-3 py-3 text-[11px]"
-        data-testid="context-panel"
-      >
-        <ServerContextCardStack />
-      </div>
-    );
-  }
-
-  // From here on `subject` is guaranteed non-null by the early
-  // returns above — narrow the type for TypeScript so every field
-  // access doesn't need a `subject?.` chain.
-  if (!subject) return null;
-
   return (
     <div
-      className="flex-1 overflow-y-auto px-3 py-3 text-[11px]"
+      className="flex-1 overflow-y-auto px-3 py-3 text-xs"
       data-testid="context-panel"
     >
-      {hasServerContext && (
-        <div className="mb-3">
-          <ServerContextCardStack />
-        </div>
-      )}
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+      <div className="text-xs font-semibold uppercase tracking-wider text-zinc-600">
         Talking About
       </div>
       <div className="mt-1 text-sm font-semibold leading-snug text-zinc-100">
         {subject.title}
       </div>
       {subject.subtitle && (
-        <div className="mt-1 truncate text-[11px] text-zinc-500">
+        <div className="mt-1 truncate text-xs text-zinc-500">
           {subject.subtitle}
         </div>
       )}
-      <div className="mt-2 flex items-center gap-1 text-[10px] text-zinc-500">
+      <div className="mt-2 flex items-center gap-1 text-xs text-zinc-500">
         <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono">
           {subject.bundle}
         </span>
@@ -96,14 +66,14 @@ export function ContextTab() {
       {subject.href && (
         <a
           href={subject.href}
-          className="mt-3 inline-flex rounded border border-zinc-800 px-2 py-1 text-[11px] font-medium text-zinc-300 hover:border-zinc-600 hover:text-zinc-100"
+          className="mt-3 inline-flex rounded border border-zinc-800 px-2 py-1 text-xs font-medium text-zinc-300 hover:border-zinc-600 hover:text-zinc-100"
         >
           View source
         </a>
       )}
       {subject.related && subject.related.length > 0 && (
         <section className="mt-4">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-600">
             Related
           </div>
           <ul className="space-y-1">
@@ -113,7 +83,7 @@ export function ContextTab() {
                   <span className="truncate font-medium">{ref.title}</span>
                   {ref.status && (
                     <span
-                      className={`shrink-0 rounded border px-1 py-px text-[9px] uppercase ${statusClass(ref.status)}`}
+                      className={`shrink-0 rounded border px-1 py-px text-xs uppercase ${statusClass(ref.status)}`}
                     >
                       {ref.status}
                     </span>

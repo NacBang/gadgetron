@@ -30,6 +30,16 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 REPO=$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)
 
+# Keep the wrapper's database, optional service and log settings aligned with
+# launch.sh. The launcher sources this file too; re-sourcing the same values is
+# intentional and avoids a status/log path that differs from the started service.
+if [[ -f "${REPO}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${REPO}/.env"
+    set +a
+fi
+
 PG_IMAGE="gadgetron-pgvector-timescale:pg16"
 PG_CONTAINER="gadgetron-pg"
 PG_VOLUME="gadgetron-pgdata"
@@ -190,7 +200,7 @@ search:
   formats: [html, json]
   safe_search: 0
 general:
-  instance_name: gadgetron
+  instance_name: gadgetron-dev
 YAML
 }
 

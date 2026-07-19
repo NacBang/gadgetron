@@ -130,23 +130,16 @@ test("panels don't collapse unexpectedly during chat message flow", async ({
   await expect(page.getByTestId("evidence-pane-collapsed")).toBeVisible();
 });
 
-// Clicking between Chat / Wiki / Dashboard through the LeftRail must keep
+// Clicking between Chat / Knowledge / Dashboard through the LeftRail must keep
 // the shell chrome (StatusStrip + LeftRail) mounted. Before the route-group
 // refactor the shell unmounted on every navigation, so the chat thread
 // state was lost when the operator clicked Dashboard mid-generation.
-test("shell chrome persists across Chat → Wiki → Dashboard navigation", async ({
+test("shell chrome persists across Chat → Knowledge → Dashboard navigation", async ({
   page,
 }) => {
-  // Mock the workbench endpoints hit by wiki + dashboard so navigation
+  // Mock the dashboard endpoint so navigation
   // doesn't stall on 401s. These responses don't need to be realistic —
   // we're asserting DOM persistence, not page content.
-  await page.route("**/workbench/actions/wiki-list", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ result: { payload: { pages: [] } } }),
-    });
-  });
   await page.route("**/workbench/usage/summary", async (route) => {
     await route.fulfill({
       status: 200,
@@ -173,14 +166,14 @@ test("shell chrome persists across Chat → Wiki → Dashboard navigation", asyn
     });
   });
 
-  // Chat → Wiki
+  // Chat → Knowledge
   await page.getByTestId("nav-tab-wiki").click();
-  await page.waitForURL(/\/wiki/);
+  await page.waitForURL(/\/knowledge/);
   await expect(page.getByTestId("workbench-shell")).toBeVisible();
   await expect(page.getByTestId("left-rail")).toBeVisible();
-  await expect(page.getByTestId("wiki-header")).toBeVisible();
+  await expect(page.getByTestId("knowledge-header")).toBeVisible();
 
-  // Wiki → Dashboard
+  // Knowledge → Dashboard
   await page.getByTestId("nav-tab-dashboard").click();
   await page.waitForURL(/\/dashboard/);
   await expect(page.getByTestId("workbench-shell")).toBeVisible();
@@ -193,102 +186,4 @@ test("shell chrome persists across Chat → Wiki → Dashboard navigation", asyn
   await expect(page.getByTestId("workbench-shell")).toBeVisible();
   await expect(page.getByTestId("left-rail")).toBeVisible();
   await expect(page.getByTestId("chat-header")).toBeVisible();
-});
-
-test("finding discussion opens chat with side-panel context", async ({
-  page,
-}) => {
-  const finding = {
-    id: "finding-smart-1",
-    host_id: "host-1",
-    source: "journal",
-    severity: "critical",
-    category: "storage",
-    fingerprint: "smartd-sdb-pending",
-    summary: "SMART pending sectors on /dev/sdb",
-    excerpt:
-      "smartd: Device: /dev/sdb [SAT], 6 Currently unreadable sectors",
-    ts_first: "2026-05-04T00:00:00Z",
-    ts_last: "2026-05-04T00:30:00Z",
-    count: 6,
-    classified_by: "rule",
-    cause: "Disk media is reporting unreadable sectors.",
-    solution: "Plan replacement and avoid write-heavy repair attempts.",
-    remediation: null,
-    comment_count: 0,
-  };
-
-  await page.route("**/workbench/actions/loganalysis-list", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        result: {
-          payload: [
-            {
-              text: JSON.stringify({ findings: [finding] }),
-            },
-          ],
-        },
-      }),
-    });
-  });
-  await page.route("**/workbench/actions/server-list", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        result: {
-          payload: [
-            {
-              text: JSON.stringify({
-                hosts: [
-                  {
-                    id: "host-1",
-                    host: "10.100.1.110",
-                    alias: "dg5R-PRO6000-8",
-                  },
-                ],
-              }),
-            },
-          ],
-        },
-      }),
-    });
-  });
-  await page.route("**/workbench/actions/loganalysis-status", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        result: {
-          payload: [
-            {
-              text: JSON.stringify({ hosts: [] }),
-            },
-          ],
-        },
-      }),
-    });
-  });
-
-  await page.goto("/web/findings");
-  await expect(page.getByText("SMART pending sectors on /dev/sdb")).toBeVisible();
-  await page.getByRole("button", { name: "Ask Penny" }).first().click();
-
-  await page.waitForURL(/\/web\/?$/);
-  await expect(page.getByTestId("active-subject-banner")).toContainText(
-    "Talking about",
-  );
-  await expect(page.getByTestId("active-subject-banner")).toContainText(
-    "SMART pending sectors",
-  );
-
-  await page.getByTestId("evidence-pane-expand-btn").click();
-  await expect(page.getByTestId("context-panel")).toContainText(
-    "SMART pending sectors",
-  );
-  await expect(page.getByTestId("context-panel")).toContainText(
-    "dg5R-PRO6000-8",
-  );
 });

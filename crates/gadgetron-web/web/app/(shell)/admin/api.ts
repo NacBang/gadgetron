@@ -39,7 +39,7 @@ export interface ListGroupsResponse {
 export type BrainMode = "claude_max" | "external_anthropic" | "external_proxy" | "gadgetron_local";
 export type AgentBackend = "claude_code" | "codex_exec";
 export type ModelSource = "default" | "local";
-export type AgentEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type AgentEffort = "auto" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface AgentBrainSettings {
   mode: BrainMode;
@@ -53,6 +53,7 @@ export interface AgentBrainSettings {
   // High-level admin UI fields. Older backend responses may
   // omit these; default-fallback in the consumer.
   backend?: AgentBackend;
+  llm_endpoint_id?: string | null;
   agent?: AgentBackend;
   model_source?: ModelSource;
   local_base_url?: string;
@@ -68,6 +69,7 @@ export interface UpdateAgentBrainSettingsRequest {
   external_auth_token_value?: string;
   custom_model_option: boolean;
   backend: AgentBackend;
+  llm_endpoint_id?: string | null;
   model_source: ModelSource;
   local_base_url: string;
   local_api_key_env: string;
@@ -78,7 +80,7 @@ export interface LlmEndpointRow {
   id: string;
   name: string;
   kind: "vllm" | "sglang" | "openai_compatible" | "anthropic_proxy" | "ccr";
-  protocol: "openai_chat" | "anthropic_messages";
+  protocol: "openai_chat" | "openai_responses" | "anthropic_messages";
   base_url: string;
   target_kind?: "external" | "local" | "registered_server";
   target_host_id?: string | null;
@@ -86,6 +88,18 @@ export interface LlmEndpointRow {
   listen_port?: number | null;
   auth_token_env?: string | null;
   model_id?: string | null;
+  discovered_models: string[];
+  runtime_compatibility:
+    | "unverified"
+    | "codex_exec"
+    | "claude_code"
+    | "bridge_required"
+    | "incompatible";
+  tool_status: "untested" | "passed" | "failed" | "unsupported";
+  tool_model_id?: string | null;
+  last_tool_probe_at?: string | null;
+  last_tool_error?: string | null;
+  capability_details: Record<string, unknown>;
   health_status: "unknown" | "ok" | "error";
   last_probe_at?: string | null;
   last_ok_at?: string | null;
@@ -106,7 +120,7 @@ export interface ManagedHostRow {
   alias?: string | null;
 }
 
-export type AdminTab = "agent-backend" | "users" | "access";
+export type AdminTab = "agent-backend" | "bundles" | "users" | "access";
 
 export const MAX_AVATAR_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -354,6 +368,9 @@ export async function autodetectLlmEndpoint(
     port: number;
     alias?: string;
     scheme?: "http" | "https";
+    model_id?: string;
+    auth_token_env?: string;
+    auth_token_value?: string;
   },
 ): Promise<{
   ok: boolean;
@@ -466,6 +483,7 @@ export async function deleteLlmEndpoint(
 export async function probeLlmEndpoint(
   apiKey: string | null,
   endpointId: string,
+  body?: { model_id?: string; auth_token_value?: string },
 ): Promise<{
   ok: boolean;
   endpoint: LlmEndpointRow;
@@ -477,7 +495,11 @@ export async function probeLlmEndpoint(
     {
       method: "POST",
       credentials: "include",
-      headers: authHeaders(apiKey),
+      headers: {
+        ...authHeaders(apiKey),
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
     },
   );
   if (!res.ok) {
@@ -495,7 +517,7 @@ export async function probeLlmEndpoint(
 export async function useLlmEndpoint(
   apiKey: string | null,
   endpointId: string,
-  body?: { external_auth_token_value?: string },
+  body?: { model_id?: string; external_auth_token_value?: string },
 ): Promise<void> {
   const res = await fetch(
     `${getApiBase()}/workbench/admin/llm/endpoints/${endpointId}/use`,

@@ -1,16 +1,15 @@
 //! In-process workbench action service.
 //!
-//! Implements the 10-step direct action flow.
-//! Real provider dispatch is deferred (this returns a synthetic response).
-//! Approval stub returns `pending_approval` for `requires_approval ||
-//! destructive` actions.
+//! Resolves a visible descriptor, validates its input, evaluates the common
+//! policy, persists Review requests, dispatches the Gadget, and records audit
+//! and billing outcomes. No-dispatcher fixtures retain a synthetic success path.
 
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use gadgetron_core::{
-    agent::tools::GadgetDispatcher,
+    agent::tools::{GadgetCatalog, GadgetDispatcher},
     audit::{ActionAuditEvent, ActionAuditOutcome, ActionAuditSink},
     knowledge::{
         candidate::{
@@ -19,7 +18,7 @@ use gadgetron_core::{
         AuthenticatedContext,
     },
     workbench::{
-        ApprovalRequest, ApprovalStore, InvokeWorkbenchActionRequest,
+        ApprovalRequest, ApprovalStore, DynamicWorkbenchSurface, InvokeWorkbenchActionRequest,
         InvokeWorkbenchActionResponse, WorkbenchActionResult,
     },
 };
@@ -27,6 +26,7 @@ use uuid::Uuid;
 
 use crate::web::{
     catalog::CatalogSnapshot,
+    manager_oversight::{record_workbench_action, WorkbenchActionOutcome},
     replay_cache::{InMemoryReplayCache, ReplayKey},
     workbench::{WorkbenchActionService, WorkbenchHttpError},
 };
@@ -37,10 +37,8 @@ use crate::web::{
 
 /// In-process direct-action service.
 ///
-/// Backed by a `DescriptorCatalog` snapshot, a replay cache, and an optional
-/// `KnowledgeCandidateCoordinator`. Real gadget dispatch is not performed in
-/// this PR — the ok path returns a synthetic result and optionally captures
-/// an activity event via the coordinator.
+/// Backed by an atomic descriptor snapshot, replay cache, optional Gadget
+/// dispatcher, common policy evaluator, approval store, and audit sinks.
 pub struct InProcessWorkbenchActionService {
     /// Shared catalog snapshot — bundles the `DescriptorCatalog` and
     /// its pre-compiled validators, atomically swappable. Every
@@ -59,6 +57,10 @@ pub struct InProcessWorkbenchActionService {
     /// without any providers), step 7 falls back to the synthetic result
     /// and `payload` is `None`.
     pub gadget_dispatcher: Option<Arc<dyn GadgetDispatcher>>,
+    /// Enabled external Bundle action descriptors. Descriptor discovery is
+    /// separate from dispatch so only explicitly signed workspace actions are
+    /// invokable by action id; execution still uses `gadget_dispatcher`.
+    pub dynamic_workbench: Option<Arc<dyn DynamicWorkbenchSurface>>,
     /// Audit sink for direct-action dispatch events. When wired, the
     /// service emits one `ActionAuditEvent::DirectActionCompleted` per
     /// invocation (success, error, or pending_approval) and echoes the
@@ -71,6 +73,8 @@ pub struct InProcessWorkbenchActionService {
     /// `Uuid::new_v4()` — the approve endpoint can then look up the
     /// record and resume dispatch.
     pub approval_store: Option<Arc<dyn ApprovalStore>>,
+    pub policy_evaluator: Option<Arc<dyn gadgetron_core::policy::PolicyEvaluator>>,
+    pub gadget_catalog: Option<Arc<dyn GadgetCatalog>>,
     /// Optional Postgres pool for the billing ledger. When
     /// present, successful direct-action + approved-action dispatches
     /// emit a `billing_events` row (kind=Action, source_event_id =
@@ -143,8 +147,11 @@ impl InProcessWorkbenchActionService {
             replay_cache: Arc::new(replay_cache),
             coordinator,
             gadget_dispatcher,
+            dynamic_workbench: None,
             audit_sink,
             approval_store,
+            policy_evaluator: None,
+            gadget_catalog: None,
             pg_pool: None,
             billing_failures: None,
         }
@@ -166,6 +173,21 @@ impl InProcessWorkbenchActionService {
         billing_failures: Arc<gadgetron_xaas::billing::BillingFailureCounter>,
     ) -> Self {
         self.billing_failures = Some(billing_failures);
+        self
+    }
+
+    pub fn with_dynamic_workbench(mut self, surface: Arc<dyn DynamicWorkbenchSurface>) -> Self {
+        self.dynamic_workbench = Some(surface);
+        self
+    }
+
+    pub fn with_policy_enforcement(
+        mut self,
+        evaluator: Arc<dyn gadgetron_core::policy::PolicyEvaluator>,
+        catalog: Arc<dyn GadgetCatalog>,
+    ) -> Self {
+        self.policy_evaluator = Some(evaluator);
+        self.gadget_catalog = Some(catalog);
         self
     }
 }
@@ -192,12 +214,35 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // ---------------------------------------------------------------
         let snapshot = self.descriptor_catalog.load();
         let catalog = &snapshot.catalog;
-        let descriptor =
-            catalog
-                .find_action(action_id)
-                .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
-                    action_id: action_id.to_string(),
-                })?;
+        let static_descriptor = catalog.find_action(action_id).cloned();
+        let is_dynamic_descriptor = static_descriptor.is_none();
+        let descriptor = static_descriptor
+            .clone()
+            .or_else(|| {
+                self.dynamic_workbench
+                    .as_ref()
+                    .and_then(|surface| surface.find_action(actor_scopes, action_id))
+            })
+            .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
+                action_id: action_id.to_string(),
+            })?;
+        let direct_actions_allowed = catalog.allow_direct_actions();
+        let validator = if static_descriptor.is_some() {
+            snapshot.validators.get(action_id).cloned()
+        } else {
+            match jsonschema::validator_for(&descriptor.input_schema) {
+                Ok(validator) => Some(Arc::new(validator)),
+                Err(error) => {
+                    tracing::warn!(
+                        action_id = %action_id,
+                        error = %error,
+                        "dynamic Bundle action has invalid input_schema; validation skipped"
+                    );
+                    None
+                }
+            }
+        };
+        drop(snapshot);
 
         // ---------------------------------------------------------------
         // Step 3: required_scope + disabled_reason check.
@@ -219,7 +264,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         }
 
         // Check instance-level policy (allow_direct_actions=false).
-        if !catalog.allow_direct_actions() {
+        if !direct_actions_allowed && !is_dynamic_descriptor {
             return Err(WorkbenchHttpError::DirectActionsDisabled);
         }
 
@@ -240,7 +285,7 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // ---------------------------------------------------------------
         // Step 4: JSON-Schema validation of args.
         // ---------------------------------------------------------------
-        if let Some(validator) = snapshot.validators.get(action_id) {
+        if let Some(validator) = validator {
             // `validate` returns the first error via Result<(), ValidationError>.
             // Use `iter_errors` to collect a user-facing message.
             let mut error_iter = validator.iter_errors(&request.args);
@@ -277,6 +322,37 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             }
         }
 
+        let policy_request_id = request.client_invocation_id.unwrap_or_else(Uuid::new_v4);
+        let policy_context =
+            crate::policy_enforcement::dispatch_context(actor, actor_scopes, policy_request_id);
+        let policy_evaluation = if let Some(evaluator) = self.policy_evaluator.as_ref() {
+            Some(
+                crate::policy_enforcement::evaluate_workbench_action(
+                    evaluator.as_ref(),
+                    self.gadget_catalog.as_deref(),
+                    crate::policy_enforcement::WorkbenchPolicyInvocation {
+                        context: &policy_context,
+                        descriptor: &descriptor,
+                        args: &request.args,
+                        path: gadgetron_core::policy::EnforcementPath::WorkbenchAction,
+                        approval_id: None,
+                        review_state: gadgetron_core::policy::PolicyReviewState::Pending,
+                    },
+                )
+                .await
+                .map_err(policy_error_to_http)?,
+            )
+        } else {
+            None
+        };
+        if let Some(evaluation) = policy_evaluation.as_ref() {
+            if evaluation.authorization == gadgetron_core::policy::PolicyAuthorization::Denied {
+                return Err(WorkbenchHttpError::PolicyDenied {
+                    detail: evaluation.trace.reason.clone(),
+                });
+            }
+        }
+
         // Start the audit clock early so step 6 (pending_approval) also
         // reports an elapsed_ms. The sink receives fire-and-forget events
         // at every completion boundary so operators can reconstruct the
@@ -293,17 +369,28 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         // back to a bare `Uuid::new_v4()` — the approval id is still
         // returned but resume is not possible.
         // ---------------------------------------------------------------
-        let needs_approval = descriptor.requires_approval || descriptor.destructive;
+        let needs_approval = policy_evaluation.as_ref().map_or(
+            descriptor.requires_approval || descriptor.destructive,
+            |evaluation| {
+                evaluation.authorization
+                    == gadgetron_core::policy::PolicyAuthorization::PendingReview
+            },
+        );
         if needs_approval {
             let approval_id = Uuid::new_v4();
             if let Some(store) = &self.approval_store {
-                let record = ApprovalRequest::new_pending(
+                let mut record = ApprovalRequest::new_pending(
                     approval_id,
                     actor,
                     action_id,
                     descriptor.gadget_name.clone(),
                     request.args.clone(),
                 );
+                if let Some(evaluation) = policy_evaluation.as_ref() {
+                    record = record.with_policy_binding(
+                        crate::policy_enforcement::approval_binding(evaluation),
+                    );
+                }
                 if let Err(e) = store.create(record).await {
                     tracing::error!(
                         action_id = %action_id,
@@ -372,8 +459,14 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             self.gadget_dispatcher.as_ref(),
             descriptor.gadget_name.as_deref(),
         ) {
+            let dispatch_context = crate::policy_enforcement::dispatch_context(
+                actor,
+                actor_scopes,
+                request.client_invocation_id.unwrap_or(audit_event_id),
+            )
+            .with_policy_authorized();
             match dispatcher
-                .dispatch_gadget(gadget_name, request.args.clone())
+                .dispatch_gadget_with_context(dispatch_context, gadget_name, request.args.clone())
                 .await
             {
                 Ok(result) => {
@@ -407,6 +500,24 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                         audit_event_id = %audit_event_id,
                         "gadget dispatch failed; surfacing as error"
                     );
+                    if let Some(pool) = self.pg_pool.as_ref() {
+                        let (decision, revision) = oversight_policy(policy_evaluation.as_ref());
+                        record_workbench_action(
+                            pool,
+                            WorkbenchActionOutcome {
+                                actor,
+                                source_event_id: audit_event_id,
+                                action_id,
+                                args: &request.args,
+                                response: None,
+                                error_code: Some(e.error_code()),
+                                elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                                policy_decision: decision,
+                                policy_revision: revision,
+                            },
+                        )
+                        .await;
+                    }
                     return Err(WorkbenchHttpError::Core(e.into()));
                 }
             }
@@ -504,6 +615,25 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
         };
         let resp = InvokeWorkbenchActionResponse { result };
 
+        if let Some(pool) = self.pg_pool.as_ref() {
+            let (decision, revision) = oversight_policy(policy_evaluation.as_ref());
+            record_workbench_action(
+                pool,
+                WorkbenchActionOutcome {
+                    actor,
+                    source_event_id: audit_event_id,
+                    action_id,
+                    args: &request.args,
+                    response: Some(&resp),
+                    error_code: None,
+                    elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                    policy_decision: decision,
+                    policy_revision: revision,
+                },
+            )
+            .await;
+        }
+
         if let Some(ciid) = request.client_invocation_id {
             let key = ReplayKey {
                 tenant_id: actor_tenant_id,
@@ -528,16 +658,51 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
     async fn resume_approval(
         &self,
         actor: &AuthenticatedContext,
-        _actor_scopes: &[gadgetron_core::context::Scope],
+        actor_scopes: &[gadgetron_core::context::Scope],
         approval: ApprovalRequest,
     ) -> Result<InvokeWorkbenchActionResponse, WorkbenchHttpError> {
-        let snapshot = self.descriptor_catalog.load();
-        let descriptor = snapshot
-            .catalog
-            .find_action(&approval.action_id)
-            .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
-                action_id: approval.action_id.clone(),
-            })?;
+        let descriptor = {
+            let snapshot = self.descriptor_catalog.load();
+            snapshot.catalog.find_action(&approval.action_id).cloned()
+        }
+        .or_else(|| {
+            self.dynamic_workbench
+                .as_ref()
+                .and_then(|surface| surface.find_action(actor_scopes, &approval.action_id))
+        })
+        .ok_or_else(|| WorkbenchHttpError::ActionNotFound {
+            action_id: approval.action_id.clone(),
+        })?;
+        let policy_context =
+            crate::policy_enforcement::dispatch_context(actor, actor_scopes, approval.id);
+        if let Some(evaluator) = self.policy_evaluator.as_ref() {
+            let binding = approval
+                .policy_binding
+                .as_ref()
+                .ok_or(WorkbenchHttpError::PolicyBindingMismatch)?;
+            let evaluation = crate::policy_enforcement::evaluate_workbench_action(
+                evaluator.as_ref(),
+                self.gadget_catalog.as_deref(),
+                crate::policy_enforcement::WorkbenchPolicyInvocation {
+                    context: &policy_context,
+                    descriptor: &descriptor,
+                    args: &approval.args,
+                    path: gadgetron_core::policy::EnforcementPath::ReviewResume,
+                    approval_id: Some(approval.id),
+                    review_state: gadgetron_core::policy::PolicyReviewState::Approved,
+                },
+            )
+            .await
+            .map_err(policy_error_to_http)?;
+            if evaluation.trace.input_hash != binding.input_hash {
+                return Err(WorkbenchHttpError::PolicyBindingMismatch);
+            }
+            if evaluation.authorization == gadgetron_core::policy::PolicyAuthorization::Denied {
+                return Err(WorkbenchHttpError::PolicyDenied {
+                    detail: evaluation.trace.reason,
+                });
+            }
+        }
         let start_instant = std::time::Instant::now();
         let audit_event_id = Uuid::new_v4();
         let mut payload: Option<serde_json::Value> = None;
@@ -545,8 +710,12 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             self.gadget_dispatcher.as_ref(),
             descriptor.gadget_name.as_deref(),
         ) {
+            let dispatch_context = policy_context
+                .clone()
+                .with_policy_authorized()
+                .with_approval_granted();
             match dispatcher
-                .dispatch_gadget(gadget_name, approval.args.clone())
+                .dispatch_gadget_with_context(dispatch_context, gadget_name, approval.args.clone())
                 .await
             {
                 Ok(result) => {
@@ -573,6 +742,26 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
                         audit_event_id = %audit_event_id,
                         "approved-dispatch failed; surfacing as error",
                     );
+                    if let Some(pool) = self.pg_pool.as_ref() {
+                        record_workbench_action(
+                            pool,
+                            WorkbenchActionOutcome {
+                                actor,
+                                source_event_id: audit_event_id,
+                                action_id: &approval.action_id,
+                                args: &approval.args,
+                                response: None,
+                                error_code: Some(e.error_code()),
+                                elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                                policy_decision: "review",
+                                policy_revision: approval
+                                    .policy_binding
+                                    .as_ref()
+                                    .map(|binding| binding.policy.to_revision_ref()),
+                            },
+                        )
+                        .await;
+                    }
                     return Err(WorkbenchHttpError::Core(e.into()));
                 }
             }
@@ -604,7 +793,57 @@ impl WorkbenchActionService for InProcessWorkbenchActionService {
             knowledge_candidates: vec![],
             payload,
         };
-        Ok(InvokeWorkbenchActionResponse { result })
+        let response = InvokeWorkbenchActionResponse { result };
+        if let Some(pool) = self.pg_pool.as_ref() {
+            record_workbench_action(
+                pool,
+                WorkbenchActionOutcome {
+                    actor,
+                    source_event_id: audit_event_id,
+                    action_id: &approval.action_id,
+                    args: &approval.args,
+                    response: Some(&response),
+                    error_code: None,
+                    elapsed_ms: start_instant.elapsed().as_millis() as u64,
+                    policy_decision: "review",
+                    policy_revision: approval
+                        .policy_binding
+                        .as_ref()
+                        .map(|binding| binding.policy.to_revision_ref()),
+                },
+            )
+            .await;
+        }
+        Ok(response)
+    }
+}
+
+fn oversight_policy(
+    evaluation: Option<&gadgetron_core::policy::PolicyEvaluation>,
+) -> (&'static str, Option<String>) {
+    let Some(evaluation) = evaluation else {
+        return ("unknown", None);
+    };
+    let decision = match evaluation.authorization {
+        gadgetron_core::policy::PolicyAuthorization::Auto => "auto",
+        gadgetron_core::policy::PolicyAuthorization::PendingReview
+        | gadgetron_core::policy::PolicyAuthorization::ApprovedReview => "review",
+        gadgetron_core::policy::PolicyAuthorization::Denied => "deny",
+    };
+    (decision, Some(evaluation.trace.policy.to_revision_ref()))
+}
+
+fn policy_error_to_http(
+    error: gadgetron_core::policy::PolicyEvaluationError,
+) -> WorkbenchHttpError {
+    if error.code == "policy_input_invalid" || error.code == "policy_gadget_unknown" {
+        WorkbenchHttpError::PolicyInvalidInput {
+            detail: error.detail,
+        }
+    } else {
+        WorkbenchHttpError::PolicyUnavailable {
+            detail: error.detail,
+        }
     }
 }
 
@@ -671,6 +910,79 @@ mod tests {
     use crate::web::catalog::DescriptorCatalog;
     use crate::web::replay_cache::{InMemoryReplayCache, DEFAULT_REPLAY_TTL};
     use gadgetron_core::workbench::InvokeWorkbenchActionRequest;
+
+    struct TestPolicyCatalog;
+
+    impl gadgetron_core::agent::tools::GadgetCatalog for TestPolicyCatalog {
+        fn all_schemas(&self) -> Vec<gadgetron_core::agent::tools::GadgetSchema> {
+            vec![gadgetron_core::agent::tools::GadgetSchema {
+                name: "wiki.search".into(),
+                tier: gadgetron_core::agent::tools::GadgetTier::Read,
+                description: "Search knowledge".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                idempotent: Some(true),
+            }]
+        }
+    }
+
+    struct FixedPolicyEvaluator {
+        authorization: gadgetron_core::policy::PolicyAuthorization,
+    }
+
+    #[async_trait]
+    impl gadgetron_core::policy::PolicyEvaluator for FixedPolicyEvaluator {
+        async fn active_identity(
+            &self,
+            _tenant_id: Uuid,
+        ) -> Result<
+            gadgetron_core::policy::PolicyIdentity,
+            gadgetron_core::policy::PolicyEvaluationError,
+        > {
+            Ok(test_policy_identity())
+        }
+
+        async fn evaluate(
+            &self,
+            request: gadgetron_core::policy::PolicyEvaluationRequest,
+        ) -> Result<
+            gadgetron_core::policy::PolicyEvaluation,
+            gadgetron_core::policy::PolicyEvaluationError,
+        > {
+            let decision = match self.authorization {
+                gadgetron_core::policy::PolicyAuthorization::Auto => {
+                    gadgetron_core::policy::PolicyDecision::Auto
+                }
+                gadgetron_core::policy::PolicyAuthorization::Denied => {
+                    gadgetron_core::policy::PolicyDecision::Deny
+                }
+                gadgetron_core::policy::PolicyAuthorization::PendingReview
+                | gadgetron_core::policy::PolicyAuthorization::ApprovedReview => {
+                    gadgetron_core::policy::PolicyDecision::Review
+                }
+            };
+            Ok(gadgetron_core::policy::PolicyEvaluation {
+                event_id: Uuid::new_v4(),
+                trace: gadgetron_core::policy::PolicyDecisionTrace {
+                    schema_version: gadgetron_core::policy::POLICY_SCHEMA_VERSION,
+                    policy: test_policy_identity(),
+                    input_hash: request.input.digest().unwrap(),
+                    decision,
+                    reason: "fixed test policy".into(),
+                    steps: Vec::new(),
+                },
+                trace_hash: format!("sha256:{}", "b".repeat(64)),
+                authorization: self.authorization,
+            })
+        }
+    }
+
+    fn test_policy_identity() -> gadgetron_core::policy::PolicyIdentity {
+        gadgetron_core::policy::PolicyIdentity {
+            policy_id: Uuid::from_u128(1),
+            revision: 7,
+            document_hash: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
 
     fn make_service(catalog: DescriptorCatalog) -> InProcessWorkbenchActionService {
         InProcessWorkbenchActionService::new(
@@ -861,6 +1173,72 @@ mod tests {
             .unwrap();
         assert_eq!(resp.result.status, "pending_approval");
         assert!(resp.result.approval_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn common_policy_denial_overrides_descriptor_flags() {
+        let svc = make_service(DescriptorCatalog::seed_p2b()).with_policy_enforcement(
+            Arc::new(FixedPolicyEvaluator {
+                authorization: gadgetron_core::policy::PolicyAuthorization::Denied,
+            }),
+            Arc::new(TestPolicyCatalog),
+        );
+        let error = svc
+            .invoke(
+                &actor(),
+                &actor_scopes_default(),
+                "knowledge-search",
+                InvokeWorkbenchActionRequest {
+                    args: serde_json::json!({"query": "blocked"}),
+                    client_invocation_id: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WorkbenchHttpError::PolicyDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn common_policy_review_persists_policy_bound_request() {
+        use crate::web::approval_store::InMemoryApprovalStore;
+        use gadgetron_core::workbench::ApprovalStore;
+
+        let store: Arc<dyn ApprovalStore> = Arc::new(InMemoryApprovalStore::new());
+        let svc = InProcessWorkbenchActionService::new_full(
+            Arc::new(ArcSwap::from_pointee(
+                DescriptorCatalog::seed_p2b().into_snapshot(),
+            )),
+            InMemoryReplayCache::new(DEFAULT_REPLAY_TTL),
+            None,
+            None,
+            Arc::new(gadgetron_core::audit::NoopActionAuditSink),
+            Some(store.clone()),
+        )
+        .with_policy_enforcement(
+            Arc::new(FixedPolicyEvaluator {
+                authorization: gadgetron_core::policy::PolicyAuthorization::PendingReview,
+            }),
+            Arc::new(TestPolicyCatalog),
+        );
+        let response = svc
+            .invoke(
+                &actor(),
+                &actor_scopes_default(),
+                "knowledge-search",
+                InvokeWorkbenchActionRequest {
+                    args: serde_json::json!({"query": "review me"}),
+                    client_invocation_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let approval = store
+            .get(response.result.approval_id.unwrap())
+            .await
+            .unwrap();
+        let binding = approval.policy_binding.expect("policy binding");
+        assert_eq!(binding.policy, test_policy_identity());
+        assert!(!binding.decision_event_id.is_nil());
     }
 
     // -----------------------------------------------------------------------

@@ -13,6 +13,22 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "./ui/collapsible";
+import { DeclarativeRenderer } from "./workbench/declarative-renderer";
+import { useCapabilities } from "../lib/capability-context";
+import { useI18n } from "../lib/i18n";
+
+function parsedResult(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "output" in parsed) {
+      return (parsed as { output: unknown }).output;
+    }
+    return parsed;
+  } catch {
+    return value;
+  }
+}
 
 /**
  * Fallback ToolCallMessagePart renderer — used for every MCP tool invocation
@@ -20,8 +36,8 @@ import {
  *
  * Live-state polish:
  *   - While the call is in-flight, a spinning `Loader2` replaces the static
- *     wrench and the right-side label flips to "호출 중..." with a subtle
- *     blue ring. Without this the static `실행 중` badge looked frozen — the
+ *     wrench and the right-side label switches to the running copy. Without
+ *     this the static running badge looked frozen — the
  *     caller couldn't tell whether the agent was actually working or the
  *     stream had stalled.
  *   - On success the wrench returns and a green check lands with a fade-in.
@@ -37,6 +53,9 @@ export function ToolPart(props: {
   status?: { type: string };
   isError?: boolean;
 }) {
+  const { snapshot } = useCapabilities();
+  const { labels } = useI18n();
+  const copy = labels.chat.tool;
   const isRunning = props.status?.type === "running";
   const isDone =
     props.status?.type === "complete" || props.result !== undefined;
@@ -99,6 +118,10 @@ export function ToolPart(props: {
       : undefined;
 
   const displayName = props.toolName?.replace(/^mcp__[^_]+__/, "") ?? "tool";
+  const presentation = snapshot.ui_contributions.find((item) =>
+    item.kind === "tool_result" && item.gadget_name === displayName && item.renderer,
+  );
+  const presentationPayload = parsedResult(props.result);
 
   const Icon = isRunning ? Loader2 : Wrench;
 
@@ -111,7 +134,7 @@ export function ToolPart(props: {
       <CollapsibleTrigger
         className={`flex w-full items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
           isRunning
-            ? "border-blue-500/30 bg-blue-500/5 hover:bg-blue-500/10"
+            ? "border-[var(--copper)] bg-[var(--surface-2)] hover:bg-[var(--surface)]"
             : props.isError
               ? "border-red-500/30 bg-red-500/5 hover:bg-red-500/10"
               : "border-border/40 bg-muted/30 hover:bg-muted/50"
@@ -121,23 +144,23 @@ export function ToolPart(props: {
           className={`size-3 shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
         />
         <Icon
-          className={`size-3 shrink-0 ${isRunning ? "motion-safe:animate-spin text-blue-400" : props.isError ? "text-red-400" : "text-blue-400"}`}
+          className={`size-3 shrink-0 ${isRunning ? "motion-safe:animate-spin text-[var(--copper-hi)]" : props.isError ? "text-red-400" : "text-[var(--ink-2)]"}`}
         />
         <code className="font-mono text-xs text-foreground">{displayName}</code>
         <div className="ml-auto flex items-center gap-1.5">
           {elapsedLabel && (
             <span
               className={`font-mono text-[10px] tabular-nums ${
-                isRunning ? "text-blue-400/70" : "text-muted-foreground/70"
+                isRunning ? "text-[var(--copper-hi)]" : "text-muted-foreground/70"
               }`}
             >
               {elapsedLabel}
             </span>
           )}
           {isRunning && (
-            <span className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-blue-400/70">
-              <span className="size-1 rounded-full bg-blue-400 animate-pulse" />
-              Running
+            <span className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--copper-hi)]">
+              <span className="size-1 rounded-full bg-[var(--copper)] animate-pulse" />
+              {copy.running}
             </span>
           )}
           {success && (
@@ -153,7 +176,7 @@ export function ToolPart(props: {
           {argsStr && (
             <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-2">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                Input
+                {copy.input}
               </div>
               <pre className="text-xs text-foreground/80 whitespace-pre-wrap break-all font-mono">
                 {argsStr}
@@ -163,11 +186,15 @@ export function ToolPart(props: {
           {resultStr && (
             <div className="rounded-md border border-border/40 bg-muted/20 px-3 py-2">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                Result
+                {copy.result}
               </div>
-              <pre className="text-xs text-foreground/80 whitespace-pre-wrap break-all font-mono">
-                {resultStr}
-              </pre>
+              {presentation ? (
+                <DeclarativeRenderer renderer={presentation.renderer!} payload={presentationPayload} />
+              ) : typeof presentationPayload === "string" ? (
+                <p className="whitespace-pre-wrap break-words text-xs text-foreground/80">{presentationPayload.slice(0, 16_384)}</p>
+              ) : (
+                <DeclarativeRenderer renderer={Array.isArray(presentationPayload) ? "list" : "detail"} payload={presentationPayload} />
+              )}
             </div>
           )}
         </div>

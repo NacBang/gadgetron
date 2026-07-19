@@ -1,0 +1,11 @@
+{
+  "revision": "news-source-collection-v1",
+  "objective": "Collect bounded source snapshots for a Manager-defined News Topic through Core-owned fetch.",
+  "inputs": ["topic", "approved_locators", "source_class", "freshness", "cursor"],
+  "outputs": ["source_snapshot", "source_health", "provenance"],
+  "rules": [
+    "Never bypass a paywall or authentication boundary.",
+    "Preserve canonical locator, content hash, fetched time and source revision.",
+    "A failed fetch remains a visible source-health outcome, not an empty success."
+  ]
+}

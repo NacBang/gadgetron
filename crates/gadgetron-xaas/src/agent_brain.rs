@@ -21,6 +21,7 @@ struct AgentBrainSettingsRow {
     updated_by: Option<Uuid>,
     updated_at: DateTime<Utc>,
     agent: String,
+    llm_endpoint_id: Option<Uuid>,
     model_source: String,
     local_base_url: String,
     local_api_key_env: String,
@@ -72,22 +73,26 @@ fn model_source_to_str(v: ModelSource) -> &'static str {
 
 fn parse_effort(raw: &str) -> Result<AgentEffort, AgentBrainSettingsError> {
     match raw {
+        "auto" => Ok(AgentEffort::Auto),
         "low" => Ok(AgentEffort::Low),
         "medium" => Ok(AgentEffort::Medium),
         "high" => Ok(AgentEffort::High),
         "xhigh" => Ok(AgentEffort::Xhigh),
         "max" => Ok(AgentEffort::Max),
+        "ultra" => Ok(AgentEffort::Ultra),
         other => Err(AgentBrainSettingsError::InvalidEffort(other.to_string())),
     }
 }
 
 fn effort_to_str(v: AgentEffort) -> &'static str {
     match v {
+        AgentEffort::Auto => "auto",
         AgentEffort::Low => "low",
         AgentEffort::Medium => "medium",
         AgentEffort::High => "high",
         AgentEffort::Xhigh => "xhigh",
         AgentEffort::Max => "max",
+        AgentEffort::Ultra => "ultra",
     }
 }
 
@@ -109,6 +114,7 @@ fn row_to_settings(
         updated_by: row.updated_by,
         source: AgentBrainSettingsSource::Database,
         backend,
+        llm_endpoint_id: row.llm_endpoint_id,
         model_source,
         local_base_url: row.local_base_url,
         local_api_key_env: row.local_api_key_env,
@@ -124,7 +130,8 @@ pub async fn get_agent_brain_settings(
         r#"
         SELECT mode, external_base_url, model, external_auth_token_env,
                custom_model_option, updated_by, updated_at,
-               agent, model_source, local_base_url, local_api_key_env, effort
+               agent, llm_endpoint_id, model_source,
+               local_base_url, local_api_key_env, effort
         FROM agent_brain_settings
         WHERE tenant_id = $1
         "#,
@@ -147,10 +154,11 @@ pub async fn upsert_agent_brain_settings(
         INSERT INTO agent_brain_settings (
             tenant_id, mode, external_base_url, model,
             external_auth_token_env, custom_model_option, updated_by, updated_at,
-            agent, model_source, local_base_url, local_api_key_env, effort
+            agent, llm_endpoint_id, model_source,
+            local_base_url, local_api_key_env, effort
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(),
-                $8, $9, $10, $11, $12)
+                $8, $9, $10, $11, $12, $13)
         ON CONFLICT (tenant_id) DO UPDATE SET
             mode = EXCLUDED.mode,
             external_base_url = EXCLUDED.external_base_url,
@@ -160,13 +168,15 @@ pub async fn upsert_agent_brain_settings(
             updated_by = EXCLUDED.updated_by,
             updated_at = NOW(),
             agent = EXCLUDED.agent,
+            llm_endpoint_id = EXCLUDED.llm_endpoint_id,
             model_source = EXCLUDED.model_source,
             local_base_url = EXCLUDED.local_base_url,
             local_api_key_env = EXCLUDED.local_api_key_env,
             effort = EXCLUDED.effort
         RETURNING mode, external_base_url, model, external_auth_token_env,
                   custom_model_option, updated_by, updated_at,
-                  agent, model_source, local_base_url, local_api_key_env, effort
+                  agent, llm_endpoint_id, model_source,
+                  local_base_url, local_api_key_env, effort
         "#,
     )
     .bind(tenant_id)
@@ -177,6 +187,7 @@ pub async fn upsert_agent_brain_settings(
     .bind(request.custom_model_option)
     .bind(actor_user_id)
     .bind(backend_to_str(request.backend))
+    .bind(request.llm_endpoint_id)
     .bind(model_source_to_str(request.model_source))
     .bind(&request.local_base_url)
     .bind(&request.local_api_key_env)

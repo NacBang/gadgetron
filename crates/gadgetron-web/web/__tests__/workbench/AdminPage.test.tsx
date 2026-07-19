@@ -1,9 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AdminPage from "../../app/(shell)/admin/page";
 
 vi.mock("../../app/lib/auth-context", () => ({
+  authHeaders: () => ({}),
   useAuth: () => ({
     apiKey: null,
     saveKey: vi.fn(),
@@ -29,7 +30,7 @@ describe("AdminPage", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows Admin sections as internal tabs with Agent Backend first", async () => {
+  it("shows Admin sections as internal tabs with Penny Models first", async () => {
     global.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -57,15 +58,138 @@ describe("AdminPage", () => {
 
     render(<AdminPage />);
 
-    expect(await screen.findByRole("tab", { name: "Agent Backend" })).toBeTruthy();
+    expect(await screen.findByRole("tab", { name: "Penny Models" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Bundles" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Users" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Access" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Agent Backend" })).toBeTruthy();
-    expect(screen.getByText("Applied configuration")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "New chat defaults" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Local model endpoints" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
 
     await userEvent.click(screen.getByRole("tab", { name: "Access" }));
     expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
+  });
+
+  it("shows signed Bundle lifecycle controls and honest export scope", async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/workbench/admin/users?")) {
+        return jsonResponse({ users: [], returned: 0 });
+      }
+      if (url.includes("/workbench/admin/agent/brain")) {
+        return jsonResponse({ mode: "claude_max", external_base_url: "", model: "", external_auth_token_env: "", custom_model_option: false, source: "config_file" });
+      }
+      if (url.includes("/workbench/admin/llm/endpoints")) {
+        return jsonResponse({ endpoints: [], returned: 0 });
+      }
+      if (url.endsWith("/workbench/admin/bundles")) {
+        return jsonResponse({
+          bundles: [
+            {
+              bundle: { id: "server-administrator", version: "1.0.0" },
+              bundle_class: "operational",
+              source_path: "/bundles/server-administrator/bundle.toml",
+              action_count: 0,
+              view_count: 0,
+              contract: "bundle_sdk_v1",
+              package_manifest_sha256: "a".repeat(64),
+              permission_ids: ["ssh-read"],
+              provided_capabilities: [
+                { id: "gadgetron.operation.server-administration", version: "1.0.0", description: "Server administration" },
+              ],
+              dependencies: { requires: [], optional: [], conflicts: [] },
+              settings_declared: true,
+              agent_role_count: 0,
+              target_profile_count: 2,
+              runtime: { bundle_id: "server-administrator", state: "disabled", updated_at_ms: 1 },
+            },
+            {
+              bundle: { id: "restaurant-research", version: "1.0.0" },
+              bundle_class: "intelligence",
+              source_path: "/bundles/restaurant-research/bundle.toml",
+              action_count: 2,
+              view_count: 1,
+              contract: "bundle_sdk_v1",
+              permission_ids: [],
+              provided_capabilities: [
+                { id: "gadgetron.intelligence.restaurant-context", version: "1.0.0", description: "Restaurant research context" },
+              ],
+              dependencies: { requires: [], optional: [], conflicts: [] },
+              settings_declared: false,
+              agent_role_count: 3,
+              target_profile_count: 0,
+              runtime: { bundle_id: "restaurant-research", state: "enabled", updated_at_ms: 1 },
+            },
+          ],
+          count: 2,
+        });
+      }
+      if (url.includes("/workbench/admin/bundles/dependency-plan?")) {
+        return jsonResponse({
+          desired_enabled: ["restaurant-research"],
+          enable_order: ["restaurant-research"],
+          bindings: [],
+          issues: [],
+        });
+      }
+      if (url.endsWith("/workbench/knowledge/ontologies")) {
+        return jsonResponse({
+          revisions: [{
+            revision: {
+              id: "restaurant-ontology",
+              owner_bundle_id: "restaurant-research",
+              schema_id: "restaurant-domain",
+              schema_version: 1,
+              schema_sha256: "c".repeat(64),
+              format_version: 1,
+              legacy_adapter: false,
+              created_at: "2026-07-18T00:00:00Z",
+            },
+            activation_action: "activate",
+            package_count: 1,
+            type_count: 8,
+            relation_count: 5,
+          }],
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    render(<AdminPage />);
+    await userEvent.click(await screen.findByRole("tab", { name: "Bundles" }));
+    expect((await screen.findAllByText("server-administrator")).length).toBe(2);
+    expect(screen.getByTestId("bundle-class-operational")).toHaveTextContent("server-administrator");
+    expect(screen.getByTestId("bundle-class-intelligence")).toHaveTextContent("restaurant-research");
+    expect(screen.getAllByText(/signed runtime/)).toHaveLength(2);
+    expect(screen.getByText("Version 1.0.0 · Functions provided by runtime")).toBeTruthy();
+    expect(screen.queryByText("Version 1.0.0 · 0 actions · 0 views")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Settings" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Connections" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "AI roles" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Ontology" })).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
+    expect(screen.getByText("Server administration")).toBeTruthy();
+    expect(screen.getByText("No Bundle dependencies.")).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "Lifecycle" }));
+    expect(screen.getByRole("button", { name: "Preview enable" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Export portable package" })).toBeTruthy();
+    expect(screen.getByText("Package export is not data export")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: /restaurant-research/ }));
+    expect(screen.getByText("Version 1.0.0 · 2 actions · 1 view")).toBeTruthy();
+    expect(await screen.findByRole("tab", { name: "AI roles" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Research settings" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Connections" })).toBeNull();
+    await userEvent.click(await screen.findByRole("tab", { name: "Ontology" }));
+    expect(await screen.findByRole("heading", { name: "Restaurant Domain" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Bundle ontology" })).toBeTruthy();
+    const ontologyPanel = screen.getByRole("tabpanel", { name: "Ontology" });
+    expect(within(ontologyPanel).getByText("8")).toBeTruthy();
+    expect(within(ontologyPanel).queryByRole("button")).toBeNull();
+    expect(screen.queryByText("Server Domain")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /server-administrator/ }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Ontology" })).toBeNull());
   });
 
   it("submits avatar_url when creating a user with a profile photo URL", async () => {
@@ -396,7 +520,7 @@ describe("AdminPage", () => {
     });
   });
 
-  it("clears stale external settings for the default Claude entitlement", async () => {
+  it("preserves an explicit default model while clearing stale external routing", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
@@ -471,7 +595,7 @@ describe("AdminPage", () => {
       expect(body).toMatchObject({
         mode: "claude_max",
         external_base_url: "",
-        model: "",
+        model: "stale-model",
         external_auth_token_env: "",
         custom_model_option: false,
         backend: "claude_code",
@@ -600,6 +724,11 @@ describe("AdminPage", () => {
       protocol: "openai_chat",
       base_url: "http://10.100.1.5:8100",
       model_id: "cyankiwi/gemma-4-31B-it-AWQ-4bit",
+      discovered_models: ["cyankiwi/gemma-4-31B-it-AWQ-4bit"],
+      runtime_compatibility: "bridge_required",
+      tool_status: "unsupported",
+      tool_model_id: "cyankiwi/gemma-4-31B-it-AWQ-4bit",
+      capability_details: {},
       health_status: "ok",
       last_latency_ms: 12,
       created_at: "2026-05-03T00:00:00Z",
@@ -639,6 +768,10 @@ describe("AdminPage", () => {
           auth_token_env: "PENNY_CCR_AUTH_TOKEN",
           base_url: "http://127.0.0.1:3456",
           model_id: rawEndpoint.model_id,
+          discovered_models: [],
+          runtime_compatibility: "unverified",
+          tool_status: "untested",
+          capability_details: {},
           health_status: "unknown",
           created_at: "2026-05-03T00:00:00Z",
           updated_at: "2026-05-03T00:00:00Z",
@@ -661,11 +794,11 @@ describe("AdminPage", () => {
 
     await screen.findByText("gemma4");
     expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "Create CCR" }));
+    await userEvent.click(screen.getByRole("button", { name: "Register CCR" }));
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
     expect(screen.getByTestId("ccr-bridge-direction-icon")).toBeTruthy();
     expect(screen.queryByText("gemma4 → Anthropic-compatible endpoint")).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Create bridge" }));
+    await userEvent.click(screen.getByRole("button", { name: "Register target" }));
 
     await waitFor(() => {
       const createCall = fetchMock.mock.calls.find(([input, init]) => {
@@ -695,6 +828,11 @@ describe("AdminPage", () => {
       protocol: "anthropic_messages",
       base_url: "http://10.100.1.5:8101",
       model_id: "gemma4",
+      discovered_models: ["gemma4"],
+      runtime_compatibility: "claude_code",
+      tool_status: "passed",
+      tool_model_id: "gemma4",
+      capability_details: { messages_tool_use: true },
       auth_token_env: "PENNY_CCR_AUTH_TOKEN",
       health_status: "ok",
       last_latency_ms: 12,

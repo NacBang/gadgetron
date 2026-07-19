@@ -55,7 +55,7 @@ binary = "/Users/<name>/.local/bin/claude"
 ### `penny_agent_error` + exit_code=1
 
 **서브케이스 1**: stderr에 `--output-format=stream-json requires --verbose`
-- **원인**: Claude Code 2.0.x (구버전). Gadgetron은 Claude Code 2.1.104+ 전제.
+- **원인**: 지원 floor보다 오래된 Claude Code. Gadgetron은 Claude Code 2.1.206+ 전제.
 - **대응**: `claude --version` 확인, 필요 시 업그레이드.
 
 **서브케이스 2**: stderr에 `Not logged in · Please run /login`

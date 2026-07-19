@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "types": [
+    {"id":"ErrorSignature","label":"Error signature","family":"entity"},
+    {"id":"EnvironmentProfile","label":"Environment profile","family":"entity"},
+    {"id":"VendorAdvisory","label":"Vendor advisory","family":"source"},
+    {"id":"CommunityCase","label":"Community case","family":"source"},
+    {"id":"Hypothesis","label":"Diagnosis hypothesis","family":"claim"},
+    {"id":"Procedure","label":"Recovery procedure","family":"procedure"},
+    {"id":"Precondition","label":"Procedure precondition","family":"claim"},
+    {"id":"Prohibition","label":"Unsafe condition","family":"claim"},
+    {"id":"Rollback","label":"Rollback procedure","family":"procedure"},
+    {"id":"ServerLesson","label":"Server operations lesson","family":"lesson"}
+  ],
+  "relations": [
+    {"id":"supports_diagnosis","label":"Supports diagnosis","family":"supports","source_types":["VendorAdvisory","CommunityCase","ErrorSignature"],"target_types":["Hypothesis"]},
+    {"id":"contradicts_diagnosis","label":"Contradicts diagnosis","family":"contradicts","source_types":["VendorAdvisory","CommunityCase"],"target_types":["Hypothesis","Procedure"]},
+    {"id":"applies_in","label":"Applies in environment","family":"applies_to","source_types":["Hypothesis","Procedure","ServerLesson"],"target_types":["EnvironmentProfile"]},
+    {"id":"requires","label":"Requires precondition","family":"applies_to","source_types":["Procedure"],"target_types":["Precondition"]},
+    {"id":"prohibits","label":"Prohibits procedure","family":"applies_to","source_types":["Prohibition"],"target_types":["Procedure"]},
+    {"id":"rollback_for","label":"Rollback for procedure","family":"applies_to","source_types":["Rollback"],"target_types":["Procedure"]},
+    {"id":"derived_from","label":"Derived from evidence","family":"derived_from","source_types":["ServerLesson"],"target_types":["VendorAdvisory","CommunityCase","Hypothesis","Procedure"]}
+  ],
+  "migrations": []
+}

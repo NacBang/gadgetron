@@ -59,8 +59,9 @@ pub async fn bootstrap_admin_if_needed(
     pool: &PgPool,
     config: Option<&BootstrapConfig>,
 ) -> Result<(), BootstrapError> {
+    let mut tx = pool.begin().await?;
     let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
 
     if user_count > 0 {
@@ -71,6 +72,7 @@ pub async fn bootstrap_admin_if_needed(
                  ignoring bootstrap config. Remove [auth.bootstrap] from gadgetron.toml."
             );
         }
+        tx.rollback().await?;
         return Ok(());
     }
 
@@ -93,19 +95,27 @@ pub async fn bootstrap_admin_if_needed(
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(DEFAULT_TENANT_ID)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
+    let admin_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (tenant_id, email, display_name, role, password_hash)
-         VALUES ($1, $2, $3, 'admin', $4)",
+         VALUES ($1, $2, $3, 'admin', $4)
+         RETURNING id",
     )
     .bind(DEFAULT_TENANT_ID)
     .bind(&bootstrap.admin_email)
     .bind(&bootstrap.admin_display_name)
     .bind(&password_hash)
-    .execute(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    crate::default_onboarding::ensure_default_team_onboarding_in_transaction(
+        &mut tx,
+        DEFAULT_TENANT_ID,
+        admin_id,
+    )
+    .await?;
+    tx.commit().await?;
 
     tracing::info!(
         target: "auth.bootstrap",

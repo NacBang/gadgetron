@@ -1,0 +1,1967 @@
+manifest_version = 3
+
+[bundle]
+id = "server-administrator"
+version = "0.4.27"
+class = "operational"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.8.5, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[[dependencies.optional]]
+capability = "gadgetron.intelligence.server-operations-context"
+version = "^1.0"
+feature = "research-assisted-diagnosis"
+reason = "Cited server operations research improves diagnosis without owning fleet state or repair authority"
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/server-administrator"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 256
+open_files = 64
+cpu_seconds = 60
+
+[[permissions]]
+id = "operations-read"
+kind = "database"
+description = "Read tenant-scoped Server Administrator operational state"
+resources = ["postgres:table:host_metrics", "postgres:table:server_metric_history_5s", "postgres:table:server_metric_history_1m", "postgres:table:server_metric_history_5m", "postgres:table:server_metric_history_1h", "postgres:table:server_metric_history_6h", "postgres:table:host_stats_latest", "postgres:table:server_assets_latest", "postgres:table:server_target_health", "postgres:table:server_metric_alert_rules", "postgres:table:server_gadgetini_latest", "postgres:table:log_findings", "postgres:table:alert_state", "postgres:table:server_incidents", "postgres:table:server_incident_signals", "postgres:table:server_incident_events", "postgres:table:server_incident_knowledge_snapshots", "postgres:table:server_incident_enrichment_dispatches", "postgres:table:server_operation_outcomes", "postgres:table:server_job_runs", "postgres:table:server_profile_revisions", "postgres:table:server_cluster_revisions", "postgres:table:server_clusters", "postgres:table:server_enrollments", "postgres:table:server_validation_results"]
+
+[[permissions]]
+id = "operations-write"
+kind = "database"
+description = "Write tenant-scoped telemetry, findings, alerts, jobs and outcomes through Core-compiled mutations"
+resources = ["postgres:table:host_metrics", "postgres:table:host_stats_latest", "postgres:table:server_assets_latest", "postgres:table:server_target_health", "postgres:table:server_metric_alert_rules", "postgres:table:server_gadgetini_latest", "postgres:table:server_gadgetini_observations", "postgres:table:log_findings", "postgres:table:alert_state", "postgres:table:server_incidents", "postgres:table:server_incident_signals", "postgres:table:server_incident_events", "postgres:table:server_incident_enrichment_dispatches", "postgres:table:server_operation_outcomes", "postgres:table:server_job_runs", "postgres:table:log_scan_cursor", "postgres:table:server_profile_revisions", "postgres:table:server_cluster_revisions", "postgres:table:server_clusters", "postgres:table:server_enrollments", "postgres:table:server_validation_results"]
+
+[[permissions]]
+id = "server-knowledge-read"
+kind = "knowledge_read"
+description = "Read actor-visible, revision-pinned Core knowledge context for a server target"
+resources = ["knowledge:context"]
+
+[[permissions]]
+id = "server-knowledge-feedback"
+kind = "knowledge_feedback"
+description = "Return verified server repair outcomes to the Core experience lifecycle"
+resources = ["knowledge:feedback"]
+
+[[permissions]]
+id = "ssh-operations"
+kind = "network"
+description = "Run signed inventory, telemetry, log and bounded monitoring-enrollment operations on Manager-approved SSH targets"
+resources = ["ssh:operation:inventory", "ssh:operation:telemetry", "ssh:operation:topology", "ssh:operation:gadgetini-telemetry", "ssh:operation:log-scan", "ssh:operation:log-system-errors", "ssh:operation:log-kernel-warnings", "ssh:operation:log-auth-failures", "ssh:operation:monitoring-state", "ssh:operation:monitoring-enable", "ssh:operation:monitoring-disable"]
+
+[[permissions.secret_references]]
+id = "ssh-identity"
+purpose = "Authenticate to a Manager-approved SSH target without exposing the private key to the Bundle"
+required = true
+
+[[permissions]]
+id = "ssh-key-use"
+kind = "secret_use"
+description = "Use a Core-owned SSH identity only inside signed Server Administrator executors"
+resources = ["secret:use:ssh-identity"]
+
+[[broker_operations]]
+id = "inventory"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:inventory"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set -eu
+hostname_value=$(hostname 2>/dev/null || uname -n)
+kernel_value=$(uname -sr 2>/dev/null || true)
+architecture_value=$(uname -m 2>/dev/null || true)
+machine_id_value=$(cat /etc/machine-id 2>/dev/null | head -n 1 || true)
+boot_id_value=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | head -n 1 || true)
+cpu_model_value=$(awk -F: '/model name/{sub(/^[[:space:]]*/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)
+logical_cpus_value=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+memory_kib_value=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)
+os_pretty_name_value=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
+uptime_value=$(awk '{printf "%.0f", $1}' /proc/uptime 2>/dev/null || printf '0')
+dmi_uuid_value=$(cat /sys/class/dmi/id/product_uuid 2>/dev/null | tr -d '\r\n' | head -c 128 || true)
+dmi_serial_value=$(
+  if [ -r /sys/class/dmi/id/product_serial ]; then
+    cat /sys/class/dmi/id/product_serial
+  else
+    cat /sys/class/dmi/id/chassis_serial 2>/dev/null
+  fi | tr -d '\r\n' | head -c 128
+)
+nvidia_smi_path=$(command -v nvidia-smi 2>/dev/null || true)
+if [ -z "$nvidia_smi_path" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then nvidia_smi_path=/usr/lib/wsl/lib/nvidia-smi; fi
+printf 'hostname=%s\n' "$hostname_value"
+printf 'kernel=%s\n' "$kernel_value"
+printf 'architecture=%s\n' "$architecture_value"
+printf 'machine_id=%s\n' "$machine_id_value"
+printf 'boot_id=%s\n' "$boot_id_value"
+printf 'cpu_model=%s\n' "$cpu_model_value"
+printf 'logical_cpus=%s\n' "$logical_cpus_value"
+printf 'memory_kib=%s\n' "$memory_kib_value"
+printf 'os_pretty_name=%s\n' "$os_pretty_name_value"
+printf 'uptime_seconds=%s\n' "$uptime_value"
+printf 'dmi_uuid=%s\n' "$dmi_uuid_value"
+printf 'dmi_serial=%s\n' "$dmi_serial_value"
+if [ -n "$nvidia_smi_path" ]; then
+  "$nvidia_smi_path" --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>/dev/null |
+    head -n 16 |
+    while IFS= read -r gpu; do printf 'gpu=%s\n' "$gpu"; done
+fi
+'''
+timeout_seconds = 15
+max_stdout_bytes = 32768
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "telemetry"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:telemetry"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set +e
+nvidia_smi_path=$(command -v nvidia-smi 2>/dev/null || true)
+if [ -z "$nvidia_smi_path" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then nvidia_smi_path=/usr/lib/wsl/lib/nvidia-smi; fi
+printf '===HOST===\n'; hostname 2>/dev/null || uname -n
+printf '===UPTIME===\n'; awk '{printf "%.0f\n", $1}' /proc/uptime 2>/dev/null
+printf '===LOAD===\n'; head -n 1 /proc/loadavg 2>/dev/null
+printf '===CPUINFO===\n'; getconf _NPROCESSORS_ONLN 2>/dev/null
+printf '===STAT0===\n'; head -n 1 /proc/stat 2>/dev/null
+printf '===NET0===\n'; cat /proc/net/dev 2>/dev/null
+sleep 0.2
+printf '===STAT1===\n'; head -n 1 /proc/stat 2>/dev/null
+printf '===NET1===\n'; cat /proc/net/dev 2>/dev/null
+printf '===MEM===\n'; head -n 256 /proc/meminfo 2>/dev/null
+printf '===DF===\n'
+df -PkT -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null |
+  awk 'NR > 1 && count < 32 {print $1 "|" $2 "|" $3 "|" $4 "|" $6 "|" $7; count++}'
+printf '===SENSORS===\n'
+if command -v sensors >/dev/null 2>&1; then
+  sensors_output=$(timeout 3 sensors -j 2>/dev/null)
+  if [ -n "$sensors_output" ]; then printf '%s\n' "$sensors_output"; else printf '{}\n'; fi
+else
+  printf '{}\n'
+fi
+printf '===NVSMI===\n'
+if [ -n "$nvidia_smi_path" ]; then
+  "$nvidia_smi_path" --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null | head -n 16
+fi
+printf '===NVSMI_HEALTH===\n'
+if [ -n "$nvidia_smi_path" ]; then
+  "$nvidia_smi_path" --query-gpu=index,uuid,ecc.errors.uncorrected.volatile.total,clocks_event_reasons.active --format=csv,noheader,nounits 2>/dev/null | head -n 16
+fi
+printf '===DCGM===\n'
+if [ -x /usr/bin/dcgmi ]; then
+  timeout 2 sudo -n /usr/bin/dcgmi dmon -c 1 -e 203,204,150,140,155,160,112,230,319,250,252 2>/dev/null | head -n 64
+fi
+printf '===IPMI===\n'
+if [ -x /usr/bin/ipmitool ]; then
+  timeout 5 sudo -n /usr/bin/ipmitool dcmi power reading 2>/dev/null | grep -i 'Instantaneous' | head -n 1
+fi
+printf '===XID===\n'
+if [ -n "$nvidia_smi_path" ]; then
+  sudo -n /usr/bin/dmesg 2>/dev/null | grep 'NVRM: Xid' | tail -n 16
+fi
+printf '===AVAILABILITY===\n'
+command -v sensors >/dev/null 2>&1 && printf 'sensors=1\n' || printf 'sensors=0\n'
+[ -n "$nvidia_smi_path" ] && printf 'nvidia_smi=1\n' || printf 'nvidia_smi=0\n'
+[ -x /usr/bin/dcgmi ] && printf 'dcgm=1\n' || printf 'dcgm=0\n'
+[ -x /usr/bin/ipmitool ] && printf 'ipmitool=1\n' || printf 'ipmitool=0\n'
+printf '===END===\n'
+'''
+timeout_seconds = 30
+max_stdout_bytes = 131072
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "topology"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:topology"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set +e
+printf '===LINK===\n'
+link_output=$(ip -j -d link show 2>/dev/null)
+if [ -n "$link_output" ]; then printf '%s\n' "$link_output"; else printf '[]\n'; fi
+printf '===ADDR===\n'
+addr_output=$(ip -j addr show 2>/dev/null)
+if [ -n "$addr_output" ]; then printf '%s\n' "$addr_output"; else printf '[]\n'; fi
+printf '===NEIGH===\n'
+neigh_output=$(ip -j neigh show 2>/dev/null)
+if [ -n "$neigh_output" ]; then printf '%s\n' "$neigh_output"; else printf '[]\n'; fi
+printf '===ROUTE===\n'
+route_output=$(ip -j route show table main 2>/dev/null)
+if [ -n "$route_output" ]; then printf '%s\n' "$route_output"; else printf '[]\n'; fi
+printf '===ETHTOOL===\n'
+for interface_path in /sys/class/net/*; do
+  interface=${interface_path##*/}
+  case "$interface" in lo|veth*|br-*|docker0|docker_gwbridge|virbr*|lxdbr*|incusbr*|cni*|flannel*|cilium*) continue;; esac
+  speed=$(ethtool "$interface" 2>/dev/null | awk -F': ' '/Speed:/{print $2; exit}')
+  printf '%s %s\n' "$interface" "${speed:-unknown}"
+done
+printf '===LLDP===\n'
+if command -v lldpctl >/dev/null 2>&1; then
+  lldp_output=$(timeout 3 lldpctl -f json0 2>/dev/null)
+  if [ -n "$lldp_output" ]; then printf '%s\n' "$lldp_output"; else printf '{}\n'; fi
+else
+  printf '{}\n'
+fi
+printf '===AVAILABILITY===\n'
+command -v ethtool >/dev/null 2>&1 && printf 'ethtool=1\n' || printf 'ethtool=0\n'
+command -v lldpctl >/dev/null 2>&1 && printf 'lldp=1\n' || printf 'lldp=0\n'
+printf '===END===\n'
+'''
+timeout_seconds = 30
+max_stdout_bytes = 131072
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "log-scan"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:log-scan"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set -eu
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl --no-pager -n 200 -p warning..alert -o short-iso 2>/dev/null || true
+else
+  dmesg 2>/dev/null | tail -n 200 || true
+fi
+'''
+timeout_seconds = 20
+max_stdout_bytes = 131072
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "log-system-errors"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:log-system-errors"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set -eu
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl --no-pager -b -n 200 -p err..alert -o short-iso 2>/dev/null || true
+else
+  dmesg 2>/dev/null | tail -n 200 || true
+fi
+'''
+timeout_seconds = 20
+max_stdout_bytes = 131072
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "log-kernel-warnings"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:log-kernel-warnings"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set -eu
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl --no-pager -k -b -n 200 -p warning..alert -o short-iso 2>/dev/null || true
+else
+  dmesg 2>/dev/null | tail -n 200 || true
+fi
+'''
+timeout_seconds = 20
+max_stdout_bytes = 131072
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "log-auth-failures"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:log-auth-failures"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set -eu
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl --no-pager -b -n 500 -p notice..alert -o short-iso 2>/dev/null |
+    grep -E ' (sshd|sudo)(\[|:)|authentication failure|Failed password' |
+    tail -n 200 || true
+elif [ -r /var/log/auth.log ]; then
+  tail -n 500 /var/log/auth.log |
+    grep -E ' (sshd|sudo)(\[|:)|authentication failure|Failed password' |
+    tail -n 200 || true
+elif [ -r /var/log/secure ]; then
+  tail -n 500 /var/log/secure |
+    grep -E ' (sshd|sudo)(\[|:)|authentication failure|Failed password' |
+    tail -n 200 || true
+fi
+'''
+timeout_seconds = 20
+max_stdout_bytes = 131072
+max_stderr_bytes = 8192
+
+[[broker_operations]]
+id = "gadgetini-telemetry"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:gadgetini-telemetry"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+LC_ALL=C
+export LC_ALL
+set -eu
+command -v redis-cli >/dev/null 2>&1 || exit 69
+redis-cli --raw MGET air_humit air_temp chassis_stabil coolant_delta_t1 coolant_leak coolant_level coolant_temp_inlet1 coolant_temp_inlet2 coolant_temp_outlet1 coolant_temp_outlet2 host_stat
+'''
+timeout_seconds = 10
+max_stdout_bytes = 4096
+max_stderr_bytes = 2048
+
+[[broker_operations]]
+id = "monitoring-state"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:monitoring-state"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+set -eu
+state=disabled
+if [ "$(cat "$HOME/.local/state/gadgetron-monitor/enabled" 2>/dev/null || true)" = enabled ]; then
+  state=enabled
+fi
+printf 'monitoring=%s\n' "$state"
+'''
+timeout_seconds = 5
+max_stdout_bytes = 128
+max_stderr_bytes = 1024
+
+[[broker_operations]]
+id = "monitoring-enable"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:monitoring-enable"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+set -eu
+umask 077
+mkdir -p "$HOME/.local/state/gadgetron-monitor"
+tmp=$(mktemp "$HOME/.local/state/gadgetron-monitor/enabled.XXXXXX")
+printf 'enabled\n' > "$tmp"
+chmod 0600 "$tmp"
+mv "$tmp" "$HOME/.local/state/gadgetron-monitor/enabled"
+printf 'monitoring=enabled\n'
+'''
+timeout_seconds = 5
+max_stdout_bytes = 128
+max_stderr_bytes = 1024
+
+[[broker_operations]]
+id = "monitoring-disable"
+kind = "ssh_execute"
+network_permission_id = "ssh-operations"
+network_resource = "ssh:operation:monitoring-disable"
+secret_permission_id = "ssh-key-use"
+secret_resource = "secret:use:ssh-identity"
+command = '''
+set -eu
+rm -f "$HOME/.local/state/gadgetron-monitor/enabled"
+printf 'monitoring=disabled\n'
+'''
+timeout_seconds = 5
+max_stdout_bytes = 128
+max_stderr_bytes = 1024
+
+[capabilities]
+gadget_namespaces = ["server", "loganalysis"]
+
+[[capabilities.knowledge_events]]
+id = "incident-closed-knowledge"
+event_kind = "server-incident-closed"
+subject_kind = "server-incident"
+snapshot_permission_id = "operations-read"
+snapshot_resource = "postgres:table:server_incident_knowledge_snapshots"
+snapshot_fields = ["incident_id", "revision", "title", "snapshot", "acting_space_id"]
+acting_space_id_field = "acting_space_id"
+subject_id_field = "incident_id"
+subject_revision_field = "revision"
+title_field = "title"
+researcher_bundle = "server-operations-intelligence"
+researcher_role = "server-incident-researcher"
+output_vault_bundle = "server-administrator"
+knowledge_schema_id = "server.knowledge"
+source_path_prefix = "incidents"
+
+[[capabilities.provides]]
+id = "gadgetron.operation.server-administration"
+version = "1.0.0"
+description = "Server inventory, monitoring, remediation verification and outcome capabilities"
+
+[[capabilities.gadgets]]
+name = "server.profiles-list"
+description = "List immutable platform, cluster, role and exact-server profile revisions"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "profiles_list", properties = { scope = { type = "string", enum = ["platform_base", "cluster", "role", "server"] }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.profile-revision-create"
+description = "Create one immutable desired-state profile revision"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "profile_create", properties = { profile_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, scope = { type = "string", enum = ["platform_base", "cluster", "role", "server"] }, label = { type = "string", minLength = 1, maxLength = 120 }, spec = { type = "object" } }, required = ["profile_id", "scope", "label", "spec"], additionalProperties = false }
+output_schema = { type = "object", properties = { profile_id = { type = "string" }, revision = { type = "string", format = "uuid" }, scope = { type = "string" }, label = { type = "string" }, spec = { type = "object" } }, required = ["profile_id", "revision", "scope", "label", "spec"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.clusters-list"
+description = "List current versioned server cluster definitions"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "clusters_list", properties = { status = { type = "string", enum = ["active", "paused", "retired"] }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.cluster-upsert"
+description = "Create a new exact cluster revision from platform, cluster and role profiles"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "cluster_upsert", properties = { cluster_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, label = { type = "string", minLength = 1, maxLength = 120 }, environment = { type = "string", minLength = 1, maxLength = 64 }, purpose = { type = "string", minLength = 1, maxLength = 512 }, base_profile = { type = "object", properties = { profile_id = { type = "string" }, revision = { type = "string", format = "uuid" } }, required = ["profile_id", "revision"], additionalProperties = false }, cluster_profile = { type = "object", properties = { profile_id = { type = "string" }, revision = { type = "string", format = "uuid" } }, required = ["profile_id", "revision"], additionalProperties = false }, roles = { type = "array", minItems = 1, maxItems = 20, items = { type = "object", properties = { role_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, label = { type = "string", minLength = 1, maxLength = 120 }, profile = { type = "object", properties = { profile_id = { type = "string" }, revision = { type = "string", format = "uuid" } }, required = ["profile_id", "revision"], additionalProperties = false } }, required = ["role_id", "label", "profile"], additionalProperties = false } } }, required = ["cluster_id", "label", "environment", "purpose", "base_profile", "cluster_profile", "roles"], additionalProperties = false }
+output_schema = { type = "object", properties = { cluster_id = { type = "string" }, revision = { type = "string", format = "uuid" }, label = { type = "string" }, environment = { type = "string" }, purpose = { type = "string" }, roles = { type = "array" }, status = { const = "active" }, updated_at = { type = "string" } }, required = ["cluster_id", "revision", "label", "environment", "purpose", "roles", "status", "updated_at"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.enrollments-list"
+description = "List server enrollment lifecycle, health, compliance and qualification state"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "enrollments_list", properties = { cluster_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, lifecycle_state = { type = "string", enum = ["discovered", "commissioning", "ready_to_configure", "configuring", "qualifying", "active", "draining", "maintenance", "quarantined", "retired"] }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.enrollment-start"
+description = "Pin platform, cluster, role and optional exact-server profile revisions for a newly discovered target"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "enrollment_start", x_gadgetron_background_job = "server-enrollment", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, cluster_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, role_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, server_profile = { type = "object", properties = { profile_id = { type = "string" }, revision = { type = "string", format = "uuid" } }, required = ["profile_id", "revision"], additionalProperties = false } }, required = ["target_id", "cluster_id", "role_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, target_id = { type = "string" }, cluster_id = { type = "string" }, cluster_revision = { type = "string", format = "uuid" }, role_id = { type = "string" }, server_profile = { type = ["object", "null"] }, lifecycle_state = { const = "discovered" }, health_status = { type = "string" }, compliance_status = { type = "string" }, commissioning_status = { type = "string" }, qualification_status = { type = "string" }, effective_profile = { type = "object" }, profile_overrides = { type = "array" }, revision = { type = "string", format = "uuid" }, updated_at = { type = "string" } }, required = ["enrollment_id", "target_id", "cluster_id", "cluster_revision", "role_id", "server_profile", "lifecycle_state", "health_status", "compliance_status", "commissioning_status", "qualification_status", "effective_profile", "profile_overrides", "revision", "updated_at"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.enrollment-rollout-plan"
+description = "Preview the exact desired-profile impact and bounded execution path for one drifted active server"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "enrollment_rollout_plan", properties = { enrollment_id = { type = "string", format = "uuid" } }, required = ["enrollment_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, target_id = { type = "string" }, cluster_id = { type = "string" }, role_id = { type = "string" }, drift = { type = "boolean" }, from_cluster_revision = { type = "string", format = "uuid" }, to_cluster_revision = { type = "string", format = "uuid" }, expected_enrollment_revision = { type = "string", format = "uuid" }, rollout_kind = { type = "string" }, effective_profile_changed = { type = "boolean" }, changed_paths = { type = "array", items = { type = "string" } }, changes_truncated = { type = "boolean" }, setup_features_added = { type = "array", items = { type = "string" } }, setup_features_removed = { type = "array", items = { type = "string" } }, setup_features = { type = "array", items = { type = "string" } }, setup_reapply_supported = { type = "boolean" }, requires_commissioning = { type = "boolean" }, requires_configuration = { type = "boolean" }, requires_reboot = { type = "boolean" }, steps = { type = "array", items = { type = "string" } } }, required = ["enrollment_id", "target_id", "cluster_id", "role_id", "drift", "from_cluster_revision", "to_cluster_revision", "expected_enrollment_revision", "rollout_kind", "effective_profile_changed", "changed_paths", "changes_truncated", "setup_features_added", "setup_features_removed", "setup_features", "setup_reapply_supported", "requires_commissioning", "requires_configuration", "requires_reboot", "steps"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.enrollment-rollout-apply"
+description = "Apply one reviewed exact revision or supported signed setup-feature rollout and remove the server from usable capacity until requalification passes"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "enrollment_rollout_apply", properties = { enrollment_id = { type = "string", format = "uuid" }, expected_enrollment_revision = { type = "string", format = "uuid" }, expected_cluster_revision = { type = "string", format = "uuid" } }, required = ["enrollment_id", "expected_enrollment_revision", "expected_cluster_revision"], additionalProperties = false }
+output_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, target_id = { type = "string" }, cluster_id = { type = "string" }, from_cluster_revision = { type = "string", format = "uuid" }, to_cluster_revision = { type = "string", format = "uuid" }, rollout_kind = { type = "string" }, lifecycle_state = { type = "string" }, compliance_status = { const = "unknown" }, commissioning_status = { type = "string" }, qualification_status = { type = "string" }, revision = { type = "string", format = "uuid" }, updated_at = { type = "string" }, plan = { type = "object" } }, required = ["enrollment_id", "target_id", "cluster_id", "from_cluster_revision", "to_cluster_revision", "rollout_kind", "lifecycle_state", "compliance_status", "commissioning_status", "qualification_status", "revision", "updated_at", "plan"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.enrollment-setup-record"
+description = "Record one Core-verified existing-target setup receipt against the exact reviewed enrollment revision"
+tier = "write"
+input_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, expected_enrollment_revision = { type = "string", format = "uuid" }, target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, target_revision = { type = "string", format = "uuid" }, target_profile_id = { const = "server" }, os_family = { type = "string", enum = ["debian", "rhel"] }, setup_features = { type = "array", maxItems = 3, uniqueItems = true, items = { type = "string", enum = ["system_observation", "nvidia_dcgm"] } }, installed_packages = { type = "array", maxItems = 64, uniqueItems = true, items = { type = "string", minLength = 1, maxLength = 160 } }, skipped_packages = { type = "array", maxItems = 64, uniqueItems = true, items = { type = "string", minLength = 1, maxLength = 160 } } }, required = ["enrollment_id", "expected_enrollment_revision", "target_id", "target_revision", "target_profile_id", "os_family", "setup_features", "installed_packages", "skipped_packages"], additionalProperties = false }
+output_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, target_id = { type = "string" }, status = { const = "setup_applied" }, revision = { type = "string", format = "uuid" }, updated_at = { type = "string" } }, required = ["enrollment_id", "target_id", "status", "revision", "updated_at"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.enrollment-transition"
+description = "Move one enrollment through the bounded lifecycle and link exact critical-incident safe-stop or verified recovery evidence"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_fleet_workflow = "enrollment_release", properties = { enrollment_id = { type = "string", format = "uuid" }, to = { type = "string", enum = ["discovered", "commissioning", "ready_to_configure", "configuring", "qualifying", "active", "draining", "maintenance", "quarantined", "retired"] }, reason = { type = "string", minLength = 1, maxLength = 512 }, incident_id = { type = "string", title = "Incident", format = "uuid" }, target_revision = { type = "string", title = "Health revision used for context", format = "uuid" }, context_query_id = { type = "string", title = "Knowledge query", minLength = 1, maxLength = 256 }, context_revision = { type = "string", title = "Knowledge context revision", minLength = 1, maxLength = 256 }, used_citation_id = { type = "string", title = "Used citation", minLength = 1, maxLength = 256 }, used_source_revision = { type = "string", title = "Used source revision", minLength = 1, maxLength = 256 } }, required = ["enrollment_id", "to"], additionalProperties = false }
+output_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, target_id = { type = "string" }, from = { type = "string" }, to = { type = "string" }, revision = { type = "string", format = "uuid" }, updated_at = { type = "string" }, incident_id = { type = ["string", "null"], format = "uuid" }, operation_id = { type = ["string", "null"], format = "uuid" }, operation_kind = { type = ["string", "null"] }, target_revision = { type = ["string", "null"], format = "uuid" }, before = { type = "object" }, after = { type = "object" }, experience = { type = "object" } }, required = ["enrollment_id", "target_id", "from", "to", "revision", "updated_at"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "server.operation-outcomes-list"
+
+[[capabilities.gadgets]]
+name = "server.validation-record"
+description = "Record one immutable commissioning or qualification result and recompute the gate"
+tier = "write"
+input_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, gate = { type = "string", enum = ["commissioning", "qualification"] }, suite = { type = "string", enum = ["readiness", "qualification", "failure_epilogue", "burn_in", "distributed"] }, check_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, status = { type = "string", enum = ["pass", "warning", "fail", "skipped", "not_applicable"] }, summary = { type = "string", minLength = 1, maxLength = 512 }, details = { type = "object", default = {} } }, required = ["enrollment_id", "gate", "suite", "check_id", "status", "summary"], additionalProperties = false }
+output_schema = { type = "object", properties = { result_id = { type = "string", format = "uuid" }, enrollment_id = { type = "string", format = "uuid" }, gate = { type = "string" }, check_id = { type = "string" }, status = { type = "string" }, required = { type = "boolean" }, gate_status = { type = "string" }, lifecycle_state = { type = "string" }, revision = { type = "string", format = "uuid" }, observed_at = { type = "string" } }, required = ["result_id", "enrollment_id", "gate", "check_id", "status", "required", "gate_status", "lifecycle_state", "revision", "observed_at"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.validation-results-list"
+description = "List immutable commissioning and qualification results for one enrollment"
+tier = "read"
+input_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, gate = { type = "string", enum = ["commissioning", "qualification"] }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, required = ["enrollment_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.target_profiles]]
+id = "server"
+label = "Server"
+registry = "ssh"
+default = true
+target_id_prefix = "server"
+target_argument = "target_id"
+allowed_operations = ["inventory", "telemetry", "topology", "log-scan", "log-system-errors", "log-kernel-warnings", "log-auth-failures", "monitoring-state", "monitoring-enable", "monitoring-disable"]
+setup_features = ["system_observation", "nvidia_dcgm"]
+bootstrap_input_schema = { type = "object", properties = {}, additionalProperties = false }
+verification_job = "server-duty-cycle"
+setup_reapply_gadget = "server.enrollment-setup-record"
+setup_reapply_input_schema = { type = "object", properties = { enrollment_id = { type = "string", format = "uuid" }, expected_enrollment_revision = { type = "string", format = "uuid" } }, required = ["enrollment_id", "expected_enrollment_revision"], additionalProperties = false }
+
+[[capabilities.target_profiles]]
+id = "gadgetini"
+label = "Gadgetini cooling child"
+registry = "ssh"
+default = false
+target_id_prefix = "gadgetini"
+target_argument = "gadgetini_id"
+allowed_operations = ["gadgetini-telemetry"]
+setup_features = ["redis_client"]
+bootstrap_input_schema = { type = "object", properties = { parent_target_id = { type = "string", title = "Parent server", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, attach_mode = { type = "string", title = "Connection", enum = ["direct", "usb"], default = "direct" } }, required = ["parent_target_id", "attach_mode"], additionalProperties = false }
+ssh_route = { kind = "ssh_parent", activation_parameter = "attach_mode", activation_value = "usb", parent_target_parameter = "parent_target_id" }
+verification_gadget = "server.gadgetini-attach"
+
+[[capabilities.gadgets]]
+name = "server.host-stats-list"
+description = "List current tenant-scoped server telemetry snapshots"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.host-inventory"
+description = "Collect bounded read-only facts from one Manager-approved SSH target"
+tier = "read"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, facts = { type = "object" }, duration_ms = { type = "integer" } }, required = ["target_id", "facts", "duration_ms"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.inventory-collect"
+description = "Collect and persist bounded inventory for one Manager-approved target"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, host_id = { type = "string" }, inventory = { type = "object" }, duration_ms = { type = "integer" } }, required = ["target_id", "host_id", "inventory", "duration_ms"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.telemetry-collect"
+description = "Collect and persist current bounded telemetry plus metric history for one approved target"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, host_id = { type = "string" }, stats = { type = "object" }, observed_at = { type = "string" }, duration_ms = { type = "integer" } }, required = ["target_id", "host_id", "stats", "observed_at", "duration_ms"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.telemetry-live"
+description = "Read one bounded live telemetry snapshot without changing Server state"
+tier = "read"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false, x_gadgetron_live_telemetry = true }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, mode = { const = "live" }, observed_at = { type = "string" }, duration_ms = { type = "integer" }, collector_warnings = { type = "array" }, rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["target_id", "mode", "observed_at", "duration_ms", "collector_warnings", "rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.topology-scan"
+description = "Collect and persist bounded interface and route topology for one approved target"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, host_id = { type = "string" }, topology = { type = "object" }, duration_ms = { type = "integer" } }, required = ["target_id", "host_id", "topology", "duration_ms"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.assets-list"
+description = "List tenant-scoped persisted server inventory and topology"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.subject-context"
+description = "Build a bounded Penny subject from current persisted state for one visible server target"
+tier = "read"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { id = { type = "string" }, kind = { const = "server" }, bundle = { const = "server-administrator" }, title = { type = "string" }, subtitle = { type = "string" }, href = { type = "string" }, summary = { type = "string" }, facts = { type = "object" }, related = { type = "array" }, prompt = { type = "string" } }, required = ["id", "kind", "bundle", "title", "facts", "related", "prompt"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.knowledge-context"
+description = "Find cited operations knowledge relevant to one exact server health revision"
+tier = "read"
+input_schema = { type = "object", properties = { target_id = { type = "string", title = "Server", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, target_revision = { type = "string", title = "Health revision", format = "uuid" }, question = { type = "string", title = "What should Penny investigate?", minLength = 2, maxLength = 2048 } }, required = ["target_id", "target_revision", "question"], additionalProperties = false }
+output_schema = { type = "object" }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.topology-graph"
+description = "Build the tenant fleet graph from persisted typed topology snapshots without new SSH work"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { nodes = { type = "array" }, edges = { type = "array" }, networks = { type = "array" }, generated_at = { type = "string" } }, required = ["nodes", "edges", "networks", "generated_at"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.fleet-summary"
+description = "Summarize active clusters, server enrollment, operational attention and fresh telemetry"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object", properties = { summary = { type = "object", properties = { clusters = { type = "integer" }, servers = { type = "integer" }, active_servers = { type = "integer" }, needs_attention = { type = "integer" }, unreachable = { type = "integer" }, quarantined = { type = "integer" }, enrolling = { type = "integer" }, compliance_drift = { type = "integer" }, qualification_backlog = { type = "integer" }, open_incidents = { type = "integer" }, fresh_telemetry = { type = "integer" } }, required = ["clusters", "servers", "active_servers", "needs_attention", "unreachable", "quarantined", "enrolling", "compliance_drift", "qualification_backlog", "open_incidents", "fresh_telemetry"] }, clusters = { type = "array" } }, required = ["summary", "clusters"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.fleet-map"
+description = "Project a bounded multi-cluster server set for the dedicated Fleet Map"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object", properties = { fleet = { type = "object", properties = { shown_servers = { type = "integer" }, total_servers = { type = ["integer", "null"] }, truncated = { type = "boolean" } }, required = ["shown_servers", "total_servers", "truncated"] }, servers = { type = "array" } }, required = ["fleet", "servers"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.metric-catalog"
+description = "List current metrics available for active monitored targets"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.metric-series"
+description = "Read a bounded persisted metric history for one active target, range and interval"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_metric_history = true, properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, metric = { type = "string", pattern = "^[A-Za-z0-9_.:@-]+$", maxLength = 128 }, labels = { type = "object", default = {} }, range = { type = "string", enum = ["5m", "30m", "24h", "7d", "30d"], default = "24h" }, interval = { type = "string", enum = ["auto", "5s", "1m", "5m", "15m", "1h", "6h", "1d"], default = "auto" } }, required = ["target_id", "metric"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, host_id = { type = "string" }, metric = { type = "string" }, labels = { type = "object" }, presentation = { type = ["object", "null"] }, unit = { type = ["string", "null"] }, requested_range = { type = "string" }, effective_interval = { type = "string" }, requested_from = { type = "string" }, requested_to = { type = "string" }, coverage = { type = "object" }, gaps = { type = "array" }, points = { type = "array" }, summary = { type = "object" }, partial = { type = "boolean" }, truncated = { type = "boolean" } }, required = ["target_id", "host_id", "metric", "labels", "presentation", "unit", "requested_range", "effective_interval", "requested_from", "requested_to", "coverage", "gaps", "points", "summary", "partial", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.alerts-overview"
+description = "Project fixed and configurable alert sources with current durable instances"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.incidents-list"
+description = "List active and recently closed server incident episodes with human-readable impact and next action"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.incident-context"
+description = "Build bounded Penny context for one server incident episode, its timeline, diagnostics and verified outcomes"
+tier = "read"
+input_schema = { type = "object", properties = { incident_id = { type = "string", format = "uuid" }, target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["incident_id", "target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { id = { type = "string" }, kind = { const = "server_incident" }, bundle = { const = "server-administrator" }, title = { type = "string" }, subtitle = { type = "string" }, href = { type = "string" }, summary = { type = "string" }, facts = { type = "object" }, related = { type = "array" }, prompt = { type = "string" } }, required = ["id", "kind", "bundle", "title", "facts", "related", "prompt"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.incident-distill"
+description = "Distill Lesson from this closed incident through the reviewed pipeline; canonical knowledge is never written automatically"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, x_gadgetron_row_action_when = { field = "status", equals = "closed" }, properties = { incident_id = { type = "string", title = "Incident", format = "uuid" }, revision = { type = "string", title = "Incident evidence revision", pattern = "^[0-9a-f]{64}$" } }, required = ["incident_id", "revision"], additionalProperties = false }
+output_schema = { type = "object", properties = { incident_id = { type = "string" }, revision = { type = "string" }, distillation_requested = { type = "boolean" }, message = { type = "string" } }, required = ["incident_id", "revision", "distillation_requested", "message"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.alert-rule-upsert"
+description = "Create or revision-check update one tenant metric threshold rule"
+tier = "write"
+input_schema = { type = "object", properties = { rule_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, label = { type = "string", minLength = 1, maxLength = 128 }, metric_pattern = { type = "string", pattern = "^[A-Za-z0-9_.:@*-]+$", maxLength = 128 }, direction = { type = "string", enum = ["above", "below"] }, high_threshold = { type = "number" }, critical_threshold = { type = "number" }, for_seconds = { type = "integer", minimum = 0, maximum = 86400, default = 0 }, enabled = { type = "boolean", default = true }, expected_revision = { type = "string", format = "uuid" } }, required = ["rule_id", "label", "metric_pattern", "direction", "high_threshold", "critical_threshold"], additionalProperties = false }
+output_schema = { type = "object", properties = { rule_id = { type = "string" }, revision = { type = "string" }, state = { type = "string" } }, required = ["rule_id", "revision", "state"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.alert-rule-delete"
+description = "Revision-check delete one metric threshold rule and resolve its instances"
+tier = "write"
+input_schema = { type = "object", properties = { rule_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, expected_revision = { type = "string", format = "uuid" } }, required = ["rule_id", "expected_revision"], additionalProperties = false }
+output_schema = { type = "object", properties = { rule_id = { type = "string" }, rule_deleted = { type = "integer" }, alerts_resolved = { type = "integer" } }, required = ["rule_id", "rule_deleted", "alerts_resolved"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.target-retire"
+description = "Retire monitoring execution state and resolve the target-unreachable alert before Core removes one SSH target"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, health_deleted = { type = "integer" }, alert_deleted = { type = "integer" } }, required = ["target_id", "health_deleted", "alert_deleted"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.monitoring-state"
+description = "Check monitoring"
+tier = "read"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { target_id = { type = "string", title = "Server", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { status = { type = "string" }, target = { type = "string" }, monitoring = { type = "string", enum = ["enabled", "disabled"] }, next_action = { type = ["string", "null"] } }, required = ["status", "target", "monitoring", "next_action"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.monitoring-observe"
+description = "Observe signed monitoring state and reconcile its exact incident signal before recovery"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", title = "Server", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { status = { type = "string", enum = ["ready", "action_required"] }, target = { type = "string" }, monitoring = { type = "string", enum = ["enabled", "disabled"] }, incident_id = { type = ["string", "null"], format = "uuid" }, next_action = { type = ["string", "null"] } }, required = ["status", "target", "monitoring", "incident_id", "next_action"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.monitoring-repair"
+description = "Restore monitoring"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { target_id = { type = "string", title = "Server", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, incident_id = { type = "string", title = "Incident", format = "uuid" }, target_revision = { type = "string", title = "Health revision used for context", format = "uuid" }, context_query_id = { type = "string", title = "Knowledge query", minLength = 1, maxLength = 256 }, context_revision = { type = "string", title = "Knowledge context revision", minLength = 1, maxLength = 256 }, used_citation_id = { type = "string", title = "Used citation", minLength = 1, maxLength = 256 }, used_source_revision = { type = "string", title = "Used source revision", minLength = 1, maxLength = 256 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { status = { type = "string", enum = ["recovered", "unchanged", "safe_stopped"] }, target = { type = "string" }, issue = { type = "string" }, action = { type = "string" }, before = { type = "object" }, after = { type = "object" }, attempts = { type = "integer" }, rollback_available = { type = "boolean" }, operation_id = { type = "string" }, experience = { type = "object" } }, required = ["status", "target", "issue", "action", "before", "after", "attempts", "rollback_available", "operation_id", "experience"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "server.operation-outcomes-list"
+rollback_gadget = "server.monitoring-rollback"
+
+[[capabilities.gadgets]]
+name = "server.monitoring-rollback"
+description = "Restore the pre-repair monitoring enrollment when the verified post-state is unchanged"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", title = "Server", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, operation_id = { type = "string", title = "Repair operation", format = "uuid" } }, required = ["target_id", "operation_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { status = { type = "string", enum = ["rolled_back", "safe_stopped"] }, target = { type = "string" }, issue = { type = "string" }, action = { type = "string" }, before = { type = "object" }, after = { type = "object" }, attempts = { type = "integer" }, rollback_available = { type = "boolean" }, operation_id = { type = "string" } }, required = ["status", "target", "issue", "action", "before", "after", "attempts", "rollback_available", "operation_id"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "server.operation-outcomes-list"
+rollback_gadget = "server.monitoring-repair"
+
+[[capabilities.gadgets]]
+name = "loganalysis.scan"
+description = "Collect bounded warning/error logs and materialize tenant findings and alerts"
+tier = "write"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["target_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, host_id = { type = "string" }, created = { type = "integer" }, folded = { type = "integer" }, critical = { type = "integer" }, duration_ms = { type = "integer" } }, required = ["target_id", "host_id", "created", "folded", "critical", "duration_ms"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "loganalysis.inspect"
+description = "Read a bounded signed system, kernel or authentication log preset without arbitrary shell input"
+tier = "read"
+input_schema = { type = "object", properties = { target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, preset = { type = "string", enum = ["system-errors", "kernel-warnings", "auth-failures"] }, limit = { type = "integer", minimum = 10, maximum = 200, default = 100 } }, required = ["target_id", "preset"], additionalProperties = false }
+output_schema = { type = "object", properties = { target_id = { type = "string" }, preset = { type = "string" }, observed_at = { type = "string" }, rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" }, duration_ms = { type = "integer" }, evidence = { type = "object" } }, required = ["target_id", "preset", "observed_at", "rows", "count", "truncated", "duration_ms", "evidence"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "loganalysis.findings-list"
+description = "List open tenant-scoped log findings"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "loganalysis.finding-detail"
+description = "Read one tenant-visible finding with target identity, diagnosis fields and advisory excerpt evidence"
+tier = "read"
+input_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" } }, required = ["finding_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { finding = { type = "object" }, evidence = { type = "object" } }, required = ["finding", "evidence"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "loganalysis.subject-context"
+description = "Build a bounded Penny subject and advisory Evidence for one visible log finding"
+tier = "read"
+input_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" } }, required = ["finding_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { id = { type = "string" }, kind = { const = "log_finding" }, bundle = { const = "server-administrator" }, title = { type = "string" }, subtitle = { type = "string" }, href = { type = "string" }, summary = { type = "string" }, facts = { type = "object" }, related = { type = "array" }, prompt = { type = "string" } }, required = ["id", "kind", "bundle", "title", "facts", "related", "prompt"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "loganalysis.alerts-list"
+description = "List firing tenant-scoped Server Administrator alerts"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "loganalysis.alerts-summary"
+description = "Summarize firing alerts by severity"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object", properties = { firing = { type = "integer" }, critical = { type = "integer" }, high = { type = "integer" }, medium = { type = "integer" } }, required = ["firing", "critical", "high", "medium"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "loganalysis.finding-dismiss"
+description = "Dismiss one finding as a reversible triage action and resolve its alert"
+tier = "write"
+input_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" } }, required = ["finding_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { finding_id = { type = "string" }, state = { type = "string" }, operation_id = { type = "string" }, rollback_gadget = { type = "string" } }, required = ["finding_id", "state", "operation_id", "rollback_gadget"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "server.operation-outcomes-list"
+rollback_gadget = "loganalysis.finding-reopen"
+
+[[capabilities.gadgets]]
+name = "loganalysis.finding-reopen"
+description = "Reopen one dismissed finding and restore its high/critical alert"
+tier = "write"
+input_schema = { type = "object", properties = { finding_id = { type = "string", format = "uuid" } }, required = ["finding_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { finding_id = { type = "string" }, state = { type = "string" }, operation_id = { type = "string" }, rollback_gadget = { type = "string" } }, required = ["finding_id", "state", "operation_id", "rollback_gadget"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+outcome_gadget = "server.operation-outcomes-list"
+rollback_gadget = "loganalysis.finding-dismiss"
+
+[[capabilities.gadgets]]
+name = "server.gadgetini-attach"
+description = "Attach one approved direct or parent-routed USB Gadgetini child only after its first fixed cooling observation succeeds"
+tier = "write"
+input_schema = { type = "object", properties = { gadgetini_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, parent_target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, attach_mode = { type = "string", enum = ["direct", "usb"] } }, required = ["gadgetini_id", "parent_target_id", "attach_mode"], additionalProperties = false }
+output_schema = { type = "object", properties = { gadgetini_id = { type = "string" }, parent_target_id = { type = "string" }, attach_mode = { type = "string" }, relation_revision = { type = "string" }, attached = { type = "boolean" }, observation = { type = "object" } }, required = ["gadgetini_id", "parent_target_id", "attach_mode", "relation_revision", "attached", "observation"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = true
+requires_evidence = true
+rollback_gadget = "server.gadgetini-detach"
+
+[[capabilities.gadgets]]
+name = "server.gadgetini-detach"
+description = "Detach one exact Gadgetini relationship revision, preserve observation history and resolve its active safety alerts"
+tier = "write"
+input_schema = { type = "object", properties = { gadgetini_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, parent_target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, expected_revision = { type = "string", format = "uuid" } }, required = ["gadgetini_id", "parent_target_id", "expected_revision"], additionalProperties = false }
+output_schema = { type = "object", properties = { gadgetini_id = { type = "string" }, parent_target_id = { type = "string" }, detached = { type = "boolean" }, alerts_deleted = { type = "integer" }, history_preserved = { type = "boolean" } }, required = ["gadgetini_id", "parent_target_id", "detached", "alerts_deleted", "history_preserved"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = true
+rollback_gadget = "server.gadgetini-attach"
+
+[[capabilities.gadgets]]
+name = "server.gadgetini-telemetry-collect"
+description = "Collect fixed passive cooling telemetry from one attached direct or parent-routed USB Gadgetini target"
+tier = "write"
+input_schema = { type = "object", properties = { gadgetini_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, parent_target_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 }, attach_mode = { type = "string", enum = ["direct", "usb"] } }, required = ["gadgetini_id", "parent_target_id", "attach_mode"], additionalProperties = false }
+output_schema = { type = "object", properties = { gadgetini_id = { type = "string" }, parent_target_id = { type = "string" }, attach_mode = { type = "string" }, observation_status = { type = "string" }, stats = { type = "object" }, warnings = { type = "array" }, observed_at = { type = "string" }, duration_ms = { type = "integer" } }, required = ["gadgetini_id", "parent_target_id", "attach_mode", "observation_status", "stats", "warnings", "observed_at", "duration_ms"] }
+
+[capabilities.gadgets.effect]
+risk = "medium"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "server.gadgetini-list"
+description = "List current tenant-scoped Gadgetini cooling child observations"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.gadgetini-summary"
+description = "Summarize observed Gadgetini children, incomplete observations and cooling safety attention"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object", properties = { observed = { type = "integer" }, attention = { type = "integer" }, incomplete = { type = "integer" }, truncated = { type = "boolean" } }, required = ["observed", "attention", "incomplete", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.gadgetini-subject-context"
+description = "Build bounded Penny context for one persisted Gadgetini cooling observation and its parent server"
+tier = "read"
+input_schema = { type = "object", properties = { gadgetini_id = { type = "string", pattern = "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength = 64 } }, required = ["gadgetini_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { id = { type = "string" }, kind = { const = "gadgetini" }, bundle = { const = "server-administrator" }, title = { type = "string" }, subtitle = { type = "string" }, href = { type = "string" }, summary = { type = "string" }, facts = { type = "object" }, related = { type = "array" }, prompt = { type = "string" } }, required = ["id", "kind", "bundle", "title", "facts", "related", "prompt"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "server.operation-outcomes-list"
+description = "List immutable before/after Server Administrator operation outcomes"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.jobs]]
+id = "server-duty-cycle"
+role = "operator"
+triggers = ["on_demand", "schedule"]
+goal = "Keep the registered server observable and recover monitoring safely"
+schedule = "*/5 * * * *"
+target_registry = "ssh"
+target_profile = "server"
+knowledge_context = { subject_gadget = "server.subject-context", context_gadget = "server.knowledge-context", question = "Use current team knowledge to verify safe monitoring recovery before collecting the server state." }
+gadget_allowlist = ["server.subject-context", "server.knowledge-context", "server.monitoring-observe", "server.monitoring-repair", "server.inventory-collect", "server.telemetry-collect", "server.topology-scan", "loganalysis.scan"]
+budget = { max_gadget_calls = 7, max_wall_seconds = 180 }
+
+[[capabilities.jobs]]
+id = "server-enrollment"
+role = "operator"
+triggers = ["on_demand"]
+goal = "Commission, configure, qualify and activate one verified server enrollment"
+gadget_allowlist = ["server.inventory-collect", "server.monitoring-repair", "server.telemetry-collect", "server.topology-scan", "server.monitoring-state", "loganalysis.scan", "server.enrollment-transition", "server.validation-record"]
+budget = { max_gadget_calls = 14, max_wall_seconds = 180 }
+
+[[capabilities.workspaces]]
+id = "fleet"
+label = "Overview"
+renderer = "dashboard"
+data_capability = "server.fleet-summary"
+action_gadgets = ["server.subject-context", "server.profiles-list", "server.profile-revision-create", "server.clusters-list", "server.cluster-upsert", "server.enrollments-list", "server.enrollment-start", "server.enrollment-rollout-plan", "server.enrollment-rollout-apply", "server.enrollment-transition"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "fleet-map"
+label = "Fleet Map"
+renderer = "dashboard"
+data_capability = "server.fleet-map"
+action_gadgets = ["server.subject-context"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "servers"
+label = "Servers"
+renderer = "table"
+data_capability = "server.assets-list"
+action_gadgets = ["server.subject-context", "server.monitoring-state", "server.monitoring-repair"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "logs"
+label = "Logs"
+renderer = "table"
+data_capability = "loganalysis.findings-list"
+action_gadgets = ["loganalysis.subject-context", "loganalysis.inspect", "loganalysis.finding-detail", "loganalysis.scan", "loganalysis.finding-dismiss", "loganalysis.finding-reopen"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "topology"
+label = "Topology"
+renderer = "graph"
+data_capability = "server.topology-graph"
+action_gadgets = ["server.topology-scan"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "metrics"
+label = "Metrics"
+renderer = "telemetry"
+data_capability = "server.metric-catalog"
+action_gadgets = ["server.telemetry-live", "server.metric-series"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "raw-telemetry"
+label = "Raw telemetry"
+renderer = "table"
+data_capability = "server.metric-catalog"
+action_gadgets = ["server.metric-series"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "alerts"
+label = "Incidents"
+renderer = "cards"
+data_capability = "server.incidents-list"
+action_gadgets = ["server.incident-context", "server.incident-distill"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "cooling"
+label = "Cooling"
+renderer = "table"
+data_capability = "server.gadgetini-list"
+action_gadgets = ["server.gadgetini-subject-context", "server.gadgetini-attach", "server.gadgetini-detach", "server.gadgetini-telemetry-collect"]
+required_scopes = ["management"]
+
+[[capabilities.ui_contributions]]
+id = "fleet-main"
+kind = "workspace"
+label = "Fleet overview"
+placement = "main"
+target_registry = "ssh"
+target_profile = "server"
+target_retire_gadget = "server.target-retire"
+order_hint = 90
+icon = "dashboard"
+required_scopes = ["management"]
+empty_state = "No server fleet has been defined"
+error_state = "The server fleet overview is unavailable"
+workspace = "fleet"
+
+[[capabilities.ui_contributions]]
+id = "fleet-navigation"
+kind = "navigation"
+label = "Fleet"
+placement = "primary_navigation"
+navigation_section = "operations"
+order_hint = 90
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "No server fleet has been defined"
+error_state = "The server fleet overview is unavailable"
+workspace = "fleet"
+
+[[capabilities.ui_contributions]]
+id = "fleet-map-main"
+kind = "workspace"
+label = "Fleet Map"
+placement = "main"
+order_hint = 95
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "No servers are available for the Fleet Map"
+error_state = "The Fleet Map is unavailable"
+workspace = "fleet-map"
+
+[[capabilities.ui_contributions]]
+id = "fleet-map-navigation"
+kind = "navigation"
+label = "Fleet Map"
+placement = "primary_navigation"
+navigation_section = "operations"
+order_hint = 95
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "No servers are available for the Fleet Map"
+error_state = "Fleet Map navigation is unavailable"
+workspace = "fleet-map"
+
+[[capabilities.ui_contributions]]
+id = "servers-main"
+kind = "workspace"
+label = "Servers"
+placement = "main"
+target_registry = "ssh"
+target_profile = "server"
+target_retire_gadget = "server.target-retire"
+order_hint = 100
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "No server telemetry is available yet"
+error_state = "Server telemetry is unavailable"
+workspace = "servers"
+
+[[capabilities.ui_contributions]]
+id = "servers-navigation"
+kind = "navigation"
+label = "Servers"
+placement = "primary_navigation"
+navigation_section = "operations"
+order_hint = 100
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "The Servers workspace is not enabled"
+error_state = "Servers navigation is unavailable"
+workspace = "servers"
+
+[[capabilities.ui_contributions]]
+id = "servers-summary"
+kind = "dashboard_widget"
+label = "Server fleet"
+placement = "dashboard"
+order_hint = 100
+icon = "dashboard"
+required_scopes = ["management"]
+empty_state = "No current server snapshots"
+error_state = "The server fleet summary is unavailable"
+gadget = "server.fleet-summary"
+renderer = "dashboard"
+refresh_seconds = 15
+
+[[capabilities.ui_contributions]]
+id = "server-stats-tool-result"
+kind = "tool_result"
+label = "Server telemetry"
+placement = "tool_result"
+order_hint = 100
+icon = "table"
+required_scopes = ["management"]
+empty_state = "No server telemetry was returned"
+error_state = "The server telemetry result is unavailable"
+gadget = "server.host-stats-list"
+renderer = "table"
+
+[[capabilities.ui_contributions]]
+id = "server-subject-context"
+kind = "subject_context"
+label = "Selected server"
+placement = "penny_context"
+order_hint = 102
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "No server is selected"
+error_state = "Selected server context is unavailable"
+gadget = "server.subject-context"
+
+[[capabilities.ui_contributions]]
+id = "server-subject-tool-result"
+kind = "tool_result"
+label = "Server diagnosis context"
+placement = "tool_result"
+order_hint = 103
+icon = "fleet"
+required_scopes = ["management"]
+empty_state = "No current server context was returned"
+error_state = "Server diagnosis context is unavailable"
+gadget = "server.subject-context"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "server-incident-subject-context"
+kind = "subject_context"
+label = "Selected server incident"
+placement = "penny_context"
+order_hint = 103
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No incident is selected"
+error_state = "Selected incident context is unavailable"
+gadget = "server.incident-context"
+
+[[capabilities.ui_contributions]]
+id = "server-incident-subject-tool-result"
+kind = "tool_result"
+label = "Incident diagnosis context"
+placement = "tool_result"
+order_hint = 104
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No current incident context was returned"
+error_state = "Incident diagnosis context is unavailable"
+gadget = "server.incident-context"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "server-monitoring-repair-tool-result"
+kind = "tool_result"
+label = "Monitoring recovery"
+placement = "tool_result"
+order_hint = 104
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No monitoring recovery result was returned"
+error_state = "Monitoring recovery result is unavailable"
+gadget = "server.monitoring-repair"
+renderer = "operation"
+
+[[capabilities.ui_contributions]]
+id = "server-monitoring-rollback-tool-result"
+kind = "tool_result"
+label = "Monitoring rollback"
+placement = "tool_result"
+order_hint = 105
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No monitoring rollback result was returned"
+error_state = "Monitoring rollback result is unavailable"
+gadget = "server.monitoring-rollback"
+renderer = "operation"
+
+[[capabilities.ui_contributions]]
+id = "server-monitoring-repair-review"
+kind = "review_presentation"
+label = "Restore server monitoring"
+placement = "review"
+order_hint = 104
+icon = "review"
+required_scopes = ["management"]
+empty_state = "No monitoring recovery is pending"
+error_state = "Monitoring recovery review is unavailable"
+gadget = "server.monitoring-repair"
+renderer = "operation"
+
+[[capabilities.ui_contributions]]
+id = "finding-subject-context"
+kind = "subject_context"
+label = "Selected log finding"
+placement = "penny_context"
+order_hint = 104
+icon = "logs"
+required_scopes = ["management"]
+empty_state = "No log finding is selected"
+error_state = "Selected finding context is unavailable"
+gadget = "loganalysis.subject-context"
+
+[[capabilities.ui_contributions]]
+id = "finding-subject-tool-result"
+kind = "tool_result"
+label = "Finding diagnosis context"
+placement = "tool_result"
+order_hint = 105
+icon = "logs"
+required_scopes = ["management"]
+empty_state = "No current finding context was returned"
+error_state = "Finding diagnosis context is unavailable"
+gadget = "loganalysis.subject-context"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "finding-triage-review"
+kind = "review_presentation"
+label = "Finding triage"
+placement = "review"
+order_hint = 100
+icon = "review"
+required_scopes = ["management"]
+empty_state = "No finding triage decision is pending"
+error_state = "The finding triage decision is unavailable"
+gadget = "loganalysis.finding-dismiss"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "logs-main"
+kind = "workspace"
+label = "Logs"
+placement = "main"
+order_hint = 110
+icon = "logs"
+required_scopes = ["management"]
+empty_state = "No open log findings"
+error_state = "Log findings are unavailable"
+workspace = "logs"
+
+[[capabilities.ui_contributions]]
+id = "topology-main"
+kind = "workspace"
+label = "Topology"
+placement = "main"
+order_hint = 105
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No typed server topology is available yet"
+error_state = "Server topology is unavailable"
+workspace = "topology"
+
+[[capabilities.ui_contributions]]
+id = "topology-navigation"
+kind = "navigation"
+label = "Topology"
+placement = "primary_navigation"
+navigation_section = "operations"
+order_hint = 104
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "The Topology workspace is not enabled"
+error_state = "Topology navigation is unavailable"
+workspace = "topology"
+
+[[capabilities.ui_contributions]]
+id = "metrics-main"
+kind = "workspace"
+label = "Metrics"
+placement = "main"
+order_hint = 107
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No current server metrics are available"
+error_state = "Server metrics are unavailable"
+workspace = "metrics"
+
+[[capabilities.ui_contributions]]
+id = "metrics-navigation"
+kind = "navigation"
+label = "Metrics"
+placement = "primary_navigation"
+navigation_section = "operations"
+order_hint = 103
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "The Metrics workspace is not enabled"
+error_state = "Metrics navigation is unavailable"
+workspace = "metrics"
+
+[[capabilities.ui_contributions]]
+id = "raw-telemetry-main"
+kind = "workspace"
+label = "Raw telemetry"
+placement = "main"
+order_hint = 111
+icon = "table"
+required_scopes = ["management"]
+empty_state = "No raw server metrics are available"
+error_state = "Raw server telemetry is unavailable"
+workspace = "raw-telemetry"
+
+[[capabilities.ui_contributions]]
+id = "raw-telemetry-navigation"
+kind = "navigation"
+label = "Raw telemetry"
+placement = "primary_navigation"
+navigation_section = "diagnostics"
+order_hint = 111
+icon = "table"
+required_scopes = ["management"]
+empty_state = "The Raw telemetry workspace is not enabled"
+error_state = "Raw telemetry navigation is unavailable"
+workspace = "raw-telemetry"
+
+[[capabilities.ui_contributions]]
+id = "alerts-main"
+kind = "workspace"
+label = "Incidents"
+placement = "main"
+order_hint = 108
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No server alert sources are available"
+error_state = "Server alerts are unavailable"
+workspace = "alerts"
+
+[[capabilities.ui_contributions]]
+id = "alerts-navigation"
+kind = "navigation"
+label = "Incidents"
+placement = "primary_navigation"
+navigation_section = "operations"
+order_hint = 102
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "The Alerts workspace is not enabled"
+error_state = "Alerts navigation is unavailable"
+workspace = "alerts"
+
+[[capabilities.ui_contributions]]
+id = "cooling-main"
+kind = "workspace"
+label = "Cooling"
+placement = "main"
+target_registry = "ssh"
+target_profile = "gadgetini"
+target_retire_gadget = "server.target-retire"
+order_hint = 109
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No Gadgetini cooling observations are available"
+error_state = "Gadgetini cooling observations are unavailable"
+workspace = "cooling"
+
+[[capabilities.ui_contributions]]
+id = "cooling-summary"
+kind = "dashboard_widget"
+label = "Cooling safety"
+placement = "dashboard"
+order_hint = 109
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No Gadgetini cooling observations"
+error_state = "Cooling safety summary is unavailable"
+gadget = "server.gadgetini-summary"
+renderer = "dashboard"
+refresh_seconds = 15
+
+[[capabilities.ui_contributions]]
+id = "gadgetini-subject-context"
+kind = "subject_context"
+label = "Selected Gadgetini"
+placement = "penny_context"
+order_hint = 109
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No Gadgetini is selected"
+error_state = "Selected Gadgetini context is unavailable"
+gadget = "server.gadgetini-subject-context"
+
+[[capabilities.ui_contributions]]
+id = "gadgetini-subject-tool-result"
+kind = "tool_result"
+label = "Gadgetini diagnosis context"
+placement = "tool_result"
+order_hint = 109
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No Gadgetini context was returned"
+error_state = "Gadgetini diagnosis context is unavailable"
+gadget = "server.gadgetini-subject-context"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "gadgetini-telemetry-tool-result"
+kind = "tool_result"
+label = "Gadgetini cooling telemetry"
+placement = "tool_result"
+order_hint = 109
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No Gadgetini cooling telemetry was returned"
+error_state = "Gadgetini cooling telemetry is unavailable"
+gadget = "server.gadgetini-telemetry-collect"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "logs-navigation"
+kind = "navigation"
+label = "Logs"
+placement = "primary_navigation"
+navigation_section = "diagnostics"
+order_hint = 110
+icon = "logs"
+required_scopes = ["management"]
+empty_state = "The Logs workspace is not enabled"
+error_state = "Logs navigation is unavailable"
+workspace = "logs"
+
+[[capabilities.ui_contributions]]
+id = "alerts-summary"
+kind = "dashboard_widget"
+label = "Server alerts"
+placement = "dashboard"
+order_hint = 110
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No firing server alerts"
+error_state = "Server alert summary is unavailable"
+gadget = "loganalysis.alerts-summary"
+renderer = "dashboard"
+refresh_seconds = 15
+
+[[capabilities.ui_contributions]]
+id = "findings-tool-result"
+kind = "tool_result"
+label = "Log findings"
+placement = "tool_result"
+order_hint = 110
+icon = "logs"
+required_scopes = ["management"]
+empty_state = "No log findings were returned"
+error_state = "Log findings result is unavailable"
+gadget = "loganalysis.findings-list"
+renderer = "table"
+
+[[capabilities.ui_contributions]]
+id = "log-inspection-tool-result"
+kind = "tool_result"
+label = "Bounded server logs"
+placement = "tool_result"
+order_hint = 112
+icon = "logs"
+required_scopes = ["management"]
+empty_state = "No matching log lines were returned"
+error_state = "The signed log preset is unavailable"
+gadget = "loganalysis.inspect"
+renderer = "table"
+
+[[capabilities.ui_contributions]]
+id = "finding-detail-tool-result"
+kind = "tool_result"
+label = "Finding evidence"
+placement = "tool_result"
+order_hint = 114
+icon = "review"
+required_scopes = ["management"]
+empty_state = "The finding has no visible detail"
+error_state = "Finding evidence is unavailable"
+gadget = "loganalysis.finding-detail"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "topology-tool-result"
+kind = "tool_result"
+label = "Server topology"
+placement = "tool_result"
+order_hint = 120
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No topology was returned"
+error_state = "Server topology result is unavailable"
+gadget = "server.topology-scan"
+renderer = "detail"
+
+[[capabilities.ui_contributions]]
+id = "metric-series-tool-result"
+kind = "tool_result"
+label = "Server metric series"
+placement = "tool_result"
+order_hint = 125
+icon = "activity"
+required_scopes = ["management"]
+empty_state = "No metric samples were returned"
+error_state = "Metric series is unavailable"
+gadget = "server.metric-series"
+renderer = "timeseries"
+
+[[capabilities.ui_contributions]]
+id = "server-duty-cycle-job"
+kind = "job_presentation"
+label = "Server duty cycle"
+placement = "jobs"
+order_hint = 100
+icon = "jobs"
+required_scopes = ["management"]
+empty_state = "No Server Administrator duty cycle has run"
+error_state = "Server duty-cycle status is unavailable"
+job = "server-duty-cycle"
+renderer = "detail"
+refresh_seconds = 5
+
+[[capabilities.migrations]]
+id = "host-metrics-initial"
+revision = 20260421000001
+legacy_sqlx_version = 20260421000001
+kind = "schema"
+path = "migrations/20260421000001_host_metrics.sql"
+sha256 = "8f226d34e8487878946bec42e81152f06d772cc22d397b1c339352a0f4b19dca"
+
+[[capabilities.migrations]]
+id = "log-findings-initial"
+revision = 20260423000001
+legacy_sqlx_version = 20260423000001
+kind = "schema"
+path = "migrations/20260423000001_log_findings.sql"
+sha256 = "3e2f9d385fa156af12412631bec76663bfa98f8049ef6bed14018b71d75dc5ed"
+
+[[capabilities.migrations]]
+id = "log-findings-remediation"
+revision = 20260423000002
+legacy_sqlx_version = 20260423000002
+kind = "schema"
+path = "migrations/20260423000002_log_findings_remediation.sql"
+sha256 = "6578506677bc3fafb41087b7baab449a4a9f0bc34111bb0e1c26d1ff66d6f49a"
+
+[[capabilities.migrations]]
+id = "log-finding-comments"
+revision = 20260423000003
+legacy_sqlx_version = 20260423000003
+kind = "schema"
+path = "migrations/20260423000003_log_finding_comments.sql"
+sha256 = "44eb63dca8db59fa610e875d25eb03e60d2d2248b5ea2c3bbc3c91346a7ffa83"
+
+[[capabilities.migrations]]
+id = "log-finding-fingerprint"
+revision = 20260503000003
+legacy_sqlx_version = 20260503000003
+kind = "schema"
+path = "migrations/20260503000003_log_finding_fingerprint.sql"
+sha256 = "0dd9e31daf0ffc7eb5a1d382090de843b33553b45ecaabdba75cd0850083e0f8"
+
+[[capabilities.migrations]]
+id = "host-stats-latest"
+revision = 20260611000001
+legacy_sqlx_version = 20260611000001
+kind = "schema"
+path = "migrations/20260611000001_host_stats_latest.sql"
+sha256 = "2671989211497439582a16e68d21d0b2ebbecc17d60c2331b8247999d5a73a54"
+
+[[capabilities.migrations]]
+id = "alert-state"
+revision = 20260616000001
+legacy_sqlx_version = 20260616000001
+kind = "schema"
+path = "migrations/20260616000001_alert_state.sql"
+sha256 = "bbb86d1a38ed3d2c02a2bb8989d787c6354979ca45b95055f45e0b9f0d4cc545"
+
+[[capabilities.migrations]]
+id = "operational-vertical"
+revision = 20260711000001
+kind = "schema"
+path = "migrations/20260711000001_operational_vertical.sql"
+sha256 = "907bc12924c0c8ab029c828f98123a492a0d219a3f40ed4d781b5e7b20bbbe68"
+
+[[capabilities.migrations]]
+id = "target-health"
+revision = 20260711000002
+kind = "schema"
+path = "migrations/20260711000002_target_health.sql"
+sha256 = "38cd27c4eea347cc4cc164d6286a9f4499782aec0e88e383a9c5d05e6447b1e0"
+
+[[capabilities.migrations]]
+id = "metric-alert-rules"
+revision = 20260712000001
+kind = "schema"
+path = "migrations/20260712000001_metric_alert_rules.sql"
+sha256 = "9cb811e2b0953d7945d58e37b46c9b51e78be3326e40a4c4a0279852b1523c44"
+
+[[capabilities.migrations]]
+id = "gadgetini-cooling"
+revision = 20260712000002
+kind = "schema"
+path = "migrations/20260712000002_gadgetini_cooling.sql"
+sha256 = "63ff6cf3bd4d77277d10900faf4df5da6b3ff32119b3af45e6b30e28d7010f36"
+
+[[capabilities.migrations]]
+id = "gadgetini-lifecycle"
+revision = 20260712000003
+kind = "schema"
+path = "migrations/20260712000003_gadgetini_lifecycle.sql"
+sha256 = "a515f2adba65798f1f002387f8692c85121bc12107ea9e03b9dbe744c1221382"
+
+[[capabilities.migrations]]
+id = "metric-history-ranges"
+revision = 20260714000001
+kind = "schema"
+path = "migrations/20260714000001_metric_history_ranges.sql"
+sha256 = "897bd43b002dfd086b7ed5ad36da0890858d0b9d8242641f6fe01b039caf14fd"
+
+[[capabilities.migrations]]
+id = "cluster-enrollment"
+revision = 20260715000001
+kind = "schema"
+path = "migrations/20260715000001_cluster_enrollment.sql"
+sha256 = "95685aad402b648e8fb01800e7b5d0ca4daca2d254f0a4a413be2b1fa082e1c8"
+
+[[capabilities.migrations]]
+id = "incident-history"
+revision = 20260715000002
+kind = "schema"
+path = "migrations/20260715000002_incident_history.sql"
+sha256 = "a3b8940c44d3568ae6ce2e534ea77de9c71159f55d31c91ec25ebd8cfd9fd835"
+
+[[capabilities.migrations]]
+id = "incident-outcomes"
+revision = 20260715000003
+kind = "schema"
+path = "migrations/20260715000003_incident_outcomes.sql"
+sha256 = "34d179dfdbaeecccc7cb62e1bcb204dbc603ab1af706fce303334595d0dd0016"
+
+[[capabilities.migrations]]
+id = "incident-experience"
+revision = 20260715000004
+kind = "schema"
+path = "migrations/20260715000004_incident_experience.sql"
+sha256 = "4fa3c67a3d9cc00a2a8d5b2313be2dde5568721e80afbfd877419cb3320558c5"
+
+[[capabilities.migrations]]
+id = "incident-signals"
+revision = 20260716000001
+kind = "schema"
+path = "migrations/20260716000001_incident_signals.sql"
+sha256 = "ee1fead5246af3b801b67879e7075c2ddccd240809d39c4674643b46a5b41bdd"
+
+[[capabilities.migrations]]
+id = "server-profile-override"
+revision = 20260716000002
+kind = "schema"
+path = "migrations/20260716000002_server_profile_override.sql"
+sha256 = "d1331feee688dbe103aa8d31fe2eeb28a1c4e0a75ea5662d6296c5d5c15b402d"
+
+[[capabilities.migrations]]
+id = "incident-safe-stop"
+revision = 20260716000003
+kind = "schema"
+path = "migrations/20260716000003_incident_safe_stop.sql"
+sha256 = "67e868189db161d283bd61382f8bd1792cc15041845480a90d3f3e8666623acd"
+
+[[capabilities.migrations]]
+id = "incident-recovery-validation"
+revision = 20260716000004
+kind = "schema"
+path = "migrations/20260716000004_incident_recovery_validation.sql"
+sha256 = "e59275affae1074320e2377d0d4ed38720be902a400ea759d60505de0240f70d"
+
+[[capabilities.migrations]]
+id = "typed-temperature-cleanup"
+revision = 20260716000005
+kind = "data"
+path = "migrations/20260716000005_typed_temperature_cleanup.sql"
+sha256 = "9f46a7aadcbdc9e8641158ae7650b8da20e2e449bb472bc1535946ac2ccb843b"
+
+[[capabilities.migrations]]
+id = "incident-recovery-outcome"
+revision = 20260716000006
+kind = "schema"
+path = "migrations/20260716000006_incident_recovery_outcome.sql"
+sha256 = "7817d8d8750d902e4043a61450fe92f76b50adea8bd94701965b6f89a6b93a6e"
+
+[[capabilities.migrations]]
+id = "incident-recovery-posture"
+revision = 20260716000007
+kind = "schema"
+path = "migrations/20260716000007_incident_recovery_posture.sql"
+sha256 = "1f78ba992d149a8167935f84f989da2b12a582db9e517cfa692ad4e7ecf66dee"
+
+[[capabilities.migrations]]
+id = "log-triage-guidance"
+revision = 20260716000008
+kind = "data"
+path = "migrations/20260716000008_log_triage_guidance.sql"
+sha256 = "6b8c6843cebb15cfa5d906eb638cd6278b4458590ca94d691c5fcd33b1b110fb"
+
+[[capabilities.migrations]]
+id = "incident-knowledge-snapshot"
+revision = 20260717000001
+kind = "schema"
+path = "migrations/20260717000001_incident_knowledge_snapshot.sql"
+sha256 = "a9c87ca617c09e9a7841af27f639f8f77c8ecfa3164dbd8948b1c8682c45afa9"
+
+[[capabilities.migrations]]
+id = "incident-enrichment-dispatch"
+revision = 20260717000002
+kind = "schema"
+path = "migrations/20260717000002_incident_enrichment_dispatch.sql"
+sha256 = "fd580aa7ace7f1adb2c4c2aca8ebb433eb629433f596ba25461348f2f1acff5e"
+
+[[capabilities.migrations]]
+id = "incident-acting-space"
+revision = 20260718000001
+kind = "schema"
+path = "migrations/20260718000001_incident_acting_space.sql"
+sha256 = "8a9a3df1f21146a050d4c234efce09e5c4b6032035ede00016924d55bedc260a"

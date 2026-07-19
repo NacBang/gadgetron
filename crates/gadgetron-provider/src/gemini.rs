@@ -400,6 +400,7 @@ mod tests {
             stream: false,
             stop: None,
             conversation_id: None,
+            audit_context: None,
         };
 
         let gemini_req = GeminiProvider::to_gemini_request(&req);

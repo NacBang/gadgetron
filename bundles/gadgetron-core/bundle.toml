@@ -1,14 +1,11 @@
-# gadgetron-core — first-party bundle manifest.
+# gadgetron-core — legacy static workbench catalog fixture.
 #
-# Operators can point `[web] catalog_path = "bundles/gadgetron-core/bundle.toml"`
-# at this file and reload via SIGHUP or the admin endpoint to load it
-# as the live catalog. The `[bundle]` table surfaces in the reload
-# response so admin tooling can tell which bundle + version is live
-# at any given time.
+# This is not a signed installable product Bundle. Compatibility tests and
+# legacy deployments may point `[web] catalog_path` here to compare the old
+# descriptor projection with the Core fallback.
 #
 # Content mirrors `DescriptorCatalog::seed_p2b()` exactly so the
-# hardcoded fallback and the bundle path produce identical catalogs.
-# A later release removes the hardcoded fallback entirely.
+# hardcoded fallback and this fixture produce identical catalogs.
 
 [bundle]
 id = "gadgetron-core"

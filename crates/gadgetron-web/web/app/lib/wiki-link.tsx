@@ -1,15 +1,14 @@
 "use client";
 
-// Wiki-citation support for chat markdown (ISSUE 44).
+// Knowledge-citation support for chat markdown (ISSUE 44).
 //
 // Penny cites wiki pages as footnotes whose definition is the page name
 // in inline code — `ops/runbook-h100-ecc` — per the persona's RAG
 // section. That renders as plain <code>, so there was nothing to click
 // to open the document. This module loads the wiki page list once and
 // lets the markdown renderer turn EXACT page-name matches into links to
-// `/web/wiki?page=<name>` (the deep link the wiki workbench already
-// honors). Matching against the real page list means shell snippets
-// like `cargo test` or repo paths never linkify by accident.
+// `/web/knowledge?q=<name>`. Matching against the real page list means
+// shell snippets like `cargo test` or repo paths never linkify by accident.
 
 import {
   createContext,
@@ -26,6 +25,16 @@ const WikiPagesContext = createContext<ReadonlySet<string> | null>(null);
 
 export function useWikiPages(): ReadonlySet<string> | null {
   return useContext(WikiPagesContext);
+}
+
+export function knowledgeSearchHref(
+  query?: string | null,
+  basePath = "/knowledge",
+): string {
+  const normalized = query?.trim();
+  return normalized
+    ? `${basePath}?q=${encodeURIComponent(normalized)}`
+    : basePath;
 }
 
 /**

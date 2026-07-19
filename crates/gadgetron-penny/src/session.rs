@@ -55,10 +55,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
-use gadgetron_core::agent::config::{AgentBackend, AgentConfig, SessionMode, StdEnv};
+use gadgetron_core::agent::config::{
+    AgentBackend, AgentConfig, ConversationAgentProfile, EnvResolver, SessionMode, StdEnv,
+};
 use gadgetron_core::audit::{GadgetAuditEventSink, GadgetMetadata, NoopGadgetAuditEventSink};
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
-use gadgetron_core::provider::{ChatChunk, ChatRequest};
+use gadgetron_core::provider::{CallbackCredentialLease, ChatChunk, ChatRequest};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -71,14 +73,15 @@ use crate::agent_backend::{
     BackendTurnPlan,
 };
 use crate::backend_session::AgentBackendSessionPersistence;
-use crate::gadget_config::write_config_file_for_agent;
+use crate::gadget_config::write_config_file_for_agent_with_env;
 use crate::home::PennyHome;
-pub use crate::prompt::{build_stdin_payload, StdinMode};
+pub use crate::prompt::{build_stdin_payload, invocation_system_prompt, StdinMode};
 use crate::redact::redact_stderr;
+use crate::responses_bridge::ResponsesBridge;
 use crate::session_store::SessionStore;
 use crate::spawn::{
-    build_claude_command_with_session, build_codex_exec_command_with_mode, ClaudeSessionMode,
-    CodexExecMode,
+    build_claude_command_with_session_and_system, build_codex_exec_command_with_mode_and_system,
+    resolve_codex_compatible_base_url, ClaudeSessionMode, CodexExecMode,
 };
 
 #[cfg(test)]
@@ -87,9 +90,6 @@ use crate::agent_backend::emit_tool_audit_if_needed;
 use crate::stream::StreamJsonEvent;
 #[cfg(test)]
 use gadgetron_core::audit::{GadgetAuditEvent, GadgetCallOutcome, GadgetTier};
-#[cfg(test)]
-use gadgetron_core::message::Role;
-
 /// Bound on the in-flight chunk channel. Small values are fine —
 /// Claude Code emits chunks faster than HTTP can drain them anyway,
 /// and back-pressure is desired on slow clients.
@@ -150,6 +150,7 @@ fn plan_backend_turn(backend: AgentBackend, spawn_mode: &SpawnMode) -> Result<Ba
 /// so it is owned by this bundle rather than a loose local variable.
 struct SpawnedAgentProcess {
     _mcp_tmp: Option<NamedTempFile>,
+    _responses_bridge: Option<ResponsesBridge>,
     child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -223,6 +224,10 @@ pub struct AgentSession {
     /// pinned to `~/.gadgetron/penny/work/` for auto-memory isolation).
     /// `None` in tests and legacy constructors.
     config_path: Option<PathBuf>,
+    /// Turn-scoped parent callback credential. The lease remains alive for
+    /// retries and is revoked when the driver exits on success, error, cancel,
+    /// or receiver drop.
+    callback_credential: Option<CallbackCredentialLease>,
 }
 
 impl AgentSession {
@@ -299,7 +304,13 @@ impl AgentSession {
             backend_session_persistence,
             penny_home,
             config_path,
+            callback_credential: None,
         }
+    }
+
+    pub fn with_callback_credential(mut self, credential: CallbackCredentialLease) -> Self {
+        self.callback_credential = Some(credential);
+        self
     }
 
     /// Back-compat constructor for tests that do not care about audit
@@ -349,10 +360,42 @@ async fn run_driver(session: AgentSession, tx: mpsc::Sender<Result<ChatChunk>>) 
         backend_session_persistence,
         penny_home,
         config_path,
+        callback_credential,
     } = session;
 
+    let std_env = StdEnv;
+    let turn_env = TurnEnv {
+        callback_key: callback_credential
+            .as_ref()
+            .map(CallbackCredentialLease::expose),
+        fallback: &std_env,
+    };
+
+    let mut effective_config = (*config).clone();
+    let stored_profile = if let (Some(conversation_id), Some(persistence)) = (
+        request.conversation_id.as_deref(),
+        backend_session_persistence.as_deref(),
+    ) {
+        persistence
+            .load_conversation_agent_profile(conversation_id)
+            .await
+    } else {
+        None
+    };
+    let latest_user_instruction = request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, gadgetron_core::message::Role::User))
+        .and_then(|message| message.content.text())
+        .unwrap_or_default();
+    let selected_profile =
+        stored_profile.unwrap_or_else(|| ConversationAgentProfile::from_agent(&effective_config));
+    let resolved_profile = selected_profile.resolve_auto(latest_user_instruction);
+    effective_config = resolved_profile.overlay_agent(&effective_config);
+
     match drive(
-        &config,
+        &effective_config,
         &allowed_tools,
         &request,
         &tool_metadata,
@@ -362,6 +405,7 @@ async fn run_driver(session: AgentSession, tx: mpsc::Sender<Result<ChatChunk>>) 
         backend_session_persistence.as_deref(),
         penny_home.as_deref(),
         config_path.as_deref(),
+        &turn_env,
     )
     .await
     {
@@ -374,32 +418,52 @@ async fn run_driver(session: AgentSession, tx: mpsc::Sender<Result<ChatChunk>>) 
     }
 }
 
+struct TurnEnv<'a> {
+    callback_key: Option<&'a str>,
+    fallback: &'a dyn EnvResolver,
+}
+
+impl EnvResolver for TurnEnv<'_> {
+    fn get(&self, name: &str) -> Option<String> {
+        if name == "GADGETRON_GATEWAY_CALLBACK_KEY" {
+            if let Some(key) = self.callback_key {
+                return Some(key.to_string());
+            }
+        }
+        self.fallback.get(name)
+    }
+}
+
 fn spawn_claude_process(
     config: &AgentConfig,
     allowed_tools: &[String],
     claude_session_mode: ClaudeSessionMode,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
+    invocation_system: Option<&str>,
+    env: &dyn EnvResolver,
 ) -> Result<SpawnedAgentProcess> {
     // 1. MCP config tempfile (mkstemp 0600 atomic). `config_path`
     // is forwarded so the MCP grandchild spawned by Claude Code can find
     // `[knowledge]` / `[agent]` even though its cwd is pinned to Penny's
     // neutral workdir (which contains no TOML).
-    let mcp_tmp =
-        write_config_file_for_agent(config_path, config).map_err(|e| GadgetronError::Penny {
+    let mcp_tmp = write_config_file_for_agent_with_env(config_path, config, env).map_err(|e| {
+        GadgetronError::Penny {
             kind: PennyErrorKind::SpawnFailed {
                 reason: format!("mcp tmpfile: {e}"),
             },
             message: "failed to create MCP config tmpfile".to_string(),
-        })?;
+        }
+    })?;
 
     // 2. Build the Command (env_clear + allowlist + kill_on_drop + session flag).
-    let mut cmd = build_claude_command_with_session(
+    let mut cmd = build_claude_command_with_session_and_system(
         config,
         mcp_tmp.path(),
         allowed_tools,
         claude_session_mode,
-        &StdEnv,
+        invocation_system,
+        env,
     )
     .map_err(|e| GadgetronError::Penny {
         kind: PennyErrorKind::SpawnFailed {
@@ -476,6 +540,7 @@ fn spawn_claude_process(
 
     Ok(SpawnedAgentProcess {
         _mcp_tmp: Some(mcp_tmp),
+        _responses_bridge: None,
         child,
         stdin,
         stdout,
@@ -483,21 +548,48 @@ fn spawn_claude_process(
     })
 }
 
-fn spawn_codex_process(
+async fn spawn_codex_process(
     config: &AgentConfig,
     allowed_tools: &[String],
     mode: CodexExecMode,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
+    invocation_system: Option<&str>,
+    env: &dyn EnvResolver,
 ) -> Result<SpawnedAgentProcess> {
+    let mut effective_config = config.clone();
+    let responses_bridge = if matches!(
+        config.codex.auth_mode,
+        gadgetron_core::agent::config::CodexAuthMode::OpenAiCompatibleProviderEnv
+    ) {
+        let target_base_url = resolve_codex_compatible_base_url(config, env);
+        if target_base_url.trim().is_empty() {
+            None
+        } else {
+            let bridge = ResponsesBridge::start(&target_base_url)
+                .await
+                .map_err(|error| GadgetronError::Penny {
+                    kind: PennyErrorKind::SpawnFailed {
+                        reason: error.to_string(),
+                    },
+                    message: "failed to start Local Responses compatibility bridge".to_string(),
+                })?;
+            effective_config.codex.compatible_base_url_env = bridge.base_url().to_string();
+            Some(bridge)
+        }
+    } else {
+        None
+    };
+
     let workdir_buf = penny_home.map(PennyHome::workdir);
-    let mut cmd = build_codex_exec_command_with_mode(
-        config,
+    let mut cmd = build_codex_exec_command_with_mode_and_system(
+        &effective_config,
         config_path,
         allowed_tools,
         workdir_buf.as_deref(),
         mode.clone(),
-        &StdEnv,
+        invocation_system,
+        env,
     )
     .map_err(|e| GadgetronError::Penny {
         kind: PennyErrorKind::SpawnFailed {
@@ -560,6 +652,7 @@ fn spawn_codex_process(
 
     Ok(SpawnedAgentProcess {
         _mcp_tmp: None,
+        _responses_bridge: responses_bridge,
         child,
         stdin,
         stdout,
@@ -567,19 +660,36 @@ fn spawn_codex_process(
     })
 }
 
-fn spawn_agent_process(
+async fn spawn_agent_process(
     config: &AgentConfig,
     allowed_tools: &[String],
     command_mode: BackendCommandMode,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
+    invocation_system: Option<&str>,
+    env: &dyn EnvResolver,
 ) -> Result<SpawnedAgentProcess> {
     match command_mode {
-        BackendCommandMode::Claude(mode) => {
-            spawn_claude_process(config, allowed_tools, mode, penny_home, config_path)
-        }
+        BackendCommandMode::Claude(mode) => spawn_claude_process(
+            config,
+            allowed_tools,
+            mode,
+            penny_home,
+            config_path,
+            invocation_system,
+            env,
+        ),
         BackendCommandMode::Codex(mode) => {
-            spawn_codex_process(config, allowed_tools, mode, penny_home, config_path)
+            spawn_codex_process(
+                config,
+                allowed_tools,
+                mode,
+                penny_home,
+                config_path,
+                invocation_system,
+                env,
+            )
+            .await
         }
     }
 }
@@ -606,12 +716,16 @@ async fn stream_stdout_with_idle_timeout(
         let read = if !*emitted_chunks {
             tokio::select! {
                 read = reader.read_line(&mut line) => read,
+                _ = tx.closed() => return Ok(StreamLoopOutcome::ReceiverDropped),
                 _ = tokio::time::sleep(Duration::from_secs(idle_timeout_secs)) => {
                     return Ok(StreamLoopOutcome::TimedOut);
                 }
             }
         } else {
-            reader.read_line(&mut line).await
+            tokio::select! {
+                read = reader.read_line(&mut line) => read,
+                _ = tx.closed() => return Ok(StreamLoopOutcome::ReceiverDropped),
+            }
         };
         let n = read.map_err(|e| GadgetronError::Penny {
             kind: PennyErrorKind::AgentError {
@@ -744,11 +858,20 @@ async fn resolve_spawn_mode(
         None => None,
     };
 
-    let (entry, first_turn) = store.get_or_create_with_backend_session(
-        conversation_id.to_string(),
-        config.backend,
-        persisted_backend_session_id,
-    );
+    let (entry, first_turn) = store
+        .get_or_create_pinned(
+            conversation_id.to_string(),
+            config.backend,
+            persisted_backend_session_id,
+        )
+        .map_err(|mismatch| GadgetronError::Penny {
+            kind: PennyErrorKind::AgentBackendPinned {
+                conversation_id: conversation_id.to_string(),
+                pinned: mismatch.pinned.as_str().to_string(),
+                requested: mismatch.requested.as_str().to_string(),
+            },
+            message: "conversation agent runtime is already pinned".to_string(),
+        })?;
 
     if first_turn && config.session_mode == SessionMode::NativeOnly {
         return Err(GadgetronError::Penny {
@@ -820,6 +943,7 @@ async fn drive(
     backend_session_persistence: Option<&dyn AgentBackendSessionPersistence>,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
+    env: &dyn EnvResolver,
 ) -> Result<()> {
     // 0. Resolve spawn mode (native session branching).
     let spawn_mode =
@@ -840,6 +964,7 @@ async fn drive(
             backend_session_persistence,
             penny_home,
             config_path,
+            env,
             &turn_plan,
             &mut emitted_chunks,
         )
@@ -896,16 +1021,21 @@ async fn drive_attempt(
     backend_session_persistence: Option<&dyn AgentBackendSessionPersistence>,
     penny_home: Option<&PennyHome>,
     config_path: Option<&std::path::Path>,
+    env: &dyn EnvResolver,
     turn_plan: &BackendTurnPlan,
     emitted_chunks: &mut bool,
 ) -> Result<()> {
+    let invocation_system = invocation_system_prompt(request);
     let mut process = spawn_agent_process(
         config,
         allowed_tools,
         turn_plan.command_mode.clone(),
         penny_home,
         config_path,
-    )?;
+        invocation_system.as_deref(),
+        env,
+    )
+    .await?;
 
     // 5. `request_timeout_secs` is an idle watchdog, not a total wall-clock
     //    cap. Long active turns must keep running as long as stream-json
@@ -1048,6 +1178,7 @@ mod tests {
             stream: true,
             stop: None,
             conversation_id: None,
+            audit_context: None,
         }
     }
 
@@ -1062,29 +1193,19 @@ mod tests {
         assert_eq!(session.request.messages.len(), 4);
     }
 
-    // Stdin format verification — mirrors the feed_stdin logic.
-    // Can't test the async function directly without a mock ChildStdin,
-    // so we verify the expected byte sequence shape here.
     #[test]
-    fn stdin_format_roles_are_capitalized_and_separated_by_blank_line() {
+    fn stateless_stdin_excludes_system_authority() {
         let req = test_request();
-        let mut expected = String::new();
-        for msg in &req.messages {
-            let label = match msg.role {
-                Role::System => "System",
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-                Role::Tool => "Tool",
-            };
-            expected.push_str(label);
-            expected.push_str(": ");
-            expected.push_str(msg.content.text().unwrap_or(""));
-            expected.push_str("\n\n");
-        }
-        assert!(expected.starts_with("System: be helpful\n\n"));
-        assert!(expected.contains("\nUser: hello\n\n"));
-        assert!(expected.contains("\nAssistant: hi\n\n"));
-        assert!(expected.ends_with("User: what is 2+2\n\n"));
+        let payload = build_stdin_payload(&req, StdinMode::FlattenHistory).unwrap();
+        assert!(!payload.contains("System:"));
+        assert!(!payload.contains("be helpful"));
+        assert!(payload.starts_with("User: hello\n\n"));
+        assert!(payload.contains("Assistant: hi\n\n"));
+        assert!(payload.ends_with("User: what is 2+2\n\n"));
+        assert_eq!(
+            invocation_system_prompt(&req).as_deref(),
+            Some("be helpful")
+        );
     }
 
     #[test]
@@ -1095,8 +1216,9 @@ mod tests {
         // stdin carries ONLY the flattened conversation.
         assert!(!payload.contains("<system>"));
         assert!(!payload.contains("You are Penny"));
-        assert!(payload.starts_with("System: be helpful\n\n"));
-        assert!(payload.contains("User: hello\n\n"));
+        assert!(!payload.contains("System:"));
+        assert!(!payload.contains("be helpful"));
+        assert!(payload.starts_with("User: hello\n\n"));
         assert!(payload.ends_with("User: what is 2+2\n\n"));
     }
 
@@ -1241,6 +1363,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         };
         let second = ClaudeCodeSession::new(
             cfg,
@@ -1262,11 +1385,8 @@ fi
     // ---- ToolUse audit emission ----
     //
     // `emit_tool_audit_if_needed` is the helper session::drive calls on
-    // every parsed stream-json event. It must emit a
-    // `GadgetCallCompleted` event on `ToolUse` and pass through on every
-    // other variant. For ToolUse, it must look up (tier, category) via
-    // the metadata snapshot passed by the caller, stripping the
-    // `mcp__knowledge__` prefix that Claude Code wraps tool names in.
+    // every parsed stream-json event. It correlates each ToolUse with its
+    // ToolResult and emits `GadgetCallCompleted` only after the result.
 
     use std::sync::Mutex;
 
@@ -1308,7 +1428,16 @@ fi
             input: serde_json::json!({"name": "home", "content": "hi"}),
         };
 
-        emit_tool_audit_if_needed(&event, &metadata, &sink, None, None);
+        let mut pending = HashMap::new();
+        emit_tool_audit_if_needed(&event, &mut pending, &metadata, &sink, None, None, None);
+        assert!(sink.events.lock().unwrap().is_empty());
+
+        let result = StreamJsonEvent::ToolResult {
+            tool_use_id: "call_1".into(),
+            content: serde_json::json!({"ok": true}),
+            is_error: false,
+        };
+        emit_tool_audit_if_needed(&result, &mut pending, &metadata, &sink, None, None, None);
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1329,7 +1458,7 @@ fi
                 assert_eq!(*tier, GadgetTier::Write);
                 assert_eq!(category, "knowledge");
                 assert!(matches!(outcome, GadgetCallOutcome::Success));
-                assert_eq!(*elapsed_ms, 0); // precise timing deferred
+                assert!(*elapsed_ms < 1_000);
                 assert!(conversation_id.is_none());
                 assert!(claude_session_uuid.is_none());
                 // Owner/tenant always None in single-user mode.
@@ -1346,26 +1475,34 @@ fi
     fn emit_tool_audit_is_noop_for_non_tool_use_events() {
         let sink = CaptureSink::default();
         let metadata = metadata_with_wiki_write();
-        // Every non-ToolUse variant should produce zero events.
+        let mut pending = HashMap::new();
+        // Unrelated and unmatched events should produce zero audit rows.
         let delta = StreamJsonEvent::MessageDelta {
             delta: crate::stream::MessageDelta {
                 text: Some("hi".into()),
                 stop_reason: None,
             },
         };
-        emit_tool_audit_if_needed(&delta, &metadata, &sink, None, None);
+        emit_tool_audit_if_needed(&delta, &mut pending, &metadata, &sink, None, None, None);
 
         let result = StreamJsonEvent::ToolResult {
             tool_use_id: "call_1".into(),
             content: serde_json::json!({"ok": true}),
             is_error: false,
         };
-        emit_tool_audit_if_needed(&result, &metadata, &sink, None, None);
+        emit_tool_audit_if_needed(&result, &mut pending, &metadata, &sink, None, None, None);
 
         let stop = StreamJsonEvent::MessageStop {
             stop_reason: "stop".into(),
         };
-        emit_tool_audit_if_needed(&stop, &metadata, &sink, None, None);
+        emit_tool_audit_if_needed(&stop, &mut pending, &metadata, &sink, None, None, None);
+
+        let internal = StreamJsonEvent::ToolUse {
+            id: "internal_1".into(),
+            name: "ToolSearch".into(),
+            input: serde_json::json!({"query": "topology"}),
+        };
+        emit_tool_audit_if_needed(&internal, &mut pending, &metadata, &sink, None, None, None);
 
         assert_eq!(sink.events.lock().unwrap().len(), 0);
     }
@@ -1375,16 +1512,22 @@ fi
         // A `ToolUse` event whose name is not in the metadata snapshot
         // still produces an event — with `GadgetTier::Read` + category
         // `"unknown"`. This covers the case where Claude Code
-        // references a tool the registry does not know about (e.g. a
-        // built-in that slipped through `--tools ""`).
+        // references an MCP tool the registry does not know about.
         let sink = CaptureSink::default();
         let metadata = HashMap::new();
         let event = StreamJsonEvent::ToolUse {
             id: "call_2".into(),
-            name: "some.unknown.tool".into(),
+            name: "mcp__knowledge__some_unknown_tool".into(),
             input: serde_json::Value::Null,
         };
-        emit_tool_audit_if_needed(&event, &metadata, &sink, None, None);
+        let mut pending = HashMap::new();
+        emit_tool_audit_if_needed(&event, &mut pending, &metadata, &sink, None, None, None);
+        let result = StreamJsonEvent::ToolResult {
+            tool_use_id: "call_2".into(),
+            content: serde_json::json!({"ok": true}),
+            is_error: false,
+        };
+        emit_tool_audit_if_needed(&result, &mut pending, &metadata, &sink, None, None, None);
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1428,6 +1571,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         }
     }
 
@@ -1435,16 +1579,15 @@ fi
     fn flatten_history_stdin_preserves_full_transcript() {
         let req = test_request();
         let payload = build_stdin_payload(&req, StdinMode::FlattenHistory).unwrap();
-        assert!(payload.starts_with("System: be helpful\n\n"));
-        assert!(payload.contains("\nUser: hello\n\n"));
-        assert!(payload.contains("\nAssistant: hi\n\n"));
+        assert!(!payload.contains("System:"));
+        assert!(!payload.contains("be helpful"));
+        assert!(payload.starts_with("User: hello\n\n"));
+        assert!(payload.contains("Assistant: hi\n\n"));
         assert!(payload.ends_with("User: what is 2+2\n\n"));
     }
 
     #[test]
-    fn first_turn_stdin_contains_only_last_user_message_with_system_frame() {
-        // Per §5.2.10 item 9. A first-turn request with a System
-        // message + a new user turn writes `"{system}\n\n{user}"`.
+    fn first_turn_stdin_contains_only_last_user_message() {
         let req = ChatRequest {
             model: "penny".into(),
             messages: vec![Message::system("be helpful"), Message::user("hi")],
@@ -1455,12 +1598,16 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         };
         let payload = build_stdin_payload(&req, StdinMode::NativeFirstTurn).unwrap();
-        assert_eq!(payload, "be helpful\n\nhi");
-        // Absolutely no role labels — this is a fresh prompt, not a log.
+        assert_eq!(payload, "hi");
         assert!(!payload.contains("User:"));
         assert!(!payload.contains("System:"));
+        assert_eq!(
+            invocation_system_prompt(&req).as_deref(),
+            Some("be helpful")
+        );
     }
 
     #[test]
@@ -1475,6 +1622,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         };
         let payload = build_stdin_payload(&req, StdinMode::NativeFirstTurn).unwrap();
         assert_eq!(payload, "what time is it");
@@ -1492,6 +1640,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         };
         let err = build_stdin_payload(&req, StdinMode::NativeFirstTurn).expect_err("must error");
         match err {
@@ -1531,6 +1680,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         };
         let err = build_stdin_payload(&req, StdinMode::NativeResumeTurn)
             .expect_err("must reject assistant-last");
@@ -1560,6 +1710,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: Some("c1".to_string()),
+            audit_context: None,
         };
         let err =
             build_stdin_payload(&req, StdinMode::NativeResumeTurn).expect_err("must reject empty");
@@ -1611,6 +1762,21 @@ fi
         assert_eq!(err.error_code(), "penny_session_corrupted");
     }
 
+    #[test]
+    fn agent_backend_pin_conflict_maps_to_http_409() {
+        let err = GadgetronError::Penny {
+            kind: PennyErrorKind::AgentBackendPinned {
+                conversation_id: "c1".to_string(),
+                pinned: "claude_code".to_string(),
+                requested: "codex_exec".to_string(),
+            },
+            message: "runtime mismatch".to_string(),
+        };
+        assert_eq!(err.http_status_code(), 409);
+        assert_eq!(err.error_code(), "penny_conversation_agent_backend_pinned");
+        assert!(err.error_message().contains("Start a new chat"));
+    }
+
     // ---- Timeout semantics regression locks ----
 
     #[test]
@@ -1634,6 +1800,19 @@ fi
             SOURCE.contains(&first_event_guard_needle),
             "The idle timeout must only apply before the first user-visible event/tool call; \
              long-running tool calls can be silent for more than request_timeout_secs"
+        );
+    }
+
+    #[test]
+    fn penny_stream_observes_receiver_close_while_subprocess_is_silent() {
+        // Cancellation drops the stream receiver. The stdout loop must observe
+        // that independently of model output; otherwise a silent/slow local
+        // model keeps its subprocess alive until another line or timeout.
+        const SOURCE: &str = include_str!("session.rs");
+        let receiver_close_branch = ["_ = tx.", "closed()"].concat();
+        assert!(
+            SOURCE.matches(&receiver_close_branch).count() >= 2,
+            "stdout reads before and after the first event must both race the receiver-close signal"
         );
     }
 
@@ -1772,6 +1951,7 @@ fi
             stream: true,
             stop: None,
             conversation_id: id.map(|s| s.to_string()),
+            audit_context: None,
         }
     }
 
@@ -1942,8 +2122,35 @@ fi
             name: "mcp__knowledge__wiki.write".into(),
             input: serde_json::json!({"name": "test", "content": "x"}),
         };
+        let audit_context = gadgetron_core::provider::ChatAuditContext {
+            tenant_id: "tenant-1".into(),
+            owner_id: Some("owner-1".into()),
+        };
 
-        emit_tool_audit_if_needed(&event, &metadata, &sink, Some("c1"), Some(&uuid_str));
+        let mut pending = HashMap::new();
+        emit_tool_audit_if_needed(
+            &event,
+            &mut pending,
+            &metadata,
+            &sink,
+            Some("c1"),
+            Some(&uuid_str),
+            Some(&audit_context),
+        );
+        let result = StreamJsonEvent::ToolResult {
+            tool_use_id: "call_99".into(),
+            content: serde_json::json!({"ok": true}),
+            is_error: false,
+        };
+        emit_tool_audit_if_needed(
+            &result,
+            &mut pending,
+            &metadata,
+            &sink,
+            Some("c1"),
+            Some(&uuid_str),
+            Some(&audit_context),
+        );
 
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1951,10 +2158,14 @@ fi
             GadgetAuditEvent::GadgetCallCompleted {
                 conversation_id,
                 claude_session_uuid,
+                owner_id,
+                tenant_id,
                 ..
             } => {
                 assert_eq!(conversation_id.as_deref(), Some("c1"));
                 assert_eq!(claude_session_uuid.as_deref(), Some(uuid_str.as_str()));
+                assert_eq!(owner_id.as_deref(), Some("owner-1"));
+                assert_eq!(tenant_id.as_deref(), Some("tenant-1"));
             }
             #[allow(unreachable_patterns)]
             _ => panic!("unexpected variant"),
@@ -2026,5 +2237,35 @@ fi
             .collect();
         assert!(!args.contains(&"--session-id".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn turn_env_prefers_lease_key_and_preserves_other_values() {
+        use gadgetron_core::agent::config::FakeEnv;
+
+        let fallback = FakeEnv::new()
+            .with("GADGETRON_GATEWAY_CALLBACK_KEY", "static-key")
+            .with("HOME", "/tmp/penny-home");
+        let env = TurnEnv {
+            callback_key: Some("delegated-key"),
+            fallback: &fallback,
+        };
+
+        assert_eq!(
+            env.get("GADGETRON_GATEWAY_CALLBACK_KEY").as_deref(),
+            Some("delegated-key")
+        );
+        assert_eq!(env.get("HOME").as_deref(), Some("/tmp/penny-home"));
+
+        let fallback_only = TurnEnv {
+            callback_key: None,
+            fallback: &fallback,
+        };
+        assert_eq!(
+            fallback_only
+                .get("GADGETRON_GATEWAY_CALLBACK_KEY")
+                .as_deref(),
+            Some("static-key")
+        );
     }
 }

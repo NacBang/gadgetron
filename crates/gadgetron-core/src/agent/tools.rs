@@ -18,6 +18,65 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Authenticated request identity carried across the generic Gadget dispatch
+/// seam. External Bundles must receive this context verbatim in their public
+/// SDK invocation envelope; substituting a default tenant would cross the
+/// platform's tenant boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GadgetDispatchContext {
+    pub tenant_id: String,
+    pub actor_id: String,
+    pub request_id: String,
+    pub conversation_id: Option<String>,
+    pub scopes: Vec<String>,
+    /// Internal proof that the common Workbench approval gate already
+    /// resolved this exact persisted request. It is never populated from
+    /// Bundle input or an external tool-call payload.
+    pub approval_granted: bool,
+    /// Internal proof that the versioned Core policy evaluator authorized
+    /// this dispatch attempt. Production entrypoints set it only after a
+    /// persisted decision event; external payloads cannot populate it.
+    pub policy_authorized: bool,
+}
+
+impl GadgetDispatchContext {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        request_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            actor_id: actor_id.into(),
+            request_id: request_id.into(),
+            conversation_id: None,
+            scopes: Vec::new(),
+            approval_granted: false,
+            policy_authorized: false,
+        }
+    }
+
+    pub fn with_conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
+        self.conversation_id = Some(conversation_id.into());
+        self
+    }
+
+    pub fn with_scopes(mut self, scopes: impl IntoIterator<Item = String>) -> Self {
+        self.scopes = scopes.into_iter().collect();
+        self
+    }
+
+    pub fn with_approval_granted(mut self) -> Self {
+        self.approval_granted = true;
+        self
+    }
+
+    pub fn with_policy_authorized(mut self) -> Self {
+        self.policy_authorized = true;
+        self
+    }
+}
+
 /// Registry-facing dispatch seam for callers outside the Penny session.
 ///
 /// Penny's `GadgetRegistry` lives in `gadgetron-penny`, but the gateway
@@ -47,14 +106,26 @@ pub trait GadgetDispatcher: Send + Sync + 'static {
     ///
     /// Implementors MUST preserve:
     /// - `GadgetError::UnknownGadget(name)` when the name is unregistered.
-    /// - The L3 allowed-names gate when wrapping an operator-config-aware
-    ///   registry — otherwise `Ask` / `Never`-mode tools would be reachable
-    ///   via the workbench path after being disabled for Penny.
+    /// - The legacy L3 allowed-names gate when no common-policy authorization
+    ///   is present. A caller may set that internal authorization only after a
+    ///   successful versioned-policy evaluation.
     async fn dispatch_gadget(
         &self,
         name: &str,
         args: serde_json::Value,
     ) -> Result<GadgetResult, GadgetError>;
+
+    /// Dispatch with the authenticated caller identity preserved. Existing
+    /// in-process providers may use the compatibility default while external
+    /// Bundle adapters override this method and forward the complete context.
+    async fn dispatch_gadget_with_context(
+        &self,
+        _context: GadgetDispatchContext,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        self.dispatch_gadget(name, args).await
+    }
 }
 
 /// Read-only discovery seam for callers that need to enumerate Gadget
@@ -76,12 +147,27 @@ pub trait GadgetDispatcher: Send + Sync + 'static {
 pub trait GadgetCatalog: Send + Sync + 'static {
     /// All Gadget schemas exposed by this catalog.
     fn all_schemas(&self) -> Vec<GadgetSchema>;
+
+    /// Core-owned policy metadata. In-process catalogs use the conservative
+    /// tier mapping; signed Bundle catalogs override this with their effect
+    /// declaration without gaining authority over the policy decision.
+    fn policy_metadata(&self, name: &str) -> Option<crate::policy::GadgetPolicyMetadata> {
+        self.all_schemas()
+            .into_iter()
+            .find(|schema| schema.name == name)
+            .map(|schema| crate::policy::GadgetPolicyMetadata::from_schema(&schema))
+    }
 }
 
-/// Runtime-mutation seam for the operator-config gate inside a
-/// `GadgetRegistry`. The Side Panel → Tool Modes editor flips a bucket
-/// (e.g. `server_admin`) from `Auto`→`Ask`; the `PATCH
-/// /workbench/agent/modes` handler rebuilds `allowed_names` +
+/// One live surface that supports both discovery and dispatch. Core uses this
+/// object-safe seam to attach enabled external Bundle capabilities to the
+/// otherwise static in-process registry without depending on a domain crate.
+pub trait DynamicGadgetSurface: GadgetCatalog + GadgetDispatcher {}
+
+impl<T> DynamicGadgetSurface for T where T: GadgetCatalog + GadgetDispatcher {}
+
+/// Runtime-mutation seam for the legacy operator-config gate inside a
+/// `GadgetRegistry`. The compatibility modes endpoint rebuilds `allowed_names` +
 /// `ask_names` from the schemas against the new `AgentConfig` without
 /// restarting the server.
 ///
@@ -131,6 +217,18 @@ pub trait GadgetProvider: Send + Sync + 'static {
     /// categories are independent identifiers; a `"knowledge"` category may
     /// host Gadgets named `"wiki.read"`, `"web.search"`, etc.
     async fn call(&self, name: &str, args: serde_json::Value) -> Result<GadgetResult, GadgetError>;
+
+    /// Dispatch with the authenticated request identity when a provider needs
+    /// tenant or actor-scoped reads. Providers that do not need identity keep
+    /// the compatibility behavior through this default.
+    async fn call_with_context(
+        &self,
+        _context: &GadgetDispatchContext,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        self.call(name, args).await
+    }
 
     /// Optional runtime availability check. A provider gated on a Cargo
     /// feature or runtime config returns `false` to be excluded from the

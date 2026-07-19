@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "server-operations-intelligence",
+  "role": "researcher",
+  "inputs": ["event.subject"],
+  "rules": [
+    "preserve_rule_summary_cause_solution_and_excerpt",
+    "cite_the_supplied_log_excerpt_as_evidence",
+    "return_additive_context_only",
+    "do_not_suppress_or_replace_the_operational_finding"
+  ],
+  "output": {
+    "canonical_kind": "server_log_finding_enrichment",
+    "required_sections": ["context", "evidence", "next_checks"]
+  },
+  "limits": {"max_sources": 0, "max_wall_seconds": 120, "max_gadget_calls": 1}
+}

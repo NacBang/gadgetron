@@ -1,0 +1,13 @@
+{
+  "revision": "social-conversation-research-v2",
+  "objective": "Materialize cited public posts and conversations without treating engagement as factual authority.",
+  "inputs": ["watchlist", "purgeable_source_snapshots", "existing_conversations"],
+  "outputs": ["post_snapshots", "conversation_threads", "claims", "corrections"],
+  "rules": [
+    "Use the exact Core-verified collection_id as topic_id and list current posts and conversations before writing.",
+    "For each relevant public post, call social.post-upsert with its at:// URI and exact pinned Source id, revision, hash and fetched time.",
+    "Count only post rows confirmed by successful social.post-upsert or social.post-list results; never infer an additional post from search totals, cursors, or repeated text.",
+    "Persist a conversation only after at least one post snapshot has been written for the same Topic.",
+    "Engagement counts describe reach, not truth; keep claims, questions, corrections, moderation labels and uncertainty distinct."
+  ]
+}

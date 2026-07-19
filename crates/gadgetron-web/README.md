@@ -19,7 +19,7 @@ GADGETRON_SKIP_WEB_BUILD=1 cargo build -p gadgetron-web   # fallback UI, no npm
 cargo build -p gadgetron-web --features strict-build      # fail if npm missing
 ```
 
-`build.rs` runs `npm ci --ignore-scripts && npm run build` in `web/`, then copies `web/out/` → `web/dist/`. The `include_dir!("$CARGO_MANIFEST_DIR/web/dist")` macro embeds the resulting static assets into `.rodata` at compile time.
+`build.rs` runs `npm ci --ignore-scripts && npm run build` in `web/`, then copies `web/out/` → `web/dist/`. The `include_dir!("$CARGO_MANIFEST_DIR/web/dist")` macro embeds the resulting static assets into `.rodata` at compile time. `web/dist/` is generated, ignored, and not committed; fallback and normal builds both create it before Rust compiles the embed.
 
 ## Build-time env vars
 
@@ -66,8 +66,8 @@ cargo test -p gadgetron-web
 
 Includes:
 - `tests/path_validation.rs` — `validate_and_decode` positive + negative + proptest (1024 cases)
-- `tests/build_rs_logic.rs` — `build_logic::run` branch coverage (5 tests)
-- `tests/bundle_size.rs` — `WEB_DIST` total ≤ 3 MB budget
+- `tests/build_rs_logic.rs` — fallback, lockfile, and asset-consistency branches
+- `tests/bundle_size.rs` — `WEB_DIST` total ≤ 8 MiB budget, including offline Korean fonts
 
 Frontend tests live under `web/` and run via `npm test` (Vitest + happy-dom).
 

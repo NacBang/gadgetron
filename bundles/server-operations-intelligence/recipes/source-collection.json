@@ -1,0 +1,10 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "server-operations-intelligence",
+  "collector": "core_source_fetch",
+  "source_classes": ["official", "community", "postmortem"],
+  "inputs": ["topic", "approved_source_locators", "cursor"],
+  "classification": ["official_fact", "community_experience", "contradiction", "unverified_workaround"],
+  "snapshot": {"preserve_raw_bytes": true, "record_canonical_locator": true, "record_fetched_at": true, "record_content_hash": true, "record_usage_metadata": true},
+  "limits": {"max_sources": 20, "max_bytes": 12582912, "max_wall_seconds": 180}
+}

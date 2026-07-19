@@ -1,402 +1,641 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  AlertTriangle,
+  BrainCircuit,
+  CheckCircle2,
+  CircleDot,
+  Clock3,
+  RefreshCw,
+  ShieldAlert,
+  Workflow,
+} from "lucide-react";
+
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
 import {
+  DeclarativeRenderer,
+  EmptyState,
   InlineNotice,
-  PageToolbar,
-  StatusBadge,
   WorkbenchPage,
 } from "../../components/workbench";
 import { useAuth } from "../../lib/auth-context";
-import { getApiBase, invokeAction, unwrapPayload } from "../../lib/workbench-client";
+import {
+  fetchContributionData,
+  useCapabilities,
+  type UiContribution,
+} from "../../lib/capability-context";
+import { getApiBase } from "../../lib/workbench-client";
+import { useI18n } from "../../lib/i18n";
 
-// ---------------------------------------------------------------------------
-// /web/dashboard — operator observability surface. Runs inside
-// `(shell)/layout.tsx`; supplies only the dashboard header + tiles +
-// live-feed right column. Auth gate / outer chrome live in the shell.
-// ---------------------------------------------------------------------------
+type CoreBootstrap = {
+  gateway_version: string;
+  active_plugs: Array<{ id: string; role: string; healthy: boolean }>;
+  degraded_reasons: string[];
+  knowledge: {
+    canonical_ready: boolean;
+    search_ready: boolean;
+    relation_ready: boolean;
+  };
+};
 
-function wsUrlFromHttp(httpBase: string, actorKey: string | null): string {
+type CoreDashboardSnapshot = {
+  bootstrap: CoreBootstrap;
+  activeJobs: number;
+  pendingReview: number;
+};
+
+type LiveEvent = { type: string; [key: string]: unknown };
+
+function authHeaders(apiKey: string | null): HeadersInit {
+  return apiKey ? { Authorization: "Bearer " + apiKey } : {};
+}
+
+async function readJson<T>(url: string, apiKey: string | null): Promise<T> {
+  const response = await fetch(url, {
+    credentials: "include",
+    headers: authHeaders(apiKey),
+  });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return (await response.json()) as T;
+}
+
+async function loadSnapshot(apiKey: string | null): Promise<CoreDashboardSnapshot> {
+  const base = getApiBase() + "/workbench";
+  const [bootstrap, jobs, review] = await Promise.all([
+    readJson<CoreBootstrap>(base + "/bootstrap", apiKey),
+    readJson<{ jobs?: unknown[] }>(base + "/jobs/active", apiKey),
+    readJson<{ count?: number; approvals?: unknown[] }>(
+      base + "/approvals/pending",
+      apiKey,
+    ),
+  ]);
+  return {
+    bootstrap,
+    activeJobs: Array.isArray(jobs.jobs) ? jobs.jobs.length : 0,
+    pendingReview:
+      typeof review.count === "number"
+        ? review.count
+        : Array.isArray(review.approvals)
+          ? review.approvals.length
+          : 0,
+  };
+}
+
+function websocketUrl(apiKey: string | null): string {
   if (typeof location === "undefined") return "";
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const host = location.host;
-  const base = `${scheme}//${host}${httpBase}/workbench/events/ws`;
-  // With a session cookie, the browser sends it automatically on the
-  // WebSocket upgrade and the gateway middleware resolves it there.
-  // Fall back to `?token=` when an API key is the only auth we have.
-  return actorKey ? `${base}?token=${encodeURIComponent(actorKey)}` : base;
+  const base =
+    scheme + "//" + location.host + getApiBase() + "/workbench/events/ws";
+  return apiKey ? base + "?token=" + encodeURIComponent(apiKey) : base;
 }
-
-// Fleet summary — the `server-fleet` action payload (ISSUE 46). The
-// dashboard leads with the REGISTERED SERVERS' health, not gadgetron's
-// own usage counters (user direction 2026-06-11); usage numbers remain
-// available via /workbench/usage/summary for the admin surface.
-type FleetSummary = {
-  generated_at: string;
-  /** False in legacy no-DB mode — online/offline counts are then
-   * meaningless and the UI renders "unknown" instead (ISSUE 50). */
-  snapshots_available?: boolean;
-  servers: { total: number; online: number; offline: number };
-  gpus: {
-    count: number;
-    avg_util_pct: number | null;
-    max_temp_c: number | null;
-    total_power_w: number | null;
-  };
-  cpu: { avg_util_pct: number | null };
-  mem: { used_bytes: number; total_bytes: number };
-  warnings: number;
-  hosts: Array<{
-    id: string;
-    host: string;
-    alias: string | null;
-    online: boolean;
-    cpu_util_pct: number | null;
-    gpu_count: number;
-    gpu_avg_util_pct: number | null;
-    gpu_max_temp_c: number | null;
-    warnings: number;
-  }>;
-};
-
-async function fetchFleet(apiKey: string | null): Promise<FleetSummary> {
-  return unwrapPayload(
-    await invokeAction(apiKey, "server-fleet", {}),
-  ) as FleetSummary;
-}
-
-function fmtGiB(bytes: number): string {
-  return `${(bytes / 1024 ** 3).toFixed(0)} GiB`;
-}
-
-type LiveEvent = {
-  type: string;
-  [k: string]: unknown;
-};
 
 export default function DashboardPage() {
   const { apiKey } = useAuth();
-  const [summary, setSummary] = useState<FleetSummary | null>(null);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const { snapshot: capabilities, status: capabilityStatus } = useCapabilities();
+  const [snapshot, setSnapshot] = useState<CoreDashboardSnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState(false);
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [wsStatus, setWsStatus] = useState<
-    "disconnected" | "connecting" | "open" | "closed"
-  >("disconnected");
+    "connecting" | "open" | "closed"
+  >("connecting");
   const wsRef = useRef<WebSocket | null>(null);
 
-  const refreshSummary = useCallback(async () => {
-    setSummaryError(null);
+  const refresh = useCallback(async () => {
     try {
-      setSummary(await fetchFleet(apiKey));
-    } catch (e) {
-      setSummaryError((e as Error).message);
+      setSnapshot(await loadSnapshot(apiKey));
+      setSnapshotError(false);
+    } catch {
+      setSnapshotError(true);
     }
   }, [apiKey]);
 
-  // Snapshot rows refresh at poller cadence; 10 s keeps the tiles live
-  // without hammering the action endpoint.
   useEffect(() => {
-    void refreshSummary();
-    const t = window.setInterval(() => void refreshSummary(), 10_000);
-    return () => window.clearInterval(t);
-  }, [apiKey, refreshSummary]);
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
-  // Live WebSocket subscription. Reconnects on close; drops on unmount.
   useEffect(() => {
-    let closed = false;
+    let disposed = false;
+    let reconnect: ReturnType<typeof setTimeout> | null = null;
     const connect = () => {
-      if (closed) return;
+      if (disposed) return;
       setWsStatus("connecting");
-      const socket = new WebSocket(wsUrlFromHttp(getApiBase(), apiKey));
+      const socket = new WebSocket(websocketUrl(apiKey));
       wsRef.current = socket;
       socket.onopen = () => setWsStatus("open");
       socket.onclose = () => {
         setWsStatus("closed");
-        if (!closed) setTimeout(connect, 3000);
+        if (!disposed) reconnect = setTimeout(connect, 3_000);
       };
-      socket.onerror = () => {
-        // onclose runs after onerror; the reconnect happens there.
-      };
-      socket.onmessage = (msg) => {
+      socket.onmessage = (message) => {
         try {
-          const parsed = JSON.parse(msg.data) as LiveEvent;
-          setEvents((prev) => {
-            const next = [parsed, ...prev];
-            return next.slice(0, 100);
-          });
+          const event = JSON.parse(message.data) as LiveEvent;
+          setEvents((previous) => [event, ...previous].slice(0, 100));
         } catch {
-          // drop malformed frame
+          // Invalid external frames do not enter the human activity view.
         }
       };
     };
     connect();
     return () => {
-      closed = true;
+      disposed = true;
+      if (reconnect) clearTimeout(reconnect);
       wsRef.current?.close();
     };
   }, [apiKey]);
 
-  const connected = wsStatus === "open";
+  const coreHealthy = Boolean(
+    snapshot && snapshot.bootstrap.degraded_reasons.length === 0,
+  );
+  const knowledgePlanes = snapshot
+    ? [
+        snapshot.bootstrap.knowledge.canonical_ready,
+        snapshot.bootstrap.knowledge.search_ready,
+        snapshot.bootstrap.knowledge.relation_ready,
+      ].filter(Boolean).length
+    : 0;
+  const widgets = useMemo(
+    () =>
+      capabilities.ui_contributions
+        .filter(
+          (item) =>
+            item.kind === "dashboard_widget" &&
+            item.placement === "dashboard" &&
+            item.renderer,
+        )
+        .sort(
+          (left, right) =>
+            left.order_hint - right.order_hint || left.id.localeCompare(right.id),
+        ),
+    [capabilities.ui_contributions],
+  );
+  const headline = snapshotError
+    ? "Current status is unavailable"
+    : !snapshot
+      ? "Reading current operations"
+      : !coreHealthy
+        ? "Core needs attention"
+        : snapshot.pendingReview > 0
+          ? snapshot.pendingReview +
+            (snapshot.pendingReview === 1
+              ? " decision needs review"
+              : " decisions need review")
+          : "Operations are steady";
+  const attentionCount =
+    (snapshot?.bootstrap.degraded_reasons.length ?? 0) +
+    (snapshot?.pendingReview ?? 0);
 
   return (
     <WorkbenchPage
       title="Dashboard"
-      subtitle="Registered-fleet health at a glance, plus live operational events."
       headerTestId="dashboard-header"
       actions={
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => void refreshSummary()}
-          className="h-7 px-2 text-[11px]"
+          onClick={() => void refresh()}
+          className="h-8 px-2 text-xs"
         >
+          <RefreshCw className="size-3.5" aria-hidden />
           Refresh
         </Button>
       }
-      toolbar={
-        <PageToolbar
-          status={
-            <StatusBadge status={connected ? "healthy" : "degraded"} />
-          }
-        >
-          <span className="text-xs text-zinc-500">
-            Fleet status and live feed
-          </span>
-          <span
-            className="text-[11px] text-zinc-600"
-            data-testid="dashboard-window-label"
-          >
-            {summary
-              ? `${summary.servers.online}/${summary.servers.total} online`
-              : "—"}
-          </span>
-          <span
-            data-testid="dashboard-ws-status"
-            className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400"
-          >
-            ws: {wsStatus}
-          </span>
-        </PageToolbar>
-      }
     >
-      <div className="space-y-3">
-        {!connected && (
-          <InlineNotice tone="warn" title="Live feed disconnected">
-            Gadgetron will keep retrying the activity stream.
-          </InlineNotice>
-        )}
-        {summaryError && (
-          <InlineNotice
-            tone="error"
-            title="Fleet summary request failed"
-            details={summaryError}
-          >
-            Gadgetron could not load the registered-server summary.
-          </InlineNotice>
-        )}
-        <div className="flex min-h-[520px] overflow-hidden rounded border border-zinc-800">
-          <main className="flex-1 overflow-auto bg-zinc-950/30 p-4">
-            {!summary && !summaryError && (
-              <div className="text-[11px] text-zinc-600">
-                Loading summary...
+      <div className="space-y-4 p-3">
+        <section
+          className="border border-zinc-800 bg-[#101418]"
+          aria-labelledby="mission-status-heading"
+        >
+          <div className="grid gap-px bg-zinc-800 lg:grid-cols-[minmax(260px,1.35fr)_minmax(0,2fr)]">
+            <div className="bg-[#101418] p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-400">
+                Mission status
               </div>
-            )}
-            {summary && (
-              <div className="flex flex-col gap-3">
-                <div
-                  className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4"
-                  data-testid="dashboard-tiles"
-                >
-                  <Tile
-                    testId="tile-servers"
-                    title="Servers"
-                    primary={`${summary.servers.online}/${summary.servers.total}`}
-                    primaryLabel="online"
-                    sub={[
-                      ["online", `${summary.servers.online}`],
-                      ["offline", `${summary.servers.offline}`],
-                    ]}
-                  />
-                  <Tile
-                    testId="tile-gpus"
-                    title="GPUs"
-                    primary={`${summary.gpus.count}`}
-                    primaryLabel="gpus"
-                    sub={[
-                      [
-                        "avg util",
-                        summary.gpus.avg_util_pct != null
-                          ? `${summary.gpus.avg_util_pct.toFixed(0)}%`
-                          : "—",
-                      ],
-                      [
-                        "max temp",
-                        summary.gpus.max_temp_c != null
-                          ? `${summary.gpus.max_temp_c.toFixed(0)}°C`
-                          : "—",
-                      ],
-                      [
-                        "power",
-                        summary.gpus.total_power_w != null
-                          ? `${summary.gpus.total_power_w.toFixed(0)}W`
-                          : "—",
-                      ],
-                    ]}
-                  />
-                  <Tile
-                    testId="tile-resources"
-                    title="Resources"
-                    primary={
-                      summary.cpu.avg_util_pct != null
-                        ? `${summary.cpu.avg_util_pct.toFixed(0)}%`
-                        : "—"
-                    }
-                    primaryLabel="avg cpu"
-                    sub={[
-                      [
-                        "mem",
-                        summary.mem.total_bytes > 0
-                          ? `${fmtGiB(summary.mem.used_bytes)} / ${fmtGiB(summary.mem.total_bytes)}`
-                          : "—",
-                      ],
-                      [
-                        "mem %",
-                        summary.mem.total_bytes > 0
-                          ? `${((summary.mem.used_bytes / summary.mem.total_bytes) * 100).toFixed(0)}%`
-                          : "—",
-                      ],
-                    ]}
-                  />
-                  <a
-                    href="/web/findings"
-                    className="block"
-                    title="Open log-analysis findings"
-                  >
-                    <Tile
-                      testId="tile-warnings"
-                      title="Warnings"
-                      primary={`${summary.warnings}`}
-                      primaryLabel="warnings"
-                      sub={[["findings", "Open →"]]}
-                    />
-                  </a>
-                </div>
-                {/* Per-host status strip — one dot per server (green =
-                  * online, red = offline, amber ring = warnings). Scales
-                  * to hundreds of hosts; click → /web/servers. */}
-                {summary.hosts.length > 0 && (
-                  <div
-                    className="surface-1 rounded-lg p-3"
-                    data-testid="dashboard-host-strip"
-                  >
-                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                      Hosts ({summary.hosts.length})
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {summary.hosts.map((h) => (
-                        <a
-                          key={h.id}
-                          href="/web/servers"
-                          data-testid="dashboard-host-dot"
-                          title={`${h.alias ?? h.host}${h.online ? "" : " · offline"}${
-                            h.cpu_util_pct != null
-                              ? ` · CPU ${h.cpu_util_pct.toFixed(0)}%`
-                              : ""
-                          }${
-                            h.gpu_count > 0
-                              ? ` · GPU×${h.gpu_count}${
-                                  h.gpu_avg_util_pct != null
-                                    ? ` ${h.gpu_avg_util_pct.toFixed(0)}%`
-                                    : ""
-                                }`
-                              : ""
-                          }${h.warnings > 0 ? ` · ⚠${h.warnings}` : ""}`}
-                          className={`size-3 rounded-sm ${
-                            summary.snapshots_available === false
-                              ? "bg-zinc-500"
-                              : h.online
-                                ? "bg-emerald-500"
-                                : "bg-red-600"
-                          } ${h.warnings > 0 ? "ring-1 ring-amber-400" : ""}`}
-                        />
-                      ))}
-                    </div>
-                  </div>
+              <div className="mt-4 flex items-start gap-3">
+                {coreHealthy && !snapshotError ? (
+                  <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-zinc-500" aria-hidden />
+                ) : (
+                  <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-400" aria-hidden />
                 )}
-              </div>
-            )}
-          </main>
-
-          <aside
-            data-testid="dashboard-live-feed"
-            className="flex w-80 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950"
-          >
-            <div className="shrink-0 border-b border-zinc-800 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Live feed ({events.length})
-            </div>
-            <div className="flex-1 overflow-y-auto">
-              {events.length === 0 && (
-                <div className="px-3 py-2 text-[11px] text-zinc-600">
-                  Waiting for events...
-                </div>
-              )}
-              {events.map((e, i) => (
-                <div
-                  key={i}
-                  className="border-b border-zinc-900 px-3 py-2 text-[11px]"
-                  data-testid="dashboard-live-event"
-                >
-                  <div className="font-mono text-zinc-300">
-                    {String(e.type)}
+                <div>
+                  <h2 id="mission-status-heading" className="text-xl font-semibold text-zinc-100">
+                    {headline}
+                  </h2>
+                  <div className="mt-2 flex items-center gap-2 text-xs text-zinc-400">
+                    <CircleDot
+                      className={
+                        "size-3 " +
+                        (wsStatus === "open" ? "text-zinc-500" : "text-amber-400")
+                      }
+                      aria-hidden
+                    />
+                    {wsStatus === "open"
+                      ? "Live updates connected"
+                      : "Live updates reconnecting"}
                   </div>
-                  <pre className="mt-1 whitespace-pre-wrap break-all text-zinc-500">
-                    {JSON.stringify(e, null, 0).slice(0, 180)}
-                  </pre>
                 </div>
+              </div>
+            </div>
+            <dl
+              className="grid bg-[#101418] sm:grid-cols-2 xl:grid-cols-4"
+              data-testid="dashboard-vitals"
+            >
+              <Vital
+                testId="vital-core"
+                icon={ShieldAlert}
+                label="System"
+                value={snapshot ? (coreHealthy ? "Ready" : "Attention") : "—"}
+                context={snapshot?.bootstrap.gateway_version ?? "Loading"}
+                attention={!coreHealthy && Boolean(snapshot)}
+              />
+              <Vital
+                testId="vital-review"
+                icon={ShieldAlert}
+                label="Review"
+                value={snapshot ? String(snapshot.pendingReview) : "—"}
+                context="manager decisions"
+                attention={(snapshot?.pendingReview ?? 0) > 0}
+              />
+              <Vital
+                testId="vital-jobs"
+                icon={Workflow}
+                label="Active work"
+                value={snapshot ? String(snapshot.activeJobs) : "—"}
+                context="background jobs"
+              />
+              <Vital
+                testId="vital-knowledge"
+                icon={BrainCircuit}
+                label="Knowledge"
+                value={snapshot ? knowledgePlanes + " / 3" : "—"}
+                context="ready planes"
+                attention={Boolean(snapshot && knowledgePlanes < 3)}
+              />
+            </dl>
+          </div>
+        </section>
+
+        {snapshotError && (
+          <InlineNotice tone="error" title="Core status unavailable">
+            Last known values are not presented as current.
+          </InlineNotice>
+        )}
+        {capabilityStatus === "degraded" && (
+          <InlineNotice tone="warn" title="Domain overview may be stale">
+            The last complete signed layout remains visible.
+          </InlineNotice>
+        )}
+
+        {attentionCount > 0 && snapshot && (
+          <section aria-labelledby="attention-heading">
+            <SectionHeading
+              id="attention-heading"
+              title="Needs attention"
+              value={String(attentionCount)}
+            />
+            <div className="grid gap-2 md:grid-cols-2">
+              {snapshot.pendingReview > 0 && (
+                <AttentionItem
+                  icon={ShieldAlert}
+                  title={
+                    snapshot.pendingReview === 1
+                      ? "1 decision is waiting"
+                      : snapshot.pendingReview + " decisions are waiting"
+                  }
+                  action="Open Review"
+                  href="/review"
+                />
+              )}
+              {snapshot.bootstrap.degraded_reasons.map((reason, index) => (
+                <AttentionItem
+                  key={index}
+                  icon={AlertTriangle}
+                  title={boundedText(reason, "Core dependency needs attention")}
+                  action="Inspect system"
+                  href="/admin"
+                />
               ))}
             </div>
-          </aside>
+          </section>
+        )}
+
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <section aria-labelledby="domain-overview-heading">
+            <SectionHeading
+              id="domain-overview-heading"
+              title="Domain overview"
+              value={String(widgets.length)}
+            />
+            {widgets.length > 0 ? (
+              <div
+                className="grid grid-cols-1 gap-3 lg:grid-cols-2"
+                aria-label="Bundle dashboard widgets"
+              >
+                {widgets.map((widget) => (
+                  <BundleDashboardWidget
+                    key={widget.id}
+                    contribution={widget}
+                    revision={capabilities.revision}
+                    apiKey={apiKey}
+                  />
+                ))}
+              </div>
+            ) : (
+              <Card className="border-zinc-800 bg-zinc-950/40">
+                <CardContent className="flex items-center justify-between gap-4 p-4">
+                  <span className="text-sm text-zinc-400">No domain overview is enabled.</span>
+                  <Link
+                    href="/admin"
+                    className="inline-flex h-8 items-center border border-zinc-700 px-3 text-xs text-zinc-300 hover:bg-zinc-900 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#B87333]"
+                  >
+                    Manage Bundles
+                  </Link>
+                </CardContent>
+              </Card>
+            )}
+          </section>
+
+          <section aria-labelledby="recent-activity-heading">
+            <SectionHeading
+              id="recent-activity-heading"
+              title="Recent activity"
+              value={events.length > 0 ? String(Math.min(events.length, 12)) : undefined}
+            />
+            <Card className="border-zinc-800 bg-zinc-950/40">
+              <CardContent className="p-0">
+                <div
+                  className="max-h-[34rem] divide-y divide-zinc-900 overflow-y-auto"
+                  data-testid="dashboard-live-feed"
+                >
+                  {events.length === 0 ? (
+                    <div className="flex min-h-28 items-center gap-3 px-4 text-sm text-zinc-400">
+                      <Activity className="size-4" aria-hidden />
+                      No recent activity
+                    </div>
+                  ) : (
+                    events.slice(0, 12).map((event, index) => (
+                      <ActivityRow
+                        key={String(event.type) + "-" + index}
+                        event={event}
+                      />
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </section>
         </div>
       </div>
     </WorkbenchPage>
   );
 }
 
-function Tile(props: {
+function Vital({
+  testId,
+  icon: Icon,
+  label,
+  value,
+  context,
+  attention = false,
+}: {
   testId: string;
-  title: string;
-  primary: string;
-  primaryLabel: string;
-  sub: Array<[string, string]>;
+  icon: typeof Activity;
+  label: string;
+  value: string;
+  context: string;
+  attention?: boolean;
 }) {
   return (
-    <Card
-      className="border-zinc-800 bg-zinc-900/50"
-      data-testid={props.testId}
+    <div
+      className="min-w-0 border-b border-zinc-800 p-4 last:border-b-0 sm:border-r sm:[&:nth-child(2n)]:border-r-0 xl:border-b-0 xl:[&:nth-child(2n)]:border-r xl:last:border-r-0"
+      data-testid={testId}
     >
-      <CardContent className="flex flex-col gap-3 p-4">
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-          {props.title}
+      <dt className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400">
+        <Icon className="size-3.5" aria-hidden />
+        {label}
+      </dt>
+      <dd
+        className={
+          "mt-3 font-mono text-xl font-semibold " +
+          (attention ? "text-amber-300" : "text-zinc-100")
+        }
+      >
+        {value}
+      </dd>
+      <dd className="mt-1 text-xs text-zinc-400">{context}</dd>
+    </div>
+  );
+}
+
+function SectionHeading({
+  id,
+  title,
+  value,
+}: {
+  id: string;
+  title: string;
+  value?: string;
+}) {
+  return (
+    <div className="mb-2 flex h-7 items-center gap-2">
+      <h2
+        id={id}
+        className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-400"
+      >
+        {title}
+      </h2>
+      {value !== undefined && (
+        <span className="font-mono text-xs text-zinc-400">{value}</span>
+      )}
+    </div>
+  );
+}
+
+function AttentionItem({
+  icon: Icon,
+  title,
+  action,
+  href,
+}: {
+  icon: typeof Activity;
+  title: string;
+  action: string;
+  href: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex min-h-14 items-center gap-3 border border-[#B8733355] bg-[#B873330c] px-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#B87333]"
+    >
+      <Icon className="size-4 shrink-0 text-[#D89B5A]" aria-hidden />
+      <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{title}</span>
+      <span className="shrink-0 text-xs text-[#D89B5A]">{action}</span>
+    </Link>
+  );
+}
+
+function BundleDashboardWidget({
+  contribution,
+  revision,
+  apiKey,
+}: {
+  contribution: UiContribution;
+  revision: string;
+  apiKey: string | null;
+}) {
+  const { labels } = useI18n();
+  const [payload, setPayload] = useState<unknown>(null);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const emptyServerFleet = isEmptyServerFleet(contribution, payload);
+
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      try {
+        const data = await fetchContributionData(apiKey, contribution.id);
+        if (disposed) return;
+        if (data.capability_revision === revision) {
+          setPayload(data.payload);
+          setState("ready");
+        } else {
+          setPayload(null);
+          setState("error");
+        }
+      } catch {
+        if (!disposed) {
+          setPayload(null);
+          setState("error");
+        }
+      }
+    };
+    setPayload(null);
+    setState("loading");
+    void load();
+    const timer = window.setInterval(
+      () => void load(),
+      Math.max(5, contribution.refresh_seconds ?? 15) * 1000,
+    );
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [apiKey, contribution.id, contribution.refresh_seconds, revision]);
+
+  return (
+    <Card
+      className="overflow-hidden border-zinc-800 bg-zinc-950/40"
+      data-testid={"bundle-widget-" + contribution.id}
+    >
+      <CardContent className="p-0">
+        <div className="flex h-11 items-center justify-between border-b border-zinc-800 px-3">
+          <h3 className="text-sm font-medium text-zinc-200">{contribution.label}</h3>
+          {state === "loading" && <RefreshCw className="size-3.5 animate-spin text-zinc-600" aria-label="Loading" />}
+          {state === "error" && <AlertTriangle className="size-3.5 text-amber-400" aria-label="Unavailable" />}
         </div>
-        <div className="flex items-baseline gap-2">
-          <span className="font-mono text-3xl font-semibold text-zinc-100">
-            {props.primary}
-          </span>
-          <span className="text-[11px] text-zinc-500">
-            {props.primaryLabel}
-          </span>
-        </div>
-        <dl className="grid grid-cols-2 gap-1.5 text-[11px]">
-          {props.sub.map(([k, v]) => (
-            <div key={k} className="flex flex-col">
-              <dt className="text-zinc-600">{k}</dt>
-              <dd className="font-mono text-zinc-300">{v}</dd>
-            </div>
-          ))}
-        </dl>
+        {state === "loading" ? (
+          <div className="grid grid-cols-2 gap-px bg-zinc-900 p-px">
+            <div className="h-20 animate-pulse bg-zinc-950" />
+            <div className="h-20 animate-pulse bg-zinc-950" />
+          </div>
+        ) : state === "error" ? (
+          <div className="p-4 text-sm text-amber-200">{contribution.error_state}</div>
+        ) : payload === null ? (
+          <div className="p-4 text-sm text-zinc-400">{contribution.empty_state}</div>
+        ) : emptyServerFleet ? (
+          <EmptyState
+            className="m-3 min-h-32"
+            title={labels.emptyStates.dashboardNoServersTitle}
+            description={labels.emptyStates.dashboardNoServersDescription}
+            action={(
+              <Link
+                href="/workspace?id=server-administrator.fleet"
+                className="inline-flex h-8 items-center border border-zinc-700 px-3 text-xs text-zinc-300 hover:bg-zinc-900 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#B87333]"
+              >
+                {labels.emptyStates.dashboardStartInFleet}
+              </Link>
+            )}
+          />
+        ) : (
+          <DeclarativeRenderer renderer={contribution.renderer!} payload={payload} />
+        )}
       </CardContent>
     </Card>
   );
+}
+
+function isEmptyServerFleet(contribution: UiContribution, payload: unknown): boolean {
+  if (
+    contribution.owner_bundle !== "server-administrator"
+    || contribution.gadget_name !== "server.fleet-summary"
+    || payload === null
+    || typeof payload !== "object"
+    || Array.isArray(payload)
+  ) return false;
+  const summary = (payload as Record<string, unknown>).summary;
+  return summary !== null
+    && typeof summary === "object"
+    && !Array.isArray(summary)
+    && (summary as Record<string, unknown>).servers === 0;
+}
+
+function humanLabel(value: string): string {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function ActivityRow({ event }: { event: LiveEvent }) {
+  const title = humanLabel(String(event.type || "Activity"));
+  const target = firstScalar(event, ["target", "target_id", "subject", "resource"]);
+  const status = firstScalar(event, ["status", "state", "result"]);
+  const action = firstScalar(event, ["action", "operation", "gadget_name"]);
+  const timestamp = firstScalar(event, ["created_at", "timestamp", "at", "time"]);
+  const summary = [action, target, status].filter(Boolean).join(" · ");
+  return (
+    <div className="px-3 py-3" data-testid="dashboard-live-event">
+      <div className="flex items-start gap-2">
+        <Activity className="mt-0.5 size-3.5 shrink-0 text-zinc-600" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-medium text-zinc-300">{title}</div>
+          {summary && <div className="mt-1 truncate font-mono text-[10px] text-zinc-600">{summary}</div>}
+        </div>
+        {timestamp && (
+          <span className="flex shrink-0 items-center gap-1 font-mono text-[9px] text-zinc-700" title={timestamp}>
+            <Clock3 className="size-3" aria-hidden />
+            {activityTime(timestamp)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function firstScalar(event: LiveEvent, keys: string[]): string {
+  for (const key of keys) {
+    const value = event[key];
+    if (typeof value === "string" || typeof value === "number") {
+      return boundedText(String(value), "");
+    }
+  }
+  return "";
+}
+
+function boundedText(value: string, fallback: string): string {
+  const clean = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  return clean ? clean.slice(0, 160) : fallback;
+}
+
+function activityTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "now";
+  return new Intl.DateTimeFormat("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
 }

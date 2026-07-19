@@ -24,6 +24,11 @@ import { useAuth } from "../../lib/auth-context";
 import { safeRandomUUID } from "../../lib/uuid";
 import { getApiBase } from "../../lib/workbench-client";
 import {
+  AGENT_MODEL_OPTIONS,
+  agentEffortOptions,
+  normalizeAgentEffort,
+} from "../../lib/agent-profile";
+import {
   authHeaders,
   MAX_AVATAR_FILE_BYTES,
   createGroup,
@@ -50,6 +55,8 @@ import {
   type UserRow,
 } from "./api";
 import { LlmEndpointSettings } from "../../components/admin/llm-endpoint-settings";
+import { BundleControlPlane } from "../../components/admin/bundle-control-plane";
+import { CoreAiRoleSettings } from "../../components/admin/core-ai-role-settings";
 
 
 // ---------------------------------------------------------------------------
@@ -275,6 +282,7 @@ function PennyBrainSettings({
   const [modelSource, setModelSource] = useState<ModelSource>("default");
   const [localBaseUrl, setLocalBaseUrl] = useState("");
   const [localApiKeyEnv, setLocalApiKeyEnv] = useState("");
+  const [llmEndpointId, setLlmEndpointId] = useState<string | null>(null);
   const [effort, setEffort] = useState<AgentEffort>("max");
   // Server still stores legacy BrainConfig fields; the UI derives them from
   // Backend + Model instead of exposing raw mode names.
@@ -288,9 +296,10 @@ function PennyBrainSettings({
     const nextModelSource =
       next.model_source ?? (next.mode === "claude_max" ? "default" : "local");
     setSettings(next);
-    setModel(nextModelSource === "local" ? next.model : "");
+    setModel(next.model ?? "");
     setCustomModel(nextModelSource === "local" ? next.custom_model_option : false);
     setBackend(next.backend ?? next.agent ?? "claude_code");
+    setLlmEndpointId(next.llm_endpoint_id ?? null);
     setModelSource(nextModelSource);
     setLocalBaseUrl(
       nextModelSource === "local"
@@ -302,7 +311,10 @@ function PennyBrainSettings({
         ? next.local_api_key_env ?? next.external_auth_token_env
         : "",
     );
-    setEffort(next.effort ?? "max");
+    const nextBackend = next.backend ?? next.agent ?? "claude_code";
+    setEffort(
+      normalizeAgentEffort(nextBackend, next.model ?? "", next.effort ?? "max"),
+    );
   }, []);
 
   const refresh = useCallback(async () => {
@@ -325,10 +337,6 @@ function PennyBrainSettings({
   const save = useCallback(async () => {
     setSaving(true);
     setErr(null);
-    // codex has no `max` tier; warn that the request is clamped.
-    if (backend === "codex_exec" && effort === "max") {
-      toast.info("Codex: 'max' is clamped to 'xhigh' at spawn time.");
-    }
     try {
       // Derive the legacy raw fields from the high-level axes so old
       // server overlay paths (used by validate_with_env) still see a
@@ -343,15 +351,16 @@ function PennyBrainSettings({
           // overlaid on the backend carry the auth info instead.
           "claude_max";
       const usesExternal = derivedMode !== "claude_max";
-      const modelOverride = isLocal ? model.trim() : "";
+      const modelOverride = model.trim();
       const tokenEnv = usesExternal ? localApiKeyEnv.trim() : "";
       const next = await updateAgentBrainSettings(apiKey, {
         mode: derivedMode,
         external_base_url: usesExternal ? localBaseUrl.trim() : "",
         model: modelOverride,
         external_auth_token_env: tokenEnv,
-        custom_model_option: usesExternal ? customModel : false,
+        custom_model_option: usesExternal ? customModel || modelOverride.length > 0 : false,
         backend,
+        llm_endpoint_id: isLocal ? llmEndpointId : null,
         model_source: modelSource,
         local_base_url: isLocal ? localBaseUrl.trim() : "",
         local_api_key_env: isLocal ? localApiKeyEnv.trim() : "",
@@ -372,6 +381,7 @@ function PennyBrainSettings({
     effort,
     localApiKeyEnv,
     localBaseUrl,
+    llmEndpointId,
     model,
     modelSource,
   ]);
@@ -382,7 +392,7 @@ function PennyBrainSettings({
     <section className="rounded border border-zinc-800 bg-zinc-900 p-4">
       <header className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium text-zinc-200">Applied configuration</h2>
+          <h2 className="text-sm font-medium text-zinc-200">New chat defaults</h2>
           <p className="text-[11px] text-zinc-500">
             {settings
               ? settings.source === "database"
@@ -391,7 +401,7 @@ function PennyBrainSettings({
               : loading
                 ? "Loading settings"
                 : "Settings not loaded"}{" "}
-            · Applies to the next Penny request
+            · Existing chats keep their own runtime, model, and effort
           </p>
         </div>
         <Button
@@ -412,30 +422,91 @@ function PennyBrainSettings({
       )}
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        {/* Agent backend — Claude Code / Codex */}
+        {/* Default model. Runtime is derived from the selected preset. */}
         <div>
           <label className="mb-1 block text-[11px] text-zinc-500">
-            Agent Backend
+            Default model
           </label>
           <select
-            value={backend}
-            onChange={(e) => setBackend(e.target.value as AgentBackend)}
+            value={
+              AGENT_MODEL_OPTIONS.find(
+                (option) => option.backend === backend && option.model === model,
+              )?.key ?? "custom"
+            }
+            onChange={(event) => {
+              const option = AGENT_MODEL_OPTIONS.find(
+                (item) => item.key === event.target.value,
+              );
+              if (!option) return;
+              setBackend(option.backend);
+              setEffort((current) =>
+                normalizeAgentEffort(option.backend, option.model, current),
+              );
+              setModel(option.model);
+              setModelSource("default");
+              setLlmEndpointId(null);
+            }}
             data-testid="penny-backend-select"
             className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
           >
-            <option value="claude_code">Claude Code</option>
-            <option value="codex_exec">Codex</option>
+            {!AGENT_MODEL_OPTIONS.some(
+              (option) => option.backend === backend && option.model === model,
+            ) && <option value="custom">Custom · {model || "default"}</option>}
+            <optgroup label="Claude Code runtime">
+              {AGENT_MODEL_OPTIONS.filter(
+                (option) => option.backend === "claude_code",
+              ).map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Codex Exec runtime">
+              {AGENT_MODEL_OPTIONS.filter(
+                (option) => option.backend === "codex_exec",
+              ).map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
           </select>
           <p className="mt-1 text-[10px] text-zinc-600">
-            Agent backend that powers Penny.
+            Runtime: {backend === "codex_exec" ? "Codex Exec" : "Claude Code"}
           </p>
+          {!isLocal && (
+            <Input
+              value={model}
+              onChange={(event) => {
+                const nextModel = event.target.value;
+                const nextBackend = nextModel.startsWith("claude-")
+                  ? "claude_code"
+                  : /^(gpt-|o\d)/.test(nextModel)
+                    ? "codex_exec"
+                    : backend;
+                setModel(nextModel);
+                setBackend(nextBackend);
+                setEffort((current) =>
+                  normalizeAgentEffort(nextBackend, nextModel, current),
+                );
+              }}
+              placeholder="Optional custom model ID"
+              autoComplete="off"
+              className="mt-2"
+              aria-label="Default custom model ID"
+            />
+          )}
         </div>
         {/* Model source — Default / Local */}
         <div>
           <label className="mb-1 block text-[11px] text-zinc-500">Model</label>
           <select
             value={modelSource}
-            onChange={(e) => setModelSource(e.target.value as ModelSource)}
+            onChange={(e) => {
+              const source = e.target.value as ModelSource;
+              setModelSource(source);
+              if (source === "default") setLlmEndpointId(null);
+            }}
             data-testid="penny-model-source-select"
             className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
           >
@@ -457,28 +528,63 @@ function PennyBrainSettings({
             data-testid="penny-effort-select"
             className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
           >
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
-            <option value="max">max</option>
+            {agentEffortOptions(backend, model).map((option) => (
+              <option key={option} value={option}>
+                {option === "auto" ? "Auto · match turn difficulty" : option}
+              </option>
+            ))}
           </select>
           <p className="mt-1 text-[10px] text-zinc-600">
-            {backend === "codex_exec" && effort === "max"
-              ? "Codex has no 'max' — clamped to 'xhigh' at spawn."
-              : "Reasoning effort applied at every turn."}
+            Auto resolves each turn locally; explicit tiers stay fixed.
           </p>
         </div>
         {/* Local LLM endpoint extra fields */}
         {isLocal && (
           <>
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">
+                Local runtime
+              </label>
+              <select
+                value={backend}
+                onChange={(event) => {
+                  const nextBackend = event.target.value as AgentBackend;
+                  setBackend(nextBackend);
+                  setEffort((current) =>
+                    normalizeAgentEffort(nextBackend, model, current),
+                  );
+                }}
+                className="flex h-9 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 text-sm text-zinc-200"
+              >
+                <option value="codex_exec">Codex Exec · Responses API</option>
+                <option value="claude_code">Claude Code · Anthropic bridge</option>
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-zinc-500">
+                Model ID
+              </label>
+              <Input
+                value={model}
+                onChange={(event) => {
+                  setModel(event.target.value);
+                  setLlmEndpointId(null);
+                }}
+                placeholder="local-model-id"
+                autoComplete="off"
+                data-testid="penny-local-model-id"
+              />
+            </div>
             <div className="md:col-span-2">
               <label className="mb-1 block text-[11px] text-zinc-500">
                 Local Base URL
               </label>
               <Input
                 value={localBaseUrl}
-                onChange={(e) => setLocalBaseUrl(e.target.value)}
+                onChange={(e) => {
+                  setLocalBaseUrl(e.target.value);
+                  setLlmEndpointId(null);
+                }}
                 placeholder="http://127.0.0.1:8000/v1"
                 autoComplete="off"
                 data-testid="penny-local-base-url"
@@ -493,7 +599,10 @@ function PennyBrainSettings({
               </label>
               <Input
                 value={localApiKeyEnv}
-                onChange={(e) => setLocalApiKeyEnv(e.target.value)}
+                onChange={(e) => {
+                  setLocalApiKeyEnv(e.target.value);
+                  setLlmEndpointId(null);
+                }}
                 placeholder="LOCAL_LLM_API_KEY"
                 autoComplete="off"
                 data-testid="penny-local-api-key-env"
@@ -759,7 +868,7 @@ function UsersTable({
                         ? "rounded bg-amber-950/40 px-1.5 py-0.5 text-[10px] text-amber-300"
                         : u.role === "service"
                           ? "rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
-                          : "rounded bg-blue-950/40 px-1.5 py-0.5 text-[10px] text-blue-300"
+                          : "rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--ink-2)]"
                     }
                   >
                     {u.role}
@@ -862,7 +971,7 @@ function UsersTable({
                                 className={
                                   "flex cursor-pointer items-center gap-1.5 rounded border px-2 py-1 text-[11px] " +
                                   (checked
-                                    ? "border-blue-700 bg-blue-950/40 text-blue-200"
+                                    ? "border-[var(--copper)] bg-[var(--surface-2)] text-[var(--copper-hi)]"
                                     : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700")
                                 }
                               >
@@ -1250,7 +1359,8 @@ export default function AdminPage() {
   }, [refresh]);
 
   const tabs: Array<{ id: AdminTab; label: string }> = [
-    { id: "agent-backend", label: "Agent Backend" },
+    { id: "agent-backend", label: "Penny Models" },
+    { id: "bundles", label: "Bundles" },
     { id: "users", label: "Users" },
     { id: "access", label: "Access" },
   ];
@@ -1259,14 +1369,14 @@ export default function AdminPage() {
     <div className="flex h-full min-h-0 flex-col">
       <WorkbenchPage
         title="Admin"
-        subtitle="Configure Penny agent backend, users, and access controls."
+        subtitle="Configure Penny models, signed Bundles, users, and access controls."
         actions={
           <Button
             variant="ghost"
             size="sm"
             onClick={() => void refresh()}
             disabled={loading}
-            className="h-7 px-2 text-[11px]"
+            className="h-7 px-2 text-xs"
           >
             {loading ? "…" : "Refresh"}
           </Button>
@@ -1289,7 +1399,7 @@ export default function AdminPage() {
                   variant={activeTab === tab.id ? "secondary" : "ghost"}
                   size="sm"
                   onClick={() => setActiveTab(tab.id)}
-                  className="h-7 px-2 text-[11px]"
+                  className="h-7 px-2 text-xs"
                 >
                   {tab.label}
                 </Button>
@@ -1314,6 +1424,7 @@ export default function AdminPage() {
           {activeTab === "agent-backend" && (
             <div role="tabpanel" className="space-y-4">
               <PennyBrainSettings apiKey={requestApiKey} canCall={canCall} />
+              <CoreAiRoleSettings apiKey={requestApiKey} canCall={canCall} />
               <LlmEndpointSettings apiKey={requestApiKey} canCall={canCall} />
             </div>
           )}
@@ -1322,6 +1433,12 @@ export default function AdminPage() {
             <div role="tabpanel" className="space-y-4">
               <AddUserForm apiKey={requestApiKey} onAdded={refresh} />
               <UsersTable users={users} apiKey={requestApiKey} onChanged={refresh} />
+            </div>
+          )}
+
+          {activeTab === "bundles" && (
+            <div role="tabpanel" className="space-y-4">
+              <BundleControlPlane apiKey={requestApiKey} canCall={canCall} />
             </div>
           )}
 

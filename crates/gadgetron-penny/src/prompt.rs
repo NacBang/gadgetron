@@ -10,11 +10,11 @@ use gadgetron_core::provider::ChatRequest;
 /// rendering itself stays backend-agnostic and side-effect free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdinMode {
-    /// Flatten the full `req.messages` history into
-    /// `"{Role}: {content}\n\n"` blocks. Pre-A5 stateless fallback.
+    /// Flatten non-System history into `"{Role}: {content}\n\n"`
+    /// blocks. System authority is carried by the backend command.
     FlattenHistory,
     /// First turn of a native session: write only the newest user
-    /// message, optionally prefixed with an earlier `System` message.
+    /// message. System authority is carried by the backend command.
     NativeFirstTurn,
     /// Resume turn of a native session: write only the newest user
     /// message. The backend native session already owns prior context.
@@ -27,6 +27,19 @@ pub enum StdinMode {
     /// Codex native resume turn. The prior context is loaded by
     /// `codex exec resume`; stdin carries only the newest user message.
     CodexResumeTurn,
+}
+
+/// Join request-scoped System messages for the backend's real authority
+/// channel. These bytes must never be rendered into stdin as user text.
+pub fn invocation_system_prompt(req: &ChatRequest) -> Option<String> {
+    let prompts = req
+        .messages
+        .iter()
+        .filter(|message| matches!(message.role, Role::System))
+        .filter_map(|message| message.content.text())
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    (!prompts.is_empty()).then(|| prompts.join("\n\n"))
 }
 
 /// Build the stdin payload bytes for a given mode. Separated from async I/O so
@@ -47,13 +60,7 @@ pub fn build_stdin_payload(req: &ChatRequest, mode: StdinMode) -> Result<String>
                     },
                     message: "native_first_turn: missing user message".to_string(),
                 })?;
-            let mut buf = String::new();
-            if let Some(sys) = req.messages.iter().find(|m| matches!(m.role, Role::System)) {
-                buf.push_str(sys.content.text().unwrap_or(""));
-                buf.push_str("\n\n");
-            }
-            buf.push_str(user_msg.content.text().unwrap_or(""));
-            Ok(buf)
+            Ok(user_msg.content.text().unwrap_or("").to_string())
         }
         StdinMode::NativeResumeTurn | StdinMode::CodexResumeTurn => {
             let last = req.messages.last().ok_or_else(|| GadgetronError::Penny {
@@ -83,7 +90,7 @@ fn flatten_conversation(req: &ChatRequest) -> String {
     let mut buf = String::new();
     for msg in &req.messages {
         let role_label = match msg.role {
-            Role::System => "System",
+            Role::System => continue,
             Role::User => "User",
             Role::Assistant => "Assistant",
             Role::Tool => "Tool",

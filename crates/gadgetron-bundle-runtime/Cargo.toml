@@ -1,0 +1,19 @@
+[package]
+name = "gadgetron-bundle-runtime"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Public async runtime support for independently shipped Gadgetron Bundles"
+
+[dependencies]
+async-trait = { workspace = true }
+gadgetron-bundle-sdk = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
+
+[dev-dependencies]
+semver = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }

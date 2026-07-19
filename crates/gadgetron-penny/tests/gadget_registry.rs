@@ -46,13 +46,14 @@ fn registry_accepts_knowledge_provider() {
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     assert!(!registry.is_empty(), "registry must have tools registered");
-    // Knowledge provider exposes: wiki.{list,get,search,write,delete,rename,import}.
+    // Knowledge provider exposes source.get plus
+    // wiki.{list,get,search,write,delete,rename,import}.
     // `web.search` is only added when `[knowledge.search]` is configured, so
-    // the no-search provider built by `fresh_provider` stops at seven.
+    // the no-search provider built by `fresh_provider` stops at eight.
     assert_eq!(
         registry.len(),
-        7,
-        "no-search knowledge provider exposes 7 tools (list/get/search/write/delete/rename/import)"
+        8,
+        "no-search knowledge provider exposes source.get and 7 wiki tools"
     );
 }
 
@@ -60,12 +61,18 @@ fn registry_accepts_knowledge_provider() {
 fn registry_all_schemas_contains_every_knowledge_tool() {
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
-    let names: Vec<&str> = registry
-        .all_schemas()
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
-    for expected in ["wiki.list", "wiki.get", "wiki.search", "wiki.write"] {
+    let schemas = registry.all_schemas();
+    let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+    for expected in [
+        "source.get",
+        "wiki.list",
+        "wiki.get",
+        "wiki.search",
+        "wiki.write",
+        "wiki.delete",
+        "wiki.rename",
+        "wiki.import",
+    ] {
         assert!(
             names.contains(&expected),
             "expected {expected:?} in {names:?}"
@@ -78,11 +85,12 @@ fn build_allowed_tools_with_default_config_exposes_read_and_wiki_write() {
     // Default AgentConfig has wiki_write = Auto, other write subcats = Ask.
     // With T1 reads always present and every wiki.* T2 tool (write/delete/
     // rename/import) mapped to the `wiki_write` subcategory (Auto by default),
-    // the filtered list should contain all seven knowledge tools.
+    // the filtered list should contain source.get and all seven wiki tools.
     let (_dir, provider) = fresh_provider();
     let registry = register_knowledge(provider);
     let cfg = AgentConfig::default();
     let allowed = registry.build_allowed_tools(&cfg);
+    assert!(allowed.contains(&"source.get".to_string()));
     assert!(allowed.contains(&"wiki.list".to_string()));
     assert!(allowed.contains(&"wiki.get".to_string()));
     assert!(allowed.contains(&"wiki.search".to_string()));
@@ -90,7 +98,7 @@ fn build_allowed_tools_with_default_config_exposes_read_and_wiki_write() {
     assert!(allowed.contains(&"wiki.delete".to_string()));
     assert!(allowed.contains(&"wiki.rename".to_string()));
     assert!(allowed.contains(&"wiki.import".to_string()));
-    assert_eq!(allowed.len(), 7);
+    assert_eq!(allowed.len(), 8);
 }
 
 #[test]
@@ -101,10 +109,11 @@ fn build_allowed_tools_with_wiki_write_never_omits_write() {
     cfg.gadgets.write.wiki_write = GadgetMode::Never;
     let allowed = registry.build_allowed_tools(&cfg);
     assert!(!allowed.contains(&"wiki.write".to_string()));
+    assert!(allowed.contains(&"source.get".to_string()));
     assert!(allowed.contains(&"wiki.list".to_string()));
     assert!(allowed.contains(&"wiki.get".to_string()));
     assert!(allowed.contains(&"wiki.search".to_string()));
-    assert_eq!(allowed.len(), 3);
+    assert_eq!(allowed.len(), 4);
 }
 
 #[test]

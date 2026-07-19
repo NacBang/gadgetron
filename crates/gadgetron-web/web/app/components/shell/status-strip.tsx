@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../../lib/auth-context";
+import { useI18n, type Locale } from "../../lib/i18n";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,6 +128,7 @@ interface StatusStripProps {
 export function StatusStrip({ sessionId, actor }: StatusStripProps) {
   const health = useGatewayHealth();
   const { identity, viewMode, setViewMode, clearKey } = useAuth();
+  const { locale, labels, setLocale } = useI18n();
   const isAdmin = identity?.role === "admin";
   const userLabel = identity?.display_name || identity?.email || actor;
 
@@ -153,30 +155,29 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
   };
 
   const healthLabel = {
-    healthy: "Gateway healthy",
-    degraded: "Gateway degraded",
-    blocked: "Gateway unreachable",
-    checking: "Checking...",
+    healthy: labels.statusStrip.gatewayHealthy,
+    degraded: labels.statusStrip.gatewayDegraded,
+    blocked: labels.statusStrip.gatewayUnreachable,
+    checking: labels.statusStrip.gatewayChecking,
   }[health.status];
+
+  const localeOptions: Array<{ id: Locale; label: string }> = [
+    { id: "en", label: labels.locale.english },
+    { id: "ko", label: labels.locale.korean },
+  ];
 
   return (
     <div
       role="status"
-      aria-label="Workbench status"
+      aria-label={labels.statusStrip.workbenchStatus}
       className={cn(
         "flex h-9 shrink-0 items-center gap-4 border-b border-zinc-800 bg-zinc-950 px-4 text-xs font-mono text-zinc-400",
         health.status === "degraded" && "border-amber-900/40",
         health.status === "blocked" && "border-red-900/40",
       )}
     >
-      {/* Brand: ManyCoreSoft wordmark + product name. The wordmark
-       * already carries the company text, so we only render the
-       * product label "Gadgetron" beside it instead of repeating
-       * "ManyCoreSoft" twice. Source asset is whatever lives at
-       * /web/brand/manycoresoft.png (wide aspect, e.g. 5:1) — drop
-       * a different file at the same path to override. */}
       <span
-        className="flex items-end gap-2"
+        className="flex items-center gap-2.5"
         data-testid="brand"
         aria-label="ManyCoreSoft Gadgetron"
       >
@@ -184,9 +185,9 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
         <img
           src="/web/brand/manycoresoft.png"
           alt="ManyCoreSoft"
-          className="block h-[18px] w-auto shrink-0"
+          className="block h-[18px] w-auto shrink-0 object-contain"
         />
-        <span className="translate-y-[3px] text-sm font-semibold leading-none text-zinc-100">
+        <span className="flex h-[18px] items-center text-sm font-semibold leading-none text-zinc-100">
           Gadgetron
         </span>
       </span>
@@ -194,11 +195,36 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
       {/* Spacer pushes (optional) session/actor to the right. */}
       <span className="flex-1" />
 
+      <span
+        className="flex items-center overflow-hidden rounded border border-zinc-700 text-xs"
+        role="group"
+        aria-label={labels.locale.selector}
+        data-testid="locale-toggle"
+      >
+        {localeOptions.map((option, index) => (
+          <button
+            key={option.id}
+            type="button"
+            onClick={() => setLocale(option.id)}
+            aria-pressed={locale === option.id}
+            className={cn(
+              "min-h-6 px-2 py-0.5",
+              index > 0 && "border-l border-zinc-700",
+              locale === option.id
+                ? "bg-[var(--surface-2)] text-[var(--ink)]"
+                : "text-zinc-500 hover:text-zinc-300",
+            )}
+          >
+            {option.label}
+          </button>
+        ))}
+      </span>
+
       {isAdmin && (
         <span
-          className="flex items-center overflow-hidden rounded border border-zinc-700 text-[10px]"
+          className="flex items-center overflow-hidden rounded border border-zinc-700 text-xs"
           role="group"
-          aria-label="view mode"
+          aria-label={labels.statusStrip.viewMode}
           data-testid="view-mode-toggle"
         >
           <button
@@ -206,7 +232,7 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
             onClick={() => setViewMode("admin")}
             aria-pressed={viewMode === "admin"}
             className={cn(
-              "px-2 py-0.5",
+              "min-h-6 px-2 py-0.5",
               viewMode === "admin"
                 ? "bg-amber-900/40 text-amber-200"
                 : "text-zinc-500 hover:text-zinc-300",
@@ -219,9 +245,9 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
             onClick={() => setViewMode("user")}
             aria-pressed={viewMode === "user"}
             className={cn(
-              "border-l border-zinc-700 px-2 py-0.5",
+              "min-h-6 border-l border-zinc-700 px-2 py-0.5",
               viewMode === "user"
-                ? "bg-blue-900/40 text-blue-200"
+                ? "bg-[var(--surface-2)] text-[var(--ink)]"
                 : "text-zinc-500 hover:text-zinc-300",
             )}
           >
@@ -235,7 +261,7 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
        * real information and added visual noise on every page. */}
       {sessionId && (
         <span className="text-zinc-600" data-testid="session-id">
-          session:{" "}
+          {labels.statusStrip.session}:{" "}
           <span className="text-zinc-400">{sessionId.slice(0, 8)}</span>
         </span>
       )}
@@ -255,10 +281,10 @@ export function StatusStrip({ sessionId, actor }: StatusStripProps) {
             <button
               type="button"
               onClick={() => void handleLogout()}
-              className="ml-1 rounded border border-zinc-800 px-1 py-0.5 text-[9px] text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
-              title="Sign out"
+              className="ml-1 rounded border border-zinc-800 px-1 py-0.5 text-xs text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+              title={labels.statusStrip.signOut}
             >
-              Sign out
+              {labels.statusStrip.signOut}
             </button>
           )}
         </span>

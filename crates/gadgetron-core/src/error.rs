@@ -123,6 +123,14 @@ pub enum PennyErrorKind {
         conversation_id: String,
         reason: String,
     },
+    /// A conversation already owns a different subprocess runtime. Native
+    /// session formats cannot be converted in place; the caller must create a
+    /// new conversation for the requested runtime. HTTP 409.
+    AgentBackendPinned {
+        conversation_id: String,
+        pinned: String,
+        requested: String,
+    },
 }
 
 impl fmt::Display for PennyErrorKind {
@@ -141,6 +149,7 @@ impl fmt::Display for PennyErrorKind {
             Self::SessionNotFound { .. } => write!(f, "session_not_found"),
             Self::SessionConcurrent { .. } => write!(f, "session_concurrent"),
             Self::SessionCorrupted { .. } => write!(f, "session_corrupted"),
+            Self::AgentBackendPinned { .. } => write!(f, "agent_backend_pinned"),
         }
     }
 }
@@ -358,6 +367,9 @@ impl GadgetronError {
                 PennyErrorKind::SessionNotFound { .. } => "penny_session_not_found",
                 PennyErrorKind::SessionConcurrent { .. } => "penny_session_concurrent",
                 PennyErrorKind::SessionCorrupted { .. } => "penny_session_corrupted",
+                PennyErrorKind::AgentBackendPinned { .. } => {
+                    "penny_conversation_agent_backend_pinned"
+                }
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => "wiki_invalid_path",
@@ -440,6 +452,8 @@ impl GadgetronError {
                     format!("Conversation {conversation_id:?} is already serving another request. Wait for the current turn to finish, then retry."),
                 PennyErrorKind::SessionCorrupted { conversation_id, .. } =>
                     format!("Conversation {conversation_id:?} session state is unreadable. The session has been discarded; retry with the same conversation_id to start a fresh session."),
+                PennyErrorKind::AgentBackendPinned { conversation_id, pinned, requested } =>
+                    format!("Conversation {conversation_id:?} is pinned to the {pinned} runtime and cannot switch to {requested}. Start a new chat to use the other runtime."),
             },
             // Wiki variants — always safe to surface to clients
             // (path/bytes/limit are user-provided values, not secrets).
@@ -502,6 +516,7 @@ impl GadgetronError {
                 // vs permission_error vs quota_error).
                 PennyErrorKind::ToolDenied { .. } => "permission_error",
                 PennyErrorKind::ToolInvalidArgs { .. } => "invalid_request_error",
+                PennyErrorKind::AgentBackendPinned { .. } => "invalid_request_error",
                 PennyErrorKind::ToolRateLimited { .. } => "quota_error",
                 PennyErrorKind::ToolApprovalTimeout { .. } => "server_error",
                 _ => "server_error",
@@ -571,6 +586,7 @@ impl GadgetronError {
                 PennyErrorKind::SessionNotFound { .. } => 404,
                 PennyErrorKind::SessionConcurrent { .. } => 429,
                 PennyErrorKind::SessionCorrupted { .. } => 500,
+                PennyErrorKind::AgentBackendPinned { .. } => 409,
             },
             Self::Wiki { kind, .. } => match kind {
                 WikiErrorKind::PathEscape { .. } => 400,

@@ -11,7 +11,7 @@ export function VersionBadge() {
   if (!version) return null;
   return (
     <div
-      className="pointer-events-none fixed bottom-2 right-3 z-40 select-none text-[10px] font-mono text-zinc-700"
+      className="pointer-events-none fixed bottom-2 right-3 z-40 select-none text-[10px] font-mono text-zinc-500"
       aria-hidden
       data-testid="version-badge"
     >

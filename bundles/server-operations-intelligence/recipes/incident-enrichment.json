@@ -1,0 +1,20 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "server-operations-intelligence",
+  "role": "researcher",
+  "inputs": ["event.subject"],
+  "rules": [
+    "preserve_the_operational_rule_guidance_and_log_evidence",
+    "return_a_concise_additive_summary_not_a_replacement_diagnosis",
+    "cite_only_evidence_reference_values_present_in_event_subject_evidence",
+    "do_not_claim_recovery_from_a_closed_state_without_verification"
+  ],
+  "output": {
+    "canonical_kind": "server_incident_enrichment",
+    "required_shape": {
+      "summary": "bounded plain text",
+      "citations": [{"evidence_ref": "exact supplied reference", "reason": "bounded relevance"}]
+    }
+  },
+  "limits": {"max_sources": 0, "max_wall_seconds": 120, "max_gadget_calls": 1}
+}

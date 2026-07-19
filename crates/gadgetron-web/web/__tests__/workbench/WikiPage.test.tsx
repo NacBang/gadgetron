@@ -1,131 +1,39 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import WikiWorkbenchPage from "../../app/(shell)/wiki/page";
 
-vi.mock("../../app/lib/auth-context", () => ({
-  useAuth: () => ({
-    apiKey: null,
-  }),
+import WikiRedirectPage, {
+  legacyWikiDestination,
+} from "../../app/(shell)/wiki/page";
+
+const navigation = vi.hoisted(() => ({ replace: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => navigation,
+  useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
-function jsonResponse(body: unknown): Response {
-  return {
-    ok: true,
-    status: 200,
-    json: () => Promise.resolve(body),
-    text: () => Promise.resolve(JSON.stringify(body)),
-  } as Response;
-}
-
-const createStorageMock = () => {
-  let store: Record<string, string> = {};
-  return {
-    getItem: (key: string) => store[key] ?? null,
-    setItem: (key: string, value: string) => {
-      store[key] = value;
-    },
-    removeItem: (key: string) => {
-      delete store[key];
-    },
-    clear: () => {
-      store = {};
-    },
-  };
-};
-
-const localStorageMock = createStorageMock();
-
-Object.defineProperty(window, "localStorage", { value: localStorageMock });
-
-describe("WikiWorkbenchPage", () => {
+describe("WikiRedirectPage", () => {
   beforeEach(() => {
-    vi.restoreAllMocks();
-    localStorageMock.clear();
-    window.history.replaceState(null, "", "/web/wiki");
+    navigation.replace.mockReset();
   });
 
-  it("imports RAW source text through wiki-import and renders the receipt", async () => {
-    const rawSourceText = "  # GPU Notes\n\nRaw_import_body\n";
-    const fetchMock = vi.fn(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.includes("/workbench/actions/wiki-list")) {
-          return jsonResponse({
-            result: { payload: { pages: ["ops/runbook"] } },
-          });
-        }
-        if (url.includes("/workbench/actions/wiki-import")) {
-          const body = JSON.parse(String(init?.body));
-          expect(body.args).toMatchObject({
-            bytes: "ICAjIEdQVSBOb3RlcwoKUmF3X2ltcG9ydF9ib2R5Cg==",
-            content_type: "text/markdown",
-            title_hint: "GPU Notes",
-            target_path: "imports/gpu-notes",
-            source_uri: "https://example.com/gpu-notes",
-            overwrite: true,
-          });
-          return jsonResponse({
-            result: {
-              payload: {
-                path: "imports/gpu-notes",
-                revision: "rev-42",
-                byte_size: 31,
-                content_hash: "sha256:abc123",
-              },
-            },
-          });
-        }
-        throw new Error(`unexpected fetch: ${url}`);
-      },
-    );
-    global.fetch = fetchMock;
+  it.each([
+    ["", "/knowledge"],
+    ["?q=thermal%20runbook", "/knowledge?q=thermal%20runbook"],
+    ["?page=ops%2Frecovery", "/knowledge?q=ops%2Frecovery"],
+  ])("maps legacy search %s to %s", (search, expected) => {
+    expect(legacyWikiDestination(search)).toBe(expected);
+  });
 
-    render(<WikiWorkbenchPage />);
+  it("replaces the legacy browser URL with the mapped Knowledge URL", async () => {
+    window.history.replaceState(null, "", "/web/wiki?page=ops%2Frecovery");
 
-    expect(await screen.findByRole("tab", { name: "Sources" })).toBeTruthy();
-    fireEvent.change(screen.getByTestId("knowledge-raw-text"), {
-      target: { value: rawSourceText },
-    });
-    fireEvent.change(screen.getByTestId("knowledge-raw-title-hint"), {
-      target: { value: "GPU Notes" },
-    });
-    fireEvent.change(screen.getByTestId("knowledge-raw-target-path"), {
-      target: { value: "imports/gpu-notes" },
-    });
-    fireEvent.change(screen.getByTestId("knowledge-raw-source-uri"), {
-      target: { value: "https://example.com/gpu-notes" },
-    });
-    fireEvent.click(screen.getByTestId("knowledge-raw-overwrite"));
-    fireEvent.click(screen.getByTestId("knowledge-import-button"));
+    render(<WikiRedirectPage />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("knowledge-import-receipt").textContent).toContain(
-        "imports/gpu-notes",
+      expect(navigation.replace).toHaveBeenCalledWith(
+        "/knowledge?q=ops%2Frecovery",
       );
     });
-    expect(screen.getByTestId("knowledge-import-receipt").textContent).toContain(
-      "rev-42",
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/workbench/actions/wiki-import"),
-      expect.objectContaining({ method: "POST" }),
-    );
-  });
-
-  it("shows the candidate queue boundary in the Candidates tab", async () => {
-    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/workbench/actions/wiki-list")) {
-        return jsonResponse({ result: { payload: { pages: [] } } });
-      }
-      throw new Error(`unexpected fetch: ${url}`);
-    });
-
-    render(<WikiWorkbenchPage />);
-
-    fireEvent.click(await screen.findByRole("tab", { name: "Candidates" }));
-
-    expect(screen.getByText("No candidate queue yet")).toBeTruthy();
-    expect(screen.getByText(/accept and reject decisions belong here/i)).toBeTruthy();
   });
 });

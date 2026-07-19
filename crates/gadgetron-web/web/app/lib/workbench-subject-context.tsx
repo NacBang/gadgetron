@@ -14,9 +14,11 @@ import {
   setActiveConversationId,
 } from "./conversation-id";
 import { safeRandomUUID } from "./uuid";
+import { currentDictionary } from "./i18n";
 
 const SUBJECT_PREFIX = "gadgetron_subject_";
 const SUBJECT_EVENT = "gadgetron:workbench-subject";
+export const PENNY_COMPANION_EVENT = "gadgetron:penny-companion-open";
 
 export interface WorkbenchSubject {
   id: string;
@@ -61,6 +63,7 @@ interface StartPennyDiscussionOptions {
   autoSubmit?: boolean;
   navigateTo?: string;
   navigate?: (href: string) => void;
+  surface?: "page" | "companion";
 }
 
 const WorkbenchSubjectCtx =
@@ -123,7 +126,7 @@ function parseRelated(value: unknown): WorkbenchRelatedRef[] | undefined {
   return related.length > 0 ? related : undefined;
 }
 
-function parseSubject(value: unknown): WorkbenchSubject | null {
+export function parseWorkbenchSubject(value: unknown): WorkbenchSubject | null {
   if (!isRecord(value)) return null;
   const id = value.id;
   const kind = value.kind;
@@ -165,7 +168,7 @@ export function readConversationSubject(
   const raw = window.localStorage.getItem(storageKey(conversationId));
   if (!raw) return null;
   try {
-    return parseSubject(JSON.parse(raw));
+    return parseWorkbenchSubject(JSON.parse(raw));
   } catch {
     return null;
   }
@@ -187,32 +190,33 @@ export function clearConversationSubject(conversationId: string): void {
 }
 
 export function buildSubjectDraft(subject: WorkbenchSubject): string {
+  const copy = currentDictionary().chat.subject;
   const lines: string[] = [];
   lines.push(
     subject.prompt ??
-      "이 워크벤치 컨텍스트를 함께 검토하고 다음 단계를 추천해줘.",
+      copy.defaultPrompt,
   );
   lines.push("");
-  lines.push(`Subject: ${subject.title}`);
-  if (subject.subtitle) lines.push(`Subtitle: ${subject.subtitle}`);
-  lines.push(`Bundle: ${subject.bundle}`);
-  lines.push(`Kind: ${subject.kind}`);
-  if (subject.href) lines.push(`Source: ${subject.href}`);
+  lines.push(`${copy.subject}: ${subject.title}`);
+  if (subject.subtitle) lines.push(`${copy.subtitle}: ${subject.subtitle}`);
+  lines.push(`${copy.bundle}: ${subject.bundle}`);
+  lines.push(`${copy.kind}: ${subject.kind}`);
+  if (subject.href) lines.push(`${copy.source}: ${subject.href}`);
   if (subject.summary) {
     lines.push("");
-    lines.push("Summary:");
+    lines.push(`${copy.summary}:`);
     lines.push(subject.summary);
   }
   if (subject.facts && Object.keys(subject.facts).length > 0) {
     lines.push("");
-    lines.push("Facts:");
+    lines.push(`${copy.facts}:`);
     lines.push("```json");
     lines.push(JSON.stringify(subject.facts, null, 2));
     lines.push("```");
   }
   if (subject.related && subject.related.length > 0) {
     lines.push("");
-    lines.push("Related:");
+    lines.push(`${copy.related}:`);
     for (const ref of subject.related) {
       const parts = [ref.kind, ref.status, ref.href].filter(Boolean).join(" | ");
       lines.push(`- ${ref.title}${parts ? ` (${parts})` : ""}`);
@@ -227,8 +231,8 @@ export function buildSubjectDraft(subject: WorkbenchSubject): string {
  * conversation's pinned subject context with an outgoing first
  * message. The seeded auto-send can silently lose its race with the
  * chat runtime spinning up after a full-page navigation — when that
- * happens the operator types a question like "이 버그에 대해서 알려줘"
- * and Penny has no idea what "이 버그" is. Callers apply this to the
+ * happens the operator types a vague question about "this bug"
+ * and Penny has no idea which bug it means. Callers apply this to the
  * FIRST message of a conversation; later turns rely on the transcript.
  * Returns `text` unchanged when there is no subject, the text is a
  * slash command, or the text already carries the draft.
@@ -242,7 +246,7 @@ export function withSubjectContext(text: string): string {
   if (!subject) return text;
   const draft = buildSubjectDraft(subject);
   if (trimmed.startsWith(draft.slice(0, 80))) return text;
-  return `${draft}\n\n---\n\n질문: ${trimmed}`;
+  return `${draft}\n\n---\n\n${currentDictionary().chat.subject.question}: ${trimmed}`;
 }
 
 export function startPennyDiscussion(
@@ -274,6 +278,13 @@ export function startPennyDiscussion(
         `gadgetron_pending_submit_${conversationId}`,
       );
     }
+  }
+
+  if (options.surface === "companion") {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(PENNY_COMPANION_EVENT));
+    }
+    return conversationId;
   }
 
   const navigate =

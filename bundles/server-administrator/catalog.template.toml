@@ -1,0 +1,9 @@
+[bundle]
+id = "server-administrator"
+version = "0.4.27"
+required_scope = "management"
+
+# Runtime workspaces are published from the signed package contract only after
+# the broker permission grant, database probe and sandbox health gate succeed.
+# The legacy catalog deliberately publishes no static server route before then.
+allow_direct_actions = false

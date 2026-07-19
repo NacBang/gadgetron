@@ -1,9 +1,70 @@
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::error::Result;
 use crate::message::Message;
+use crate::secret::Secret;
+
+/// Server-injected identity for provider-side audit events.
+///
+/// The field that carries this context on [`ChatRequest`] is skipped by serde:
+/// API clients cannot supply an identity, and upstream LLM providers never
+/// receive it in their wire payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatAuditContext {
+    pub tenant_id: String,
+    pub owner_id: Option<String>,
+}
+
+/// A short-lived parent-callback bearer credential owned by one agent turn.
+///
+/// The raw value is deliberately available only through [`Self::expose`].
+/// Debug output is always redacted, and dropping the lease invokes the
+/// issuer-provided revocation callback exactly once.
+pub struct CallbackCredentialLease {
+    raw: Secret<String>,
+    revoke: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl CallbackCredentialLease {
+    pub fn new(raw: Secret<String>, revoke: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            raw,
+            revoke: Some(Box::new(revoke)),
+        }
+    }
+
+    pub fn expose(&self) -> &str {
+        self.raw.expose()
+    }
+}
+
+impl fmt::Debug for CallbackCredentialLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallbackCredentialLease")
+            .field("raw", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CallbackCredentialLease {
+    fn drop(&mut self) {
+        if let Some(revoke) = self.revoke.take() {
+            revoke();
+        }
+    }
+}
+
+/// Issues a callback credential narrowed to the authenticated chat actor.
+///
+/// The composition root supplies the implementation. Agent adapters only
+/// receive the lease and never depend on a database or concrete key store.
+pub trait CallbackCredentialIssuer: Send + Sync {
+    fn issue(&self, actor: &ChatAuditContext) -> Result<CallbackCredentialLease>;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -32,6 +93,9 @@ pub struct ChatRequest {
     /// `02-penny-agent.md §5.2.3`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Authenticated identity injected by the gateway after deserialization.
+    #[serde(skip)]
+    pub audit_context: Option<ChatAuditContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +185,49 @@ mod tests {
         let json = r#"{"content":"hi"}"#;
         let delta: ChunkDelta = serde_json::from_str(json).unwrap();
         assert_eq!(delta.reasoning_content, None);
+    }
+
+    #[test]
+    fn chat_audit_context_is_server_only() {
+        let mut request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "penny",
+            "messages": [],
+            "audit_context": {
+                "tenant_id": "client-spoofed",
+                "owner_id": "client-spoofed"
+            }
+        }))
+        .unwrap();
+        assert!(request.audit_context.is_none());
+
+        request.audit_context = Some(ChatAuditContext {
+            tenant_id: "server-tenant".into(),
+            owner_id: Some("server-owner".into()),
+        });
+        let wire = serde_json::to_value(request).unwrap();
+        assert!(wire.get("audit_context").is_none());
+    }
+
+    #[test]
+    fn callback_credential_is_redacted_and_revoked_on_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let revocations = Arc::new(AtomicUsize::new(0));
+        let revocations_for_drop = Arc::clone(&revocations);
+        let lease = CallbackCredentialLease::new(
+            Secret::new("gad_delegate_do-not-print".to_string()),
+            move || {
+                revocations_for_drop.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        assert_eq!(lease.expose(), "gad_delegate_do-not-print");
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("do-not-print"));
+        drop(lease);
+        assert_eq!(revocations.load(Ordering::SeqCst), 1);
     }
 }
 

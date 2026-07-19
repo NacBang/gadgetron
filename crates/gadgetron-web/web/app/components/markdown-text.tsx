@@ -5,7 +5,12 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { useWikiPages, wikiPageFromCode } from "../lib/wiki-link";
+import {
+  knowledgeSearchHref,
+  useWikiPages,
+  wikiPageFromCode,
+} from "../lib/wiki-link";
+import { useI18n } from "../lib/i18n";
 
 /**
  * Assistant-ui TextMessagePart component — receives `{ text, isRunning }`
@@ -64,6 +69,7 @@ export function MarkdownText({
   status?: { readonly type: string };
 }) {
   const isRunning = status?.type === "running";
+  const { labels } = useI18n();
   const wikiPages = useWikiPages();
   // Hooks first (React rules-of-hooks — no conditional hook calls).
   const displayed = useTypewriterText(text, isRunning);
@@ -89,7 +95,7 @@ export function MarkdownText({
   return (
     <div
       data-md-scope
-      className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-p:leading-relaxed prose-pre:my-3 prose-pre:rounded-lg prose-pre:border prose-pre:border-border/60 prose-pre:bg-neutral-950/60 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-li:leading-relaxed prose-code:text-[13px] prose-code:bg-neutral-800/80 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2 prose-headings:font-semibold prose-headings:text-neutral-100 prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-strong:text-neutral-50 prose-blockquote:border-l-blue-400/40 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-blockquote:my-2 prose-table:my-2 prose-th:border-border prose-td:border-border/60 prose-hr:border-border/50"
+      className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-p:leading-relaxed prose-pre:my-3 prose-pre:rounded prose-pre:border prose-pre:border-border/60 prose-pre:bg-[var(--surface)] prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-li:leading-relaxed prose-code:text-[13px] prose-code:bg-[var(--surface-2)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-a:text-[var(--copper-hi)] prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2 prose-headings:font-semibold prose-headings:text-[var(--ink)] prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-strong:text-[var(--ink)] prose-blockquote:border-l-[var(--copper)] prose-blockquote:text-muted-foreground prose-blockquote:italic prose-blockquote:my-2 prose-table:my-2 prose-th:border-border prose-td:border-border/60 prose-hr:border-border/50"
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
@@ -107,7 +113,7 @@ export function MarkdownText({
               );
             }
             if (href?.startsWith("/web/")) {
-              // In-app links (the evidence pane's `/web/wiki?page=…`
+              // In-app links (the evidence pane's `/web/knowledge?q=…`
               // shape) navigate in the same tab; Link prepends the
               // `/web` basePath itself.
               return (
@@ -141,13 +147,13 @@ export function MarkdownText({
             if (page) {
               return (
                 <Link
-                  href={`/wiki?page=${encodeURIComponent(page)}`}
-                  title={`Open wiki page: ${page}`}
+                  href={knowledgeSearchHref(page)}
+                  title={labels.knowledge.citationSearchTitle(page)}
                   className="no-underline"
                 >
                   <code
                     {...rest}
-                    className={`${className ?? ""} cursor-pointer text-blue-300 underline decoration-dotted decoration-blue-400/50 underline-offset-2`}
+                    className={`${className ?? ""} cursor-pointer text-[var(--copper-hi)] underline decoration-dotted decoration-[var(--copper)] underline-offset-2`}
                   >
                     {children}
                   </code>
@@ -167,7 +173,7 @@ export function MarkdownText({
       {isRevealing && (
         <span
           aria-label="Penny is writing"
-          className="ml-1.5 inline-block size-2 rounded-full bg-blue-400 align-middle motion-safe:animate-pulse shadow-[0_0_6px_rgba(96,165,250,0.55)]"
+          className="ml-1.5 inline-block size-2 rounded-full bg-[var(--copper)] align-middle motion-safe:animate-pulse"
         />
       )}
     </div>

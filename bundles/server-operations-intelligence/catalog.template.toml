@@ -1,0 +1,6 @@
+[bundle]
+id = "server-operations-intelligence"
+version = "0.1.2"
+required_scope = "management"
+
+allow_direct_actions = false

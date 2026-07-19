@@ -1,0 +1,463 @@
+manifest_version = 3
+
+[bundle]
+id = "community-intelligence"
+version = "0.1.0"
+class = "intelligence"
+publisher = "gadgetron.project"
+license = "Apache-2.0"
+
+[compatibility]
+gadgetron = ">=0.7.20, <2.0.0"
+host_protocol_min = 1
+host_protocol_max = 1
+
+[runtime]
+kind = "subprocess"
+transport = "json_rpc_stdio"
+entry = "bin/community-intelligence"
+entry_sha256 = "@ENTRY_SHA256@"
+
+[runtime.limits]
+memory_mb = 192
+open_files = 48
+cpu_seconds = 30
+
+[[permissions]]
+id = "community-read"
+kind = "database"
+description = "Read tenant-scoped Community Intelligence records"
+resources = ["postgres:table:community_discussions", "postgres:table:community_solution_patterns", "postgres:table:community_pattern_evidence"]
+
+[[permissions]]
+id = "community-write"
+kind = "database"
+description = "Write tenant-scoped Community Intelligence records through Core-compiled mutations"
+resources = ["postgres:table:community_discussions", "postgres:table:community_solution_patterns", "postgres:table:community_pattern_evidence"]
+
+[[permissions]]
+id = "community-collections"
+kind = "knowledge_collection"
+description = "Manage only Community Topics through the Core collection authority"
+resources = ["knowledge:collection"]
+
+[capabilities]
+gadget_namespaces = ["community"]
+
+[[capabilities.provides]]
+id = "gadgetron.intelligence.community-context"
+version = "1.0.0"
+description = "Cited discussion, evidence and solution-pattern context through the Core knowledge exchange"
+
+[[capabilities.domain_schemas]]
+id = "community-domain"
+version = 1
+schema_path = "schema/domain.json"
+sha256 = "b69f138b94e1c8bdca330a21b976900efedb48c95607f18e72de1db5a34d66fe"
+
+[[capabilities.gadgets]]
+name = "community.topic-list"
+description = "List Community Topics and their provider collection state"
+tier = "read"
+input_schema = { type = "object", properties = { limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.topic-collect"
+description = "Collect the approved official provider query for this Topic now"
+tier = "write"
+input_schema = { type = "object", x_gadgetron_row_action = true, properties = { collection_id = { type = "string", format = "uuid", title = "Topic" }, expected_revision = { type = "integer", minimum = 1, title = "Current revision" } }, required = ["collection_id", "expected_revision"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.discussion-list"
+description = "List cited community discussion snapshots"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.discussion-upsert"
+description = "Persist an idempotent Source-revision-pinned discussion snapshot"
+tier = "write"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, provider = { type = "string", enum = ["stack-exchange", "reddit", "forum"] }, external_id = { type = "string", minLength = 1, maxLength = 200 }, canonical_url = { type = "string", format = "uri", maxLength = 2000 }, title = { type = "string", minLength = 1, maxLength = 500 }, summary = { type = "string", minLength = 1, maxLength = 4000 }, state = { type = "string", enum = ["active", "edited", "deleted", "locked"] }, score_snapshot = { type = "integer", minimum = -1000000, maximum = 1000000 }, accepted_answer_observed = { type = "boolean" }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, fetched_at = { type = "string", format = "date-time" }, content_hash = { type = "string", pattern = "^[0-9a-fA-F]{64}$" } }, required = ["topic_id", "provider", "external_id", "canonical_url", "title", "summary", "state", "score_snapshot", "accepted_answer_observed", "source_id", "source_revision", "fetched_at", "content_hash"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "community.solution-pattern-list"
+description = "List environment-scoped community solution patterns"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.solution-pattern-upsert"
+description = "Create or revise a rollback-aware cited solution pattern"
+tier = "write"
+input_schema = { type = "object", properties = { pattern_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, topic_id = { type = "string", format = "uuid" }, title = { type = "string", minLength = 1, maxLength = 300 }, problem_signature = { type = "string", minLength = 1, maxLength = 2000 }, environment = { type = "string", minLength = 1, maxLength = 2000 }, procedure = { type = "string", minLength = 1, maxLength = 6000 }, rollback = { type = "string", minLength = 1, maxLength = 4000 }, status = { type = "string", enum = ["reproduced", "environment_dependent", "contradicted", "speculative", "obsolete"] }, supporting_evidence = { type = "integer", minimum = 0, maximum = 10000 }, contradicting_evidence = { type = "integer", minimum = 0, maximum = 10000 } }, required = ["topic_id", "title", "problem_signature", "environment", "procedure", "rollback", "status", "supporting_evidence", "contradicting_evidence"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "community.pattern-evidence-list"
+description = "List supporting, contradicting and contextual evidence for one pattern"
+tier = "read"
+input_schema = { type = "object", properties = { pattern_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 500, default = 100 } }, required = ["pattern_id"], additionalProperties = false }
+output_schema = { type = "object", properties = { rows = { type = "array" }, count = { type = "integer" }, truncated = { type = "boolean" } }, required = ["rows", "count", "truncated"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.pattern-evidence-upsert"
+description = "Create or revise Source-pinned evidence for a solution pattern"
+tier = "write"
+input_schema = { type = "object", properties = { evidence_id = { type = "string", format = "uuid" }, revision = { type = "integer", minimum = 1 }, pattern_id = { type = "string", format = "uuid" }, discussion_id = { type = "string", format = "uuid" }, statement = { type = "string", minLength = 1, maxLength = 2000 }, stance = { type = "string", enum = ["supports", "contradicts", "context"] }, source_id = { type = "string", format = "uuid" }, source_revision = { type = "integer", minimum = 1 }, observed_at = { type = "string", format = "date-time" } }, required = ["pattern_id", "discussion_id", "statement", "stance", "source_id", "source_revision", "observed_at"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = false
+reversible = false
+requires_evidence = true
+
+[[capabilities.gadgets]]
+name = "community.solution-graph"
+description = "View discussion, evidence and solution-pattern connections"
+tier = "read"
+input_schema = { type = "object", properties = { topic_id = { type = "string", format = "uuid" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 100 } }, additionalProperties = false }
+output_schema = { type = "object", properties = { nodes = { type = "array" }, edges = { type = "array" } }, required = ["nodes", "edges"] }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.subject-context"
+description = "Build bounded Penny context for one community solution pattern"
+tier = "read"
+input_schema = { type = "object", properties = { pattern_id = { type = "string", format = "uuid" } }, required = ["pattern_id"], additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.gadgets]]
+name = "community.dashboard-summary"
+description = "Summarize reproduced, conditional and contradicted solution patterns"
+tier = "read"
+input_schema = { type = "object", properties = {}, additionalProperties = false }
+output_schema = { type = "object" }
+[capabilities.gadgets.effect]
+risk = "low"
+idempotent = true
+reversible = true
+requires_evidence = false
+
+[[capabilities.jobs]]
+id = "community-topic-scouting"
+role = "source_scout"
+triggers = ["on_demand"]
+gadget_allowlist = ["community.topic-list"]
+budget = { max_gadget_calls = 4, max_wall_seconds = 120 }
+
+[[capabilities.jobs]]
+id = "community-discussion-research"
+role = "researcher"
+triggers = ["on_demand"]
+gadget_allowlist = ["community.topic-list", "community.discussion-list", "community.discussion-upsert", "community.solution-pattern-list"]
+budget = { max_gadget_calls = 24, max_wall_seconds = 300 }
+
+[[capabilities.jobs]]
+id = "community-solution-distillation"
+role = "gardener"
+triggers = ["on_demand"]
+gadget_allowlist = ["community.discussion-list", "community.solution-pattern-list", "community.solution-pattern-upsert", "community.pattern-evidence-list", "community.pattern-evidence-upsert", "community.solution-graph"]
+budget = { max_gadget_calls = 24, max_wall_seconds = 300 }
+
+[[capabilities.collection_profiles]]
+id = "community-official-providers"
+label = "Community sources"
+description = "Collect bounded official provider API results through Core without granting Bundle network access"
+connector = "core-community-api"
+source_classes = ["community"]
+allowlisted_domains = ["api.stackexchange.com", "oauth.reddit.com"]
+extractor_hints = ["discussion", "answer", "revision"]
+freshness_seconds = 3600
+schedule = "*/30 * * * *"
+budget = { max_sources = 5, max_bytes = 16777216, max_wall_seconds = 300 }
+recipe_asset = "community-source-collection"
+
+[[capabilities.collection_profiles.query_providers]]
+id = "stack-exchange"
+label = "Stack Exchange"
+description = "Official Stack Exchange API questions and answers with attribution metadata"
+source_class = "community"
+scope_label = "Site"
+scope_placeholder = "stackoverflow"
+default_scope = "stackoverflow"
+supports_tags = true
+supports_language = false
+requires_configuration = false
+max_window_days = 3650
+
+[[capabilities.collection_profiles.query_providers]]
+id = "reddit"
+label = "Reddit"
+description = "Requires approved API access and storage that can purge provider-deleted historical content"
+source_class = "community"
+scope_label = "Community"
+scope_placeholder = "all"
+default_scope = "all"
+supports_tags = false
+supports_language = false
+requires_configuration = true
+max_window_days = 3650
+
+[[capabilities.agent_roles]]
+id = "community-topic-scout"
+label = "Community scout"
+description = "Finds bounded official community coverage for Manager-defined Topics"
+core_role = "source_scout"
+job = "community-topic-scouting"
+recipe_asset = "community-source-collection"
+collection_profile = "community-official-providers"
+prompt_contract_revision = "community-topic-scout-v1"
+
+[[capabilities.agent_roles]]
+id = "community-researcher"
+label = "Community researcher"
+description = "Separates discussion observations, disagreements and environment-specific reports"
+core_role = "researcher"
+job = "community-discussion-research"
+recipe_asset = "community-research"
+collection_profile = "community-official-providers"
+followup_role = "community-distiller"
+prompt_contract_revision = "community-research-v1"
+
+[[capabilities.agent_roles]]
+id = "community-distiller"
+label = "Solution distiller"
+description = "Connects cited evidence into rollback-aware solution patterns and reviewed Knowledge proposals"
+core_role = "gardener"
+job = "community-solution-distillation"
+recipe_asset = "community-solution-distillation"
+collection_profile = "community-official-providers"
+prompt_contract_revision = "community-solution-distillation-v1"
+
+[[capabilities.workspaces]]
+id = "topics"
+label = "Community Topics"
+renderer = "table"
+data_capability = "community.topic-list"
+collection_profile = "community-official-providers"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "discussions"
+label = "Discussions"
+renderer = "cards"
+data_capability = "community.discussion-list"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "solutions"
+label = "Solutions"
+renderer = "cards"
+data_capability = "community.solution-pattern-list"
+action_gadgets = ["community.subject-context"]
+required_scopes = ["management"]
+
+[[capabilities.workspaces]]
+id = "community-graph"
+label = "Community graph"
+renderer = "graph"
+data_capability = "community.solution-graph"
+action_gadgets = []
+required_scopes = ["management"]
+
+[[capabilities.ui_contributions]]
+id = "topics-main"
+kind = "workspace"
+label = "Community Topics"
+placement = "main"
+order_hint = 170
+icon = "search"
+required_scopes = ["management"]
+empty_state = "No Community Topics yet"
+error_state = "Community Topics are unavailable"
+workspace = "topics"
+
+[[capabilities.ui_contributions]]
+id = "topics-navigation"
+kind = "navigation"
+label = "Community Topics"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 170
+icon = "search"
+required_scopes = ["management"]
+empty_state = "Community Intelligence is not enabled"
+error_state = "Community Topics navigation is unavailable"
+workspace = "topics"
+
+[[capabilities.ui_contributions]]
+id = "discussions-main"
+kind = "workspace"
+label = "Discussions"
+placement = "main"
+order_hint = 180
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No cited discussions yet"
+error_state = "Community discussions are unavailable"
+workspace = "discussions"
+
+[[capabilities.ui_contributions]]
+id = "discussions-navigation"
+kind = "navigation"
+label = "Discussions"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 180
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No cited discussions yet"
+error_state = "Community discussions navigation is unavailable"
+workspace = "discussions"
+
+[[capabilities.ui_contributions]]
+id = "solutions-main"
+kind = "workspace"
+label = "Solutions"
+placement = "main"
+order_hint = 190
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "No distilled solution patterns yet"
+error_state = "Community solution patterns are unavailable"
+workspace = "solutions"
+
+[[capabilities.ui_contributions]]
+id = "solutions-navigation"
+kind = "navigation"
+label = "Solutions"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 190
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "No distilled solution patterns yet"
+error_state = "Community solutions navigation is unavailable"
+workspace = "solutions"
+
+[[capabilities.ui_contributions]]
+id = "community-graph-main"
+kind = "workspace"
+label = "Community graph"
+placement = "main"
+order_hint = 200
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No connected solution evidence yet"
+error_state = "Community graph is unavailable"
+workspace = "community-graph"
+
+[[capabilities.ui_contributions]]
+id = "community-graph-navigation"
+kind = "navigation"
+label = "Community graph"
+placement = "primary_navigation"
+navigation_section = "knowledge"
+order_hint = 200
+icon = "graph"
+required_scopes = ["management"]
+empty_state = "No connected solution evidence yet"
+error_state = "Community graph navigation is unavailable"
+workspace = "community-graph"
+
+[[capabilities.ui_contributions]]
+id = "community-dashboard"
+kind = "dashboard_widget"
+label = "Community solutions"
+placement = "dashboard"
+order_hint = 170
+icon = "document"
+required_scopes = ["management"]
+empty_state = "No solution patterns yet"
+error_state = "Community solution summary is unavailable"
+gadget = "community.dashboard-summary"
+renderer = "dashboard"
+refresh_seconds = 60
+
+[[capabilities.ui_contributions]]
+id = "community-subject"
+kind = "subject_context"
+label = "Community solution pattern"
+placement = "penny_context"
+order_hint = 170
+icon = "knowledge"
+required_scopes = ["management"]
+empty_state = "Community solution context is unavailable"
+error_state = "Community solution context could not be created"
+gadget = "community.subject-context"
+
+[[capabilities.seed_assets]]
+id = "community-source-collection"
+path = "recipes/source-collection.json"
+media_type = "application/json"
+sha256 = "9c7e7a71758834929f3d7308d509f8cf753333ce72a6dace45421d44756c07a0"
+
+[[capabilities.seed_assets]]
+id = "community-research"
+path = "recipes/community-research.json"
+media_type = "application/json"
+sha256 = "f3f230e19fda0ad09166b7d5d8ed2ebedcc8671c52fefb4e109664c4d6a2fe0d"
+
+[[capabilities.seed_assets]]
+id = "community-solution-distillation"
+path = "recipes/solution-distillation.json"
+media_type = "application/json"
+sha256 = "62c64487f870ee4ea738183a69e50bd5d8557c2d8cea7075cd44ce4a82ac2461"
+
+[[capabilities.migrations]]
+id = "community-base"
+revision = 20260714000001
+kind = "schema"
+path = "migrations/20260714000001_community_base.sql"
+sha256 = "8dec65f251073e187367facca5f8eb13ed1febe69dab77fb837bf25b67564863"

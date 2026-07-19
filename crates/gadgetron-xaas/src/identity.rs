@@ -109,6 +109,7 @@ pub async fn create_user(
         None => None,
     };
 
+    let mut tx = pool.begin().await?;
     let result = sqlx::query_as::<_, UserRow>(
         r#"
         INSERT INTO users (tenant_id, email, display_name, avatar_url, role, password_hash)
@@ -123,11 +124,18 @@ pub async fn create_user(
     .bind(avatar_url)
     .bind(role.as_str())
     .bind(password_hash.as_deref())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await;
 
     match result {
-        Ok(row) => Ok(row),
+        Ok(row) => {
+            crate::default_onboarding::ensure_default_team_onboarding_in_transaction(
+                &mut tx, tenant_id, row.id,
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(row)
+        }
         Err(sqlx::Error::Database(db_err))
             if db_err.constraint() == Some("users_tenant_id_email_key") =>
         {
@@ -284,10 +292,14 @@ pub async fn backfill_api_keys_user_id(pool: &PgPool) -> Result<u64, sqlx::Error
         return Ok(0);
     };
 
-    let result = sqlx::query(r#"UPDATE api_keys SET user_id = $1 WHERE user_id IS NULL"#)
-        .bind(admin_id)
-        .execute(pool)
-        .await?;
+    let result = sqlx::query(
+        r#"UPDATE api_keys SET user_id = $1
+           WHERE user_id IS NULL AND tenant_id = $2"#,
+    )
+    .bind(admin_id)
+    .bind(DEFAULT_TENANT_ID)
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected())
 }
 

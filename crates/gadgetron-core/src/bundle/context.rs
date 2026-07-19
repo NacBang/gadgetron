@@ -80,9 +80,7 @@ pub struct PlugHandles<'a> {
     /// RAW-ingestion extractors consumed by
     /// `gadgetron-knowledge::ingest::IngestPipeline`. Keyed by `PlugId`
     /// (e.g. `"markdown"`, `"pdf"`, `"docx"`). The pipeline dispatches by
-    /// the extractor's `supported_content_types()`; the `PlugId` is how
-    /// operator config can disable a specific format without uninstalling
-    /// the whole document-formats Bundle.
+    /// the extractor's `supported_content_types()`.
     pub extractors: PlugRegistry<'a, dyn Extractor>,
 }
 

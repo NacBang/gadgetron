@@ -119,6 +119,7 @@ fn bench_router_resolve_roundrobin(c: &mut Criterion) {
         stream: false,
         stop: None,
         conversation_id: None,
+        audit_context: None,
     };
 
     let mut group = c.benchmark_group("router");

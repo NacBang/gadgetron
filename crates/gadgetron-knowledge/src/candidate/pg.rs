@@ -95,6 +95,14 @@ impl PgActivityCaptureStore {
     }
 }
 
+fn actor_scope(actor: &AuthenticatedContext) -> Option<(Uuid, Uuid)> {
+    if actor.tenant_id.is_nil() {
+        return None;
+    }
+    let user_id = actor.real_user_id.unwrap_or(actor.api_key_id);
+    (!user_id.is_nil()).then_some((actor.tenant_id, user_id))
+}
+
 // ---------------------------------------------------------------------------
 // ActivityCaptureStore impl
 // ---------------------------------------------------------------------------
@@ -103,9 +111,11 @@ impl PgActivityCaptureStore {
 impl ActivityCaptureStore for PgActivityCaptureStore {
     async fn append_activity(
         &self,
-        _actor: &AuthenticatedContext,
+        actor: &AuthenticatedContext,
         event: CapturedActivityEvent,
     ) -> CaptureResult<()> {
+        let (tenant_id, actor_user_id) =
+            actor_scope(actor).unwrap_or((event.tenant_id, event.actor_user_id));
         sqlx::query(
             "INSERT INTO activity_events (
                 id, tenant_id, actor_user_id, request_id,
@@ -115,8 +125,8 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(event.id)
-        .bind(event.tenant_id)
-        .bind(event.actor_user_id)
+        .bind(tenant_id)
+        .bind(actor_user_id)
         .bind(event.request_id)
         .bind(snake_case_label(&event.origin))
         .bind(snake_case_label(&event.kind))
@@ -135,7 +145,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
 
     async fn append_candidate(
         &self,
-        _actor: &AuthenticatedContext,
+        actor: &AuthenticatedContext,
         activity_event_id: Uuid,
         hint: CandidateHint,
     ) -> CaptureResult<KnowledgeCandidate> {
@@ -165,7 +175,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
             )
             SELECT $1, $2, ae.tenant_id, ae.actor_user_id, $3, $4, $5, $6, $7
             FROM activity_events ae
-            WHERE ae.id = $2
+            WHERE ae.id = $2 AND ($8::UUID IS NULL OR ae.tenant_id = $8)
             RETURNING tenant_id, actor_user_id",
         )
         .bind(candidate_id)
@@ -177,6 +187,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
         .bind(&provenance_json)
         .bind(&disposition_label)
         .bind(now)
+        .bind(actor_scope(actor).map(|scope| scope.0))
         .fetch_optional(&self.pool)
         .await
         .map_err(pg_to_gadgetron)?;
@@ -205,7 +216,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
 
     async fn decide_candidate(
         &self,
-        _actor: &AuthenticatedContext,
+        actor: &AuthenticatedContext,
         decision: CandidateDecision,
     ) -> CaptureResult<KnowledgeCandidate> {
         let next_disposition = match decision.decision {
@@ -235,12 +246,13 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
         let row: Option<CandidateRow> = sqlx::query_as::<_, CandidateRow>(
             "UPDATE knowledge_candidates
              SET disposition = $1
-             WHERE id = $2
+             WHERE id = $2 AND ($3::UUID IS NULL OR tenant_id = $3)
              RETURNING id, activity_event_id, tenant_id, actor_user_id,
                        summary, proposed_path, provenance, disposition, created_at",
         )
         .bind(&next_label)
         .bind(decision.candidate_id)
+        .bind(actor_scope(actor).map(|scope| scope.0))
         .fetch_optional(&mut *tx)
         .await
         .map_err(pg_to_gadgetron)?;
@@ -263,7 +275,13 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
         )
         .bind(decision.candidate_id)
         .bind(snake_case_label(&decision.decision))
-        .bind(decision.decided_by_user_id)
+        .bind(if decision.decided_by_penny {
+            None
+        } else {
+            actor_scope(actor)
+                .map(|scope| scope.1)
+                .or(decision.decided_by_user_id)
+        })
         .bind(decision.decided_by_penny)
         .bind(&decision.rationale)
         .execute(&mut *tx)
@@ -277,7 +295,7 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
 
     async fn list_candidates(
         &self,
-        _actor: &AuthenticatedContext,
+        actor: &AuthenticatedContext,
         limit: usize,
         only_pending: bool,
     ) -> CaptureResult<Vec<KnowledgeCandidate>> {
@@ -287,10 +305,12 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
                         summary, proposed_path, provenance, disposition, created_at
                  FROM knowledge_candidates
                  WHERE disposition IN ('pending_penny_decision', 'pending_user_confirmation')
+                   AND ($2::UUID IS NULL OR tenant_id = $2)
                  ORDER BY created_at DESC, id DESC
                  LIMIT $1",
             )
             .bind(limit as i64)
+            .bind(actor_scope(actor).map(|scope| scope.0))
             .fetch_all(&self.pool)
             .await
             .map_err(pg_to_gadgetron)?
@@ -299,10 +319,12 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
                 "SELECT id, activity_event_id, tenant_id, actor_user_id,
                         summary, proposed_path, provenance, disposition, created_at
                  FROM knowledge_candidates
+                 WHERE ($2::UUID IS NULL OR tenant_id = $2)
                  ORDER BY created_at DESC, id DESC
                  LIMIT $1",
             )
             .bind(limit as i64)
+            .bind(actor_scope(actor).map(|scope| scope.0))
             .fetch_all(&self.pool)
             .await
             .map_err(pg_to_gadgetron)?
@@ -315,16 +337,17 @@ impl ActivityCaptureStore for PgActivityCaptureStore {
 
     async fn get_candidate(
         &self,
-        _actor: &AuthenticatedContext,
+        actor: &AuthenticatedContext,
         id: Uuid,
     ) -> CaptureResult<Option<KnowledgeCandidate>> {
         let row: Option<CandidateRow> = sqlx::query_as::<_, CandidateRow>(
             "SELECT id, activity_event_id, tenant_id, actor_user_id,
                     summary, proposed_path, provenance, disposition, created_at
              FROM knowledge_candidates
-             WHERE id = $1",
+             WHERE id = $1 AND ($2::UUID IS NULL OR tenant_id = $2)",
         )
         .bind(id)
+        .bind(actor_scope(actor).map(|scope| scope.0))
         .fetch_optional(&self.pool)
         .await
         .map_err(pg_to_gadgetron)?;

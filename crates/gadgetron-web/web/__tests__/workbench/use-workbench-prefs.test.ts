@@ -29,6 +29,7 @@ const STORAGE_KEY = "gadgetron.workbench.prefs";
 describe("useWorkbenchPrefs", () => {
   beforeEach(() => {
     localStorageMock.clear();
+    window.sessionStorage.clear();
   });
 
   it("returns defaults when localStorage is empty", () => {
@@ -38,6 +39,7 @@ describe("useWorkbenchPrefs", () => {
     expect(prefs.evidencePaneWidth).toBe(320);
     expect(prefs.leftRailWidth).toBe(240);
     expect(prefs.leftRailCollapsed).toBe(false);
+    expect(prefs.collapsedNavSections).toEqual([]);
     expect(prefs.density).toBe("comfortable");
     expect(prefs.rightPane).toBe("evidence");
   });
@@ -62,21 +64,58 @@ describe("useWorkbenchPrefs", () => {
     expect(prefs.density).toBe("compact");
     expect(prefs.leftRailCollapsed).toBe(true);
     expect(prefs.evidencePaneOpen).toBe(false);
+    expect(prefs.collapsedNavSections).toEqual([]);
   });
 
-  it("writes updated prefs to localStorage", () => {
+  it("persists collapsed navigation sections", () => {
+    const { result } = renderHook(() => useWorkbenchPrefs());
+    act(() => {});
+
+    act(() => {
+      result.current[1]({ collapsedNavSections: ["operations", "diagnostics"] });
+    });
+
+    expect(result.current[0].collapsedNavSections).toEqual([
+      "operations",
+      "diagnostics",
+    ]);
+  });
+
+  it("keeps the Inspector choice in this browser session", () => {
     const { result } = renderHook(() => useWorkbenchPrefs());
     act(() => {});
 
     act(() => {
       const [, update] = result.current;
-      update({ evidencePaneOpen: false });
+      update({ evidencePaneOpen: true });
     });
 
     const stored = JSON.parse(localStorageMock.getItem(STORAGE_KEY)!) as {
       evidencePaneOpen: boolean;
     };
     expect(stored.evidencePaneOpen).toBe(false);
+    expect(window.sessionStorage.getItem("gadgetron.workbench.evidence-pane-open")).toBe("true");
+    expect(result.current[0].evidencePaneOpen).toBe(true);
+  });
+
+  it("does not reopen from a previous session's stored choice", () => {
+    localStorageMock.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        density: "comfortable",
+        rightPane: "evidence",
+        leftRailCollapsed: false,
+        evidencePaneOpen: true,
+        evidencePaneWidth: 320,
+        leftRailWidth: 240,
+        showReasoning: false,
+        showToolDetails: false,
+      }),
+    );
+    const { result } = renderHook(() => useWorkbenchPrefs());
+    act(() => {});
+
+    expect(result.current[0].evidencePaneOpen).toBe(false);
   });
 
   it("round-trips evidencePaneWidth", () => {
@@ -126,6 +165,7 @@ describe("useWorkbenchPrefs", () => {
 describe("useWorkbenchPrefs cross-instance sync (ISSUE 50)", () => {
   beforeEach(() => {
     localStorageMock.clear();
+    window.sessionStorage.clear();
   });
 
   it("a write from one instance does not roll back another's write", () => {
@@ -137,17 +177,17 @@ describe("useWorkbenchPrefs cross-instance sync (ISSUE 50)", () => {
       a.result.current[1]({ leftRailCollapsed: true });
     });
     act(() => {
-      b.result.current[1]({ chatMonitoringOpen: true });
+      b.result.current[1]({ evidencePaneOpen: true });
     });
 
     const stored = JSON.parse(
       window.localStorage.getItem(STORAGE_KEY) ?? "{}",
-    ) as { leftRailCollapsed?: boolean; chatMonitoringOpen?: boolean };
+    ) as { leftRailCollapsed?: boolean; evidencePaneOpen?: boolean };
     // Pre-fix, b's write was based on b's mount-time snapshot and
     // reverted leftRailCollapsed to false.
     expect(stored.leftRailCollapsed).toBe(true);
-    expect(stored.chatMonitoringOpen).toBe(true);
+    expect(stored.evidencePaneOpen).toBe(false);
     // And instance a observes b's change via the same-tab event.
-    expect(a.result.current[0].chatMonitoringOpen).toBe(true);
+    expect(a.result.current[0].evidencePaneOpen).toBe(true);
   });
 });

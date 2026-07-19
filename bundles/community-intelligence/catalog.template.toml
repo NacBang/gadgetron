@@ -1,0 +1,6 @@
+[bundle]
+id = "community-intelligence"
+version = "0.1.0"
+required_scope = "management"
+
+allow_direct_actions = false

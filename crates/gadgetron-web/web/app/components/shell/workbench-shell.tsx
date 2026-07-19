@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { StatusStrip, useGatewayHealth } from "./status-strip";
 import { LeftRail } from "./left-rail";
@@ -8,7 +8,15 @@ import { EvidencePane } from "./evidence-pane";
 import { FailurePanel } from "./failure-panel";
 import { ResizeHandle } from "./resize-handle";
 import { VersionBadge } from "./version-badge";
+import { PennyCompanion } from "../chat/penny-companion";
+import { ResponsiveShellControls } from "./responsive-shell-controls";
+import { CommandPalette } from "./command-palette";
+import { useInspector } from "../../lib/inspector-context";
 import {
+  EVIDENCE_PANE_WIDTH_MAX,
+  EVIDENCE_PANE_WIDTH_MIN,
+  LEFT_RAIL_WIDTH_MAX,
+  LEFT_RAIL_WIDTH_MIN,
   clampEvidencePaneWidth,
   clampLeftRailWidth,
   useWorkbenchPrefs,
@@ -45,37 +53,47 @@ function OfflineBanner() {
   );
 }
 
-function useNarrowDesktop() {
-  const [narrow, setNarrow] = useState(false);
+function useShellViewport() {
+  const [viewport, setViewport] = useState({
+    width: 1440,
+    narrow: false,
+    mobile: false,
+  });
 
   useEffect(() => {
-    const update = () => setNarrow(window.innerWidth < 1200);
+    const update = () =>
+      setViewport({
+        width: window.innerWidth,
+        narrow: window.innerWidth < 1200,
+        mobile: window.innerWidth < 768,
+      });
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  return narrow;
+  return viewport;
 }
 
 // ---------------------------------------------------------------------------
 // WorkbenchShell
 //
 // Shared chrome for every post-auth /web route. Rendered once by the
-// `(shell)/layout.tsx` route-group layout so Chat / Wiki / Dashboard
-// share the same `StatusStrip` + `LeftRail` + `EvidencePane` and the
+// `(shell)/layout.tsx` route-group layout so Chat / Knowledge / Dashboard
+// share the same `StatusStrip` + `LeftRail` + contextual Inspector
 // React tree survives route transitions (no Assistant runtime
 // unmount, no chat-state reset).
 //
 //   ┌─────────────────────────────────────────────────────┐
 //   │ StatusStrip (gateway health, active plugs, session) │
 //   ├───────┬──────────────────────────┬──────────────────┤
-//   │ Left  │ page header (slot)       │ EvidencePane     │
+//   │ Left  │ page header (slot)       │ Inspector        │
 //   │ rail  │ page body (children)     │ (or `rightRail`) │
 //   └───────┴──────────────────────────┴──────────────────┘
 //
 // Pages supply a `header` slot for page-level titles / actions. The
-// right rail defaults to the shared `EvidencePane`; pages can override
+// right rail defaults to the shared Inspector (`EvidencePane` is the
+// compatibility component name); pages can override
 // via `rightRail` (e.g. a dashboard live-feed or a wiki search-hits
 // panel when those fold into the shell in future work).
 // ---------------------------------------------------------------------------
@@ -87,7 +105,7 @@ interface WorkbenchShellProps {
    * · N pages + New/Refresh"). Shared affordances (plug status, sign-out)
    * live in the `StatusStrip` and stay outside the slot. */
   header?: ReactNode;
-  /** Replace the default `EvidencePane` with a page-specific right rail.
+  /** Replace the default Inspector with a page-specific right rail.
    * Pass `null` to hide the right area entirely (pre-auth state). */
   rightRail?: ReactNode | null;
   /** Pre-auth rendering: the page body is the login form. The left rail
@@ -103,26 +121,38 @@ export function WorkbenchShell({
   preAuth = false,
 }: WorkbenchShellProps) {
   const [prefs, updatePrefs] = useWorkbenchPrefs();
+  const { view: inspectorView } = useInspector();
+  const lastAutoOpenedInspector = useRef<string | null>(null);
   const health = useGatewayHealth();
   const [, setRetryCount] = useState(0);
-  const narrowDesktop = useNarrowDesktop();
+  const viewport = useShellViewport();
+  const narrowDesktop = viewport.narrow;
+  const mobile = viewport.mobile;
   const effectiveLeftRailCollapsed =
     preAuth || narrowDesktop || prefs.leftRailCollapsed;
 
   const showHardFailureOverlay = health.status === "blocked";
+
+  useEffect(() => {
+    if (!inspectorView) {
+      lastAutoOpenedInspector.current = null;
+      return;
+    }
+    if (inspectorView.autoOpen && lastAutoOpenedInspector.current !== inspectorView.id) {
+      lastAutoOpenedInspector.current = inspectorView.id;
+      updatePrefs({ evidencePaneOpen: true });
+    }
+  }, [inspectorView, updatePrefs]);
 
   const handleRetry = () => {
     setRetryCount((n) => n + 1);
     window.location.reload();
   };
 
-  // Default right rail: the shared EvidencePane. `rightRail === null`
+  // Default right rail: the shared contextual Inspector. `rightRail === null`
   // means the caller explicitly opted out (pre-auth). `rightRail`
   // passed as a node means "use my custom right rail". Undefined =
-  // fall back to the default EvidencePane. (The former copilot-route
-  // special case is gone — the monitoring split lives on the chat
-  // page itself since ISSUE 47, and the EvidencePane defaults to its
-  // collapsed column there.)
+  // fall back to the default Inspector.
   const resolvedRightRail =
     preAuth || rightRail === null
       ? null
@@ -148,18 +178,38 @@ export function WorkbenchShell({
 
       {/* 3-panel body */}
       <div className="flex flex-1 overflow-hidden" data-testid="workbench-body">
-        {!preAuth && (
-          <LeftRail
-            collapsed={effectiveLeftRailCollapsed}
-            forcedCollapsed={narrowDesktop}
-            onCollapse={(v) => updatePrefs({ leftRailCollapsed: v })}
-            width={prefs.leftRailWidth}
-          />
+        {!preAuth && !mobile && (
+          <Suspense
+            fallback={
+              <aside
+                aria-label="Workspace navigation"
+                className="shrink-0 border-r border-zinc-800 bg-zinc-950"
+                style={{ width: effectiveLeftRailCollapsed ? 48 : prefs.leftRailWidth }}
+              />
+            }
+          >
+            <LeftRail
+              collapsed={effectiveLeftRailCollapsed}
+              forcedCollapsed={narrowDesktop}
+              onCollapse={(v) => updatePrefs({ leftRailCollapsed: v })}
+              width={prefs.leftRailWidth}
+            />
+          </Suspense>
         )}
-        {!preAuth && !effectiveLeftRailCollapsed && (
+        {!preAuth && !mobile && !effectiveLeftRailCollapsed && (
           <ResizeHandle
             orientation="vertical"
             ariaLabel="Resize navigation rail"
+            ariaControls="left-rail"
+            valueMin={LEFT_RAIL_WIDTH_MIN}
+            valueMax={LEFT_RAIL_WIDTH_MAX}
+            valueNow={prefs.leftRailWidth}
+            onResizeTo={(edge) =>
+              updatePrefs({
+                leftRailWidth:
+                  edge === "min" ? LEFT_RAIL_WIDTH_MIN : LEFT_RAIL_WIDTH_MAX,
+              })
+            }
             onResize={(dx) =>
               updatePrefs({
                 leftRailWidth: clampLeftRailWidth(prefs.leftRailWidth + dx),
@@ -177,6 +227,14 @@ export function WorkbenchShell({
           data-testid="chat-column"
           aria-label="Main content"
         >
+          {!preAuth && (
+            <ResponsiveShellControls
+              mobile={mobile}
+              narrow={narrowDesktop}
+              viewportWidth={viewport.width}
+              showInspector={rightRail === undefined}
+            />
+          )}
           {header}
           {children}
         </main>
@@ -185,6 +243,18 @@ export function WorkbenchShell({
           <ResizeHandle
             orientation="vertical"
             ariaLabel="Resize evidence pane"
+            ariaControls="evidence-pane"
+            valueMin={EVIDENCE_PANE_WIDTH_MIN}
+            valueMax={EVIDENCE_PANE_WIDTH_MAX}
+            valueNow={prefs.evidencePaneWidth}
+            onResizeTo={(edge) =>
+              updatePrefs({
+                evidencePaneWidth:
+                  edge === "min"
+                    ? EVIDENCE_PANE_WIDTH_MIN
+                    : EVIDENCE_PANE_WIDTH_MAX,
+              })
+            }
             onResize={(dx) =>
               updatePrefs({
                 evidencePaneWidth: clampEvidencePaneWidth(
@@ -202,6 +272,8 @@ export function WorkbenchShell({
       </div>
 
       <VersionBadge />
+      {!preAuth && <PennyCompanion />}
+      {!preAuth && <CommandPalette />}
 
       {showHardFailureOverlay && (
         <FailurePanel

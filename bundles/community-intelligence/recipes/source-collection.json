@@ -1,0 +1,11 @@
+{
+  "revision": "community-source-collection-v1",
+  "objective": "Collect bounded official community API snapshots for a Manager-defined Topic through Core.",
+  "inputs": ["topic", "provider", "scope", "tags", "lookback_window"],
+  "outputs": ["source_snapshot", "source_health", "provider_provenance"],
+  "rules": [
+    "Use only the signed provider query fields; never construct an endpoint or credential.",
+    "Preserve provider source ids, canonical links, edit times, content license, hash and fetched time.",
+    "A provider backoff, quota or retention failure remains a visible failed outcome."
+  ]
+}

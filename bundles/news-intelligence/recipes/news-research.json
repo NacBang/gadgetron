@@ -1,0 +1,13 @@
+{
+  "revision": "news-research-v2",
+  "objective": "Turn collected source snapshots into cited claims and event chronology without promoting inference to fact.",
+  "inputs": ["topic", "source_snapshots", "existing_events"],
+  "outputs": ["article_snapshots", "claims", "event_candidates"],
+  "rules": [
+    "Ensure one successful news.article-upsert for every pinned Source snapshot, even when matching Events or Claims already exist; copy the pinned source id, revision, locator and fetched time. A corrected retry after a failed call does not count as an additional snapshot.",
+    "List existing Events and Claims first and reuse their id and revision when they describe the same materialized fact.",
+    "Pin every factual claim to an exact source id and revision.",
+    "Keep reported, corroborated, contradicted, corrected and unverified states distinct.",
+    "Similarity proposes a duplicate; it never proves a merge."
+  ]
+}

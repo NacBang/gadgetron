@@ -101,6 +101,34 @@ pub enum ActivityEvent {
         #[serde(default)]
         arguments_summary: Option<String>,
     },
+    /// A monitoring alert crossed into the firing state (ISSUE 65).
+    /// Emitted by the background alert evaluator on a state EDGE only
+    /// (first fire, or a `repeat_interval` re-notify) — never every
+    /// eval tick. `fingerprint` is the stable instance identity
+    /// (e.g. `finding:<uuid>` / `host_offline:<host_id>`); the durable
+    /// state lives in `alert_state`, this bus event is the live ping.
+    AlertFired {
+        tenant_id: Uuid,
+        fingerprint: String,
+        /// `"log_finding"` / `"host_offline"` — which detector fired.
+        rule_key: String,
+        /// `None` for fleet-wide conditions; set for per-host alerts.
+        host_id: Option<Uuid>,
+        /// `"critical"` / `"high"` / `"medium"` / `"info"`.
+        severity: String,
+        /// Human-readable one-liner for the toast / alert pane.
+        message: String,
+    },
+    /// A previously-firing alert cleared (the condition stopped
+    /// matching). Lets the UI drop the alert from the live pane.
+    AlertResolved {
+        tenant_id: Uuid,
+        fingerprint: String,
+        rule_key: String,
+        host_id: Option<Uuid>,
+        severity: String,
+        message: String,
+    },
 }
 
 impl ActivityEvent {
@@ -112,6 +140,8 @@ impl ActivityEvent {
             Self::ActionCompleted { tenant_id, .. } => *tenant_id,
             Self::ApprovalResolved { tenant_id, .. } => *tenant_id,
             Self::ToolCallCompleted { tenant_id, .. } => *tenant_id,
+            Self::AlertFired { tenant_id, .. } => *tenant_id,
+            Self::AlertResolved { tenant_id, .. } => *tenant_id,
         }
     }
 }
@@ -252,5 +282,33 @@ mod tests {
         };
         assert_eq!(a.tenant_id(), t);
         assert_eq!(p.tenant_id(), t);
+    }
+
+    #[tokio::test]
+    async fn alert_fired_serializes_with_snake_case_type() {
+        let t = Uuid::new_v4();
+        let e = ActivityEvent::AlertFired {
+            tenant_id: t,
+            fingerprint: "host_offline:abc".into(),
+            rule_key: "host_offline".into(),
+            host_id: Some(Uuid::new_v4()),
+            severity: "critical".into(),
+            message: "host unreachable".into(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""type":"alert_fired""#));
+        assert_eq!(e.tenant_id(), t);
+        let r = ActivityEvent::AlertResolved {
+            tenant_id: t,
+            fingerprint: "host_offline:abc".into(),
+            rule_key: "host_offline".into(),
+            host_id: None,
+            severity: "critical".into(),
+            message: "recovered".into(),
+        };
+        assert!(serde_json::to_string(&r)
+            .unwrap()
+            .contains(r#""type":"alert_resolved""#));
+        assert_eq!(r.tenant_id(), t);
     }
 }

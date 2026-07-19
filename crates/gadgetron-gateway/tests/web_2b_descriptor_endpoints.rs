@@ -94,6 +94,7 @@ fn make_state_with_coordinator(
         knowledge: None,
         gateway_version: "0.0.0-test",
         descriptor_catalog: catalog.clone(),
+        dynamic_workbench: None,
     });
 
     let action_svc: Arc<dyn WorkbenchActionService> =
@@ -116,14 +117,18 @@ fn make_state_with_coordinator(
             projection,
             actions: Some(action_svc),
             approval_store: None,
+            policy_evaluator: None,
+            gadget_catalog: None,
             descriptor_catalog: Some(catalog),
             catalog_path: None,
             bundles_dir: None,
             bundle_signing: Default::default(),
+            runtime_manager: None,
             gadget_modes: None,
             gadget_mode_reconfigurer: None,
             agent_brain: None,
             agent_config_base: None,
+            vault_layout: None,
         })),
         penny_shared_surface: None,
         penny_assembler: None,

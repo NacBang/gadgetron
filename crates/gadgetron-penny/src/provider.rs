@@ -31,12 +31,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use gadgetron_core::agent::config::AgentConfig;
+use gadgetron_core::agent::config::{AgentConfig, ConversationAgentProfile};
 use gadgetron_core::audit::{GadgetAuditEventSink, NoopGadgetAuditEventSink};
 use gadgetron_core::error::{GadgetronError, PennyErrorKind, Result};
 use gadgetron_core::message::{Content, Message, Role};
 use gadgetron_core::provider::{
-    ChatChunk, ChatRequest, ChatResponse, Choice, LlmProvider, ModelInfo, Usage,
+    CallbackCredentialIssuer, ChatChunk, ChatRequest, ChatResponse, Choice, LlmProvider, ModelInfo,
+    Usage,
 };
 
 use crate::backend_session::AgentBackendSessionPersistence;
@@ -72,6 +73,7 @@ pub struct PennyProvider {
     /// settings endpoint. When present, every request overlays this snapshot
     /// onto the frozen startup config before spawning Claude Code.
     brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
+    callback_credential_issuer: Option<Arc<dyn CallbackCredentialIssuer>>,
 }
 
 impl PennyProvider {
@@ -130,6 +132,7 @@ impl PennyProvider {
             penny_home,
             config_path,
             brain_config: None,
+            callback_credential_issuer: None,
         }
     }
 
@@ -146,6 +149,14 @@ impl PennyProvider {
         brain_config: Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>,
     ) -> Self {
         self.brain_config = Some(brain_config);
+        self
+    }
+
+    pub fn with_callback_credential_issuer(
+        mut self,
+        issuer: Arc<dyn CallbackCredentialIssuer>,
+    ) -> Self {
+        self.callback_credential_issuer = Some(issuer);
         self
     }
 
@@ -176,22 +187,53 @@ impl PennyProvider {
         live_config.gadgets = self.registry.current_gadgets_config();
         live_config
     }
-}
 
-#[async_trait]
-impl LlmProvider for PennyProvider {
-    /// Non-streaming chat completion. Delegates to `chat_stream` and
-    /// aggregates the chunks into a single `ChatResponse`. Content is
-    /// concatenated from every `delta.content` in order; the finish
-    /// reason is taken from the last chunk that carries one.
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
-        let model = req.model.clone();
-        let mut stream = self.chat_stream(req);
+    fn session_for_request(
+        &self,
+        req: ChatRequest,
+        live_config: Arc<AgentConfig>,
+        allowed_tools: Vec<String>,
+    ) -> ClaudeCodeSession {
+        let tool_metadata = self.registry.tool_metadata_snapshot();
+        let callback_credential = self.callback_credential_issuer.as_ref().and_then(|issuer| {
+            let actor = req.audit_context.as_ref()?;
+            match issuer.issue(actor) {
+                Ok(credential) => Some(credential),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "penny_callback",
+                        error = %error,
+                        "failed to issue turn callback credential; child will expose local tools only"
+                    );
+                    None
+                }
+            }
+        });
+        let mut session = ClaudeCodeSession::new_with_home_and_config_path(
+            live_config,
+            allowed_tools,
+            req,
+            tool_metadata,
+            self.audit_sink.clone(),
+            Some(self.session_store.clone()),
+            self.backend_session_persistence.clone(),
+            self.penny_home.clone(),
+            self.config_path.clone(),
+        );
+        if let Some(credential) = callback_credential {
+            session = session.with_callback_credential(credential);
+        }
+        session
+    }
+
+    async fn collect_stream(
+        model: String,
+        mut stream: Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>>,
+    ) -> Result<ChatResponse> {
         let mut content = String::new();
         let mut finish_reason: Option<String> = None;
         let mut last_id: Option<String> = None;
         let mut created: u64 = 0;
-
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
             last_id = Some(chunk.id.clone());
@@ -205,7 +247,6 @@ impl LlmProvider for PennyProvider {
                 }
             }
         }
-
         Ok(ChatResponse {
             id: last_id.unwrap_or_else(|| "chatcmpl-penny-unknown".to_string()),
             object: "chat.completion".to_string(),
@@ -224,6 +265,94 @@ impl LlmProvider for PennyProvider {
         })
     }
 
+    /// Execute one stateless Penny turn with a role-specific subset of the
+    /// operator-approved Gadget list. An empty list exposes no product Gadget.
+    pub async fn chat_with_allowed_tools(
+        &self,
+        req: ChatRequest,
+        role_allowed_tools: &[String],
+    ) -> Result<ChatResponse> {
+        self.chat_with_config_and_allowed_tools(
+            req,
+            Arc::new(self.live_config_snapshot()),
+            role_allowed_tools,
+        )
+        .await
+    }
+
+    /// Execute one stateless role turn using a durable job profile overlaid on
+    /// the live operational policy. Backend/model/effort/endpoint remain pinned.
+    pub async fn chat_with_profile_and_allowed_tools(
+        &self,
+        req: ChatRequest,
+        profile: &ConversationAgentProfile,
+        role_allowed_tools: &[String],
+    ) -> Result<ChatResponse> {
+        let base = self.live_config_snapshot();
+        self.chat_with_config_and_allowed_tools(
+            req,
+            Arc::new(profile.overlay_agent(&base)),
+            role_allowed_tools,
+        )
+        .await
+    }
+
+    /// Stream one stateless role turn using a durable job profile.
+    ///
+    /// Knowledge workers use this variant to retain already-emitted text when
+    /// an operator cancels the job before the provider reaches its final
+    /// response.
+    pub fn chat_stream_with_profile_and_allowed_tools(
+        &self,
+        req: ChatRequest,
+        profile: &ConversationAgentProfile,
+        role_allowed_tools: &[String],
+    ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
+        let base = self.live_config_snapshot();
+        let live_config = Arc::new(profile.overlay_agent(&base));
+        let operator_allowed = self.registry.build_allowed_tools(live_config.as_ref());
+        let mut allowed_tools: Vec<_> = operator_allowed
+            .into_iter()
+            .filter(|tool| role_allowed_tools.contains(tool))
+            .collect();
+        allowed_tools.sort();
+        allowed_tools.dedup();
+        self.session_for_request(req, live_config, allowed_tools)
+            .run()
+    }
+
+    async fn chat_with_config_and_allowed_tools(
+        &self,
+        req: ChatRequest,
+        live_config: Arc<AgentConfig>,
+        role_allowed_tools: &[String],
+    ) -> Result<ChatResponse> {
+        let model = req.model.clone();
+        let operator_allowed = self.registry.build_allowed_tools(live_config.as_ref());
+        let mut allowed_tools: Vec<_> = operator_allowed
+            .into_iter()
+            .filter(|tool| role_allowed_tools.contains(tool))
+            .collect();
+        allowed_tools.sort();
+        allowed_tools.dedup();
+        let stream = self
+            .session_for_request(req, live_config, allowed_tools)
+            .run();
+        Self::collect_stream(model, stream).await
+    }
+}
+
+#[async_trait]
+impl LlmProvider for PennyProvider {
+    /// Non-streaming chat completion. Delegates to `chat_stream` and
+    /// aggregates the chunks into a single `ChatResponse`. Content is
+    /// concatenated from every `delta.content` in order; the finish
+    /// reason is taken from the last chunk that carries one.
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let model = req.model.clone();
+        Self::collect_stream(model, self.chat_stream(req)).await
+    }
+
     /// Streaming chat completion. Constructs a fresh `ClaudeCodeSession`
     /// per call so each request gets its own subprocess, MCP config
     /// tempfile, stdin/stdout pipes, and stderr sink task. Concurrency
@@ -236,19 +365,8 @@ impl LlmProvider for PennyProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatChunk>> + Send>> {
         let live_config = Arc::new(self.live_config_snapshot());
         let allowed_tools = self.registry.build_allowed_tools(live_config.as_ref());
-        let tool_metadata = self.registry.tool_metadata_snapshot();
-        let session = ClaudeCodeSession::new_with_home_and_config_path(
-            live_config,
-            allowed_tools,
-            req,
-            tool_metadata,
-            self.audit_sink.clone(),
-            Some(self.session_store.clone()),
-            self.backend_session_persistence.clone(),
-            self.penny_home.clone(),
-            self.config_path.clone(),
-        );
-        session.run()
+        self.session_for_request(req, live_config, allowed_tools)
+            .run()
     }
 
     /// Returns a single-element catalog advertising the `penny`
@@ -318,6 +436,7 @@ pub fn register_with_router(
         config_path,
         None,
         None,
+        None,
     );
 }
 
@@ -331,7 +450,8 @@ pub fn register_with_router_and_brain_config(
     config_path: Option<std::path::PathBuf>,
     brain_config: Option<Arc<arc_swap::ArcSwap<gadgetron_core::agent::AgentConfig>>>,
     backend_session_persistence: Option<Arc<dyn AgentBackendSessionPersistence>>,
-) {
+    callback_credential_issuer: Option<Arc<dyn CallbackCredentialIssuer>>,
+) -> Arc<PennyProvider> {
     let penny_home = match std::env::var("HOME") {
         Ok(real_home) => {
             let root = crate::home::default_home_root(std::path::Path::new(&real_home));
@@ -367,10 +487,15 @@ pub fn register_with_router_and_brain_config(
     if let Some(brain_config) = brain_config {
         provider = provider.with_brain_config(brain_config);
     }
+    if let Some(issuer) = callback_credential_issuer {
+        provider = provider.with_callback_credential_issuer(issuer);
+    }
+    let provider = Arc::new(provider);
     providers.insert(
         PennyProvider::MODEL_ID.to_string(),
-        Arc::new(provider) as Arc<dyn LlmProvider>,
+        provider.clone() as Arc<dyn LlmProvider>,
     );
+    provider
 }
 
 #[cfg(test)]
@@ -378,6 +503,9 @@ mod tests {
     use super::*;
     use crate::gadget_registry::GadgetRegistryBuilder;
     use gadgetron_core::message::Message;
+    use gadgetron_core::provider::{CallbackCredentialLease, ChatAuditContext};
+    use gadgetron_core::secret::Secret;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn empty_registry() -> Arc<GadgetRegistry> {
         Arc::new(
@@ -397,6 +525,7 @@ mod tests {
             stream: true,
             stop: None,
             conversation_id: None,
+            audit_context: None,
         }
     }
 
@@ -497,6 +626,51 @@ mod tests {
             } => {}
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    struct RecordingCredentialIssuer {
+        issued: Arc<AtomicUsize>,
+        revoked: Arc<AtomicUsize>,
+    }
+
+    impl CallbackCredentialIssuer for RecordingCredentialIssuer {
+        fn issue(&self, _actor: &ChatAuditContext) -> Result<CallbackCredentialLease> {
+            self.issued.fetch_add(1, Ordering::SeqCst);
+            let revoked = Arc::clone(&self.revoked);
+            Ok(CallbackCredentialLease::new(
+                Secret::new("gad_delegate_provider-test-credential".into()),
+                move || {
+                    revoked.fetch_add(1, Ordering::SeqCst);
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_turn_revokes_callback_credential_after_spawn_failure() {
+        let mut cfg = AgentConfig::default();
+        cfg.binary = "/definitely/does/not/exist/claude".into();
+        let issued = Arc::new(AtomicUsize::new(0));
+        let revoked = Arc::new(AtomicUsize::new(0));
+        let issuer = Arc::new(RecordingCredentialIssuer {
+            issued: Arc::clone(&issued),
+            revoked: Arc::clone(&revoked),
+        });
+        let provider = PennyProvider::new_without_audit(Arc::new(cfg), empty_registry())
+            .with_callback_credential_issuer(issuer);
+        let mut request = test_request();
+        request.audit_context = Some(ChatAuditContext {
+            tenant_id: uuid::Uuid::new_v4().to_string(),
+            owner_id: Some(uuid::Uuid::new_v4().to_string()),
+        });
+
+        let mut stream = provider.chat_stream(request);
+        let first = stream.next().await.expect("spawn failure result");
+        assert!(first.is_err());
+        drop(stream);
+        tokio::task::yield_now().await;
+        assert_eq!(issued.load(Ordering::SeqCst), 1);
+        assert_eq!(revoked.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

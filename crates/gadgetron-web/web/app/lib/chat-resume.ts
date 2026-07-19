@@ -5,7 +5,7 @@
 //   1. `useActiveJob(convId)` polls
 //      `GET /api/v1/web/workbench/conversations/{convId}/active-job`
 //      every `POLL_INTERVAL_MS` while the chat panel is mounted.
-//      Returns the latest snapshot so the UI can render a "생성 중"
+//      Returns the latest snapshot so the UI can render a running
 //      indicator and decide whether to follow `subscribeJobSync`
 //      for live tokens.
 //
@@ -52,6 +52,43 @@ function authHeaders(): Record<string, string> {
     if (key) h["Authorization"] = `Bearer ${key}`;
   }
   return h;
+}
+
+/**
+ * Cancel the server job currently attached to a conversation.
+ *
+ * This is intentionally independent of the foreground fetch. After a page
+ * reload the AI SDK owns only the resumed `/sync` stream, so aborting that
+ * browser subscription cannot cancel the durable backend job by itself.
+ */
+export async function cancelActiveConversationJob(
+  convId: string,
+): Promise<JobSnapshot | null> {
+  const activeUrl = `${getWorkbenchBase()}/workbench/conversations/${encodeURIComponent(
+    convId,
+  )}/active-job`;
+  const activeResponse = await fetch(activeUrl, {
+    headers: authHeaders(),
+    credentials: "include",
+  });
+  if (!activeResponse.ok) return null;
+
+  const snapshot = (await activeResponse.json()) as JobSnapshot;
+  if (!snapshot.job_id || snapshot.is_finished) return snapshot;
+
+  const cancelUrl = `${getWorkbenchBase()}/workbench/jobs/${encodeURIComponent(
+    snapshot.job_id,
+  )}/cancel`;
+  const cancelResponse = await fetch(cancelUrl, {
+    method: "POST",
+    headers: authHeaders(),
+    credentials: "include",
+    keepalive: true,
+  });
+  if (!cancelResponse.ok) {
+    throw new Error(`cancel chat job: HTTP ${cancelResponse.status}`);
+  }
+  return (await cancelResponse.json()) as JobSnapshot;
 }
 
 /**
@@ -107,7 +144,7 @@ export function useActiveJob(convId: string | null): JobSnapshot | null {
 /**
  * Convenience derived flag — `true` when there's a job that isn't
  * finished yet. The indicator UI uses this to decide whether to
- * show "생성 중".
+ * show its localized running state.
  */
 export function isJobRunning(snap: JobSnapshot | null): boolean {
   return snap !== null && snap.status === "streaming" && !snap.is_finished;

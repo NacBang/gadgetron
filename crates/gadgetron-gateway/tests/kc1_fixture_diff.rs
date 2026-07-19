@@ -95,12 +95,17 @@ impl WorkbenchProjectionService for FakeProjectionEmpty {
         _actor_scopes: &[gadgetron_core::context::Scope],
     ) -> Result<gadgetron_core::workbench::WorkbenchRegisteredViewsResponse, WorkbenchHttpError>
     {
-        Ok(gadgetron_core::workbench::WorkbenchRegisteredViewsResponse { views: vec![] })
+        Ok(
+            gadgetron_core::workbench::WorkbenchRegisteredViewsResponse {
+                capability_revision: None,
+                views: vec![],
+            },
+        )
     }
 
     async fn view_data(
         &self,
-        _actor_scopes: &[gadgetron_core::context::Scope],
+        _actor: &gadgetron_core::context::TenantContext,
         view_id: &str,
     ) -> Result<gadgetron_core::workbench::WorkbenchViewData, WorkbenchHttpError> {
         Err(WorkbenchHttpError::ViewNotFound {
@@ -113,7 +118,12 @@ impl WorkbenchProjectionService for FakeProjectionEmpty {
         _actor_scopes: &[gadgetron_core::context::Scope],
     ) -> Result<gadgetron_core::workbench::WorkbenchRegisteredActionsResponse, WorkbenchHttpError>
     {
-        Ok(gadgetron_core::workbench::WorkbenchRegisteredActionsResponse { actions: vec![] })
+        Ok(
+            gadgetron_core::workbench::WorkbenchRegisteredActionsResponse {
+                capability_revision: None,
+                actions: vec![],
+            },
+        )
     }
 }
 

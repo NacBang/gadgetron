@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "types": [
+    {"id":"Discussion","label":"Community discussion","family":"source"},
+    {"id":"SolutionPattern","label":"Solution pattern","family":"procedure"},
+    {"id":"PatternEvidence","label":"Pattern evidence","family":"claim"}
+  ],
+  "relations": [
+    {"id":"supports_pattern","label":"Supports pattern","family":"supports","source_types":["PatternEvidence"],"target_types":["SolutionPattern"]},
+    {"id":"contradicts_pattern","label":"Contradicts pattern","family":"contradicts","source_types":["PatternEvidence"],"target_types":["SolutionPattern"]},
+    {"id":"observed_in","label":"Observed in discussion","family":"derived_from","source_types":["PatternEvidence"],"target_types":["Discussion"]},
+    {"id":"applies_to","label":"Applies to environment","family":"applies_to","source_types":["SolutionPattern"],"target_types":["Discussion"]}
+  ],
+  "migrations": []
+}

@@ -1,0 +1,8 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "travel-intelligence",
+  "role": "gardener",
+  "inputs": ["candidate_id", "source_ids", "verified_outcome_ids"],
+  "rules": ["preserve_price_time", "preserve_contradictions", "preserve_accessibility_scope", "mark_stale_option"],
+  "output": {"canonical_kind": "lesson", "review_required": true}
+}

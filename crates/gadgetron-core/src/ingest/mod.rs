@@ -6,7 +6,7 @@
 //!
 //! - [`Extractor`] + [`ExtractedDocument`] / [`ExtractHints`] /
 //!   [`ExtractError`] / [`StructureHint`] — format-agnostic extraction
-//!   contract consumed by `bundles/document-formats/`.
+//!   contract consumed by `plugs/document-formats/`.
 //! - [`BlobStore`] + [`BlobId`] / [`BlobRef`] / [`BlobMetadata`] /
 //!   [`BlobError`] — wire/trait surface for original-byte persistence
 //!   (default = `FilesystemBlobStore`, S3 impl is future work).
@@ -16,7 +16,8 @@
 //!
 //! - `IngestPipeline` orchestration (lives in `gadgetron-knowledge::ingest`).
 //! - Format-specific extractors (markdown / PDF / docx / pptx live in
-//!   `bundles/document-formats/`; HTML lives in `bundles/web-scrape/`).
+//!   `plugs/document-formats/`; HTML currently lives in Knowledge Source
+//!   extraction).
 //! - `FilesystemBlobStore` implementation (future work alongside
 //!   `ingested_blobs` Postgres migration).
 //! - Chunking algorithm — `gadgetron-knowledge::chunking`.

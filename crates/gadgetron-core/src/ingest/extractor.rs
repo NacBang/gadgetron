@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 /// subprocess pool) must expose `Send + Sync` themselves.
 #[async_trait]
 pub trait Extractor: Send + Sync + std::fmt::Debug {
-    /// Stable name for logging / telemetry (e.g. `"pdf-extract-0.7"`,
+    /// Stable name for logging / telemetry (e.g. `"pdf-extract-0.12"`,
     /// `"markdown-builtin"`). Appears in `source_metadata` and tracing spans.
     fn name(&self) -> &str;
 

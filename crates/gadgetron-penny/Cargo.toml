@@ -29,6 +29,7 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
 reqwest = { workspace = true }
+axum = { workspace = true }
 
 # subprocess management
 regex = { workspace = true }

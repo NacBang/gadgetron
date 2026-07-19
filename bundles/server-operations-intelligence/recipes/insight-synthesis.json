@@ -1,0 +1,8 @@
+{
+  "recipe_version": 1,
+  "owner_bundle": "server-operations-intelligence",
+  "role": "insight_synthesizer",
+  "inputs": ["source_ids", "satisfied_outcome_ids"],
+  "rules": ["require_two_sources", "require_verified_outcome", "preserve_counterexample", "bound_environment_scope"],
+  "output": {"canonical_kind": "insight", "review_required": true}
+}

@@ -16,7 +16,7 @@ export function getApiBase(): string {
 }
 
 export interface ActionResponse {
-  result?: { status?: string; payload?: unknown };
+  result?: { status?: string; approval_id?: string | null; payload?: unknown };
   [k: string]: unknown;
 }
 
@@ -43,8 +43,8 @@ export async function invokeAction(
 
 /**
  * Gadget-backed actions wrap their JSON as
- * `[{ type: "text", text: "<json>" }]`; bundle actions return the
- * payload object directly. Both unwrap to the inner value.
+ * `[{ type: "text", text: "<json>" }]`. The decoded invocation envelope
+ * carries domain data in `output` beside evidence/outcome candidates.
  */
 export function unwrapPayload(resp: ActionResponse): unknown {
   const payload = resp.result?.payload;
@@ -52,11 +52,21 @@ export function unwrapPayload(resp: ActionResponse): unknown {
     const first = payload[0] as { text?: string } | undefined;
     if (first?.text) {
       try {
-        return JSON.parse(first.text);
+        return invocationOutput(JSON.parse(first.text));
       } catch {
         return first.text;
       }
     }
   }
-  return payload;
+  return invocationOutput(payload);
+}
+
+function invocationOutput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const envelope = value as Record<string, unknown>;
+  const isInvocationEnvelope = Object.prototype.hasOwnProperty.call(envelope, "output")
+    && Array.isArray(envelope.candidates)
+    && Array.isArray(envelope.evidence)
+    && Array.isArray(envelope.outcomes);
+  return isInvocationEnvelope ? envelope.output : value;
 }

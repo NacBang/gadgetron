@@ -1,0 +1,13 @@
+{
+  "revision": "social-response-assistance-v2",
+  "objective": "Prepare a cited, reviewable response draft without performing a social-media write.",
+  "inputs": ["briefing", "audience", "objective", "target_account", "risk_context"],
+  "domain_outputs": ["response_draft"],
+  "core_review_output": ["create_note_candidate", "citations"],
+  "rules": [
+    "Read the exact briefing id and revision named in the request before drafting and cite only its pinned evidence.",
+    "State audience, objective, impact preview and risk notes; do not impersonate a person or hide uncertainty.",
+    "Complete social.response-draft-upsert before returning the reviewed Knowledge proposal.",
+    "The handoff always has publish_allowed=false. Never follow, like, reply, message or publish."
+  ]
+}

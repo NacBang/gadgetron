@@ -6,7 +6,8 @@
 //!
 //! Terminology:
 //! - **Gadget** = MCP tool consumed by Penny. Defined by a `GadgetSchema`.
-//! - **GadgetProvider** = Rust supplier of Gadgets, owned by a Bundle.
+//! - **GadgetProvider** = Rust supplier of Gadgets. Ownership may be Core
+//!   built-in or an installed Bundle.
 //!
 //! # Knowledge service delegation
 //!
@@ -15,36 +16,39 @@
 //! variants are stable so Penny prompts, CLI, Web UI, and existing tests
 //! keep working — the plumbing change is invisible to external callers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use gadgetron_core::agent::config::{EnvResolver, StdEnv};
 use gadgetron_core::agent::tools::{
-    GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
+    GadgetDispatchContext, GadgetError, GadgetProvider, GadgetResult, GadgetSchema, GadgetTier,
 };
 use gadgetron_core::error::{GadgetronError, KnowledgeErrorKind, WikiErrorKind};
 use gadgetron_core::knowledge::{
     AuthenticatedContext, KnowledgeHit, KnowledgeHitKind, KnowledgePutRequest, KnowledgeQuery,
     KnowledgeQueryMode,
 };
+use gadgetron_plug_document_formats::MarkdownExtractor;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use base64::Engine;
-use gadgetron_core::ingest::{
-    ExtractError, ExtractHints, ExtractedDocument, Extractor, StructureHint,
-};
+use gadgetron_core::ingest::Extractor;
 
 use crate::config::KnowledgeConfig;
+use crate::conversation_source::{ConversationSourceError, ConversationSourceReader};
 use crate::error::{SearchError, WikiError};
 use crate::ingest::{ImportRequest, IngestPipeline};
 use crate::keyword_index::WikiKeywordIndex;
 use crate::llm_wiki::LlmWikiStore;
+use crate::reviewed_vault::{ReviewedVaultError, ReviewedVaultReader};
 use crate::search::{SearxngClient, WebSearch};
 use crate::semantic::{normalize_page_content, SemanticBackend};
 use crate::semantic_index::SemanticPgVectorIndex;
 use crate::service::{KnowledgeService, KnowledgeServiceBuilder};
+use crate::vault::TenantVaultLayout;
 use crate::wiki::Wiki;
 
 /// The concrete `GadgetProvider` for knowledge-layer tools.
@@ -60,21 +64,18 @@ use crate::wiki::Wiki;
 /// canonical store sees them.
 pub struct KnowledgeGadgetProvider {
     service: Arc<KnowledgeService>,
+    conversation_source: Option<ConversationSourceReader>,
+    reviewed_vault: Option<ReviewedVaultReader>,
     web_search: Option<Arc<dyn WebSearch>>,
     max_search_results: usize,
     /// True when a semantic index is registered on the service, so writes
     /// should normalize frontmatter (created/updated/source defaults).
     normalize_on_write: bool,
-    /// RAW ingestion pipeline. Always constructed; wires through the same
-    /// `KnowledgeService` as the other wiki.* gadgets so `wiki.import`
-    /// goes through the knowledge plane contract (`write()` delegation,
-    /// derived-plug fanout, etc.).
+    /// Source-Ledger-backed RAW ingestion pipeline. A provider without a
+    /// PostgreSQL pool keeps this fail-closed while legacy pages remain
+    /// readable through `service`.
     ingest_pipeline: Arc<IngestPipeline>,
-    /// Default markdown extractor — an internal near-noop used by
-    /// `wiki.import` when the operator hasn't registered a Bundle
-    /// extractor yet. Markdown needs no heavyweight parsing, so the
-    /// default guarantees `wiki.import(..., content_type: "text/markdown")`
-    /// works out of the box even on the simplest deployment.
+    /// Default compile-time Markdown Plug used by `wiki.import`.
     default_markdown_extractor: Arc<dyn Extractor>,
 }
 
@@ -93,6 +94,23 @@ impl KnowledgeGadgetProvider {
         pg_pool: Option<PgPool>,
         env: &dyn EnvResolver,
     ) -> Result<Self, WikiError> {
+        let source_import = pg_pool
+            .as_ref()
+            .map_or_else(IngestPipeline::unavailable, |pool| {
+                IngestPipeline::source_ledger(pool.clone(), config.effective_vault_path())
+            });
+        let reviewed_vault = pg_pool.as_ref().map(|pool| {
+            ReviewedVaultReader::new(
+                pool.clone(),
+                TenantVaultLayout::new(config.effective_vault_path()),
+            )
+        });
+        let conversation_source = pg_pool.as_ref().map(|pool| {
+            ConversationSourceReader::new(
+                pool.clone(),
+                TenantVaultLayout::new(config.effective_vault_path()),
+            )
+        });
         let wiki_config = config.to_wiki_config().map_err(|msg| {
             WikiError::kind_with_message(
                 WikiErrorKind::GitCorruption {
@@ -126,7 +144,12 @@ impl KnowledgeGadgetProvider {
         let semantic_backend =
             SemanticBackend::from_config(pg_pool, config.embedding.as_ref(), env)?.map(Arc::new);
 
-        Self::build_service(wiki, web_search, semantic_backend, max_search_results)
+        let mut provider =
+            Self::build_service(wiki, web_search, semantic_backend, max_search_results)?;
+        provider.reviewed_vault = reviewed_vault;
+        provider.conversation_source = conversation_source;
+        provider.ingest_pipeline = Arc::new(source_import);
+        Ok(provider)
     }
 
     /// Construct directly from an already-opened `Wiki` + optional
@@ -164,11 +187,12 @@ impl KnowledgeGadgetProvider {
         let normalize = service
             .index_plugs()
             .any(|p| p.as_str() == "semantic-pgvector");
-        let ingest_pipeline = Arc::new(IngestPipeline::new(service.clone()));
-        let default_markdown_extractor: Arc<dyn Extractor> =
-            Arc::new(InternalMarkdownExtractor::new());
+        let ingest_pipeline = Arc::new(IngestPipeline::unavailable());
+        let default_markdown_extractor: Arc<dyn Extractor> = Arc::new(MarkdownExtractor::new());
         Self {
             service,
+            conversation_source: None,
+            reviewed_vault: None,
             web_search,
             max_search_results: max_search_results.max(1),
             normalize_on_write: normalize,
@@ -204,12 +228,13 @@ impl KnowledgeGadgetProvider {
             .build()
             .map_err(|e| WikiError::Frontmatter(format!("knowledge service build: {e}")))?;
 
-        let ingest_pipeline = Arc::new(IngestPipeline::new(service.clone()));
-        let default_markdown_extractor: Arc<dyn Extractor> =
-            Arc::new(InternalMarkdownExtractor::new());
+        let ingest_pipeline = Arc::new(IngestPipeline::unavailable());
+        let default_markdown_extractor: Arc<dyn Extractor> = Arc::new(MarkdownExtractor::new());
 
         Ok(Self {
             service,
+            conversation_source: None,
+            reviewed_vault: None,
             web_search,
             max_search_results: max_search_results.max(1),
             normalize_on_write: semantic.is_some(),
@@ -233,6 +258,7 @@ impl GadgetProvider for KnowledgeGadgetProvider {
 
     fn gadget_schemas(&self) -> Vec<GadgetSchema> {
         let mut out = vec![
+            schema_source_get(),
             schema_wiki_list(),
             schema_wiki_get(),
             schema_wiki_search(),
@@ -255,10 +281,55 @@ impl GadgetProvider for KnowledgeGadgetProvider {
             "wiki.write" => self.call_wiki_write(args).await,
             "wiki.delete" => self.call_wiki_delete(args).await,
             "wiki.rename" => self.call_wiki_rename(args).await,
-            "wiki.import" => self.call_wiki_import(args).await,
+            "wiki.import" => self.call_wiki_import(None, args).await,
+            "source.get" => Err(GadgetError::Denied {
+                reason: "source.get requires an authenticated conversation context".to_string(),
+            }),
             "web.search" => self.call_web_search(args).await,
             other => Err(GadgetError::UnknownGadget(other.to_string())),
         }
+    }
+
+    async fn call_with_context(
+        &self,
+        context: &GadgetDispatchContext,
+        name: &str,
+        args: Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        match name {
+            "wiki.list" => self.call_wiki_list_with_context(context).await,
+            "wiki.get" => self.call_wiki_get_with_context(context, args).await,
+            "wiki.search" => self.call_wiki_search_with_context(context, args).await,
+            "wiki.import" => self.call_wiki_import(Some(context), args).await,
+            "source.get" => self.call_source_get_with_context(context, args).await,
+            _ => self.call(name, args).await,
+        }
+    }
+}
+
+fn schema_source_get() -> GadgetSchema {
+    GadgetSchema {
+        name: "source.get".into(),
+        tier: GadgetTier::Read,
+        description: "Read one citation-ready Source revision pinned to the current chat. Use only the exact conversation_id, source_id, source_revision, object_id, object_revision, and locator supplied in the gadgetron_chat_attachments context. The call fails if ownership, conversation linkage, readiness, revision, or locator changed."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "conversation_id": { "type": "string", "minLength": 36, "maxLength": 36 },
+                "source_id": { "type": "string", "minLength": 36, "maxLength": 36 },
+                "source_revision": { "type": "integer", "minimum": 1 },
+                "object_id": { "type": "string", "minLength": 36, "maxLength": 36 },
+                "object_revision": { "type": "integer", "minimum": 1 },
+                "locator": { "type": "string", "minLength": 1, "maxLength": 512 }
+            },
+            "required": [
+                "conversation_id", "source_id", "source_revision", "object_id",
+                "object_revision", "locator"
+            ],
+            "additionalProperties": false
+        }),
+        idempotent: Some(true),
     }
 }
 
@@ -266,7 +337,8 @@ fn schema_wiki_list() -> GadgetSchema {
     GadgetSchema {
         name: "wiki.list".into(),
         tier: GadgetTier::Read,
-        description: "List all pages in the Penny wiki. Returns page names \
+        description: "List all pages available to Penny, including reviewed \
+            Domain Vault knowledge visible to the current user. Returns page names \
             (use forward slashes for subdirectories). Call wiki.list first to \
             discover what pages exist before searching or fetching by name."
             .into(),
@@ -283,7 +355,8 @@ fn schema_wiki_get() -> GadgetSchema {
     GadgetSchema {
         name: "wiki.get".into(),
         tier: GadgetTier::Read,
-        description: "Fetch a wiki page by its logical name. Use wiki.get \
+        description: "Fetch a wiki or reviewed Domain Vault page by its exact \
+            logical name. Use wiki.get \
             when you already know the exact page name (e.g. from a previous \
             wiki.list or wiki.search result). Page names use forward slashes \
             for subdirectories and do NOT include the .md suffix."
@@ -304,8 +377,9 @@ fn schema_wiki_search() -> GadgetSchema {
     GadgetSchema {
         name: "wiki.search".into(),
         tier: GadgetTier::Read,
-        description: "Semantic + keyword search over the wiki. Returns pages \
-            ranked by relevance with a short snippet."
+        description: "Semantic + keyword search over the wiki and reviewed \
+            Domain Vault knowledge visible to the current user. Returns pages \
+            ranked by relevance with a title and short snippet."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -397,12 +471,10 @@ fn schema_wiki_import() -> GadgetSchema {
         name: "wiki.import".into(),
         tier: GadgetTier::Write,
         description: "Import a RAW document (markdown / plain text) into the \
-            wiki. Bytes are base64-encoded in `bytes`, `content_type` is the \
-            MIME type (e.g. `text/markdown`). The pipeline extracts a title \
-            (explicit `title_hint` > first heading > fallback), kebab-cases \
-            it into `imports/<title>.md`, prepends source-tracking \
-            frontmatter, and writes through the canonical store. \
-            PDF / docx / pptx extractors land in a later release."
+            authenticated user's Personal Space Source Ledger and core Vault. \
+            Bytes are base64-encoded in `bytes`; the original blob, hash, \
+            attempts, and source-linked note are preserved. PDF / docx / pptx \
+            use the Source upload surface rather than this compatibility Gadget."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -422,7 +494,7 @@ fn schema_wiki_import() -> GadgetSchema {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 256,
-                    "description": "Optional wiki path override; when omitted the pipeline derives `imports/<kebab-title>`."
+                    "description": "Optional exact Personal core Vault note locator (`notes/<slug>--<8hex>.md` or `notes/<uuid>.md`); when omitted a stable readable locator is generated."
                 },
                 "title_hint": {
                     "type": "string",
@@ -432,7 +504,7 @@ fn schema_wiki_import() -> GadgetSchema {
                 "overwrite": {
                     "type": "boolean",
                     "default": false,
-                    "description": "If true, allow overwriting an existing page at `target_path`."
+                    "description": "If true, advance the stable note at `target_path` to this new Source revision."
                 },
                 "auto_enrich": {
                     "type": "boolean",
@@ -482,6 +554,49 @@ impl KnowledgeGadgetProvider {
         AuthenticatedContext::system()
     }
 
+    async fn call_source_get_with_context(
+        &self,
+        context: &GadgetDispatchContext,
+        args: Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        let reader = self.conversation_source.as_ref().ok_or_else(|| {
+            GadgetError::Execution("conversation Source reader is unavailable".to_string())
+        })?;
+        let conversation_id = required_uuid_arg(&args, "conversation_id")?;
+        let source_id = required_uuid_arg(&args, "source_id")?;
+        let source_revision = required_positive_i64_arg(&args, "source_revision")?;
+        let object_id = required_uuid_arg(&args, "object_id")?;
+        let object_revision = required_positive_i64_arg(&args, "object_revision")?;
+        let locator = required_string_arg(&args, "locator")?;
+        let page = reader
+            .get(
+                context,
+                conversation_id,
+                source_id,
+                source_revision,
+                object_id,
+                object_revision,
+                &locator,
+            )
+            .await
+            .map_err(map_conversation_source_err)?;
+        Ok(GadgetResult {
+            content: json!({
+                "conversation_id": conversation_id,
+                "source_id": page.source_id,
+                "source_revision": page.source_revision,
+                "object_id": page.object_id,
+                "object_revision": page.object_revision,
+                "locator": page.locator,
+                "requested_uri": page.requested_uri,
+                "content_hash": page.content_hash,
+                "source_metadata": page.source_metadata,
+                "content": page.markdown,
+            }),
+            is_error: false,
+        })
+    }
+
     async fn call_wiki_list(&self) -> Result<GadgetResult, GadgetError> {
         let pages = self
             .service
@@ -512,13 +627,28 @@ impl KnowledgeGadgetProvider {
     async fn call_wiki_search(&self, args: Value) -> Result<GadgetResult, GadgetError> {
         let query = required_string_arg(&args, "query")?;
         let limit = parse_search_limit(&args);
+        let hits = self.search_wiki_hits(&query, limit).await?;
+        Ok(GadgetResult {
+            content: json!({
+                "query": query,
+                "hits": hits,
+            }),
+            is_error: false,
+        })
+    }
+
+    async fn search_wiki_hits(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHitPayload>, GadgetError> {
         // `Auto` mode at the service level dispatches to every enabled
         // search plug — keyword-only when no semantic plug is registered,
         // hybrid when both are present. The previous in-provider
         // "semantic primary, fall back to keyword" heuristic is now the
         // service's fusion algorithm.
         let q = KnowledgeQuery {
-            text: query.clone(),
+            text: query.to_string(),
             limit: u32::try_from(limit).unwrap_or(u32::MAX),
             mode: KnowledgeQueryMode::Auto,
             include_relations: false,
@@ -528,10 +658,92 @@ impl KnowledgeGadgetProvider {
             .search(&self.actor(), &q)
             .await
             .map_err(map_knowledge_err_generic)?;
+        Ok(hits.into_iter().map(search_hit_payload).collect())
+    }
+
+    async fn call_wiki_list_with_context(
+        &self,
+        context: &GadgetDispatchContext,
+    ) -> Result<GadgetResult, GadgetError> {
+        let mut pages = self
+            .service
+            .list(&self.actor())
+            .await
+            .map_err(map_knowledge_err_generic)?;
+        if let Some(reader) = &self.reviewed_vault {
+            pages.extend(reader.list(context).await.map_err(map_reviewed_vault_err)?);
+        }
+        pages.sort();
+        pages.dedup();
+        Ok(GadgetResult {
+            content: json!({ "pages": pages }),
+            is_error: false,
+        })
+    }
+
+    async fn call_wiki_get_with_context(
+        &self,
+        context: &GadgetDispatchContext,
+        args: Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        let name = required_string_arg(&args, "name")?;
+        if name.starts_with("vault/") {
+            let Some(reader) = &self.reviewed_vault else {
+                return Err(GadgetError::Execution(format!("page {name:?} not found")));
+            };
+            let page = reader
+                .get(context, &name)
+                .await
+                .map_err(map_reviewed_vault_err)?
+                .ok_or_else(|| GadgetError::Execution(format!("page {name:?} not found")))?;
+            return Ok(GadgetResult {
+                content: json!({
+                    "name": page.page_name,
+                    "title": page.title,
+                    "content": page.markdown,
+                }),
+                is_error: false,
+            });
+        }
+        self.call_wiki_get(args).await
+    }
+
+    async fn call_wiki_search_with_context(
+        &self,
+        context: &GadgetDispatchContext,
+        args: Value,
+    ) -> Result<GadgetResult, GadgetError> {
+        let query = required_string_arg(&args, "query")?;
+        let limit = parse_search_limit(&args);
+        let mut hits = self.search_wiki_hits(&query, limit).await?;
+        if let Some(reader) = &self.reviewed_vault {
+            hits.extend(
+                reader
+                    .search(context, &query, limit)
+                    .await
+                    .map_err(map_reviewed_vault_err)?
+                    .into_iter()
+                    .map(|hit| SearchHitPayload {
+                        page_name: hit.page_name,
+                        score: hit.score,
+                        section: Some(hit.title),
+                        snippet: Some(hit.snippet).filter(|snippet| !snippet.is_empty()),
+                    }),
+            );
+        }
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.page_name.cmp(&right.page_name))
+        });
+        let mut seen = HashSet::new();
+        hits.retain(|hit| seen.insert(hit.page_name.clone()));
+        hits.truncate(limit);
         Ok(GadgetResult {
             content: json!({
                 "query": query,
-                "hits": hits.into_iter().map(search_hit_payload).collect::<Vec<_>>(),
+                "hits": hits,
             }),
             is_error: false,
         })
@@ -623,34 +835,16 @@ impl KnowledgeGadgetProvider {
         }
     }
 
-    /// Dispatch `wiki.import`. Only the built-in markdown extractor is
+    /// Dispatch `wiki.import`. Only the compile-time Markdown Plug is
     /// wired here; content-type `application/pdf` is rejected at the
     /// gadget layer with an `InvalidArgs`.
-    ///
-    /// # PDF path via Bundle install (deferred)
-    ///
-    /// Importing PDFs through `wiki.import` requires the
-    /// `DocumentFormatsBundle` (with the `pdf` feature enabled) to
-    /// register a `PdfExtractor` on the `extractors` axis of the bundle
-    /// registry. That registry wiring is not yet part of the production
-    /// startup path.
-    ///
-    /// Until then, PDF extraction is exercised in two places:
-    ///
-    /// 1. **Crate-level unit tests** — `bundles/document-formats/
-    ///    src/pdf.rs` validates `PdfExtractor::extract` end-to-end
-    ///    against a hand-crafted PDF fixture.
-    /// 2. **Bundle-level integration test** — `crates/gadgetron-
-    ///    knowledge/tests/rag_citation_e2e.rs::pdf_extractor_produces_
-    ///    pipeline_ready_output` constructs a `PdfExtractor`
-    ///    directly (simulating what `BundleRegistry::install_all` will
-    ///    do) and confirms the `ExtractedDocument` shape matches what
-    ///    `IngestPipeline::import` consumes.
-    ///
-    /// Once the Bundle install path is live, this method will look up
-    /// an `Arc<dyn Extractor>` by content-type prefix from the registry
-    /// instead of always reaching for `default_markdown_extractor`.
-    async fn call_wiki_import(&self, args: Value) -> Result<GadgetResult, GadgetError> {
+    /// PDF upload uses the Source path, which selects the PDF adapter from
+    /// the same Plug package and preserves the original blob.
+    async fn call_wiki_import(
+        &self,
+        context: Option<&GadgetDispatchContext>,
+        args: Value,
+    ) -> Result<GadgetResult, GadgetError> {
         let bytes_b64 = required_string_arg(&args, "bytes")?;
         let content_type = required_string_arg(&args, "content_type")?;
         let target_path = optional_string_arg(&args, "target_path");
@@ -672,10 +866,8 @@ impl KnowledgeGadgetProvider {
             .decode(bytes_b64.as_bytes())
             .map_err(|e| GadgetError::InvalidArgs(format!("bytes must be valid base64: {e}")))?;
 
-        // Pick extractor by content_type prefix. Only the internal
-        // markdown extractor is available on this path — PDF and
-        // friends land when Bundle-driven extractors can register on
-        // the `extractors` axis.
+        // Pick extractor by content_type prefix. This legacy Gadget path
+        // intentionally remains Markdown-only; richer uploads use Sources.
         let primary = content_type
             .split(';')
             .next()
@@ -685,7 +877,7 @@ impl KnowledgeGadgetProvider {
         let supported = self.default_markdown_extractor.supported_content_types();
         if !supported.iter().any(|t| t.eq_ignore_ascii_case(&primary)) {
             return Err(GadgetError::InvalidArgs(format!(
-                "content_type {primary:?} is not supported by the built-in markdown extractor; \
+                "content_type {primary:?} is not supported by the Markdown ingest Plug; \
                  supported: {supported:?}"
             )));
         }
@@ -700,13 +892,27 @@ impl KnowledgeGadgetProvider {
             source_uri,
         };
 
+        let context = context.ok_or_else(|| GadgetError::Denied {
+            reason: "wiki.import requires an authenticated tenant user context".to_string(),
+        })?;
+        if !self.ingest_pipeline.is_available() {
+            return Err(GadgetError::Denied {
+                reason: "wiki.import requires the PostgreSQL Source Ledger".to_string(),
+            });
+        }
+        let tenant_id =
+            uuid::Uuid::parse_str(&context.tenant_id).map_err(|_| GadgetError::Denied {
+                reason: "wiki.import requires a valid tenant user context".to_string(),
+            })?;
+        let user_id =
+            uuid::Uuid::parse_str(&context.actor_id).map_err(|_| GadgetError::Denied {
+                reason: "wiki.import requires a valid tenant user context".to_string(),
+            })?;
+        let actor = gadgetron_xaas::knowledge_spaces::SpaceActor { tenant_id, user_id };
+
         match self
             .ingest_pipeline
-            .import(
-                &self.actor(),
-                request,
-                self.default_markdown_extractor.clone(),
-            )
+            .import(actor, request, self.default_markdown_extractor.clone())
             .await
         {
             Ok(receipt) => Ok(GadgetResult {
@@ -721,6 +927,10 @@ impl KnowledgeGadgetProvider {
                         .iter()
                         .map(|p| p.as_str().to_string())
                         .collect::<Vec<_>>(),
+                    "source_id": receipt.source_id,
+                    "object_id": receipt.object_id,
+                    "object_revision": receipt.object_revision,
+                    "blob_existed": receipt.blob_existed,
                 }),
                 is_error: false,
             }),
@@ -803,6 +1013,24 @@ fn required_string_arg(args: &Value, field: &str) -> Result<String, GadgetError>
     }
 }
 
+fn required_uuid_arg(args: &Value, field: &str) -> Result<uuid::Uuid, GadgetError> {
+    let value = required_string_arg(args, field)?;
+    uuid::Uuid::parse_str(&value)
+        .map_err(|_| GadgetError::InvalidArgs(format!("field '{field}' must be a UUID")))
+}
+
+fn required_positive_i64_arg(args: &Value, field: &str) -> Result<i64, GadgetError> {
+    match args.get(field).and_then(Value::as_i64) {
+        Some(value) if value > 0 => Ok(value),
+        Some(_) => Err(GadgetError::InvalidArgs(format!(
+            "field '{field}' must be a positive integer"
+        ))),
+        None => Err(GadgetError::InvalidArgs(format!(
+            "missing or invalid required field '{field}'"
+        ))),
+    }
+}
+
 /// `wiki.import` permits several optional string fields (title_hint,
 /// target_path, source_uri). Returns `None` for missing-or-null-or-empty
 /// so the pipeline's `Option<&str>` consumers don't need to branch on
@@ -830,13 +1058,58 @@ fn map_knowledge_err_generic(err: GadgetronError) -> GadgetError {
             kind: KnowledgeErrorKind::InvalidQuery { reason },
             ..
         } => {
-            if reason.contains("invalid path") {
+            if reason.contains("authenticated tenant user") {
+                GadgetError::Denied { reason }
+            } else if reason.contains("invalid path") || reason.contains("note path") {
                 GadgetError::InvalidArgs("invalid page path".into())
             } else {
                 GadgetError::InvalidArgs(reason)
             }
         }
         _ => GadgetError::Execution("wiki operation failed".into()),
+    }
+}
+
+fn map_reviewed_vault_err(err: ReviewedVaultError) -> GadgetError {
+    match err {
+        ReviewedVaultError::InvalidIdentity => GadgetError::Denied {
+            reason: "reviewed knowledge requires an authenticated tenant user".to_string(),
+        },
+        ReviewedVaultError::RevisionChanged => GadgetError::Execution(
+            "reviewed knowledge changed after review; review it again before reuse".to_string(),
+        ),
+        ReviewedVaultError::Database(_)
+        | ReviewedVaultError::Vault(_)
+        | ReviewedVaultError::InvalidUtf8 => {
+            GadgetError::Execution("reviewed knowledge is unavailable".to_string())
+        }
+    }
+}
+
+fn map_conversation_source_err(err: ConversationSourceError) -> GadgetError {
+    match err {
+        ConversationSourceError::InvalidIdentity => GadgetError::Denied {
+            reason: "conversation Sources require an authenticated tenant user".to_string(),
+        },
+        ConversationSourceError::NotFound => GadgetError::Execution(
+            "pinned conversation Source is unavailable or no longer citation-ready".to_string(),
+        ),
+        ConversationSourceError::RevisionChanged => GadgetError::Execution(
+            "pinned conversation Source changed after this turn was assembled".to_string(),
+        ),
+        ConversationSourceError::Ledger(error) => match error {
+            gadgetron_xaas::knowledge_spaces::KnowledgeSpaceError::Forbidden
+            | gadgetron_xaas::knowledge_spaces::KnowledgeSpaceError::NotFound => {
+                GadgetError::Execution(
+                    "pinned conversation Source is unavailable or no longer citation-ready"
+                        .to_string(),
+                )
+            }
+            _ => GadgetError::Execution("conversation Source ledger is unavailable".to_string()),
+        },
+        ConversationSourceError::Blob(_) | ConversationSourceError::Extraction(_) => {
+            GadgetError::Execution("conversation Source content is unavailable".to_string())
+        }
     }
 }
 
@@ -861,7 +1134,9 @@ fn map_knowledge_err_write(err: GadgetronError) -> GadgetError {
             //   too large   -> "page too large: ..."
             //   credential  -> `Denied { reason: "credential pattern ..." }`
             //   conflict    -> Execution("wiki git conflict ...")
-            if reason.contains("invalid path") {
+            if reason.contains("authenticated tenant user") {
+                GadgetError::Denied { reason }
+            } else if reason.contains("invalid path") || reason.contains("note path") {
                 GadgetError::InvalidArgs("invalid page path".into())
             } else if reason.contains("exceeds") {
                 // `size {bytes} bytes exceeds {limit}-byte limit` — normalize
@@ -921,113 +1196,6 @@ fn map_search_err(err: SearchError) -> GadgetError {
         SearchError::Parse(_) => GadgetError::Execution("web search response parse failed".into()),
         SearchError::Upstream(_) => GadgetError::Execution("web search upstream error".into()),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Internal markdown extractor — default ingest path.
-//
-// Mirrors `gadgetron-bundle-document-formats::MarkdownExtractor` shape
-// but lives inline in the knowledge crate so `wiki.import` works
-// without a Bundle installation. When `DocumentFormatsBundle` is wired
-// through a real `BundleRegistry`, the future
-// `KnowledgeGadgetProvider::from_service_with_extractor` will replace
-// this default with the registered extractor.
-// ---------------------------------------------------------------------------
-
-/// In-crate markdown extractor. Kept minimal — only the hooks the
-/// pipeline needs: UTF-8 validation + `StructureHint::Heading`
-/// emission for ATX headings. The default markdown extractor is
-/// in-crate so the gadget is independent of the bundle crate's install
-/// flow.
-#[derive(Debug, Default, Clone)]
-struct InternalMarkdownExtractor;
-
-impl InternalMarkdownExtractor {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl Extractor for InternalMarkdownExtractor {
-    fn name(&self) -> &str {
-        "markdown-internal"
-    }
-
-    fn supported_content_types(&self) -> &[&str] {
-        &["text/markdown", "text/plain"]
-    }
-
-    async fn extract(
-        &self,
-        bytes: &[u8],
-        _content_type: &str,
-        _hints: &ExtractHints,
-    ) -> Result<ExtractedDocument, ExtractError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| ExtractError::Malformed(format!("non-utf8 input: {e}")))?;
-        let structure = detect_internal_headings(text);
-        Ok(ExtractedDocument {
-            plain_text: text.to_string(),
-            structure,
-            source_metadata: serde_json::json!({
-                "extractor": "markdown-internal",
-            }),
-            warnings: Vec::new(),
-        })
-    }
-}
-
-/// ATX heading detection, fence-aware. See
-/// `plugin-document-formats::markdown::detect_headings` for the full
-/// rationale — this is a trimmed-down copy to keep the gadget crate
-/// independent of the bundle crate at link time.
-fn detect_internal_headings(text: &str) -> Vec<StructureHint> {
-    let mut hints = Vec::new();
-    let mut offset = 0usize;
-    let mut in_fence = false;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            offset += line.len();
-            continue;
-        }
-        if in_fence {
-            offset += line.len();
-            continue;
-        }
-        let line_start = offset + (line.len() - trimmed.len());
-        let mut level = 0u8;
-        for b in trimmed.bytes() {
-            if b == b'#' {
-                level += 1;
-                if level > 6 {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-        if (1..=6).contains(&level) {
-            let after = &trimmed[level as usize..];
-            let is_heading = after.starts_with(' ') || after.trim().is_empty();
-            if is_heading {
-                let t = after
-                    .trim_start_matches(' ')
-                    .trim_end_matches(['\n', '\r', '#', ' '])
-                    .trim_end()
-                    .to_string();
-                hints.push(StructureHint::Heading {
-                    level,
-                    byte_offset: line_start,
-                    text: t,
-                });
-            }
-        }
-        offset += line.len();
-    }
-    hints
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,14 +1299,15 @@ mod tests {
     }
 
     #[test]
-    fn gadget_schemas_no_search_has_seven_tools() {
-        // The seven wiki.* gadgets surface; `web.search` only appears
-        // when the provider is built with a SearxngClient.
+    fn gadget_schemas_no_search_has_eight_tools() {
+        // The seven wiki.* gadgets plus the conversation-pinned Source reader;
+        // `web.search` only appears when built with a SearxngClient.
         let (_dir, p) = fresh_provider_no_search();
         let schemas = p.gadget_schemas();
-        assert_eq!(schemas.len(), 7);
+        assert_eq!(schemas.len(), 8);
         let names: Vec<_> = schemas.iter().map(|s| s.name.as_str()).collect();
         for expected in [
+            "source.get",
             "wiki.list",
             "wiki.get",
             "wiki.search",
