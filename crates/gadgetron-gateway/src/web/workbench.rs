@@ -6293,20 +6293,28 @@ pub async fn bootstrap_bundle_ssh_target_handler(
         }
         _ => None,
     };
+    let context = bootstrap_invocation_context(&ctx, request.acting_space_id);
+    Ok(Json(
+        require_runtime_manager(&state)?
+            .bootstrap_ssh_target(ctx.tenant_id, &bundle_id, request, context)
+            .await?,
+    ))
+}
+
+fn bootstrap_invocation_context(
+    ctx: &gadgetron_core::context::TenantContext,
+    acting_space_id: Option<Uuid>,
+) -> gadgetron_bundle_sdk::InvocationContext {
     let mut context = gadgetron_bundle_sdk::InvocationContext::new(
         ctx.tenant_id.to_string(),
         ctx.actor_user_id.unwrap_or(ctx.api_key_id).to_string(),
         ctx.request_id.to_string(),
     )
     .with_scopes(ctx.scopes.iter().map(ToString::to_string));
-    if let Some(acting_space_id) = request.acting_space_id {
+    if let Some(acting_space_id) = acting_space_id {
         context = context.with_acting_space_id(acting_space_id.to_string());
     }
-    Ok(Json(
-        require_runtime_manager(&state)?
-            .bootstrap_ssh_target(ctx.tenant_id, &bundle_id, request, context)
-            .await?,
-    ))
+    context
 }
 
 async fn resolve_bootstrap_acting_space(
@@ -9263,6 +9271,13 @@ sha256 = "{digest}"
         assert_eq!(
             resolve_bootstrap_acting_space(harness.pool(), tenant_id, user_id, None).await,
             Some(promoted)
+        );
+        let invocation_context =
+            bootstrap_invocation_context(&test_ctx(tenant_id, Some(user_id)), Some(promoted));
+        assert_eq!(
+            invocation_context.acting_space_id,
+            Some(promoted.to_string()),
+            "the registration HTTP context must pin the resolved operating Space into the verification lease"
         );
         harness.cleanup().await;
     }

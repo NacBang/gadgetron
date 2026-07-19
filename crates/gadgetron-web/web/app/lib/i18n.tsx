@@ -222,6 +222,9 @@ const en = {
     signingIn: "Signing in…",
     submit: "Sign in",
   },
+  dashboard: {
+    knowledgeFeaturesAvailable: "knowledge features available",
+  },
   workspace: {
     sentToReview: "Sent to Review for Manager approval.",
     actionFailed: "Action failed",
@@ -265,6 +268,12 @@ const en = {
     noSelection: "No workspace selected",
     chooseWorkspace: "Choose an enabled domain workspace from the navigation rail.",
     loading: "Loading workspace…",
+    logsInspectTitle: "Inspect server logs",
+    logsInspectDescription:
+      "Read recent system, kernel, or sign-in events from a server.",
+    logsScanTitle: "Scan for log issues",
+    logsScanDescription:
+      "Find warning and error patterns and add anything that needs attention.",
   },
   telemetry: {
     gpus: "GPUs",
@@ -378,6 +387,9 @@ const en = {
     selected: (count: number) => `${count} selected`,
     acceptSelected: "Accept selected",
     shortcut: "Ctrl/⌘ + Enter",
+    wikiListOutcomeTitle: "List wiki pages",
+    technicalDetails: "Technical details",
+    targetIdentifier: "Target ID",
     accept: "Accept",
     reject: "Reject",
     refresh: "Refresh review items",
@@ -754,6 +766,10 @@ const en = {
     trustProgress: "Knowledge trust progress",
     trustTitle: "Knowledge trust",
     verified: "Verified",
+    trustExplainerTrigger: "What is this?",
+    trustExplainerTitle: "Why knowledge has stages",
+    trustExplainerDescription:
+      "Stages show who has reviewed the knowledge. New knowledge starts as a Note and advances to Lesson, then Insight through review; unverified writing is never shown as verified.",
     currentStage: (stage: string) => `Current stage: ${stage}`,
     selectTitle: "Select knowledge",
     selectDescription: "Review the content and trust progression here.",
@@ -786,6 +802,7 @@ const en = {
     archived: "Knowledge archived",
     archiveFailed: "Could not archive knowledge",
     created: "Knowledge created",
+    createdNextStep: "Review it to move it into trusted team knowledge.",
     createFailed: "Could not create knowledge",
     inspectorTitle: "Preview",
     listUnavailable: "Could not open the knowledge list",
@@ -1065,6 +1082,9 @@ const ko = {
     signingIn: "로그인 중…",
     submit: "로그인",
   },
+  dashboard: {
+    knowledgeFeaturesAvailable: "지식 기능 사용 가능",
+  },
   workspace: {
     sentToReview: "Manager 승인을 위해 검토에 보냈습니다.",
     actionFailed: "작업 실패",
@@ -1108,6 +1128,10 @@ const ko = {
     noSelection: "선택한 워크스페이스가 없습니다",
     chooseWorkspace: "navigation rail에서 활성화된 domain workspace를 선택하세요.",
     loading: "워크스페이스 불러오는 중…",
+    logsInspectTitle: "서버 로그 확인",
+    logsInspectDescription: "서버의 최근 시스템, 커널 또는 로그인 이벤트를 확인합니다.",
+    logsScanTitle: "로그 문제 스캔",
+    logsScanDescription: "경고와 오류 패턴을 찾아 확인이 필요한 항목을 추가합니다.",
   },
   telemetry: {
     gpus: "GPU",
@@ -1215,6 +1239,9 @@ const ko = {
     selected: (count: number) => `${count}개 선택됨`,
     acceptSelected: "선택 항목 수락",
     shortcut: "Ctrl/⌘ + Enter",
+    wikiListOutcomeTitle: "위키 페이지 목록 확인",
+    technicalDetails: "기술 세부 정보",
+    targetIdentifier: "대상 ID",
     accept: "수락",
     reject: "거절",
     refresh: "검토 항목 새로고침",
@@ -1583,6 +1610,10 @@ const ko = {
     trustProgress: "지식 신뢰 진행",
     trustTitle: "지식 신뢰",
     verified: "검증됨",
+    trustExplainerTrigger: "이게 뭐지?",
+    trustExplainerTitle: "지식에 단계가 있는 이유",
+    trustExplainerDescription:
+      "누가 확인한 지식인지 구분하는 단계입니다. 새 지식은 메모에서 시작해 검토를 거쳐 교훈, 통찰로 올라가며, 검증 안 된 글은 검증된 것처럼 표시하지 않습니다.",
     currentStage: (stage: string) => `현재 단계: ${stage}`,
     selectTitle: "지식을 선택하세요",
     selectDescription: "본문과 신뢰 진행을 여기서 확인할 수 있습니다.",
@@ -1614,6 +1645,7 @@ const ko = {
     archived: "지식을 보관 처리했습니다",
     archiveFailed: "지식을 보관하지 못했습니다",
     created: "지식을 만들었습니다",
+    createdNextStep: "검토를 거치면 팀 지식으로 올라갑니다.",
     createFailed: "지식을 만들지 못했습니다",
     inspectorTitle: "미리보기",
     listUnavailable: "지식 목록을 열지 못했습니다",

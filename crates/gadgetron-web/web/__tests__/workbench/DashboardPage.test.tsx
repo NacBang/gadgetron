@@ -66,6 +66,10 @@ describe("Core DashboardPage", () => {
     expect(screen.getByRole("heading", { name: "2 decisions need review" })).toBeTruthy();
     expect(screen.getByTestId("vital-core")).toHaveTextContent("Ready");
     expect(screen.getByTestId("vital-knowledge")).toHaveTextContent("2 / 3");
+    expect(screen.getByTestId("vital-knowledge")).toHaveTextContent(
+      "knowledge features available",
+    );
+    expect(screen.queryByText("ready planes")).toBeNull();
     expect(screen.getByTestId("vital-jobs")).toHaveTextContent("1");
     expect(screen.getByTestId("vital-review")).toHaveTextContent("2");
     expect(screen.getByRole("link", { name: /2 decisions are waiting.*Open Review/ })).toBeTruthy();

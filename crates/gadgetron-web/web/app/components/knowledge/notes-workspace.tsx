@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Popover } from "@base-ui/react/popover";
 import {
   Check,
   ChevronRight,
@@ -51,6 +52,32 @@ function isVerified(object: KnowledgeObject): boolean {
   return object.review_state === "reviewed";
 }
 
+function TrustExplainer() {
+  const { labels } = useI18n();
+  return (
+    <Popover.Root>
+      <Popover.Trigger
+        type="button"
+        className="shrink-0 text-[10px] text-[#D89B5A] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#B87333]"
+      >
+        {labels.notes.trustExplainerTrigger}
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner sideOffset={8} align="end" className="z-50">
+          <Popover.Popup className="w-72 border border-zinc-700 bg-zinc-950 p-3 text-left outline-none">
+            <Popover.Title className="text-xs font-medium text-zinc-100">
+              {labels.notes.trustExplainerTitle}
+            </Popover.Title>
+            <Popover.Description className="mt-1.5 text-xs leading-5 text-zinc-400">
+              {labels.notes.trustExplainerDescription}
+            </Popover.Description>
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
 function TrustProgress({ object }: { object: KnowledgeObject }) {
   const { labels } = useI18n();
   const current = trustStep(object);
@@ -59,7 +86,10 @@ function TrustProgress({ object }: { object: KnowledgeObject }) {
     <section className="mt-6 border-t border-zinc-800 pt-4" aria-label={labels.notes.trustProgress}>
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{labels.notes.trustTitle}</h3>
-        {isVerified(object) && <span className="inline-flex items-center gap-1 text-xs text-emerald-300"><Check className="size-3" aria-hidden />{labels.notes.verified}</span>}
+        <div className="flex items-center gap-2">
+          {isVerified(object) && <span className="inline-flex items-center gap-1 text-xs text-emerald-300"><Check className="size-3" aria-hidden />{labels.notes.verified}</span>}
+          <TrustExplainer />
+        </div>
       </div>
       <ol className="grid grid-cols-3 gap-1" aria-label={labels.notes.currentStage(trustSteps[current])}>
         {trustSteps.map((label, index) => (
@@ -216,7 +246,7 @@ export function NotesWorkspace({
   const create = async () => {
     if (!newTitle.trim() || !newVaultId || busy) return;
     setBusy(true);
-    try { const created = await createKnowledgeNote(apiKey, newVaultId, newTitle.trim()); await onChanged(); onSelect(created.object_id); setCreateOpen(false); toast.success(labels.notes.created); }
+    try { const created = await createKnowledgeNote(apiKey, newVaultId, newTitle.trim()); await onChanged(); onSelect(created.object_id); setCreateOpen(false); toast.success(labels.notes.created, { description: labels.notes.createdNextStep }); }
     catch (reason) { setNoteError(reason instanceof Error ? reason.message : labels.notes.createFailed); }
     finally { setBusy(false); }
   };
@@ -252,7 +282,7 @@ export function NotesWorkspace({
         <main className="min-w-0 bg-zinc-950/20">
           {loading && visibleObjects.length === 0 && <div className="space-y-2 p-4" aria-label={labels.notes.listLoading}>{[1, 2, 3].map((row) => <div key={row} className="h-12 bg-zinc-900 motion-safe:animate-pulse motion-reduce:animate-none" />)}</div>}
           {!loading && visibleObjects.length === 0 && <EmptyState className="m-4" title={labels.notes.emptyTitle} description={labels.notes.emptyDescription} action={<Button size="sm" onClick={() => { setNewVaultId(vaults[0]?.id ?? ""); setCreateOpen(true); }} disabled={vaults.length === 0}>{labels.notes.new}</Button>} />}
-          {visibleObjects.length > 0 && <ul className="divide-y divide-zinc-800" aria-label={labels.notes.listLabel}>{visibleObjects.map((object, index) => <li key={object.id}><button type="button" data-note-row={object.id} onClick={() => onSelect(object.id)} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); moveSelection(index, 1); } if (event.key === "ArrowUp") { event.preventDefault(); moveSelection(index, -1); } }} aria-current={selectedId === object.id ? "page" : undefined} className={`flex w-full items-start gap-3 px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#B87333] ${selectedId === object.id ? "border-l-2 border-l-[#B87333] bg-zinc-900" : "hover:bg-zinc-900/60"}`}><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-zinc-200">{object.title || noteTitle(object.path)}</span><span className="mt-1 block truncate text-[10px] text-zinc-500">{humanizeIdentifier(object.home_bundle_id)} · {displayDate(object.updated_at)}</span></span>{isVerified(object) ? <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-emerald-300" aria-label={labels.notes.verified}><Check className="size-3" aria-hidden />{labels.notes.verified}</span> : <span className="shrink-0 text-[10px] text-zinc-600">{labels.notes.needsReview}</span>}</button></li>)}</ul>}
+          {visibleObjects.length > 0 && <ul className="divide-y divide-zinc-800" aria-label={labels.notes.listLabel}>{visibleObjects.map((object, index) => <li key={object.id} className="flex items-stretch"><button type="button" data-note-row={object.id} onClick={() => onSelect(object.id)} onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); moveSelection(index, 1); } if (event.key === "ArrowUp") { event.preventDefault(); moveSelection(index, -1); } }} aria-current={selectedId === object.id ? "page" : undefined} className={`flex min-w-0 flex-1 items-start gap-3 px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#B87333] ${selectedId === object.id ? "border-l-2 border-l-[#B87333] bg-zinc-900" : "hover:bg-zinc-900/60"}`}><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-zinc-200">{object.title || noteTitle(object.path)}</span><span className="mt-1 block truncate text-[10px] text-zinc-500">{humanizeIdentifier(object.home_bundle_id)} · {displayDate(object.updated_at)}</span></span>{isVerified(object) ? <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-emerald-300" aria-label={labels.notes.verified}><Check className="size-3" aria-hidden />{labels.notes.verified}</span> : <span className="shrink-0 text-[10px] text-zinc-600">{labels.notes.needsReview}</span>}</button>{isVerified(object) && <div className="flex shrink-0 items-center px-3"><TrustExplainer /></div>}</li>)}</ul>}
         </main>
       </div>
       <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="border-zinc-800 bg-zinc-950"><DialogHeader><DialogTitle>{labels.notes.newDialogTitle}</DialogTitle></DialogHeader><div className="space-y-3"><label className="block space-y-1 text-xs text-zinc-300"><span>{labels.notes.titleField}</span><Input autoFocus value={newTitle} onChange={(event) => setNewTitle(event.target.value)} /></label><label className="block space-y-1 text-xs text-zinc-300"><span>{labels.notes.domainLibrary}</span><select className="h-9 w-full border border-zinc-800 bg-zinc-950 px-3" value={newVaultId} onChange={(event) => setNewVaultId(event.target.value)}>{vaults.map((vault) => <option key={vault.id} value={vault.id}>{humanizeIdentifier(vault.home_bundle_id)}</option>)}</select></label></div><DialogFooter><Button variant="ghost" onClick={() => setCreateOpen(false)}>{labels.notes.cancel}</Button><Button onClick={() => void create()} disabled={!newTitle.trim() || !newVaultId || busy}>{busy ? labels.notes.creating : labels.notes.create}</Button></DialogFooter></DialogContent></Dialog>

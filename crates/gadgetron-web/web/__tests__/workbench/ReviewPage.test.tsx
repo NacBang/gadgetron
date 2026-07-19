@@ -96,9 +96,9 @@ const oversightRecord = {
   source_id: "action-1",
   agent_label: "Penny",
   agent_role: "operator",
-  goal: "Inspect the research target",
+  goal: "Complete Wiki List for wiki-list",
   target_kind: "action",
-  target_id: "example-run",
+  target_id: "wiki-list",
   target_revision: null,
   policy_decision: "review",
   policy_revision: "policy-1",
@@ -122,7 +122,7 @@ const directive = {
   id: "directive-1",
   oversight_id: "oversight-1",
   target_kind: "action",
-  target_id: "example-run",
+  target_id: "wiki-list",
   target_revision: null,
   instruction: "Repeat the inspection with the missing source.",
   desired_outcome: "The missing source is verified",
@@ -367,8 +367,12 @@ describe("Review Center", () => {
   it("shows persisted outcomes and corrective directive lifecycle records", async () => {
     render(<ReviewPage />);
 
-    expect(await screen.findByTestId("oversight-workspace")).toHaveTextContent(
-      "Inspect the research target",
+    const workspace = await screen.findByTestId("oversight-workspace");
+    const outcome = screen.getByRole("button", { name: /List wiki pages/ });
+    expect(outcome).not.toHaveTextContent("wiki-list");
+    expect(workspace).not.toHaveTextContent("Complete Wiki List for wiki-list");
+    expect(await screen.findByTestId("oversight-technical-details")).toHaveTextContent(
+      "wiki-list",
     );
     expect(await screen.findByText("Result verified")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /Directives/ }));

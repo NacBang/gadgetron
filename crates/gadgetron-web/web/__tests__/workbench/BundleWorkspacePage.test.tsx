@@ -25,7 +25,23 @@ vi.mock("../../app/lib/capability-context", () => ({
     snapshot: {
       revision: "a".repeat(64),
       bundles: [],
-      actions: [],
+      actions: [{
+        id: "server-administrator.logs.action.loganalysis.inspect",
+        title: "Read a bounded signed system, kernel or authentication log preset without arbitrary shell input",
+        owner_bundle: "server-administrator",
+        gadget_name: "loganalysis.inspect",
+        input_schema: { type: "object", properties: {}, additionalProperties: false },
+        destructive: false,
+        requires_approval: false,
+      }, {
+        id: "server-administrator.logs.action.loganalysis.scan",
+        title: "Collect bounded warning/error logs and materialize tenant findings and alerts",
+        owner_bundle: "server-administrator",
+        gadget_name: "loganalysis.scan",
+        input_schema: { type: "object", properties: {}, additionalProperties: false },
+        destructive: false,
+        requires_approval: false,
+      }],
       ui_contributions: [{
         id: "server-administrator.logs-main",
         owner_bundle: "server-administrator",
@@ -48,7 +64,10 @@ vi.mock("../../app/lib/capability-context", () => ({
         placement: "main",
         renderer: "table",
         data_endpoint: "/ignored",
-        action_ids: [],
+        action_ids: [
+          "server-administrator.logs.action.loganalysis.inspect",
+          "server-administrator.logs.action.loganalysis.scan",
+        ],
       }],
     },
     status: "ready",
@@ -82,5 +101,16 @@ describe("Bundle workspace empty states", () => {
     );
     expect(screen.queryByText("No records")).toBeNull();
     expect(screen.queryByText("The Bundle returned an empty dataset.")).toBeNull();
+  });
+
+  it("presents Logs actions in concise operator language", async () => {
+    render(<BundleWorkspacePage />);
+
+    expect(await screen.findByText("Inspect server logs")).toBeVisible();
+    expect(screen.getByText("Read recent system, kernel, or sign-in events from a server.")).toBeVisible();
+    expect(screen.getByText("Scan for log issues")).toBeVisible();
+    expect(screen.getByText("Find warning and error patterns and add anything that needs attention.")).toBeVisible();
+    expect(screen.queryByText(/bounded signed system/)).toBeNull();
+    expect(screen.queryByText(/materialize tenant findings/)).toBeNull();
   });
 });
