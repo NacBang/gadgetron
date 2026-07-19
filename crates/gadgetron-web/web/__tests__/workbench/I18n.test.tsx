@@ -55,4 +55,21 @@ describe("locale dictionary", () => {
     expect(dictionaries.en.login.submit).toBe("Sign in");
     expect(dictionaries.ko.login.submit).toBe("로그인");
   });
+
+  it("keeps the pilot-visible presentation copy paired", () => {
+    expect(dictionaries.en.dashboard.knowledgeFeaturesAvailable).toBe(
+      "knowledge features available",
+    );
+    expect(dictionaries.ko.dashboard.knowledgeFeaturesAvailable).toBe(
+      "지식 기능 사용 가능",
+    );
+    expect(dictionaries.en.review.wikiListOutcomeTitle).toBe("List wiki pages");
+    expect(dictionaries.ko.review.wikiListOutcomeTitle).toBe("위키 페이지 목록 확인");
+    expect(dictionaries.en.workspace.logsInspectTitle).toBe("Inspect server logs");
+    expect(dictionaries.ko.workspace.logsScanTitle).toBe("로그 문제 스캔");
+    expect(dictionaries.en.notes.trustExplainerTrigger).toBe("What is this?");
+    expect(dictionaries.ko.notes.trustExplainerTrigger).toBe("이게 뭐지?");
+    expect(dictionaries.en.notes.createdNextStep).toContain("trusted team knowledge");
+    expect(dictionaries.ko.notes.createdNextStep).toBe("검토를 거치면 팀 지식으로 올라갑니다.");
+  });
 });

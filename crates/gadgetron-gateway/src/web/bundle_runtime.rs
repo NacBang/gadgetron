@@ -5666,7 +5666,7 @@ mod tests {
     }
 
     #[test]
-    fn server_first_observation_wall_budget_covers_signed_operation_timeouts() {
+    fn bootstrap_first_observation_wall_budget_covers_signed_operation_timeouts() {
         let source = include_str!("../../../../bundles/server-administrator/package.template.toml")
             .replace(
                 "@ENTRY_SHA256@",

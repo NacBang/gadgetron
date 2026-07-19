@@ -58,7 +58,40 @@ function focusWorkspacePayload(payload: unknown, targetId: string): unknown {
   return payload;
 }
 
-function WorkspaceAction({ action, apiKey, resultRenderer }: { action: WorkspaceActionDescriptor; apiKey: string | null; resultRenderer: WorkspaceRenderer }) {
+type WorkspaceActionPresentation = {
+  title: string;
+  description: string;
+};
+
+type LogsActionCopy = Pick<
+  ReturnType<typeof useI18n>["labels"]["workspace"],
+  | "logsInspectTitle"
+  | "logsInspectDescription"
+  | "logsScanTitle"
+  | "logsScanDescription"
+>;
+
+function logsActionPresentation(
+  action: WorkspaceActionDescriptor,
+  copy: LogsActionCopy,
+): WorkspaceActionPresentation | undefined {
+  const actionName = action.gadget_name ?? action.id;
+  if (actionName.endsWith("loganalysis.inspect")) {
+    return {
+      title: copy.logsInspectTitle,
+      description: copy.logsInspectDescription,
+    };
+  }
+  if (actionName.endsWith("loganalysis.scan")) {
+    return {
+      title: copy.logsScanTitle,
+      description: copy.logsScanDescription,
+    };
+  }
+  return undefined;
+}
+
+function WorkspaceAction({ action, apiKey, resultRenderer, presentation }: { action: WorkspaceActionDescriptor; apiKey: string | null; resultRenderer: WorkspaceRenderer; presentation?: WorkspaceActionPresentation }) {
   const { labels } = useI18n();
   const copy = labels.workspace;
   const [args, setArgs] = useState<Record<string, unknown>>({});
@@ -85,7 +118,14 @@ function WorkspaceAction({ action, apiKey, resultRenderer }: { action: Workspace
   return (
     <details className="group rounded border border-zinc-800 bg-zinc-950/50 open:border-zinc-700">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#B87333]">
-        <span className="min-w-0 truncate">{action.title}</span>
+        <span className="min-w-0">
+          <span className="block truncate">{presentation?.title ?? action.title}</span>
+          {presentation?.description && (
+            <span className="mt-0.5 block text-[11px] leading-4 text-zinc-500">
+              {presentation.description}
+            </span>
+          )}
+        </span>
         <span className="shrink-0 font-mono text-[10px] text-zinc-600">{action.requires_approval || action.destructive ? copy.review : copy.run} · <span aria-hidden="true" className="group-open:hidden">＋</span><span aria-hidden="true" className="hidden group-open:inline">−</span></span>
       </summary>
       <div className="space-y-3 border-t border-zinc-800 p-3">
@@ -399,7 +439,7 @@ function BundleWorkspaceContent() {
         {descriptor?.collection_profile
           ? <Card className="overflow-hidden border-zinc-800 bg-zinc-950/50"><CardContent className="p-0"><BundleCollectionsWorkspace apiKey={apiKey} bundleId={descriptor.owner_bundle} profileId={descriptor.collection_profile} /></CardContent></Card>
           : descriptor && <Card className="overflow-hidden border-zinc-800 bg-zinc-950/50"><CardContent className="p-0">{loading && payload === null ? <div className="p-3 text-xs text-zinc-600">{copy.loadingData}</div> : payload === null ? <EmptyState title={copy.noCurrentData} description={copy.noPayload} /> : descriptor.renderer === "telemetry" && liveTelemetryAction ? <LiveTelemetryWorkspaceRenderer payload={payload} apiKey={apiKey} liveActionId={liveTelemetryAction.id} historyActionId={metricHistoryAction?.id} initialTargetId={focusedTargetId} initialRange={focusedRange} selectedTarget={isServerPlatformWorkspace ? focusedTargetId : undefined} timeRange={isServerPlatformWorkspace ? platform.timeRange : undefined} onSelectedTargetChange={isServerPlatformWorkspace ? (targetId) => platform.setSelectedAssetScope({ kind: "server", id: targetId }) : undefined} onTimeRangeChange={isServerPlatformWorkspace ? platform.setTimeRange : undefined} /> : <DeclarativeRenderer renderer={descriptor.renderer} payload={focusedPayload} rowAction={subjectAction ? { label: copy.askPenny, onInvoke: (row) => void askPennyForRecord(row) } : undefined} rowActions={rowActionControls} platformState={rendererPlatformState} emptyState={workspaceEmptyState} />}</CardContent></Card>}
-        {descriptor && formActions.length > 0 && <section className="min-w-0" aria-label={copy.workspaceActions}><div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">{copy.actions}</div><div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">{formActions.map((action) => <WorkspaceAction key={action.id} action={action} apiKey={apiKey} resultRenderer={toolResultRenderers.get(action.gadget_name ?? "") ?? "detail"} />)}</div></section>}
+        {descriptor && formActions.length > 0 && <section className="min-w-0" aria-label={copy.workspaceActions}><div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">{copy.actions}</div><div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">{formActions.map((action) => <WorkspaceAction key={action.id} action={action} apiKey={apiKey} resultRenderer={toolResultRenderers.get(action.gadget_name ?? "") ?? "detail"} presentation={descriptor.id === "server-administrator.logs" ? logsActionPresentation(action, copy) : undefined} />)}</div></section>}
         {!workspaceId && <EmptyState title={copy.noSelection} description={copy.chooseWorkspace} />}
       </div>
     </WorkbenchPage>

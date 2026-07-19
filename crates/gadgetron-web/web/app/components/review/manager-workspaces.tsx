@@ -40,6 +40,7 @@ import {
   type TransitionDirectiveRequest,
   type VerificationState,
 } from "../../lib/manager-oversight";
+import { useI18n } from "../../lib/i18n";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -88,6 +89,14 @@ function humanLabel(value: string): string {
     .filter(Boolean)
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
+}
+
+function isWikiListOutcome(record: OversightRecord): boolean {
+  return record.source_kind === "workbench_action" && record.target_id === "wiki-list";
+}
+
+function outcomeTitle(record: OversightRecord, wikiListTitle: string): string {
+  return isWikiListOutcome(record) ? wikiListTitle : record.goal;
 }
 
 function outcomeCopy(outcome: OversightOutcome): string {
@@ -171,6 +180,8 @@ function OutcomeRow({
   active: boolean;
   onSelect: () => void;
 }) {
+  const { labels } = useI18n();
+  const wikiListOutcome = isWikiListOutcome(record);
   return (
     <button
       type="button"
@@ -184,7 +195,7 @@ function OutcomeRow({
     >
       <div className="flex items-start justify-between gap-3">
         <span className="line-clamp-2 text-sm font-medium leading-5 text-zinc-100">
-          {record.goal}
+          {outcomeTitle(record, labels.review.wikiListOutcomeTitle)}
         </span>
         <span
           className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${outcomeClasses(record.outcome)}`}
@@ -193,8 +204,8 @@ function OutcomeRow({
         </span>
       </div>
       <p className="mt-1 truncate text-xs text-zinc-500">
-        {record.agent_label} · {humanLabel(record.target_kind)} ·{" "}
-        {record.target_id}
+        {record.agent_label} · {humanLabel(record.target_kind)}
+        {!wikiListOutcome && <> · {record.target_id}</>}
       </p>
       <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-400">
         <span>{verificationCopy(record.verification_state)}</span>
@@ -213,7 +224,9 @@ function OversightDetailView({
   detail: OversightDetail;
   onIssueDirective: (record: OversightRecord) => void;
 }) {
+  const { labels } = useI18n();
   const { record } = detail;
+  const wikiListOutcome = isWikiListOutcome(record);
   return (
     <article className="min-w-0 bg-zinc-950/30 p-5">
       <div className="flex flex-wrap items-center gap-2">
@@ -230,7 +243,7 @@ function OversightDetailView({
         </span>
       </div>
       <h2 className="mt-3 text-lg font-semibold leading-7 text-zinc-100">
-        {record.goal}
+        {outcomeTitle(record, labels.review.wikiListOutcomeTitle)}
       </h2>
       <p className="mt-1 text-sm leading-6 text-zinc-400">
         {record.action_summary}
@@ -246,7 +259,8 @@ function OversightDetailView({
             Target
           </dt>
           <dd className="mt-1 break-words text-sm text-zinc-200">
-            {humanLabel(record.target_kind)} · {record.target_id}
+            {humanLabel(record.target_kind)}
+            {!wikiListOutcome && <> · {record.target_id}</>}
           </dd>
         </div>
         <div>
@@ -292,6 +306,25 @@ function OversightDetailView({
           </dd>
         </div>
       </dl>
+
+      {wikiListOutcome && (
+        <details
+          className="mt-5 rounded border border-zinc-800 text-xs text-zinc-400"
+          data-testid="oversight-technical-details"
+        >
+          <summary className="cursor-pointer px-3 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#B87333]">
+            {labels.review.technicalDetails}
+          </summary>
+          <dl className="border-t border-zinc-800 px-3 py-2">
+            <dt className="text-[10px] uppercase tracking-wider text-zinc-600">
+              {labels.review.targetIdentifier}
+            </dt>
+            <dd className="mt-1 break-all font-mono text-[11px] text-zinc-300">
+              {record.target_id}
+            </dd>
+          </dl>
+        </details>
+      )}
 
       {record.rollback_summary && (
         <div className="mt-5 rounded border border-zinc-800 p-3">

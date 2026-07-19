@@ -94,6 +94,7 @@ function websocketUrl(apiKey: string | null): string {
 }
 
 export default function DashboardPage() {
+  const { labels } = useI18n();
   const { apiKey } = useAuth();
   const { snapshot: capabilities, status: capabilityStatus } = useCapabilities();
   const [snapshot, setSnapshot] = useState<CoreDashboardSnapshot | null>(null);
@@ -273,7 +274,7 @@ export default function DashboardPage() {
                 icon={BrainCircuit}
                 label="Knowledge"
                 value={snapshot ? knowledgePlanes + " / 3" : "—"}
-                context="ready planes"
+                context={labels.dashboard.knowledgeFeaturesAvailable}
                 attention={Boolean(snapshot && knowledgePlanes < 3)}
               />
             </dl>
